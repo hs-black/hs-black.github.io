@@ -6,7 +6,7 @@
   <link href="/atom.xml" rel="self"/>
   
   <link href="http://hs-black.xyz/"/>
-  <updated>2019-12-27T15:35:26.829Z</updated>
+  <updated>2019-12-29T05:18:38.156Z</updated>
   <id>http://hs-black.xyz/</id>
   
   <author>
@@ -15,6 +15,27 @@
   </author>
   
   <generator uri="https://hexo.io/">Hexo</generator>
+  
+  <entry>
+    <title>new-blog</title>
+    <link href="http://hs-black.xyz/2019/12/29/new-blog/"/>
+    <id>http://hs-black.xyz/2019/12/29/new-blog/</id>
+    <published>2019-12-29T05:17:58.000Z</published>
+    <updated>2019-12-29T05:18:38.156Z</updated>
+    
+    <content type="html"><![CDATA[<div class="note default">                      </div><a id="more"></a><hr><p>蒟蒻的新博客test</p>]]></content>
+    
+    <summary type="html">
+    
+      &lt;div class=&quot;note default&quot;&gt;
+            
+          &lt;/div&gt;
+    
+    </summary>
+    
+    
+    
+  </entry>
   
   <entry>
     <title>Hello World</title>
