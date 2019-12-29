@@ -5,9 +5,9 @@
   <subtitle>Hs-black的博客</subtitle>
   <link href="/atom.xml" rel="self"/>
   
-  <link href="http://yoursite.com/"/>
+  <link href="http://hs-black.xyz/"/>
   <updated>2019-12-27T15:35:26.829Z</updated>
-  <id>http://yoursite.com/</id>
+  <id>http://hs-black.xyz/</id>
   
   <author>
     <name>hs-black</name>
@@ -18,8 +18,8 @@
   
   <entry>
     <title>Hello World</title>
-    <link href="http://yoursite.com/2019/12/27/hello-world/"/>
-    <id>http://yoursite.com/2019/12/27/hello-world/</id>
+    <link href="http://hs-black.xyz/2019/12/27/hello-world/"/>
+    <id>http://hs-black.xyz/2019/12/27/hello-world/</id>
     <published>2019-12-27T15:35:26.829Z</published>
     <updated>2019-12-27T15:35:26.829Z</updated>
     
