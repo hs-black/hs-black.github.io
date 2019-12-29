@@ -14,6 +14,7 @@
 
 
 <link rel="stylesheet" href="/lib/font-awesome/css/font-awesome.min.css">
+  <link rel="stylesheet" href="//cdn.jsdelivr.net/gh/fancyapps/fancybox@3/dist/jquery.fancybox.min.css">
 
 
 <script id="hexo-configurations">
@@ -28,7 +29,7 @@
     copycode: {"enable":true,"show_result":true,"style":"mac"},
     back2top: {"enable":true,"sidebar":false,"scrollpercent":true},
     bookmark: {"enable":false,"color":"#222","save":"auto"},
-    fancybox: false,
+    fancybox: true,
     mediumzoom: false,
     lazyload: false,
     pangu: false,
@@ -49,19 +50,19 @@
   <meta name="description" content="脑残的孩子就要慢慢学">
 <meta property="og:type" content="website">
 <meta property="og:title" content="友链">
-<meta property="og:url" content="http://hs-black.xyz/%E5%8F%8B%E9%93%BE/index.html">
+<meta property="og:url" content="http://hs-black.xyz/links/index.html">
 <meta property="og:site_name" content="Hs-black">
 <meta property="og:description" content="脑残的孩子就要慢慢学">
 <meta property="og:locale" content="zh_CN">
-<meta property="article:published_time" content="2019-12-29T04:06:13.000Z">
-<meta property="article:modified_time" content="2019-12-29T04:14:46.007Z">
+<meta property="article:published_time" content="2019-12-29T06:19:12.000Z">
+<meta property="article:modified_time" content="2019-12-29T06:28:18.085Z">
 <meta property="article:author" content="hs-black">
 <meta property="article:tag" content="算法">
 <meta property="article:tag" content=" hs-black">
 <meta property="article:tag" content=" OIer">
 <meta name="twitter:card" content="summary">
 
-<link rel="canonical" href="http://hs-black.xyz/%E5%8F%8B%E9%93%BE/">
+<link rel="canonical" href="http://hs-black.xyz/links/">
 
 
 <script id="page-configurations">
@@ -164,9 +165,9 @@
     <a href="/archives/" rel="section"><i class="fa fa-fw fa-archive"></i>归档</a>
 
   </li>
-        <li class="menu-item menu-item-友链">
+        <li class="menu-item menu-item-links">
 
-    <a href="/%E5%8F%8B%E9%93%BE/" rel="section"><i class="fa fa-fw fa-link"></i>友链</a>
+    <a href="/links/" rel="section"><i class="fa fa-fw fa-link"></i>友链</a>
 
   </li>
       <li class="menu-item menu-item-search">
@@ -241,7 +242,108 @@
       
       
       <div class="post-body">
-          
+           
+  
+  
+  
+
+    <div id="links">
+        <style>
+
+            #links{
+               margin-top: 5rem;
+            }
+
+            .links-content{
+                margin-top:1rem;
+            }
+
+            .link-navigation::after {
+                content: " ";
+                display: block;
+                clear: both;
+            }
+
+            .card {
+                width: 300px;
+                font-size: 1rem;
+                padding: 10px 20px;
+                border-radius: 4px;
+                transition-duration: 0.15s;
+                margin-bottom: 1rem;
+                display:flex;
+            }
+            .card:nth-child(odd) {
+                float: left;
+            }
+            .card:nth-child(even) {
+                float: right;
+            }
+            .card:hover {
+                transform: scale(1.1);
+                box-shadow: 0 2px 6px 0 rgba(0, 0, 0, 0.12), 0 0 6px 0 rgba(0, 0, 0, 0.04);
+            }
+            .card a {
+                border:none;
+            }
+            .card .ava {
+                width: 3rem!important;
+                height: 3rem!important;
+                margin:0!important;
+                margin-right: 1em!important;
+                border-radius:4px;
+
+            }
+            .card .card-header {
+                font-style: italic;
+                overflow: hidden;
+                width: 236px;
+            }
+            .card .card-header a {
+                font-style: normal;
+                color: #2bbc8a;
+                font-weight: bold;
+                text-decoration: none;
+            }
+            .card .card-header a:hover {
+                color: #d480aa;
+                text-decoration: none;
+            }
+            .card .card-header .info {
+                font-style:normal;
+                color:#a3a3a3;
+                font-size:14px;
+                min-width: 0;
+                text-overflow: ellipsis;
+                overflow: hidden;
+                white-space: nowrap;
+            }
+        </style>
+        <div class="links-content">
+            <div class="link-navigation">
+
+                
+
+                    <div class="card">
+                        <img class="ava" src="https://cdn.luogu.org/upload/usericon/122144.png"/>
+                        <div class="card-header">
+                        <div><a href="https://www.luogu.com.cn/user/122144" target="_blank">@ hs-black</a></div>
+                        <div class="info">脑残的孩子就要慢慢学</div>
+                        </div>
+                    </div>
+
+                
+
+            </div>
+            
+            </div>
+        </div>
+
+  
+  
+  
+
+        
       </div>
       
       
@@ -257,7 +359,6 @@
 
           </div>
           
-    <div class="comments" id="valine-comments"></div>
 
 <script>
   window.addEventListener('tabs:register', () => {
@@ -329,6 +430,9 @@
       <span class="links-of-author-item">
         <a href="https://github.com/hs-black" title="GitHub → https:&#x2F;&#x2F;github.com&#x2F;hs-black" rel="noopener" target="_blank"><i class="fa fa-fw fa-github"></i>GitHub</a>
       </span>
+  </div>
+  <div class="cc-license motion-element" itemprop="license">
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/zh-CN" class="cc-opacity" rel="noopener" target="_blank"><img src="/images/cc-by-nc-sa.svg" alt="Creative Commons"></a>
   </div>
 
 
@@ -415,6 +519,8 @@
   
   <script color='96,96,96' opacity='0.5' zIndex='-1' count='99' src="/lib/canvas-nest/canvas-nest.min.js"></script>
   <script src="/lib/anime.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/jquery@3/dist/jquery.min.js"></script>
+  <script src="//cdn.jsdelivr.net/gh/fancyapps/fancybox@3/dist/jquery.fancybox.min.js"></script>
   <script src="/lib/velocity/velocity.min.js"></script>
   <script src="/lib/velocity/velocity.ui.min.js"></script>
 
@@ -472,7 +578,7 @@ NexT.utils.loadComments(document.querySelector('#valine-comments'), () => {
       notify: false,
       appId: 'doikqWSvdnFFhnC35k8I3S8c-gzGzoHsz',
       appKey: 'nnug9ExFrFEkdgGt2hwc7eW9',
-      placeholder: "Just go go",
+      placeholder: "😎看了这么多，不想说点什么嘛😉",
       avatar: 'identicon',
       meta: guest,
       pageSize: '10' || 10,
