@@ -1,0 +1,728 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=2">
+<meta name="theme-color" content="#222">
+<meta name="generator" content="Hexo 4.2.0">
+  <link rel="apple-touch-icon" sizes="180x180" href="/images/apple-touch-icon-next.png">
+  <link rel="icon" type="image/png" sizes="32x32" href="/images/favicon32.ico">
+  <link rel="icon" type="image/png" sizes="16x16" href="/images/favicon16.ico">
+  <link rel="mask-icon" href="/images/logo.svg" color="#222">
+
+<link rel="stylesheet" href="/css/main.css">
+
+
+<link rel="stylesheet" href="/lib/font-awesome/css/font-awesome.min.css">
+  <link rel="stylesheet" href="//cdn.jsdelivr.net/gh/fancyapps/fancybox@3/dist/jquery.fancybox.min.css">
+
+
+<script id="hexo-configurations">
+  var NexT = window.NexT || {};
+  var CONFIG = {
+    hostname: new URL('http://hs-black.xyz').hostname,
+    root: '/',
+    scheme: 'Gemini',
+    version: '7.6.0',
+    exturl: false,
+    sidebar: {"position":"left","display":"post","padding":18,"offset":12,"onmobile":false},
+    copycode: {"enable":true,"show_result":true,"style":"mac"},
+    back2top: {"enable":true,"sidebar":false,"scrollpercent":true},
+    bookmark: {"enable":false,"color":"#222","save":"auto"},
+    fancybox: true,
+    mediumzoom: false,
+    lazyload: false,
+    pangu: false,
+    comments: {"style":"tabs","active":"valine","storage":true,"lazyload":false,"nav":null,"activeClass":"valine"},
+    algolia: {
+      appID: '',
+      apiKey: '',
+      indexName: '',
+      hits: {"per_page":10},
+      labels: {"input_placeholder":"Search for Posts","hits_empty":"We didn't find any results for the search: ${query}","hits_stats":"${hits} results found in ${time} ms"}
+    },
+    localsearch: {"enable":true,"trigger":"auto","top_n_per_article":1,"unescape":false,"preload":false},
+    path: 'search.xml',
+    motion: {"enable":true,"async":false,"transition":{"post_block":"fadeIn","post_header":"slideDownIn","post_body":"slideDownIn","coll_header":"slideLeftIn","sidebar":"slideUpIn"}}
+  };
+</script>
+
+  <meta name="description" content="用极大化思想解决矩形问题学习笔记 问题引入：   Winter Camp2002,奶牛浴场 题意简述： John要在矩形牛场中建造一个大型浴场，但是这个大型浴场不能包含任何一个奶牛的产奶点，但产奶点可以出在浴场的边界上。John的牛场和规划的浴场都是矩形，浴场要完全位于牛场之内，并且浴场的轮廓要与牛场的轮廓平行或者重合。要求所求浴场的面积尽可能大。 参数约定：产奶点的个数S不超过5000,牛场的范">
+<meta property="og:type" content="article">
+<meta property="og:title" content="用极大化思想解决矩形问题学习笔记">
+<meta property="og:url" content="http://hs-black.xyz/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/index.html">
+<meta property="og:site_name" content="Hs-black">
+<meta property="og:description" content="用极大化思想解决矩形问题学习笔记 问题引入：   Winter Camp2002,奶牛浴场 题意简述： John要在矩形牛场中建造一个大型浴场，但是这个大型浴场不能包含任何一个奶牛的产奶点，但产奶点可以出在浴场的边界上。John的牛场和规划的浴场都是矩形，浴场要完全位于牛场之内，并且浴场的轮廓要与牛场的轮廓平行或者重合。要求所求浴场的面积尽可能大。 参数约定：产奶点的个数S不超过5000,牛场的范">
+<meta property="og:locale" content="zh_CN">
+<meta property="article:published_time" content="2019-12-29T07:22:56.000Z">
+<meta property="article:modified_time" content="2019-12-29T08:10:33.185Z">
+<meta property="article:author" content="hs-black">
+<meta property="article:tag" content="悬线法">
+<meta name="twitter:card" content="summary">
+
+<link rel="canonical" href="http://hs-black.xyz/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/">
+
+
+<script id="page-configurations">
+  // https://hexo.io/docs/variables.html
+  CONFIG.page = {
+    sidebar: "",
+    isHome: false,
+    isPost: true
+  };
+</script>
+
+  <title>用极大化思想解决矩形问题学习笔记 | Hs-black</title>
+  
+
+
+
+
+
+
+  <noscript>
+  <style>
+  .use-motion .brand,
+  .use-motion .menu-item,
+  .sidebar-inner,
+  .use-motion .post-block,
+  .use-motion .pagination,
+  .use-motion .comments,
+  .use-motion .post-header,
+  .use-motion .post-body,
+  .use-motion .collection-header { opacity: initial; }
+
+  .use-motion .site-title,
+  .use-motion .site-subtitle {
+    opacity: initial;
+    top: initial;
+  }
+
+  .use-motion .logo-line-before i { left: initial; }
+  .use-motion .logo-line-after i { right: initial; }
+  </style>
+</noscript>
+
+<link rel="alternate" href="/atom.xml" title="Hs-black" type="application/atom+xml">
+</head>
+
+<body itemscope itemtype="http://schema.org/WebPage">
+  <div class="container use-motion">
+    <div class="headband"></div>
+
+    <header class="header" itemscope itemtype="http://schema.org/WPHeader">
+      <div class="header-inner"><div class="site-brand-container">
+  <div class="site-meta">
+
+    <div>
+      <a href="/" class="brand" rel="start">
+        <span class="logo-line-before"><i></i></span>
+        <span class="site-title">Hs-black</span>
+        <span class="logo-line-after"><i></i></span>
+      </a>
+    </div>
+        <p class="site-subtitle">Hs-black的博客</p>
+  </div>
+
+  <div class="site-nav-toggle">
+    <div class="toggle" aria-label="切换导航栏">
+      <span class="toggle-line toggle-line-first"></span>
+      <span class="toggle-line toggle-line-middle"></span>
+      <span class="toggle-line toggle-line-last"></span>
+    </div>
+  </div>
+</div>
+
+
+<nav class="site-nav">
+  
+  <ul id="menu" class="menu">
+        <li class="menu-item menu-item-home">
+
+    <a href="/" rel="section"><i class="fa fa-fw fa-home"></i>首页</a>
+
+  </li>
+        <li class="menu-item menu-item-about">
+
+    <a href="/about/" rel="section"><i class="fa fa-fw fa-user"></i>关于</a>
+
+  </li>
+        <li class="menu-item menu-item-tags">
+
+    <a href="/tags/" rel="section"><i class="fa fa-fw fa-tags"></i>标签</a>
+
+  </li>
+        <li class="menu-item menu-item-categories">
+
+    <a href="/categories/" rel="section"><i class="fa fa-fw fa-th"></i>分类</a>
+
+  </li>
+        <li class="menu-item menu-item-archives">
+
+    <a href="/archives/" rel="section"><i class="fa fa-fw fa-archive"></i>归档</a>
+
+  </li>
+        <li class="menu-item menu-item-links">
+
+    <a href="/links/" rel="section"><i class="fa fa-fw fa-link"></i>友链</a>
+
+  </li>
+      <li class="menu-item menu-item-search">
+        <a role="button" class="popup-trigger"><i class="fa fa-search fa-fw"></i>搜索
+        </a>
+      </li>
+  </ul>
+
+</nav>
+  <div class="site-search">
+    <div class="popup search-popup">
+    <div class="search-header">
+  <span class="search-icon">
+    <i class="fa fa-search"></i>
+  </span>
+  <div class="search-input-container">
+    <input autocomplete="off" autocorrect="off" autocapitalize="none"
+           placeholder="搜索..." spellcheck="false"
+           type="text" id="search-input">
+  </div>
+  <span class="popup-btn-close">
+    <i class="fa fa-times-circle"></i>
+  </span>
+</div>
+<div id="search-result"></div>
+
+</div>
+<div class="search-pop-overlay"></div>
+
+  </div>
+</div>
+    </header>
+
+    
+  <div class="back-to-top">
+    <i class="fa fa-arrow-up"></i>
+    <span>0%</span>
+  </div>
+  <div class="reading-progress-bar"></div>
+
+  <a href="https://github.com/hs-black" class="github-corner" title="hs-black" aria-label="hs-black" rel="noopener" target="_blank"><svg width="80" height="80" viewBox="0 0 250 250" aria-hidden="true"><path d="M0,0 L115,115 L130,115 L142,142 L250,250 L250,0 Z"></path><path d="M128.3,109.0 C113.8,99.7 119.0,89.6 119.0,89.6 C122.0,82.7 120.5,78.6 120.5,78.6 C119.2,72.0 123.4,76.3 123.4,76.3 C127.3,80.9 125.5,87.3 125.5,87.3 C122.9,97.6 130.6,101.9 134.4,103.2" fill="currentColor" style="transform-origin: 130px 106px;" class="octo-arm"></path><path d="M115.0,115.0 C114.9,115.1 118.7,116.5 119.8,115.4 L133.7,101.6 C136.9,99.2 139.9,98.4 142.2,98.6 C133.8,88.0 127.5,74.4 143.8,58.0 C148.5,53.4 154.0,51.2 159.7,51.0 C160.3,49.4 163.2,43.6 171.4,40.1 C171.4,40.1 176.1,42.5 178.8,56.2 C183.1,58.6 187.2,61.8 190.9,65.4 C194.5,69.0 197.7,73.2 200.1,77.6 C213.8,80.2 216.3,84.9 216.3,84.9 C212.7,93.1 206.9,96.0 205.4,96.6 C205.1,102.4 203.0,107.8 198.3,112.5 C181.9,128.9 168.3,122.5 157.7,114.1 C157.9,116.9 156.7,120.9 152.7,124.9 L141.0,136.5 C139.8,137.7 141.6,141.9 141.8,141.8 Z" fill="currentColor" class="octo-body"></path></svg></a>
+
+
+    <main class="main">
+      <div class="main-inner">
+        <div class="content-wrap">
+          
+
+          <div class="content">
+            
+
+  <div class="posts-expand">
+      
+  
+  
+  <article itemscope itemtype="http://schema.org/Article" class="post-block " lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://hs-black.xyz/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.png">
+      <meta itemprop="name" content="hs-black">
+      <meta itemprop="description" content="脑残的孩子就要慢慢学">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="Hs-black">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          用极大化思想解决矩形问题学习笔记
+        </h1>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-calendar-o"></i>
+              </span>
+              <span class="post-meta-item-text">发表于</span>
+              
+
+              <time title="创建时间：2019-12-29 15:22:56 / 修改时间：16:10:33" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:56+08:00">2019-12-29</time>
+            </span>
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-folder-o"></i>
+              </span>
+              <span class="post-meta-item-text">分类于</span>
+                <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+                  <a href="/categories/%E5%85%B6%E4%BB%96%E7%AE%97%E6%B3%95/" itemprop="url" rel="index">
+                    <span itemprop="name">其他算法</span>
+                  </a>
+                </span>
+            </span>
+
+          
+  
+  <span class="post-meta-item">
+    
+      <span class="post-meta-item-icon">
+        <i class="fa fa-comment-o"></i>
+      </span>
+      <span class="post-meta-item-text">Valine：</span>
+    
+    <a title="valine" href="/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/#comments" itemprop="discussionUrl">
+      <span class="post-comments-count valine-comment-count" data-xid="/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" itemprop="commentCount"></span>
+    </a>
+  </span>
+  
+  <br>
+            <span class="post-meta-item" title="本文字数">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-file-word-o"></i>
+              </span>
+                <span class="post-meta-item-text">本文字数：</span>
+              <span>3.5k</span>
+            </span>
+            <span class="post-meta-item" title="阅读时长">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-clock-o"></i>
+              </span>
+                <span class="post-meta-item-text">阅读时长 &asymp;</span>
+              <span>3 分钟</span>
+            </span>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+        <h1 id="用极大化思想解决矩形问题学习笔记"><a href="#用极大化思想解决矩形问题学习笔记" class="headerlink" title="用极大化思想解决矩形问题学习笔记"></a>用极大化思想解决矩形问题学习笔记</h1><ul>
+<li><h2 id="问题引入："><a href="#问题引入：" class="headerlink" title="问题引入："></a>问题引入：</h2></li>
+</ul>
+<blockquote>
+<p><strong>Winter Camp2002,奶牛浴场</strong></p>
+<p><strong>题意简述</strong>：</p>
+<p>John要在矩形牛场中建造一个大型浴场，但是这个大型浴场不能包含任何一个奶牛的产奶点，但产奶点可以出在浴场的边界上。John的牛场和规划的浴场都是矩形，浴场要完全位于牛场之内，并且浴场的轮廓要与牛场的轮廓平行或者重合。要求所求浴场的面积尽可能大。</p>
+<p>参数约定：产奶点的个数S不超过5000,牛场的范围N×M不超过30000×30000。</p>
+<p>输入：  </p>
+<p>10 10<br>4<br>1 1<br>9 1<br>1 9<br>9 9</p>
+<p>输出：</p>
+<p>80</p>
+</blockquote>
+<ul>
+<li><h2 id="定义："><a href="#定义：" class="headerlink" title="定义："></a>定义：</h2></li>
+</ul>
+<p><strong>有效子矩形：</strong> 内部（不包含边界）没有障碍点的子矩形（四边均与坐标轴平行）</p>
+<p><strong>极大有效子矩形</strong>：不被任何一个有效子矩形包含（除本身）</p>
+<p><strong>最大有效子矩形</strong>：最大的有效子矩形</p>
+<ul>
+<li><h3 id="小性质-："><a href="#小性质-：" class="headerlink" title="小性质 ："></a>小性质 ：</h3></li>
+</ul>
+<h3 id="1-极大有效子矩形的四条边无法向四边拓展，-也就是说四条边都存在障碍点或与大矩形边界重合"><a href="#1-极大有效子矩形的四条边无法向四边拓展，-也就是说四条边都存在障碍点或与大矩形边界重合" class="headerlink" title="1. 极大有效子矩形的四条边无法向四边拓展， 也就是说四条边都存在障碍点或与大矩形边界重合"></a>1. 极大有效子矩形的四条边无法向四边拓展， 也就是说四条边都存在障碍点或与大矩形边界重合</h3><h3 id="2-存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形"><a href="#2-存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形" class="headerlink" title="2.存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形"></a>2.存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形</h3><ul>
+<li>【证明】：若最大有效子矩形不是极大有效子矩形，那么一定存在一个有效子矩形包括它，这与它的最大性相违背</li>
+</ul>
+<ul>
+<li><h2 id="解决问题："><a href="#解决问题：" class="headerlink" title="解决问题："></a>解决问题：</h2></li>
+</ul>
+<p>1.思想一：枚举所有的极大有效子矩形</p>
+<p>2.思想二：垂线法（后文介绍）</p>
+<h2 id="算法一-O-s-2-："><a href="#算法一-O-s-2-：" class="headerlink" title="算法一  O($s^2$)："></a>算法一  O($s^2$)：</h2><p>由思想一我们可以得知，我们要枚举极大有效子矩形，尽量不枚举无效的，不是极大的子矩形</p>
+<p>而由性质一得知，极大子矩形边界中必含障碍点</p>
+<p>所以我们将所有障碍点按横坐标排序， 枚举障碍点所在纵线（与y轴平行的线）为极大有效子矩形的左边界（关于左边界是矩形边界下文讨论），再从左到右的扫描障碍点，更新答案后再更新上下边界</p>
+<ul>
+<li><p>更新答案：ans = max ( (上边界 - 下边界）* 横坐标之差 ， ans）</p>
+</li>
+<li><p>边界初始化：up = 0， down = 矩形纵长</p>
+</li>
+<li><p>更新边界： 如果新点在左边界点的上方，up = min(up,  其纵坐标)；否则 down = max（down， 其纵坐标）；</p>
+</li>
+<li><h3 id="bug-amp-改bug-："><a href="#bug-amp-改bug-：" class="headerlink" title="bug &amp; 改bug ："></a>bug &amp; 改bug ：</h3></li>
+</ul>
+<p>bug在于枚举过程中忽略了两类情况，一种是左边界在矩形左边界或右边界在矩形右边界的极大有效子矩形，另一种是左右边界都在矩形边界上（王知昆大佬的分类）。解决方法：将大矩形的四个顶点加入点集，然后横坐标排序跑一遍，纵坐标排序再跑一遍。横坐标跑的时候可以解决右边界问题，纵坐标跑时可以解决剩下问题（就像跑横坐标时可以解决上边界与下边界问题一样）</p>
+<p>最后贴一下代码：</p>
+<details><summary>talk is cheap, show me the code</summary>
+<p>
+
+<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br></pre></td><td class="code"><pre><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;algorithm&gt;</span></span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">6005</span>;</span><br><span class="line"><span class="class"><span class="keyword">struct</span> <span class="title">node</span>&#123;</span></span><br><span class="line">	<span class="keyword">int</span> x, y;</span><br><span class="line">&#125;a[N];</span><br><span class="line"><span class="keyword">int</span> L, W;</span><br><span class="line"><span class="function"><span class="keyword">bool</span> <span class="title">cmp1</span><span class="params">(node i,node j)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> i.x &lt; j.x;</span><br><span class="line">&#125;</span><br><span class="line"><span class="function"><span class="keyword">bool</span> <span class="title">cmp2</span><span class="params">(node i,node j)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> i.y &lt; j.y;</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">int</span> n;</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">	<span class="built_in">cin</span> &gt;&gt; L &gt;&gt; W &gt;&gt; n;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) </span><br><span class="line">	<span class="built_in">scanf</span> (<span class="string">"%d %d"</span>, &amp;a[i].x, &amp;a[i].y);</span><br><span class="line">	a[n+<span class="number">1</span>].y = a[n+<span class="number">1</span>].x = a[n+<span class="number">2</span>].x = a[n+<span class="number">3</span>].y = <span class="number">0</span>;</span><br><span class="line">	a[n+<span class="number">2</span>].y = a[n+<span class="number">4</span>].y = W;</span><br><span class="line">	a[n+<span class="number">3</span>].x = a[n+<span class="number">4</span>].x = L;</span><br><span class="line">	n += <span class="number">4</span>; <span class="comment">//加入矩形的四个顶点</span></span><br><span class="line">	sort(a + <span class="number">1</span>, a + n + <span class="number">1</span>, cmp1);</span><br><span class="line">	<span class="keyword">int</span> ans = <span class="number">0</span>, up, down, v;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">		up = <span class="number">0</span>, down = W, v = L - a[i].x;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> j = i + <span class="number">1</span>;j &lt;= n; j++) &#123;</span><br><span class="line">			<span class="keyword">if</span> (v * (down - up) &lt;= ans) <span class="keyword">break</span>; <span class="comment">//剪枝</span></span><br><span class="line">			ans = <span class="built_in">max</span>(ans, (down - up) * (a[j].x - a[i].x));</span><br><span class="line">			<span class="keyword">if</span> (a[j].y &gt;= a[i].y) down = <span class="built_in">min</span>(down, a[j].y);</span><br><span class="line">			<span class="keyword">else</span> up = <span class="built_in">max</span>(up, a[j].y);</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	sort(a + <span class="number">1</span>, a + n + <span class="number">1</span>, cmp2);</span><br><span class="line">	<span class="keyword">int</span> l = <span class="number">0</span>, r = L;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">		l = <span class="number">0</span>, r = L, v = W - a[i].y;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> j = i + <span class="number">1</span>;j &lt;= n; j++) &#123;</span><br><span class="line">			<span class="keyword">if</span> (v * (r - l) &lt;= ans) <span class="keyword">break</span>;</span><br><span class="line">			ans = <span class="built_in">max</span>(ans, (r - l) * (a[j].y - a[i].y));</span><br><span class="line">			<span class="keyword">if</span> (a[j].x &gt;= a[i].x) r = <span class="built_in">min</span>(r, a[j].x);</span><br><span class="line">			<span class="keyword">else</span> l = <span class="built_in">max</span>(l, a[j].x);</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="built_in">cout</span> &lt;&lt; ans &lt;&lt; <span class="built_in">endl</span>;</span><br><span class="line">	<span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+</p>
+</details>
+
+
+<h3 id="缺陷：可拓展性不够（后文例题介绍），在点（最多N-M）密集的情况下表现较差"><a href="#缺陷：可拓展性不够（后文例题介绍），在点（最多N-M）密集的情况下表现较差" class="headerlink" title="缺陷：可拓展性不够（后文例题介绍），在点（最多N * M）密集的情况下表现较差"></a>缺陷：可拓展性不够（后文例题介绍），在点（最多N * M）密集的情况下表现较差</h3><h2 id="算法二-O-N-M"><a href="#算法二-O-N-M" class="headerlink" title="算法二 O(N*M):"></a>算法二 O(N*M):</h2><p>前一种算法在许多点横坐标都相同时会做许多无用功，解决这个问题需要新的思路。通过极大有效矩形的定义得知，它的个数不会超过NM，所以我们决心寻找一种N*M级别的算法。</p>
+<ul>
+<li><h3 id="定义"><a href="#定义" class="headerlink" title="定义"></a>定义</h3></li>
+</ul>
+<p><strong>有效竖线</strong>：除了两个端点，不包含任何障碍点的线段</p>
+<p><strong>悬线</strong>：上端点是障碍点或在矩形边界上的有效竖线</p>
+<p>对于一个极大有效子矩形中，一定至少含有一条悬线，所以我们可以利用悬线来拓展形成极大有效子矩形</p>
+<p>如果一条悬线尽可能的向两端扩张，直到碰到障碍点或矩形边界，则将此矩形面积更新ans，最终ans一定是最大有效子矩形面积</p>
+<p>以每个格子为下端点的悬线有且仅有一条（除顶层格子），故悬线个数(n-1)*m。我们需要O(1)的查询每条悬线所对应的矩形；预处理出每个点向左到达的最远点，向右到达的最远点（向左和右扩张的宽度），向上到达的最远点（悬线的长度）</p>
+<details><summary>talk is cheap, show me the code</summary>
+<p>
+
+<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">//洛谷P4147</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">2000</span>;</span><br><span class="line"><span class="keyword">int</span> <span class="built_in">map</span>[N][N], l[N][N], r[N][N], h[N][N];</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">    <span class="keyword">int</span> n, m;</span><br><span class="line">    <span class="built_in">cin</span> &gt;&gt; n &gt;&gt; m;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) </span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= m; j++) &#123;</span><br><span class="line">        <span class="keyword">char</span> s[<span class="number">6</span>];</span><br><span class="line">        <span class="built_in">scanf</span> (<span class="string">"%s"</span>, s);</span><br><span class="line">        <span class="keyword">if</span> (s[<span class="number">0</span>] == <span class="string">'R'</span>) <span class="built_in">map</span>[i][j] = <span class="number">1</span>;</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= n; j++) </span><br><span class="line">        h[i][j] = <span class="number">1</span>;</span><br><span class="line">        l[i][<span class="number">1</span>] = <span class="number">1</span>; r[i][m] = m;</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">2</span>;j &lt;= m; j++) </span><br><span class="line">        <span class="keyword">if</span> (<span class="built_in">map</span>[i][j<span class="number">-1</span>]) l[i][j] = j;</span><br><span class="line">        <span class="keyword">else</span> l[i][j] = l[i][j<span class="number">-1</span>];</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = m - <span class="number">1</span>;j &gt;= <span class="number">1</span>; j--)</span><br><span class="line">        <span class="keyword">if</span> (<span class="built_in">map</span>[i][j+<span class="number">1</span>]) r[i][j] = j;</span><br><span class="line">        <span class="keyword">else</span> r[i][j] = r[i][j+<span class="number">1</span>];</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="keyword">int</span> ans = <span class="number">0</span>;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= m; j++) &#123;</span><br><span class="line">            <span class="keyword">if</span> (<span class="built_in">map</span>[i][j]) <span class="keyword">continue</span>;</span><br><span class="line">            <span class="keyword">if</span> (i == <span class="number">1</span>)</span><br><span class="line">                ans = <span class="built_in">max</span>(ans, r[i][j] - l[i][j] + <span class="number">1</span>);</span><br><span class="line">            <span class="keyword">else</span> &#123;</span><br><span class="line">                <span class="keyword">if</span> (!<span class="built_in">map</span>[i<span class="number">-1</span>][j]) &#123;</span><br><span class="line">                    h[i][j] = h[i<span class="number">-1</span>][j] + <span class="number">1</span>;</span><br><span class="line">                    l[i][j] = <span class="built_in">max</span>(l[i][j], l[i<span class="number">-1</span>][j]);</span><br><span class="line">                    r[i][j] = <span class="built_in">min</span>(r[i][j], r[i<span class="number">-1</span>][j]);</span><br><span class="line">                    ans = <span class="built_in">max</span>(ans, (r[i][j] - l[i][j] + <span class="number">1</span>) * h[i][j]);</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="built_in">cout</span> &lt;&lt; <span class="number">3</span> * ans &lt;&lt; <span class="built_in">endl</span>;</span><br><span class="line">    <span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+
+</p>
+</details>
+
+
+
+<a id="more"></a>
+<hr>
+
+    </div>
+
+    
+    
+    
+      
+
+        
+
+<div>
+<ul class="post-copyright">
+  <li class="post-copyright-author">
+    <strong>本文作者： </strong>hs-black
+  </li>
+  <li class="post-copyright-link">
+    <strong>本文链接：</strong>
+    <a href="http://hs-black.xyz/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" title="用极大化思想解决矩形问题学习笔记">http://hs-black.xyz/2019/12/29/用极大化思想解决矩形问题学习笔记/</a>
+  </li>
+  <li class="post-copyright-license">
+    <strong>版权声明： </strong>本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/zh-CN" rel="noopener" target="_blank"><i class="fa fa-fw fa-creative-commons"></i>BY-NC-SA</a> 许可协议。转载请注明出处！
+  </li>
+</ul>
+</div>
+
+
+      <footer class="post-footer">
+          <div class="post-tags">
+              <a href="/tags/%E6%82%AC%E7%BA%BF%E6%B3%95/" rel="tag"># 悬线法</a>
+          </div>
+
+        
+
+
+        
+    <div class="post-nav">
+      <div class="post-nav-item">
+    <a href="/2019/12/29/%E5%B0%8F%E7%BB%93%E8%AE%BA/" rel="prev" title="小结论">
+      <i class="fa fa-chevron-left"></i> 小结论
+    </a></div>
+      <div class="post-nav-item"></div>
+    </div>
+      </footer>
+    
+  </article>
+  
+  
+  
+
+  </div>
+
+
+          </div>
+          
+    <div class="comments" id="valine-comments"></div>
+
+<script>
+  window.addEventListener('tabs:register', () => {
+    let activeClass = CONFIG.comments.activeClass;
+    if (CONFIG.comments.storage) {
+      activeClass = localStorage.getItem('comments_active') || activeClass;
+    }
+    if (activeClass) {
+      let activeTab = document.querySelector(`a[href="#comment-${activeClass}"]`);
+      if (activeTab) {
+        activeTab.click();
+      }
+    }
+  });
+  if (CONFIG.comments.storage) {
+    window.addEventListener('tabs:click', event => {
+      if (!event.target.matches('.tabs-comment .tab-content .tab-pane')) return;
+      let commentClass = event.target.classList[1];
+      localStorage.setItem('comments_active', commentClass);
+    });
+  }
+</script>
+
+        </div>
+          
+  
+  <div class="toggle sidebar-toggle">
+    <span class="toggle-line toggle-line-first"></span>
+    <span class="toggle-line toggle-line-middle"></span>
+    <span class="toggle-line toggle-line-last"></span>
+  </div>
+
+  <aside class="sidebar">
+    <div class="sidebar-inner">
+
+      <ul class="sidebar-nav motion-element">
+        <li class="sidebar-nav-toc">
+          文章目录
+        </li>
+        <li class="sidebar-nav-overview">
+          站点概览
+        </li>
+      </ul>
+
+      <!--noindex-->
+      <div class="post-toc-wrap sidebar-panel">
+          <div class="post-toc motion-element"><ol class="nav"><li class="nav-item nav-level-1"><a class="nav-link" href="#用极大化思想解决矩形问题学习笔记"><span class="nav-number">1.</span> <span class="nav-text">用极大化思想解决矩形问题学习笔记</span></a><ol class="nav-child"><li class="nav-item nav-level-2"><a class="nav-link" href="#问题引入："><span class="nav-number">1.1.</span> <span class="nav-text">问题引入：</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#定义："><span class="nav-number">1.2.</span> <span class="nav-text">定义：</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#小性质-："><span class="nav-number">1.2.1.</span> <span class="nav-text">小性质 ：</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#1-极大有效子矩形的四条边无法向四边拓展，-也就是说四条边都存在障碍点或与大矩形边界重合"><span class="nav-number">1.2.2.</span> <span class="nav-text">1. 极大有效子矩形的四条边无法向四边拓展， 也就是说四条边都存在障碍点或与大矩形边界重合</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#2-存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形"><span class="nav-number">1.2.3.</span> <span class="nav-text">2.存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#解决问题："><span class="nav-number">1.3.</span> <span class="nav-text">解决问题：</span></a></li><li class="nav-item nav-level-2"><a class="nav-link" href="#算法一-O-s-2-："><span class="nav-number">1.4.</span> <span class="nav-text">算法一  O($s^2$)：</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#bug-amp-改bug-："><span class="nav-number">1.4.1.</span> <span class="nav-text">bug &amp; 改bug ：</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#缺陷：可拓展性不够（后文例题介绍），在点（最多N-M）密集的情况下表现较差"><span class="nav-number">1.4.2.</span> <span class="nav-text">缺陷：可拓展性不够（后文例题介绍），在点（最多N * M）密集的情况下表现较差</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#算法二-O-N-M"><span class="nav-number">1.5.</span> <span class="nav-text">算法二 O(N*M):</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#定义"><span class="nav-number">1.5.1.</span> <span class="nav-text">定义</span></a></li></ol></li></ol></li></ol></div>
+      </div>
+      <!--/noindex-->
+
+      <div class="site-overview-wrap sidebar-panel">
+        <div class="site-author motion-element" itemprop="author" itemscope itemtype="http://schema.org/Person">
+    <img class="site-author-image" itemprop="image" alt="hs-black"
+      src="/images/avatar.png">
+  <p class="site-author-name" itemprop="name">hs-black</p>
+  <div class="site-description" itemprop="description">脑残的孩子就要慢慢学</div>
+</div>
+<div class="site-state-wrap motion-element">
+  <nav class="site-state">
+      <div class="site-state-item site-state-posts">
+          <a href="/archives/">
+        
+          <span class="site-state-item-count">27</span>
+          <span class="site-state-item-name">日志</span>
+        </a>
+      </div>
+      <div class="site-state-item site-state-categories">
+            <a href="/categories/">
+          
+        <span class="site-state-item-count">31</span>
+        <span class="site-state-item-name">分类</span></a>
+      </div>
+      <div class="site-state-item site-state-tags">
+            <a href="/tags/">
+          
+        <span class="site-state-item-count">33</span>
+        <span class="site-state-item-name">标签</span></a>
+      </div>
+  </nav>
+</div>
+  <div class="links-of-author motion-element">
+      <span class="links-of-author-item">
+        <a href="https://github.com/hs-black" title="GitHub → https:&#x2F;&#x2F;github.com&#x2F;hs-black" rel="noopener" target="_blank"><i class="fa fa-fw fa-github"></i>GitHub</a>
+      </span>
+  </div>
+  <div class="cc-license motion-element" itemprop="license">
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/zh-CN" class="cc-opacity" rel="noopener" target="_blank"><img src="/images/cc-by-nc-sa.svg" alt="Creative Commons"></a>
+  </div>
+
+
+  <div class="links-of-blogroll motion-element">
+    <div class="links-of-blogroll-title">
+      <i class="fa fa-fw fa-link"></i>
+      Links
+    </div>
+    <ul class="links-of-blogroll-list">
+        <li class="links-of-blogroll-item">
+          <a href="https://www.luogu.com.cn/user/122144" title="https:&#x2F;&#x2F;www.luogu.com.cn&#x2F;user&#x2F;122144" rel="noopener" target="_blank">Luogu</a>
+        </li>
+    </ul>
+  </div>
+
+      </div>
+
+    </div>
+  </aside>
+  <div id="sidebar-dimmer"></div>
+
+
+      </div>
+    </main>
+
+    <footer class="footer">
+      <div class="footer-inner">
+        
+
+<div class="copyright">
+  
+  &copy; 
+  <span itemprop="copyrightYear">2019</span>
+  <span class="with-love">
+    <i class="fa fa-user"></i>
+  </span>
+  <span class="author" itemprop="copyrightHolder">hs-black</span>
+    <span class="post-meta-divider">|</span>
+    <span class="post-meta-item-icon">
+      <i class="fa fa-area-chart"></i>
+    </span>
+    <span title="站点总字数">86k</span>
+    <span class="post-meta-divider">|</span>
+    <span class="post-meta-item-icon">
+      <i class="fa fa-coffee"></i>
+    </span>
+    <span title="站点阅读时长">1:18</span>
+</div>
+
+        
+<div class="busuanzi-count">
+  <script async src="https://busuanzi.ibruce.info/busuanzi/2.3/busuanzi.pure.mini.js"></script>
+    <span class="post-meta-item" id="busuanzi_container_site_uv" style="display: none;">
+      <span class="post-meta-item-icon">
+        <i class="fa fa-user"></i>
+      </span>
+      <span class="site-uv" title="总访客量">
+        <span id="busuanzi_value_site_uv"></span>
+      </span>
+    </span>
+    <span class="post-meta-divider">|</span>
+    <span class="post-meta-item" id="busuanzi_container_site_pv" style="display: none;">
+      <span class="post-meta-item-icon">
+        <i class="fa fa-eye"></i>
+      </span>
+      <span class="site-pv" title="总访问量">
+        <span id="busuanzi_value_site_pv"></span>
+      </span>
+    </span>
+</div>
+
+
+
+
+
+
+
+
+      </div>
+    </footer>
+  </div>
+
+  
+  
+  <script color='96,96,96' opacity='0.5' zIndex='-1' count='99' src="/lib/canvas-nest/canvas-nest.min.js"></script>
+  <script src="/lib/anime.min.js"></script>
+  <script src="//cdn.jsdelivr.net/npm/jquery@3/dist/jquery.min.js"></script>
+  <script src="//cdn.jsdelivr.net/gh/fancyapps/fancybox@3/dist/jquery.fancybox.min.js"></script>
+  <script src="/lib/velocity/velocity.min.js"></script>
+  <script src="/lib/velocity/velocity.ui.min.js"></script>
+
+<script src="/js/utils.js"></script>
+
+<script src="/js/motion.js"></script>
+
+
+<script src="/js/schemes/pisces.js"></script>
+
+
+<script src="/js/next-boot.js"></script>
+
+
+
+
+  
+
+
+
+
+  
+<script src="/js/local-search.js"></script>
+
+
+
+
+
+
+
+
+
+
+
+
+
+  
+
+  
+      
+<script type="text/x-mathjax-config">
+    MathJax.Ajax.config.path['mhchem'] = '//cdn.jsdelivr.net/npm/mathjax-mhchem@3';
+
+  MathJax.Hub.Config({
+    tex2jax: {
+      inlineMath: [ ['$', '$'], ['\\(', '\\)'] ],
+      processEscapes: true,
+      skipTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+    },
+    TeX: {
+        extensions: ['[mhchem]/mhchem.js'],
+      equationNumbers: {
+        autoNumber: 'AMS'
+      }
+    }
+  });
+
+  MathJax.Hub.Register.StartupHook('TeX Jax Ready', function() {
+    MathJax.InputJax.TeX.prefilterHooks.Add(function(data) {
+      if (data.display) {
+        var next = data.script.nextSibling;
+        while (next && next.nodeName.toLowerCase() === '#text') {
+          next = next.nextSibling;
+        }
+        if (next && next.nodeName.toLowerCase() === 'br') {
+          next.parentNode.removeChild(next);
+        }
+      }
+    });
+  });
+
+  MathJax.Hub.Queue(function() {
+    var all = MathJax.Hub.getAllJax(), i;
+    for (i = 0; i < all.length; i += 1) {
+      element = document.getElementById(all[i].inputID + '-Frame').parentNode;
+      if (element.nodeName.toLowerCase() == 'li') {
+        element = element.parentNode;
+      }
+      element.classList.add('has-jax');
+    }
+  });
+</script>
+<script>
+  NexT.utils.getScript('//cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-AMS-MML_HTMLorMML', () => {
+    MathJax.Hub.Typeset();
+  }, window.MathJax);
+</script>
+
+    
+
+  
+
+
+<script>
+NexT.utils.loadComments(document.querySelector('#valine-comments'), () => {
+  NexT.utils.getScript('//cdn.jsdelivr.net/npm/valine/dist/Valine.min.js', () => {
+    var GUEST = ['nick', 'mail', 'link'];
+    var guest = 'nick,mail,link';
+    guest = guest.split(',').filter(item => {
+      return GUEST.includes(item);
+    });
+    new Valine({
+      el: '#valine-comments',
+      verify: false,
+      notify: false,
+      appId: 'doikqWSvdnFFhnC35k8I3S8c-gzGzoHsz',
+      appKey: 'nnug9ExFrFEkdgGt2hwc7eW9',
+      placeholder: "😎看了这么多，不想说点什么嘛😉",
+      avatar: 'identicon',
+      meta: guest,
+      pageSize: '10' || 10,
+      visitor: false,
+      lang: 'zh-cn' || 'zh-cn',
+      path: location.pathname,
+      recordIP: false,
+      serverURLs: ''
+    });
+  }, window.Valine);
+});
+</script>
+
+
+</body>
+</html>
