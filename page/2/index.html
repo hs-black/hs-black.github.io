@@ -221,6 +221,127 @@
   
   
   <article itemscope itemtype="http://schema.org/Article" class="post-block home" lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://hs-black.xyz/2019/12/29/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.png">
+      <meta itemprop="name" content="hs-black">
+      <meta itemprop="description" content="脑残的孩子就要慢慢学">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="Hs-black">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          
+            <a href="/2019/12/29/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" class="post-title-link" itemprop="url">线性代数学习笔记</a>
+        </h1>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-calendar-o"></i>
+              </span>
+              <span class="post-meta-item-text">发表于</span>
+
+              <time title="创建时间：2019-12-29 15:22:40" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:40+08:00">2019-12-29</time>
+            </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-calendar-check-o"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2020-01-01 10:45:37" itemprop="dateModified" datetime="2020-01-01T10:45:37+08:00">2020-01-01</time>
+              </span>
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-folder-o"></i>
+              </span>
+              <span class="post-meta-item-text">分类于</span>
+                <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+                  <a href="/categories/%E6%95%B0%E5%AD%A6/" itemprop="url" rel="index">
+                    <span itemprop="name">数学</span>
+                  </a>
+                </span>
+                  ，
+                <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
+                  <a href="/categories/%E6%95%B0%E5%AD%A6/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0/" itemprop="url" rel="index">
+                    <span itemprop="name">线性代数</span>
+                  </a>
+                </span>
+            </span>
+
+          
+  
+  <span class="post-meta-item">
+    
+      <span class="post-meta-item-icon">
+        <i class="fa fa-comment-o"></i>
+      </span>
+      <span class="post-meta-item-text">Valine：</span>
+    
+    <a title="valine" href="/2019/12/29/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/#comments" itemprop="discussionUrl">
+      <span class="post-comments-count valine-comment-count" data-xid="/2019/12/29/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" itemprop="commentCount"></span>
+    </a>
+  </span>
+  
+  <br>
+            <span class="post-meta-item" title="本文字数">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-file-word-o"></i>
+              </span>
+                <span class="post-meta-item-text">本文字数：</span>
+              <span>2.2k</span>
+            </span>
+            <span class="post-meta-item" title="阅读时长">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-clock-o"></i>
+              </span>
+                <span class="post-meta-item-text">阅读时长 &asymp;</span>
+              <span>2 分钟</span>
+            </span>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
+
+      
+          <h1 id="线性代数学习笔记"><a href="#线性代数学习笔记" class="headerlink" title="线性代数学习笔记"></a>线性代数学习笔记</h1><h2 id="一：行列式"><a href="#一：行列式" class="headerlink" title="一：行列式"></a>一：行列式</h2><p>前置芝士： 序列逆序对个数 $\tau  (a_1a_2a_3 \cdots a_n)  \displaystyle \sum^{n}_{i}{a[i] &lt; a[j] ( i &gt; j)}$</p>
+<p>性质1: 交换序列中相邻的两个数会改变原序列逆序对个数的奇偶性</p>
+<p>性质2: 交换序列中不相邻的两个数也会改变原序列逆序对个数的奇偶性</p>
+<p>​    证明:$ a_1…a_i…a_j…a_n  不断将a~i~与它右边的数字交换直至正好换到a_j 即a_1…a_ja_i…a_n 此时共交换了j - i 次$</p>
+<p>再将$a_j$ 向左与相邻数字交换j - i - 1次到原来$a_i$所在位置 ,此时共交换2 * (j - i) - 1次,为奇数次,所以奇偶性改变</p>
+          <!--noindex-->
+            <div class="post-button">
+              <a class="btn" href="/2019/12/29/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/#more" rel="contents">
+                阅读全文 &raquo;
+              </a>
+            </div>
+          <!--/noindex-->
+        
+      
+    </div>
+
+    
+    
+    
+      <footer class="post-footer">
+        <div class="post-eof"></div>
+      </footer>
+  </article>
+  
+  
+  
+
+        
+  
+  
+  <article itemscope itemtype="http://schema.org/Article" class="post-block home" lang="zh-CN">
     <link itemprop="mainEntityOfPage" href="http://hs-black.xyz/2019/12/29/%E7%BD%91%E7%BB%9C%E6%B5%81%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/">
 
     <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
@@ -605,132 +726,11 @@
   
   
 
-        
-  
-  
-  <article itemscope itemtype="http://schema.org/Article" class="post-block home" lang="zh-CN">
-    <link itemprop="mainEntityOfPage" href="http://hs-black.xyz/2019/12/29/%E6%A0%91%E9%93%BE%E5%89%96%E5%88%86%E6%9D%BF%E5%AD%90/">
-
-    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
-      <meta itemprop="image" content="/images/avatar.png">
-      <meta itemprop="name" content="hs-black">
-      <meta itemprop="description" content="脑残的孩子就要慢慢学">
-    </span>
-
-    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
-      <meta itemprop="name" content="Hs-black">
-    </span>
-      <header class="post-header">
-        <h1 class="post-title" itemprop="name headline">
-          
-            <a href="/2019/12/29/%E6%A0%91%E9%93%BE%E5%89%96%E5%88%86%E6%9D%BF%E5%AD%90/" class="post-title-link" itemprop="url">树链剖分板子</a>
-        </h1>
-
-        <div class="post-meta">
-            <span class="post-meta-item">
-              <span class="post-meta-item-icon">
-                <i class="fa fa-calendar-o"></i>
-              </span>
-              <span class="post-meta-item-text">发表于</span>
-
-              <time title="创建时间：2019-12-29 15:22:05" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:05+08:00">2019-12-29</time>
-            </span>
-              <span class="post-meta-item">
-                <span class="post-meta-item-icon">
-                  <i class="fa fa-calendar-check-o"></i>
-                </span>
-                <span class="post-meta-item-text">更新于</span>
-                <time title="修改时间：2020-01-01 10:46:09" itemprop="dateModified" datetime="2020-01-01T10:46:09+08:00">2020-01-01</time>
-              </span>
-            <span class="post-meta-item">
-              <span class="post-meta-item-icon">
-                <i class="fa fa-folder-o"></i>
-              </span>
-              <span class="post-meta-item-text">分类于</span>
-                <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
-                  <a href="/categories/%E6%A0%91%E4%B8%8A%E9%97%AE%E9%A2%98/" itemprop="url" rel="index">
-                    <span itemprop="name">树上问题</span>
-                  </a>
-                </span>
-                  ，
-                <span itemprop="about" itemscope itemtype="http://schema.org/Thing">
-                  <a href="/categories/%E6%A0%91%E4%B8%8A%E9%97%AE%E9%A2%98/%E6%A0%91%E9%93%BE%E5%89%96%E5%88%86/" itemprop="url" rel="index">
-                    <span itemprop="name">树链剖分</span>
-                  </a>
-                </span>
-            </span>
-
-          
-  
-  <span class="post-meta-item">
-    
-      <span class="post-meta-item-icon">
-        <i class="fa fa-comment-o"></i>
-      </span>
-      <span class="post-meta-item-text">Valine：</span>
-    
-    <a title="valine" href="/2019/12/29/%E6%A0%91%E9%93%BE%E5%89%96%E5%88%86%E6%9D%BF%E5%AD%90/#comments" itemprop="discussionUrl">
-      <span class="post-comments-count valine-comment-count" data-xid="/2019/12/29/%E6%A0%91%E9%93%BE%E5%89%96%E5%88%86%E6%9D%BF%E5%AD%90/" itemprop="commentCount"></span>
-    </a>
-  </span>
-  
-  <br>
-            <span class="post-meta-item" title="本文字数">
-              <span class="post-meta-item-icon">
-                <i class="fa fa-file-word-o"></i>
-              </span>
-                <span class="post-meta-item-text">本文字数：</span>
-              <span>3.4k</span>
-            </span>
-            <span class="post-meta-item" title="阅读时长">
-              <span class="post-meta-item-icon">
-                <i class="fa fa-clock-o"></i>
-              </span>
-                <span class="post-meta-item-text">阅读时长 &asymp;</span>
-              <span>3 分钟</span>
-            </span>
-
-        </div>
-      </header>
-
-    
-    
-    
-    <div class="post-body" itemprop="articleBody">
-
-      
-          <a id="more"></a>
-<details><summary>talk is cheap, show me the code</summary>
-<p>
-
-<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br><span class="line">51</span><br><span class="line">52</span><br><span class="line">53</span><br><span class="line">54</span><br><span class="line">55</span><br><span class="line">56</span><br><span class="line">57</span><br><span class="line">58</span><br><span class="line">59</span><br><span class="line">60</span><br><span class="line">61</span><br><span class="line">62</span><br><span class="line">63</span><br><span class="line">64</span><br><span class="line">65</span><br><span class="line">66</span><br><span class="line">67</span><br><span class="line">68</span><br><span class="line">69</span><br><span class="line">70</span><br><span class="line">71</span><br><span class="line">72</span><br><span class="line">73</span><br><span class="line">74</span><br><span class="line">75</span><br><span class="line">76</span><br><span class="line">77</span><br><span class="line">78</span><br><span class="line">79</span><br><span class="line">80</span><br><span class="line">81</span><br><span class="line">82</span><br><span class="line">83</span><br><span class="line">84</span><br><span class="line">85</span><br><span class="line">86</span><br><span class="line">87</span><br><span class="line">88</span><br><span class="line">89</span><br><span class="line">90</span><br><span class="line">91</span><br><span class="line">92</span><br><span class="line">93</span><br><span class="line">94</span><br><span class="line">95</span><br><span class="line">96</span><br><span class="line">97</span><br><span class="line">98</span><br><span class="line">99</span><br><span class="line">100</span><br><span class="line">101</span><br><span class="line">102</span><br><span class="line">103</span><br><span class="line">104</span><br><span class="line">105</span><br><span class="line">106</span><br><span class="line">107</span><br><span class="line">108</span><br><span class="line">109</span><br><span class="line">110</span><br><span class="line">111</span><br><span class="line">112</span><br><span class="line">113</span><br><span class="line">114</span><br><span class="line">115</span><br><span class="line">116</span><br><span class="line">117</span><br><span class="line">118</span><br><span class="line">119</span><br><span class="line">120</span><br><span class="line">121</span><br><span class="line">122</span><br><span class="line">123</span><br><span class="line">124</span><br><span class="line">125</span><br><span class="line">126</span><br><span class="line">127</span><br><span class="line">128</span><br><span class="line">129</span><br><span class="line">130</span><br><span class="line">131</span><br><span class="line">132</span><br><span class="line">133</span><br><span class="line">134</span><br><span class="line">135</span><br><span class="line">136</span><br><span class="line">137</span><br><span class="line">138</span><br><span class="line">139</span><br><span class="line">140</span><br><span class="line">141</span><br><span class="line">142</span><br><span class="line">143</span><br><span class="line">144</span><br><span class="line">145</span><br><span class="line">146</span><br><span class="line">147</span><br><span class="line">148</span><br><span class="line">149</span><br><span class="line">150</span><br><span class="line">151</span><br><span class="line">152</span><br><span class="line">153</span><br><span class="line">154</span><br><span class="line">155</span><br><span class="line">156</span><br><span class="line">157</span><br><span class="line">158</span><br><span class="line">159</span><br><span class="line">160</span><br><span class="line">161</span><br><span class="line">162</span><br><span class="line">163</span><br><span class="line">164</span><br><span class="line">165</span><br><span class="line">166</span><br><span class="line">167</span><br><span class="line">168</span><br><span class="line">169</span><br><span class="line">170</span><br><span class="line">171</span><br><span class="line">172</span><br><span class="line">173</span><br><span class="line">174</span><br><span class="line">175</span><br><span class="line">176</span><br><span class="line">177</span><br><span class="line">178</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">// luogu-judger-enable-o2</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">define</span> p1 p &lt;&lt; 1</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">define</span> p2 p &lt;&lt; 1 | 1</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">define</span> ll long long</span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">100050</span>;</span><br><span class="line">ll sum[N&lt;&lt;<span class="number">3</span>], <span class="keyword">add_t</span>[N&lt;&lt;<span class="number">3</span>];</span><br><span class="line"><span class="keyword">int</span> <span class="keyword">l_t</span>[N&lt;&lt;<span class="number">3</span>], <span class="keyword">r_t</span>[N&lt;&lt;<span class="number">3</span>];</span><br><span class="line"><span class="function">ll <span class="title">read</span><span class="params">(<span class="keyword">void</span>)</span> </span>&#123;</span><br><span class="line">	ll x = <span class="number">0</span>, f = <span class="number">1</span>;</span><br><span class="line">	<span class="keyword">char</span> c = getchar();</span><br><span class="line">	<span class="keyword">while</span> (!<span class="built_in">isdigit</span>(c)) &#123;</span><br><span class="line">		<span class="keyword">if</span> (c == <span class="string">'-'</span>) f = <span class="number">-1</span>;</span><br><span class="line">		c = getchar();</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">while</span> (<span class="built_in">isdigit</span>(c)) &#123;</span><br><span class="line">		x = (x &lt;&lt; <span class="number">3</span>) + (x &lt;&lt; <span class="number">1</span>) + c - <span class="string">'0'</span>;</span><br><span class="line">		c = getchar();</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">return</span> x * f;</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">int</span> siz[N], top[N];</span><br><span class="line"><span class="keyword">int</span> f[N], dep[N], son[N];</span><br><span class="line"><span class="keyword">int</span> h[N], to[N&lt;&lt;<span class="number">1</span>];</span><br><span class="line"><span class="keyword">int</span> ne[N&lt;&lt;<span class="number">1</span>], tot;</span><br><span class="line">ll w[N];</span><br><span class="line"><span class="function"><span class="keyword">inline</span> <span class="keyword">void</span> <span class="title">add_e</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> y)</span> </span>&#123;</span><br><span class="line">	ne[++tot] = h[x];</span><br><span class="line">	h[x] = tot;</span><br><span class="line">	to[tot] = y;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">dfs1</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> fa)</span> </span>&#123;</span><br><span class="line">	dep[x] = dep[fa] + <span class="number">1</span>;</span><br><span class="line">	siz[x] = <span class="number">1</span>;</span><br><span class="line">	f[x] = fa;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = h[x]; i; i = ne[i]) &#123;</span><br><span class="line">		<span class="keyword">int</span> y = to[i];</span><br><span class="line">		<span class="keyword">if</span> (y == fa) <span class="keyword">continue</span>;</span><br><span class="line">		dfs1(y, x);</span><br><span class="line">		siz[x] += siz[y];</span><br><span class="line">		<span class="keyword">if</span> (siz[y] &gt; siz[son[x]]) son[x] = y;</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">ll wt[N], cnt;</span><br><span class="line"><span class="keyword">int</span> id[N], Top[N];</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">dfs2</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> topf)</span> </span>&#123;</span><br><span class="line">	id[x] = ++cnt;</span><br><span class="line">	wt[cnt] = w[x];</span><br><span class="line">	Top[x] = topf;</span><br><span class="line">	<span class="keyword">if</span> (!son[x]) <span class="keyword">return</span>;</span><br><span class="line">	dfs2(son[x], topf);</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = h[x]; i; i = ne[i]) &#123;</span><br><span class="line">		<span class="keyword">int</span> y = to[i];</span><br><span class="line">		<span class="keyword">if</span> (y == f[x] || y == son[x]) <span class="keyword">continue</span>;</span><br><span class="line">		dfs2(y, y);</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">ll n, m, r, P;</span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">buil</span><span class="params">(<span class="keyword">int</span> l,<span class="keyword">int</span> r,<span class="keyword">int</span> p)</span> </span>&#123; </span><br><span class="line">	<span class="keyword">l_t</span>[p] = l, <span class="keyword">r_t</span>[p] = r;</span><br><span class="line">	<span class="keyword">if</span> (l == r) &#123;</span><br><span class="line">		sum[p] = wt[l] % P;</span><br><span class="line">		<span class="keyword">return</span>;</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">int</span> mid = (l + r) &gt;&gt; <span class="number">1</span>;</span><br><span class="line">	buil(l, mid, p1);</span><br><span class="line">	buil(mid + <span class="number">1</span>, r, p2);</span><br><span class="line">	sum[p] = sum[p1] + sum[p2];</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">spread</span><span class="params">(<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">add_t</span>[p]) &#123;</span><br><span class="line">		sum[p1] += (ll)(<span class="keyword">r_t</span>[p1] - <span class="keyword">l_t</span>[p1] + <span class="number">1</span>) * <span class="keyword">add_t</span>[p];</span><br><span class="line">		sum[p2] += (ll)(<span class="keyword">r_t</span>[p2] - <span class="keyword">l_t</span>[p2] + <span class="number">1</span>) * <span class="keyword">add_t</span>[p];</span><br><span class="line">		<span class="keyword">add_t</span>[p1] += <span class="keyword">add_t</span>[p];</span><br><span class="line">		<span class="keyword">add_t</span>[p2] += <span class="keyword">add_t</span>[p];</span><br><span class="line">		sum[p1] %= P;</span><br><span class="line">		sum[p2] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p1] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p2] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p]= <span class="number">0</span>;</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">add</span><span class="params">(<span class="keyword">int</span> l,<span class="keyword">int</span> r,ll d,<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">l_t</span>[p] &gt;= l &amp;&amp; <span class="keyword">r_t</span>[p] &lt;= r) &#123;</span><br><span class="line">		sum[p] += (<span class="keyword">r_t</span>[p] - <span class="keyword">l_t</span>[p] + <span class="number">1</span>) * d;</span><br><span class="line">		sum[p] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p] += d;</span><br><span class="line">		<span class="keyword">return</span>;</span><br><span class="line">	&#125;</span><br><span class="line">	spread(p);</span><br><span class="line">	<span class="keyword">if</span> (l &lt;= <span class="keyword">r_t</span>[p1]) add(l, r, d, p1);</span><br><span class="line">	<span class="keyword">if</span> (r &gt;= <span class="keyword">l_t</span>[p2]) add(l, r, d, p2);</span><br><span class="line">	sum[p] = sum[p1] + sum[p2];</span><br><span class="line">	sum[p] %= P;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function">ll <span class="title">ask</span><span class="params">(<span class="keyword">int</span> l,<span class="keyword">int</span> r,<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">l_t</span>[p] &gt;= l &amp;&amp; <span class="keyword">r_t</span>[p] &lt;= r)</span><br><span class="line">		<span class="keyword">return</span> sum[p];</span><br><span class="line">	spread(p);</span><br><span class="line">	ll ans = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">r_t</span>[p1] &gt;= l) ans += ask(l, r, p1);</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">l_t</span>[p2] &lt;= r) ans += ask(l, r, p2);</span><br><span class="line">	<span class="keyword">return</span> ans % P;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">update</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> y,ll z)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">while</span> (Top[x] != Top[y]) &#123;</span><br><span class="line">		<span class="keyword">if</span> (dep[Top[x]] &lt; dep[Top[y]]) swap(x, y);</span><br><span class="line">		add(id[Top[x]], id[x], z, <span class="number">1</span>);</span><br><span class="line">		x = f[Top[x]];</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">if</span> (dep[x] &lt; dep[y]) swap(x, y);</span><br><span class="line">	add(id[y], id[x], z, <span class="number">1</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function">ll <span class="title">query</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> y)</span> </span>&#123;</span><br><span class="line">	ll ans = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">while</span> (Top[x] != Top[y]) &#123;</span><br><span class="line">		<span class="keyword">if</span> (dep[Top[x]] &lt; dep[Top[y]]) swap(x, y);</span><br><span class="line">		ans += ask(id[Top[x]], id[x], <span class="number">1</span>);</span><br><span class="line">		x = f[Top[x]];</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">if</span> (dep[x] &lt; dep[y]) swap(x, y);</span><br><span class="line">	ans += ask(id[y], id[x], <span class="number">1</span>);</span><br><span class="line">	<span class="keyword">return</span> ans % P;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">add_w</span><span class="params">(<span class="keyword">int</span> x,ll z)</span> </span>&#123;</span><br><span class="line">	add(id[x], id[x] + siz[x] - <span class="number">1</span>, z, <span class="number">1</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function">ll <span class="title">query_w</span><span class="params">(<span class="keyword">int</span> x)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> ask(id[x], id[x] + siz[x] - <span class="number">1</span>, <span class="number">1</span>) % P;</span><br><span class="line">&#125;</span><br><span class="line">	</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">	n = read(), m = read(), r = read(), P = read();</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) w[i] = read();</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt; n; i++) &#123;</span><br><span class="line">		<span class="keyword">int</span> x = read(), y = read();</span><br><span class="line">		add_e(x, y); add_e(y, x);</span><br><span class="line">	&#125;</span><br><span class="line">	dfs1(r, <span class="number">0</span>);</span><br><span class="line">	dfs2(r, r);</span><br><span class="line">	buil(<span class="number">1</span>, n, <span class="number">1</span>);</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= m; i++) &#123;</span><br><span class="line">		<span class="keyword">int</span> op = read();</span><br><span class="line">		<span class="keyword">if</span> (op == <span class="number">1</span>) &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read(), y = read();</span><br><span class="line">			ll z = read() % P;</span><br><span class="line">			update(x, y, z);</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span> <span class="keyword">if</span> (op == <span class="number">2</span>) &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read(), y = read();</span><br><span class="line">			<span class="built_in">printf</span> (<span class="string">"%lld\n"</span>, query(x, y));</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span> <span class="keyword">if</span> (op == <span class="number">3</span>) &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read();</span><br><span class="line">			ll z = read();</span><br><span class="line">			add_w(x, z % P);</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span> &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read();</span><br><span class="line">			<span class="built_in">printf</span> (<span class="string">"%lld\n"</span>, query_w(x));</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-
-</p>
-</details>
-
-
-
-<hr>
-
-      
-    </div>
-
-    
-    
-    
-      <footer class="post-footer">
-        <div class="post-eof"></div>
-      </footer>
-  </article>
-  
-  
-  
-
   </div>
 
   
   <nav class="pagination">
-    <a class="extend prev" rel="prev" href="/"><i class="fa fa-angle-left" aria-label="上一页"></i></a><a class="page-number" href="/">1</a><span class="page-number current">2</span><a class="page-number" href="/page/3/">3</a><span class="space">&hellip;</span><a class="page-number" href="/page/7/">7</a><a class="extend next" rel="next" href="/page/3/"><i class="fa fa-angle-right" aria-label="下一页"></i></a>
+    <a class="extend prev" rel="prev" href="/"><i class="fa fa-angle-left" aria-label="上一页"></i></a><a class="page-number" href="/">1</a><span class="page-number current">2</span><a class="page-number" href="/page/3/">3</a><span class="space">&hellip;</span><a class="page-number" href="/page/8/">8</a><a class="extend next" rel="next" href="/page/3/"><i class="fa fa-angle-right" aria-label="下一页"></i></a>
   </nav>
 
 
@@ -798,20 +798,20 @@
       <div class="site-state-item site-state-posts">
           <a href="/archives/">
         
-          <span class="site-state-item-count">28</span>
+          <span class="site-state-item-count">29</span>
           <span class="site-state-item-name">日志</span>
         </a>
       </div>
       <div class="site-state-item site-state-categories">
             <a href="/categories/">
           
-        <span class="site-state-item-count">32</span>
+        <span class="site-state-item-count">33</span>
         <span class="site-state-item-name">分类</span></a>
       </div>
       <div class="site-state-item site-state-tags">
             <a href="/tags/">
           
-        <span class="site-state-item-count">35</span>
+        <span class="site-state-item-count">36</span>
         <span class="site-state-item-name">标签</span></a>
       </div>
   </nav>
@@ -864,12 +864,12 @@
     <span class="post-meta-item-icon">
       <i class="fa fa-area-chart"></i>
     </span>
-    <span title="站点总字数">88k</span>
+    <span title="站点总字数">90k</span>
     <span class="post-meta-divider">|</span>
     <span class="post-meta-item-icon">
       <i class="fa fa-coffee"></i>
     </span>
-    <span title="站点阅读时长">1:20</span>
+    <span title="站点阅读时长">1:22</span>
 </div>
 
         
