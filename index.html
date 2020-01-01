@@ -244,10 +244,16 @@
                 <i class="fa fa-calendar-o"></i>
               </span>
               <span class="post-meta-item-text">发表于</span>
-              
 
-              <time title="创建时间：2019-12-31 21:07:41 / 修改时间：22:33:23" itemprop="dateCreated datePublished" datetime="2019-12-31T21:07:41+08:00">2019-12-31</time>
+              <time title="创建时间：2019-12-31 21:07:41" itemprop="dateCreated datePublished" datetime="2019-12-31T21:07:41+08:00">2019-12-31</time>
             </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-calendar-check-o"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2020-01-01 10:48:38" itemprop="dateModified" datetime="2020-01-01T10:48:38+08:00">2020-01-01</time>
+              </span>
             <span class="post-meta-item">
               <span class="post-meta-item-icon">
                 <i class="fa fa-folder-o"></i>
@@ -311,54 +317,6 @@
           <div class="note default">
             <p>各位毒瘤大家好, 最近模拟赛考了一道trie+主席树好题, 但大家都用hash水过了这道题(<del>包括我</del>), 为了测试一下新搭建的HEAT OJ的hack功能,  <del>我将继续扮演毒瘤的角色, 用毒瘤的艺术形象努力创0造一个正能量的形象, 文体两开花, 弘扬中华文化,</del> 右转去BZOJ搞了一晚上hashkiller, 回来卡了单哈希(双哈希是真滴卡不住</p>
           </div>
-<h2 id="哈希-hash"><a href="#哈希-hash" class="headerlink" title="哈希(hash) :"></a>哈希(hash) :</h2><p>利用大质数或其他对应函数把字符串转为一个正整数来快速判断字符串相等</p>
-<p>通常可以模一个大质数或使用自然溢出</p>
-<p>实现(例);</p>
-<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> P = <span class="number">1e9</span>+<span class="number">7</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> di = <span class="number">1331</span>;</span><br><span class="line">hash[i] = (hash[i<span class="number">-1</span>] * base + s[i]) % P;</span><br></pre></td></tr></table></figure>
-<p>其中$base$, 我称之为底数, P我称之为模数, 事实上自然溢出相当于模了$2^{64}$</p>
-<h2 id="卡哈希的思想"><a href="#卡哈希的思想" class="headerlink" title="卡哈希的思想:"></a>卡哈希的思想:</h2><ol>
-<li>数学构造</li>
-<li>随机数据(依据生日悖论</li>
-</ol>
-<h2 id="Part-1-生日悖论"><a href="#Part-1-生日悖论" class="headerlink" title="Part 1 生日悖论:"></a>Part 1 生日悖论:</h2><blockquote>
-<p>如果一个班级有23个人, 那么其中有两个人生日相同的概率超过50%</p>
-</blockquote>
-<p>surprise 这与大部分人的直觉相违背, 所以称之为生日悖论</p>
-<p>为什么会这样呢, 是自己的直觉不靠谱吗?</p>
-<p>不, 我们可以考虑另一个问题, 如果一个班里有23人包括自己, 有人生日和自己相同的概率是多少?</p>
-<p>没错, 大概为$6%$左右, 这是与直觉近似的, 其实我们的直觉正是把”有人生日相同”和”有人生日和自己相同”的概念相混, 实际有人生日和自己相同的概率确实很小</p>
-<p>证明可以用排列组合开心的手玩一下</p>
-<h3 id="性质"><a href="#性质" class="headerlink" title="性质:"></a>性质:</h3><p>样本容量为$n$, 超过$50%$概率有两个样本相同的概率为</p>
-<script type="math/tex; mode=display">
-1.18\sqrt{n}</script><h2 id="Part-2-卡大质数hash-1000000009"><a href="#Part-2-卡大质数hash-1000000009" class="headerlink" title="Part 2 卡大质数hash (1000000009) :"></a>Part 2 卡大质数hash (1000000009) :</h2><p>考虑生日攻击, 随机一个1e5大小的字符串, 询问长度为$L$的本质不同子串有多少个, 用大质数$hash$和后缀数组(也可以用自然溢出$hash$)对拍, 输出不同子串的终止位置, 拿$fc$命令对比一下, 找出$hash$值相等的不同子串</p>
-<p>正确性如生日悖论, 大概有超过$50%$的几率成功, 实际上质数不强的时候有很多相同</p>
-<h2 id="Part-3-卡自然溢出hash"><a href="#Part-3-卡自然溢出hash" class="headerlink" title="Part 3 卡自然溢出hash:"></a>Part 3 卡自然溢出hash:</h2><p>自然溢出$hash$在数据随机的情况下正确性极高, 因为它的值域很大, 很难生日攻击</p>
-<p>考虑特殊构造:</p>
-<h3 id="对于底数为偶数"><a href="#对于底数为偶数" class="headerlink" title="对于底数为偶数:"></a>对于底数为偶数:</h3><p>构造$aaaa\cdots aaaa$ 和 $baaa\cdots aaaa$两个长度相等且长度大于64的串</p>
-<p>底数的六十四次方以上模$P$就会为零, $b$和$a$也会被判为相等</p>
-<h3 id="对于底数为奇数"><a href="#对于底数为奇数" class="headerlink" title="对于底数为奇数:"></a>对于底数为奇数:</h3><p>不太好卡, 要用神仙的构造方法:</p>
-<p>设一个串$s[]$, $s[1] = ‘a’$ 设$ |s| = strlen(s + 1)$ 为$s$的长度 </p>
-<p>定义$ (!s)$ 为$s$中的字符全部$’a’变’b’, ‘b’变’a’,$ 当然$s$中只含有$’a’$和$’b’$两种字符</p>
-<p>定义串$S1 + S2$为$S1$串在前$S2$串在后拼接起来, $hash(s1)$ 为$s1$的哈希值</p>
-<p>类似数列的, 我们定义一个”字符串列”, 为一个字符串集合{$S_n$}, 后一个字符串可以通过前一个字符串推出</p>
-<p>$S_1 = “a”$</p>
-<script type="math/tex; mode=display">
-S_i = S_{i-1} + (!S_{i-1})</script><p>则$S_i$的长度为$2^{i-1}$</p>
-<script type="math/tex; mode=display">
-hash(S_i) = hash(S_{i-1}) * base^{|S_{i-1}|} + hash((!S_{i-1})) \\
-= hash(S_{i-1}) * base^{2^{i-2}} + hash((!S_{i-1})) \\
-hash((!S_{i-1})) = hash((!S_{i-2})) * base^{2^{i-2}} + hash(S_{i-1}) \\
-
-hash(S_i) - hash((!S_{i-1})) = (hash(S_{i-1}) - hash((!S_{i-2}))) * base^{2^{i-2}} - (hash(S_{i-1}) - hash((!S_{i-2})))\\
-
-hash(S_i) - hash((!S_{i-1})) = (hash(S_{i-1}) - hash((!S_{i-2}))) * (base^{2^{i-2}} - 1)</script><p>希望得到 $2^{64} | hash(S_i) - hash(!S_i)$ 设$g_i = hash(S_i) - hash(!S_i)$</p>
-<p>$g_i=g_{i-1}*(base^{2^{i-2}}-1)$ 每个 $(base^{2^{i-2}}-1)$ 都是偶数, 这使得g到第64项就就可以卡掉hash了,</p>
-<p>但事实上12位以上就行, 因为</p>
-<script type="math/tex; mode=display">
-base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶数乘一个偶数, 而左边的可以继续递归下去, 所以原式整除$2^i$ 然后就结束啦</p>
-<blockquote>
-<p>长大后, 我要当毒瘤, 爷爷奶奶可高兴了, 给我爱吃的…</p>
-</blockquote>
           <!--noindex-->
             <div class="post-button">
               <a class="btn" href="/2019/12/31/%E6%AF%92%E7%98%A4%E5%85%BB%E6%88%90%E8%AE%B01-%E5%A6%82%E4%BD%95%E5%8D%A1hash/#more" rel="contents">
@@ -408,10 +366,16 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
                 <i class="fa fa-calendar-o"></i>
               </span>
               <span class="post-meta-item-text">发表于</span>
-              
 
-              <time title="创建时间：2019-12-29 15:22:56 / 修改时间：16:10:33" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:56+08:00">2019-12-29</time>
+              <time title="创建时间：2019-12-29 15:22:56" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:56+08:00">2019-12-29</time>
             </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-calendar-check-o"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2020-01-01 10:45:16" itemprop="dateModified" datetime="2020-01-01T10:45:16+08:00">2020-01-01</time>
+              </span>
             <span class="post-meta-item">
               <span class="post-meta-item-icon">
                 <i class="fa fa-folder-o"></i>
@@ -476,62 +440,6 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <p>输出：</p>
 <p>80</p>
 </blockquote>
-<ul>
-<li><h2 id="定义："><a href="#定义：" class="headerlink" title="定义："></a>定义：</h2></li>
-</ul>
-<p><strong>有效子矩形：</strong> 内部（不包含边界）没有障碍点的子矩形（四边均与坐标轴平行）</p>
-<p><strong>极大有效子矩形</strong>：不被任何一个有效子矩形包含（除本身）</p>
-<p><strong>最大有效子矩形</strong>：最大的有效子矩形</p>
-<ul>
-<li><h3 id="小性质-："><a href="#小性质-：" class="headerlink" title="小性质 ："></a>小性质 ：</h3></li>
-</ul>
-<h3 id="1-极大有效子矩形的四条边无法向四边拓展，-也就是说四条边都存在障碍点或与大矩形边界重合"><a href="#1-极大有效子矩形的四条边无法向四边拓展，-也就是说四条边都存在障碍点或与大矩形边界重合" class="headerlink" title="1. 极大有效子矩形的四条边无法向四边拓展， 也就是说四条边都存在障碍点或与大矩形边界重合"></a>1. 极大有效子矩形的四条边无法向四边拓展， 也就是说四条边都存在障碍点或与大矩形边界重合</h3><h3 id="2-存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形"><a href="#2-存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形" class="headerlink" title="2.存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形"></a>2.存在一个障碍点的矩形中最大有效子矩形一定是极大有效子矩形</h3><ul>
-<li>【证明】：若最大有效子矩形不是极大有效子矩形，那么一定存在一个有效子矩形包括它，这与它的最大性相违背</li>
-</ul>
-<ul>
-<li><h2 id="解决问题："><a href="#解决问题：" class="headerlink" title="解决问题："></a>解决问题：</h2></li>
-</ul>
-<p>1.思想一：枚举所有的极大有效子矩形</p>
-<p>2.思想二：垂线法（后文介绍）</p>
-<h2 id="算法一-O-s-2-："><a href="#算法一-O-s-2-：" class="headerlink" title="算法一  O($s^2$)："></a>算法一  O($s^2$)：</h2><p>由思想一我们可以得知，我们要枚举极大有效子矩形，尽量不枚举无效的，不是极大的子矩形</p>
-<p>而由性质一得知，极大子矩形边界中必含障碍点</p>
-<p>所以我们将所有障碍点按横坐标排序， 枚举障碍点所在纵线（与y轴平行的线）为极大有效子矩形的左边界（关于左边界是矩形边界下文讨论），再从左到右的扫描障碍点，更新答案后再更新上下边界</p>
-<ul>
-<li><p>更新答案：ans = max ( (上边界 - 下边界）* 横坐标之差 ， ans）</p>
-</li>
-<li><p>边界初始化：up = 0， down = 矩形纵长</p>
-</li>
-<li><p>更新边界： 如果新点在左边界点的上方，up = min(up,  其纵坐标)；否则 down = max（down， 其纵坐标）；</p>
-</li>
-<li><h3 id="bug-amp-改bug-："><a href="#bug-amp-改bug-：" class="headerlink" title="bug &amp; 改bug ："></a>bug &amp; 改bug ：</h3></li>
-</ul>
-<p>bug在于枚举过程中忽略了两类情况，一种是左边界在矩形左边界或右边界在矩形右边界的极大有效子矩形，另一种是左右边界都在矩形边界上（王知昆大佬的分类）。解决方法：将大矩形的四个顶点加入点集，然后横坐标排序跑一遍，纵坐标排序再跑一遍。横坐标跑的时候可以解决右边界问题，纵坐标跑时可以解决剩下问题（就像跑横坐标时可以解决上边界与下边界问题一样）</p>
-<p>最后贴一下代码：</p>
-<details><summary>talk is cheap, show me the code</summary>
-<p>
-
-<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br><span class="line">47</span><br><span class="line">48</span><br><span class="line">49</span><br><span class="line">50</span><br></pre></td><td class="code"><pre><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;algorithm&gt;</span></span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">6005</span>;</span><br><span class="line"><span class="class"><span class="keyword">struct</span> <span class="title">node</span>&#123;</span></span><br><span class="line">	<span class="keyword">int</span> x, y;</span><br><span class="line">&#125;a[N];</span><br><span class="line"><span class="keyword">int</span> L, W;</span><br><span class="line"><span class="function"><span class="keyword">bool</span> <span class="title">cmp1</span><span class="params">(node i,node j)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> i.x &lt; j.x;</span><br><span class="line">&#125;</span><br><span class="line"><span class="function"><span class="keyword">bool</span> <span class="title">cmp2</span><span class="params">(node i,node j)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> i.y &lt; j.y;</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">int</span> n;</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">	<span class="built_in">cin</span> &gt;&gt; L &gt;&gt; W &gt;&gt; n;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) </span><br><span class="line">	<span class="built_in">scanf</span> (<span class="string">"%d %d"</span>, &amp;a[i].x, &amp;a[i].y);</span><br><span class="line">	a[n+<span class="number">1</span>].y = a[n+<span class="number">1</span>].x = a[n+<span class="number">2</span>].x = a[n+<span class="number">3</span>].y = <span class="number">0</span>;</span><br><span class="line">	a[n+<span class="number">2</span>].y = a[n+<span class="number">4</span>].y = W;</span><br><span class="line">	a[n+<span class="number">3</span>].x = a[n+<span class="number">4</span>].x = L;</span><br><span class="line">	n += <span class="number">4</span>; <span class="comment">//加入矩形的四个顶点</span></span><br><span class="line">	sort(a + <span class="number">1</span>, a + n + <span class="number">1</span>, cmp1);</span><br><span class="line">	<span class="keyword">int</span> ans = <span class="number">0</span>, up, down, v;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">		up = <span class="number">0</span>, down = W, v = L - a[i].x;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> j = i + <span class="number">1</span>;j &lt;= n; j++) &#123;</span><br><span class="line">			<span class="keyword">if</span> (v * (down - up) &lt;= ans) <span class="keyword">break</span>; <span class="comment">//剪枝</span></span><br><span class="line">			ans = <span class="built_in">max</span>(ans, (down - up) * (a[j].x - a[i].x));</span><br><span class="line">			<span class="keyword">if</span> (a[j].y &gt;= a[i].y) down = <span class="built_in">min</span>(down, a[j].y);</span><br><span class="line">			<span class="keyword">else</span> up = <span class="built_in">max</span>(up, a[j].y);</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	sort(a + <span class="number">1</span>, a + n + <span class="number">1</span>, cmp2);</span><br><span class="line">	<span class="keyword">int</span> l = <span class="number">0</span>, r = L;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">		l = <span class="number">0</span>, r = L, v = W - a[i].y;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> j = i + <span class="number">1</span>;j &lt;= n; j++) &#123;</span><br><span class="line">			<span class="keyword">if</span> (v * (r - l) &lt;= ans) <span class="keyword">break</span>;</span><br><span class="line">			ans = <span class="built_in">max</span>(ans, (r - l) * (a[j].y - a[i].y));</span><br><span class="line">			<span class="keyword">if</span> (a[j].x &gt;= a[i].x) r = <span class="built_in">min</span>(r, a[j].x);</span><br><span class="line">			<span class="keyword">else</span> l = <span class="built_in">max</span>(l, a[j].x);</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="built_in">cout</span> &lt;&lt; ans &lt;&lt; <span class="built_in">endl</span>;</span><br><span class="line">	<span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-
-</p>
-</details>
-
-
-<h3 id="缺陷：可拓展性不够（后文例题介绍），在点（最多N-M）密集的情况下表现较差"><a href="#缺陷：可拓展性不够（后文例题介绍），在点（最多N-M）密集的情况下表现较差" class="headerlink" title="缺陷：可拓展性不够（后文例题介绍），在点（最多N * M）密集的情况下表现较差"></a>缺陷：可拓展性不够（后文例题介绍），在点（最多N * M）密集的情况下表现较差</h3><h2 id="算法二-O-N-M"><a href="#算法二-O-N-M" class="headerlink" title="算法二 O(N*M):"></a>算法二 O(N*M):</h2><p>前一种算法在许多点横坐标都相同时会做许多无用功，解决这个问题需要新的思路。通过极大有效矩形的定义得知，它的个数不会超过NM，所以我们决心寻找一种N*M级别的算法。</p>
-<ul>
-<li><h3 id="定义"><a href="#定义" class="headerlink" title="定义"></a>定义</h3></li>
-</ul>
-<p><strong>有效竖线</strong>：除了两个端点，不包含任何障碍点的线段</p>
-<p><strong>悬线</strong>：上端点是障碍点或在矩形边界上的有效竖线</p>
-<p>对于一个极大有效子矩形中，一定至少含有一条悬线，所以我们可以利用悬线来拓展形成极大有效子矩形</p>
-<p>如果一条悬线尽可能的向两端扩张，直到碰到障碍点或矩形边界，则将此矩形面积更新ans，最终ans一定是最大有效子矩形面积</p>
-<p>以每个格子为下端点的悬线有且仅有一条（除顶层格子），故悬线个数(n-1)*m。我们需要O(1)的查询每条悬线所对应的矩形；预处理出每个点向左到达的最远点，向右到达的最远点（向左和右扩张的宽度），向上到达的最远点（悬线的长度）</p>
-<details><summary>talk is cheap, show me the code</summary>
-<p>
-
-<figure class="highlight c++"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br><span class="line">8</span><br><span class="line">9</span><br><span class="line">10</span><br><span class="line">11</span><br><span class="line">12</span><br><span class="line">13</span><br><span class="line">14</span><br><span class="line">15</span><br><span class="line">16</span><br><span class="line">17</span><br><span class="line">18</span><br><span class="line">19</span><br><span class="line">20</span><br><span class="line">21</span><br><span class="line">22</span><br><span class="line">23</span><br><span class="line">24</span><br><span class="line">25</span><br><span class="line">26</span><br><span class="line">27</span><br><span class="line">28</span><br><span class="line">29</span><br><span class="line">30</span><br><span class="line">31</span><br><span class="line">32</span><br><span class="line">33</span><br><span class="line">34</span><br><span class="line">35</span><br><span class="line">36</span><br><span class="line">37</span><br><span class="line">38</span><br><span class="line">39</span><br><span class="line">40</span><br><span class="line">41</span><br><span class="line">42</span><br><span class="line">43</span><br><span class="line">44</span><br><span class="line">45</span><br><span class="line">46</span><br></pre></td><td class="code"><pre><span class="line"><span class="comment">//洛谷P4147</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">2000</span>;</span><br><span class="line"><span class="keyword">int</span> <span class="built_in">map</span>[N][N], l[N][N], r[N][N], h[N][N];</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">    <span class="keyword">int</span> n, m;</span><br><span class="line">    <span class="built_in">cin</span> &gt;&gt; n &gt;&gt; m;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) </span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= m; j++) &#123;</span><br><span class="line">        <span class="keyword">char</span> s[<span class="number">6</span>];</span><br><span class="line">        <span class="built_in">scanf</span> (<span class="string">"%s"</span>, s);</span><br><span class="line">        <span class="keyword">if</span> (s[<span class="number">0</span>] == <span class="string">'R'</span>) <span class="built_in">map</span>[i][j] = <span class="number">1</span>;</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= n; j++) </span><br><span class="line">        h[i][j] = <span class="number">1</span>;</span><br><span class="line">        l[i][<span class="number">1</span>] = <span class="number">1</span>; r[i][m] = m;</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">2</span>;j &lt;= m; j++) </span><br><span class="line">        <span class="keyword">if</span> (<span class="built_in">map</span>[i][j<span class="number">-1</span>]) l[i][j] = j;</span><br><span class="line">        <span class="keyword">else</span> l[i][j] = l[i][j<span class="number">-1</span>];</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = m - <span class="number">1</span>;j &gt;= <span class="number">1</span>; j--)</span><br><span class="line">        <span class="keyword">if</span> (<span class="built_in">map</span>[i][j+<span class="number">1</span>]) r[i][j] = j;</span><br><span class="line">        <span class="keyword">else</span> r[i][j] = r[i][j+<span class="number">1</span>];</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="keyword">int</span> ans = <span class="number">0</span>;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">        <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= m; j++) &#123;</span><br><span class="line">            <span class="keyword">if</span> (<span class="built_in">map</span>[i][j]) <span class="keyword">continue</span>;</span><br><span class="line">            <span class="keyword">if</span> (i == <span class="number">1</span>)</span><br><span class="line">                ans = <span class="built_in">max</span>(ans, r[i][j] - l[i][j] + <span class="number">1</span>);</span><br><span class="line">            <span class="keyword">else</span> &#123;</span><br><span class="line">                <span class="keyword">if</span> (!<span class="built_in">map</span>[i<span class="number">-1</span>][j]) &#123;</span><br><span class="line">                    h[i][j] = h[i<span class="number">-1</span>][j] + <span class="number">1</span>;</span><br><span class="line">                    l[i][j] = <span class="built_in">max</span>(l[i][j], l[i<span class="number">-1</span>][j]);</span><br><span class="line">                    r[i][j] = <span class="built_in">min</span>(r[i][j], r[i<span class="number">-1</span>][j]);</span><br><span class="line">                    ans = <span class="built_in">max</span>(ans, (r[i][j] - l[i][j] + <span class="number">1</span>) * h[i][j]);</span><br><span class="line">                &#125;</span><br><span class="line">            &#125;</span><br><span class="line">        &#125;</span><br><span class="line">    &#125;</span><br><span class="line">    <span class="built_in">cout</span> &lt;&lt; <span class="number">3</span> * ans &lt;&lt; <span class="built_in">endl</span>;</span><br><span class="line">    <span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-
-</p>
-</details>
           <!--noindex-->
             <div class="post-button">
               <a class="btn" href="/2019/12/29/%E7%94%A8%E6%9E%81%E5%A4%A7%E5%8C%96%E6%80%9D%E6%83%B3%E8%A7%A3%E5%86%B3%E7%9F%A9%E5%BD%A2%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/#more" rel="contents">
@@ -581,10 +489,16 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
                 <i class="fa fa-calendar-o"></i>
               </span>
               <span class="post-meta-item-text">发表于</span>
-              
 
-              <time title="创建时间：2019-12-29 15:22:48 / 修改时间：16:10:04" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:48+08:00">2019-12-29</time>
+              <time title="创建时间：2019-12-29 15:22:48" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:48+08:00">2019-12-29</time>
             </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-calendar-check-o"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2020-01-01 10:45:00" itemprop="dateModified" datetime="2020-01-01T10:45:00+08:00">2020-01-01</time>
+              </span>
             <span class="post-meta-item">
               <span class="post-meta-item-icon">
                 <i class="fa fa-folder-o"></i>
@@ -617,7 +531,7 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
                 <i class="fa fa-file-word-o"></i>
               </span>
                 <span class="post-meta-item-text">本文字数：</span>
-              <span>925</span>
+              <span>937</span>
             </span>
             <span class="post-meta-item" title="阅读时长">
               <span class="post-meta-item-icon">
@@ -643,66 +557,7 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <li>$C^0_n + C^1_n +  \cdots + C^n_n = 2^n$</li>
 <li>$C_n^k$ k为奇数相加等于k为偶数相加</li>
 <li>n/x下取整的可能值最多有根号n个</li>
-<li>1~N内质数个数大概为lnN</li>
-</ul>
-<h2 id="图论trick"><a href="#图论trick" class="headerlink" title="图论trick:"></a>图论trick:</h2><ul>
-<li><h3 id="关于三点两两求lca"><a href="#关于三点两两求lca" class="headerlink" title="关于三点两两求lca"></a>关于三点两两求lca</h3><ul>
-<li>其中有两个lca相同(求另一个可以三个一起异或起来)</li>
-<li>不同的也是深度最大的那个</li>
-<li>不同lca的三点在树上的分叉点</li>
-<li>换根lca就是分叉点</li>
-</ul>
-</li>
-<li><h3 id="关于源点和汇点"><a href="#关于源点和汇点" class="headerlink" title="关于源点和汇点"></a>关于源点和汇点</h3><ul>
-<li>求一些点到另一些点的最短路可以建超级源点和汇点</li>
-<li>一些点向另一些点连边可以新建源点和汇点</li>
-</ul>
-</li>
-<li><p>分层图可以解决特殊边的问题,  可以通过dp减少空间</p>
-</li>
-<li><p>最大/小值多想想生成树</p>
-</li>
-</ul>
-<h2 id="人类智慧"><a href="#人类智慧" class="headerlink" title="人类智慧:"></a>人类智慧:</h2><ul>
-<li>将点不断分成两个集合, 使每两点至少有一次在不同的集合, 可以根据某一位在二进制上是否为一</li>
-</ul>
-<h2 id="基础算法与奇技淫巧"><a href="#基础算法与奇技淫巧" class="headerlink" title="基础算法与奇技淫巧:"></a>基础算法与奇技淫巧:</h2><ul>
-<li><p>二分大于k的值设为一</p>
-</li>
-<li><p>无法直接dp可以试试先贪心排序</p>
-</li>
-<li><p>区间操作没准可以变成差分</p>
-</li>
-<li><p>闲的没事可以试试倒序操作</p>
-</li>
-<li><p>最大值最小, 最小值最大试试二分</p>
-</li>
-<li><p>实在想不出来学会面向数据编程, 小数据暴力, 大数据瞎搞</p>
-</li>
-<li><p>将数据分块, 大范围暴力, 小范围存储</p>
-</li>
-<li><p>逆序问题可以先进行排序</p>
-</li>
-<li><p>整体求值可以化为每个部分对答案的贡献, 在加上数据结构或重新化为另一个整体</p>
-</li>
-</ul>
-<h2 id="方法"><a href="#方法" class="headerlink" title="方法:"></a>方法:</h2><ul>
-<li>主元, 让你的式子的变量逐渐有某种规律(靠人类智慧</li>
-<li>转化, 将一个问题转化为另一个已知问题(可能有多步转化</li>
-<li>放弃, 适时的放弃能让你拿到更多的分数</li>
-</ul>
-<h2 id="心态和考场trick"><a href="#心态和考场trick" class="headerlink" title="心态和考场trick:"></a>心态和考场trick:</h2><ul>
-<li>心态, 我会大家会, 我不会大家也会, 我会不会大家都会, 无所谓(滑稽</li>
-<li>浏览一遍题目, 看看自己最少能拿多少分, 掌握最佳的分配时间</li>
-<li>尝试hack自己, 用边界条件和细节问题</li>
-<li>留出一个小时左右打对拍, 检查是否mle或没开够</li>
-<li>做不出题时感觉题目很奇怪多半是题看错了</li>
-<li>别的选手使劲敲键盘, 那就跟着敲几下, 吓唬一下别人(滑稽</li>
-<li>想出题赶紧写, 调过样例, 去个厕所, 想不出来, 去个厕所, ak稳了, 去个厕所(滑稽</li>
-<li>尽量吃熟悉的食物</li>
-<li>检查时再读一遍题, 看看有没有输出”IMPOSSIBLE”啥的</li>
-<li>尽管爆零, 走出考场时要大喊”我 AK 了”, 不留遗憾, 涨涨人品(滑稽</li>
-<li>to be continued</li>
+<li>1~N内质数个数大概为$\frac{N}{lnN}$</li>
 </ul>
           <!--noindex-->
             <div class="post-button">
@@ -753,10 +608,16 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
                 <i class="fa fa-calendar-o"></i>
               </span>
               <span class="post-meta-item-text">发表于</span>
-              
 
-              <time title="创建时间：2019-12-29 15:22:40 / 修改时间：16:09:47" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:40+08:00">2019-12-29</time>
+              <time title="创建时间：2019-12-29 15:22:40" itemprop="dateCreated datePublished" datetime="2019-12-29T15:22:40+08:00">2019-12-29</time>
             </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-calendar-check-o"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2020-01-01 10:45:37" itemprop="dateModified" datetime="2020-01-01T10:45:37+08:00">2020-01-01</time>
+              </span>
             <span class="post-meta-item">
               <span class="post-meta-item-icon">
                 <i class="fa fa-folder-o"></i>
@@ -819,50 +680,6 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <p>性质2: 交换序列中不相邻的两个数也会改变原序列逆序对个数的奇偶性</p>
 <p>​    证明:$ a_1…a_i…a_j…a_n  不断将a~i~与它右边的数字交换直至正好换到a_j 即a_1…a_ja_i…a_n 此时共交换了j - i 次$</p>
 <p>再将$a_j$ 向左与相邻数字交换j - i - 1次到原来$a_i$所在位置 ,此时共交换2 * (j - i) - 1次,为奇数次,所以奇偶性改变</p>
-<p><strong>行列式正式登场:</strong> 定义: $\begin{bmatrix}<br>a_{11} &amp; a_{12} &amp; \cdots &amp;a_{1n} \\<br>a_{21} &amp; a_{22} &amp; \cdots &amp;a_{2n} \\<br>\vdots &amp; \vdots &amp; \ddots &amp;\vdots \\<br>a_{n1} &amp; a_{n2} &amp; \cdots &amp;a_{nn} \\<br>\end{bmatrix}$  =  $(-1)^{\tau (a_{1j_1} a_{2j_2}\cdots a_{nj_n})}$$\displaystyle \Pi ^{n} _ {i = 1}a_{ij_i} (j_i$ 互不相同)</p>
-<p>性质1: 行列互换, 行列式的值不变</p>
-<p>性质2: 交换行列式的两行或两列,行列式的符号改变</p>
-<ul>
-<li>推论: 如果行列式有两行或两列完全相同, 那么此行列式的值为零</li>
-</ul>
-<p>性质3: 行列式的某一行所有元素乘以一个数k等于用数k乘以此行列式</p>
-<ul>
-<li>推论1: 行列式中某一行(列)的所有元素全部是零, 那么这个行列式的值是零</li>
-<li>推论2: 行列式中某一行(列)所有元素的公因子可以提到此行列式外面</li>
-<li>推论3: 行列式如果有两行(列)对应元素成比例,那么次行列式的值为零</li>
-</ul>
-<p>性质4: 若行列式的某一列(行)的元素都是两数之和 , 如:</p>
-<script type="math/tex; mode=display">
-\begin{bmatrix}
-a_{11} & a_{12} & \cdots &a_{1i} + a^{'}_{1i} & \cdots &a_{1n} \\
-a_{21} & a_{22} & \cdots &a_{2i} + a^{'}_{2i} & \cdots &a_{2n} \\
-\vdots & \vdots & \vdots &\vdots & \ddots &\vdots \\
-a_{n1} & a_{n2} & \cdots &a_{ni} + a^{'}_{ni} & \cdots &a_{nn} \\
-\end{bmatrix}</script><p>则D等于下列两个行列式的和:</p>
-<p>D = $\begin{bmatrix}<br>a_{11} &amp; a_{12} &amp; \cdots &amp;a_{1i} &amp; \cdots &amp;a_{1n} \\<br>a_{21} &amp; a_{22} &amp; \cdots &amp;a_{2i}  &amp; \cdots &amp;a_{2n} \\<br>\vdots &amp; \vdots &amp; \vdots &amp;\vdots &amp; \ddots &amp;\vdots \\<br>a_{n1} &amp; a_{n2} &amp; \cdots &amp;a_{ni}&amp; \cdots &amp;a_{nn} \\<br>\end{bmatrix}$ + $\begin{bmatrix}<br>a_{11} &amp; a_{12} &amp; \cdots  &amp;a^{‘}_{1i} &amp; \cdots &amp;a_{1n} \\<br>a_{21} &amp; a_{22} &amp; \cdots &amp; a^{‘}_{2i} &amp; \cdots &amp;a_{2n} \\<br>\vdots &amp; \vdots &amp; \vdots &amp;\vdots &amp; \ddots &amp;\vdots \\<br>a_{n1} &amp; a_{n2} &amp; \cdots &amp;a^{‘}_{ni} &amp; \cdots &amp;a_{nn} \\<br>\end{bmatrix}$ </p>
-<p>性质5: 把行列式的某一行(列)的元素乘以同一个数后加到另一行(列)的对应元素上,行列式不变</p>
-<script type="math/tex; mode=display">
-\begin{bmatrix}
-a_{11} & a_{12} & \cdots &a_{1n} \\
-a_{21} & a_{22} & \cdots &a_{2n} \\
-\vdots & \vdots & \ddots &\vdots \\
-a_{n1} & a_{n2} & \cdots &a_{nn} \\
-\end{bmatrix}</script><h3 id="代数余子式"><a href="#代数余子式" class="headerlink" title="代数余子式:"></a>代数余子式:</h3><p> 在n阶行列式D中划去任意选定的k行、k列后，余下的元素按原来顺序组成的n-k阶行列式M，称为行列式D的k阶子式A的余子式</p>
-<h2 id="Matrix-Tree定理"><a href="#Matrix-Tree定理" class="headerlink" title="Matrix-Tree定理:"></a>Matrix-Tree定理:</h2><h3 id="拉普拉斯矩阵-度数矩阵-邻接矩阵"><a href="#拉普拉斯矩阵-度数矩阵-邻接矩阵" class="headerlink" title="拉普拉斯矩阵: 度数矩阵-邻接矩阵"></a>拉普拉斯矩阵: 度数矩阵-邻接矩阵</h3><script type="math/tex; mode=display">
-L_{i,j}=
-\begin{cases}
-\deg(v_i),  &\text{if $i=j$}\\[2ex]
--1, &\text{if $i\not=j$ and $v_i$ is adjacent to $v_j$}\\[2ex]
-0, &\text{otherwise}
-\end{cases}</script><p>求出它任意一个代数余子式的值即为它生成树的数量</p>
-<h3 id="拓展"><a href="#拓展" class="headerlink" title="拓展"></a>拓展</h3><ul>
-<li><p>求边权和: 将邻接矩阵改为边权, 度数矩阵改为边权和</p>
-</li>
-<li><p>有向图的生成图计数: 度数矩阵改为入度, 邻接矩阵改为有向边的邻接矩阵, 以x为根的生成树形图为删掉x行x列的代数余子式的值</p>
-</li>
-<li><p>一张有向图G, 欧拉回路的数量为$t1(G) * \Pi_{i=1}^n(deg(i)-1)!$ t1表示以一为根的生成树的数量</p>
-</li>
-</ul>
           <!--noindex-->
             <div class="post-button">
               <a class="btn" href="/2019/12/29/%E7%BA%BF%E6%80%A7%E4%BB%A3%E6%95%B0%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/#more" rel="contents">
@@ -1014,7 +831,7 @@ L_{i,j}=
 <div class="copyright">
   
   &copy; 
-  <span itemprop="copyrightYear">2019</span>
+  <span itemprop="copyrightYear">2020</span>
   <span class="with-love">
     <i class="fa fa-user"></i>
   </span>

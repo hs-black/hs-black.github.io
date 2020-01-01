@@ -6,6 +6,7 @@
     <content><![CDATA[<div class="note default">
             <p>各位毒瘤大家好, 最近模拟赛考了一道trie+主席树好题, 但大家都用hash水过了这道题(<del>包括我</del>), 为了测试一下新搭建的HEAT OJ的hack功能,  <del>我将继续扮演毒瘤的角色, 用毒瘤的艺术形象努力创0造一个正能量的形象, 文体两开花, 弘扬中华文化,</del> 右转去BZOJ搞了一晚上hashkiller, 回来卡了单哈希(双哈希是真滴卡不住</p>
           </div>
+<a id="more"></a>
 <h2 id="哈希-hash"><a href="#哈希-hash" class="headerlink" title="哈希(hash) :"></a>哈希(hash) :</h2><p>利用大质数或其他对应函数把字符串转为一个正整数来快速判断字符串相等</p>
 <p>通常可以模一个大质数或使用自然溢出</p>
 <p>实现(例);</p>
@@ -54,7 +55,6 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <blockquote>
 <p>长大后, 我要当毒瘤, 爷爷奶奶可高兴了, 给我爱吃的…</p>
 </blockquote>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -82,6 +82,7 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <p>输出：</p>
 <p>80</p>
 </blockquote>
+<a id="more"></a>
 <ul>
 <li><h2 id="定义："><a href="#定义：" class="headerlink" title="定义："></a>定义：</h2></li>
 </ul>
@@ -141,7 +142,6 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 
 
 
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -161,8 +161,9 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <li>$C^0_n + C^1_n +  \cdots + C^n_n = 2^n$</li>
 <li>$C_n^k$ k为奇数相加等于k为偶数相加</li>
 <li>n/x下取整的可能值最多有根号n个</li>
-<li>1~N内质数个数大概为lnN</li>
+<li>1~N内质数个数大概为$\frac{N}{lnN}$</li>
 </ul>
+<a id="more"></a>
 <h2 id="图论trick"><a href="#图论trick" class="headerlink" title="图论trick:"></a>图论trick:</h2><ul>
 <li><h3 id="关于三点两两求lca"><a href="#关于三点两两求lca" class="headerlink" title="关于三点两两求lca"></a>关于三点两两求lca</h3><ul>
 <li>其中有两个lca相同(求另一个可以三个一起异或起来)</li>
@@ -222,7 +223,6 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <li>尽管爆零, 走出考场时要大喊”我 AK 了”, 不留遗憾, 涨涨人品(滑稽</li>
 <li>to be continued</li>
 </ul>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -240,6 +240,7 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <p>性质2: 交换序列中不相邻的两个数也会改变原序列逆序对个数的奇偶性</p>
 <p>​    证明:$ a_1…a_i…a_j…a_n  不断将a~i~与它右边的数字交换直至正好换到a_j 即a_1…a_ja_i…a_n 此时共交换了j - i 次$</p>
 <p>再将$a_j$ 向左与相邻数字交换j - i - 1次到原来$a_i$所在位置 ,此时共交换2 * (j - i) - 1次,为奇数次,所以奇偶性改变</p>
+<a id="more"></a>
 <p><strong>行列式正式登场:</strong> 定义: $\begin{bmatrix}<br>a_{11} &amp; a_{12} &amp; \cdots &amp;a_{1n} \\<br>a_{21} &amp; a_{22} &amp; \cdots &amp;a_{2n} \\<br>\vdots &amp; \vdots &amp; \ddots &amp;\vdots \\<br>a_{n1} &amp; a_{n2} &amp; \cdots &amp;a_{nn} \\<br>\end{bmatrix}$  =  $(-1)^{\tau (a_{1j_1} a_{2j_2}\cdots a_{nj_n})}$$\displaystyle \Pi ^{n} _ {i = 1}a_{ij_i} (j_i$ 互不相同)</p>
 <p>性质1: 行列互换, 行列式的值不变</p>
 <p>性质2: 交换行列式的两行或两列,行列式的符号改变</p>
@@ -284,7 +285,6 @@ L_{i,j}=
 <li><p>一张有向图G, 欧拉回路的数量为$t1(G) * \Pi_{i=1}^n(deg(i)-1)!$ t1表示以一为根的生成树的数量</p>
 </li>
 </ul>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -298,7 +298,7 @@ L_{i,j}=
   <entry>
     <title>网络流学习笔记</title>
     <url>/2019/12/29/%E7%BD%91%E7%BB%9C%E6%B5%81%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/</url>
-    <content><![CDATA[<h1 id="网络流学习笔记"><a href="#网络流学习笔记" class="headerlink" title="网络流学习笔记"></a>网络流学习笔记</h1><h3 id="网络流资料"><a href="#网络流资料" class="headerlink" title="网络流资料"></a><a href="https://wenku.baidu.com/view/986baf00b52acfc789ebc9a9.html" target="_blank" rel="noopener">网络流资料</a></h3><p>[toc] </p>
+    <content><![CDATA[<h1 id="网络流学习笔记"><a href="#网络流学习笔记" class="headerlink" title="网络流学习笔记"></a>网络流学习笔记</h1><h3 id="网络流资料"><a href="#网络流资料" class="headerlink" title="网络流资料"></a><a href="https://wenku.baidu.com/view/986baf00b52acfc789ebc9a9.html" target="_blank" rel="noopener">网络流资料</a></h3><a id="more"></a>
 <h2 id="最大流dinic"><a href="#最大流dinic" class="headerlink" title="最大流dinic"></a>最大流dinic</h2><details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -414,7 +414,6 @@ L_{i,j}=
 <li><p>转化思想: 将问题转化为模型(最小点权覆盖集, 最大点权独立集, 最大权闭合子图)</p>
 </li>
 </ul>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -429,7 +428,7 @@ L_{i,j}=
   <entry>
     <title>图的计数</title>
     <url>/2019/12/29/%E5%9B%BE%E7%9A%84%E8%AE%A1%E6%95%B0/</url>
-    <content><![CDATA[<p><strong>形式：求n个点____ 的个数</strong></p>
+    <content><![CDATA[<p><strong>形式：求n个点____ 的个数</strong><br><a id="more"></a></p>
 <h2 id="有标号无向图的个数（不一定联通）：-2-C-n-2"><a href="#有标号无向图的个数（不一定联通）：-2-C-n-2" class="headerlink" title="有标号无向图的个数（不一定联通）：$2^{C_n^2}$"></a>有标号无向图的个数（不一定联通）：<strong>$2^{C_n^2}$</strong></h2><p>证明显然</p>
 <h2 id="有标号无向联通图个数："><a href="#有标号无向联通图个数：" class="headerlink" title="有标号无向联通图个数："></a>有标号无向联通图个数：</h2><p>设g(x)为不一定联通图的个数， f(x) 为连通图个数</p>
 <p>枚举1号点所在联通块的大小</p>
@@ -461,7 +460,6 @@ L_{i,j}=
 <p> <strong>一个有趣的推广是，n个节点的度依次为D1, D2, …, Dn的无根树共有(n-2)! / [ (D1-1)!(D2-1)!..(Dn-1)! ]个，因为此时Prüfer编码中的数字i恰好出现Di-1次。</strong></p>
 <h2 id="有标号有根树：-n-n-1"><a href="#有标号有根树：-n-n-1" class="headerlink" title="有标号有根树： $ n ^ {n-1}$"></a>有标号有根树： $ n ^ {n-1}$</h2><p>即每棵无根树的每个节点都可以当根， 再乘上n即可</p>
 <p><a href="https://www.cnblogs.com/flashhu/p/9457830.html" target="_blank" rel="noopener">学习ing</a></p>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -475,7 +473,8 @@ L_{i,j}=
   <entry>
     <title>数论板子</title>
     <url>/2019/12/29/%E6%95%B0%E8%AE%BA%E6%9D%BF%E5%AD%90/</url>
-    <content><![CDATA[<h1 id="数论板子"><a href="#数论板子" class="headerlink" title="数论板子"></a>数论板子</h1><h3 id="数论分块"><a href="#数论分块" class="headerlink" title="数论分块 :"></a>数论分块 :</h3><figure class="highlight cpp"><table><tr><td class="code"><pre><span class="line">j = n / (n / i);</span><br><span class="line">ans += (n/i) * (j - i + <span class="number">1</span>);</span><br></pre></td></tr></table></figure>
+    <content><![CDATA[<a id="more"></a>
+<h1 id="数论板子"><a href="#数论板子" class="headerlink" title="数论板子"></a>数论板子</h1><h3 id="数论分块"><a href="#数论分块" class="headerlink" title="数论分块 :"></a>数论分块 :</h3><figure class="highlight cpp"><table><tr><td class="code"><pre><span class="line">j = n / (n / i);</span><br><span class="line">ans += (n/i) * (j - i + <span class="number">1</span>);</span><br></pre></td></tr></table></figure>
 <h2 id="筛法"><a href="#筛法" class="headerlink" title="筛法:"></a>筛法:</h2><h3 id="线性筛"><a href="#线性筛" class="headerlink" title="线性筛:"></a>线性筛:</h3><details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -517,7 +516,7 @@ L_{i,j}=
 </details>
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -531,7 +530,8 @@ L_{i,j}=
   <entry>
     <title>树链剖分板子</title>
     <url>/2019/12/29/%E6%A0%91%E9%93%BE%E5%89%96%E5%88%86%E6%9D%BF%E5%AD%90/</url>
-    <content><![CDATA[<details><summary>talk is cheap, show me the code</summary>
+    <content><![CDATA[<a id="more"></a>
+<details><summary>talk is cheap, show me the code</summary>
 <p>
 
 <figure class="highlight cpp"><table><tr><td class="code"><pre><span class="line"><span class="comment">// luogu-judger-enable-o2</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">define</span> p1 p &lt;&lt; 1</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">define</span> p2 p &lt;&lt; 1 | 1</span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">define</span> ll long long</span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">100050</span>;</span><br><span class="line">ll sum[N&lt;&lt;<span class="number">3</span>], <span class="keyword">add_t</span>[N&lt;&lt;<span class="number">3</span>];</span><br><span class="line"><span class="keyword">int</span> <span class="keyword">l_t</span>[N&lt;&lt;<span class="number">3</span>], <span class="keyword">r_t</span>[N&lt;&lt;<span class="number">3</span>];</span><br><span class="line"><span class="function">ll <span class="title">read</span><span class="params">(<span class="keyword">void</span>)</span> </span>&#123;</span><br><span class="line">	ll x = <span class="number">0</span>, f = <span class="number">1</span>;</span><br><span class="line">	<span class="keyword">char</span> c = getchar();</span><br><span class="line">	<span class="keyword">while</span> (!<span class="built_in">isdigit</span>(c)) &#123;</span><br><span class="line">		<span class="keyword">if</span> (c == <span class="string">'-'</span>) f = <span class="number">-1</span>;</span><br><span class="line">		c = getchar();</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">while</span> (<span class="built_in">isdigit</span>(c)) &#123;</span><br><span class="line">		x = (x &lt;&lt; <span class="number">3</span>) + (x &lt;&lt; <span class="number">1</span>) + c - <span class="string">'0'</span>;</span><br><span class="line">		c = getchar();</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">return</span> x * f;</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">int</span> siz[N], top[N];</span><br><span class="line"><span class="keyword">int</span> f[N], dep[N], son[N];</span><br><span class="line"><span class="keyword">int</span> h[N], to[N&lt;&lt;<span class="number">1</span>];</span><br><span class="line"><span class="keyword">int</span> ne[N&lt;&lt;<span class="number">1</span>], tot;</span><br><span class="line">ll w[N];</span><br><span class="line"><span class="function"><span class="keyword">inline</span> <span class="keyword">void</span> <span class="title">add_e</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> y)</span> </span>&#123;</span><br><span class="line">	ne[++tot] = h[x];</span><br><span class="line">	h[x] = tot;</span><br><span class="line">	to[tot] = y;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">dfs1</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> fa)</span> </span>&#123;</span><br><span class="line">	dep[x] = dep[fa] + <span class="number">1</span>;</span><br><span class="line">	siz[x] = <span class="number">1</span>;</span><br><span class="line">	f[x] = fa;</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = h[x]; i; i = ne[i]) &#123;</span><br><span class="line">		<span class="keyword">int</span> y = to[i];</span><br><span class="line">		<span class="keyword">if</span> (y == fa) <span class="keyword">continue</span>;</span><br><span class="line">		dfs1(y, x);</span><br><span class="line">		siz[x] += siz[y];</span><br><span class="line">		<span class="keyword">if</span> (siz[y] &gt; siz[son[x]]) son[x] = y;</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">ll wt[N], cnt;</span><br><span class="line"><span class="keyword">int</span> id[N], Top[N];</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">dfs2</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> topf)</span> </span>&#123;</span><br><span class="line">	id[x] = ++cnt;</span><br><span class="line">	wt[cnt] = w[x];</span><br><span class="line">	Top[x] = topf;</span><br><span class="line">	<span class="keyword">if</span> (!son[x]) <span class="keyword">return</span>;</span><br><span class="line">	dfs2(son[x], topf);</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = h[x]; i; i = ne[i]) &#123;</span><br><span class="line">		<span class="keyword">int</span> y = to[i];</span><br><span class="line">		<span class="keyword">if</span> (y == f[x] || y == son[x]) <span class="keyword">continue</span>;</span><br><span class="line">		dfs2(y, y);</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line">ll n, m, r, P;</span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">buil</span><span class="params">(<span class="keyword">int</span> l,<span class="keyword">int</span> r,<span class="keyword">int</span> p)</span> </span>&#123; </span><br><span class="line">	<span class="keyword">l_t</span>[p] = l, <span class="keyword">r_t</span>[p] = r;</span><br><span class="line">	<span class="keyword">if</span> (l == r) &#123;</span><br><span class="line">		sum[p] = wt[l] % P;</span><br><span class="line">		<span class="keyword">return</span>;</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">int</span> mid = (l + r) &gt;&gt; <span class="number">1</span>;</span><br><span class="line">	buil(l, mid, p1);</span><br><span class="line">	buil(mid + <span class="number">1</span>, r, p2);</span><br><span class="line">	sum[p] = sum[p1] + sum[p2];</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">spread</span><span class="params">(<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">add_t</span>[p]) &#123;</span><br><span class="line">		sum[p1] += (ll)(<span class="keyword">r_t</span>[p1] - <span class="keyword">l_t</span>[p1] + <span class="number">1</span>) * <span class="keyword">add_t</span>[p];</span><br><span class="line">		sum[p2] += (ll)(<span class="keyword">r_t</span>[p2] - <span class="keyword">l_t</span>[p2] + <span class="number">1</span>) * <span class="keyword">add_t</span>[p];</span><br><span class="line">		<span class="keyword">add_t</span>[p1] += <span class="keyword">add_t</span>[p];</span><br><span class="line">		<span class="keyword">add_t</span>[p2] += <span class="keyword">add_t</span>[p];</span><br><span class="line">		sum[p1] %= P;</span><br><span class="line">		sum[p2] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p1] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p2] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p]= <span class="number">0</span>;</span><br><span class="line">	&#125;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">add</span><span class="params">(<span class="keyword">int</span> l,<span class="keyword">int</span> r,ll d,<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">l_t</span>[p] &gt;= l &amp;&amp; <span class="keyword">r_t</span>[p] &lt;= r) &#123;</span><br><span class="line">		sum[p] += (<span class="keyword">r_t</span>[p] - <span class="keyword">l_t</span>[p] + <span class="number">1</span>) * d;</span><br><span class="line">		sum[p] %= P;</span><br><span class="line">		<span class="keyword">add_t</span>[p] += d;</span><br><span class="line">		<span class="keyword">return</span>;</span><br><span class="line">	&#125;</span><br><span class="line">	spread(p);</span><br><span class="line">	<span class="keyword">if</span> (l &lt;= <span class="keyword">r_t</span>[p1]) add(l, r, d, p1);</span><br><span class="line">	<span class="keyword">if</span> (r &gt;= <span class="keyword">l_t</span>[p2]) add(l, r, d, p2);</span><br><span class="line">	sum[p] = sum[p1] + sum[p2];</span><br><span class="line">	sum[p] %= P;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function">ll <span class="title">ask</span><span class="params">(<span class="keyword">int</span> l,<span class="keyword">int</span> r,<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">l_t</span>[p] &gt;= l &amp;&amp; <span class="keyword">r_t</span>[p] &lt;= r)</span><br><span class="line">		<span class="keyword">return</span> sum[p];</span><br><span class="line">	spread(p);</span><br><span class="line">	ll ans = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">r_t</span>[p1] &gt;= l) ans += ask(l, r, p1);</span><br><span class="line">	<span class="keyword">if</span> (<span class="keyword">l_t</span>[p2] &lt;= r) ans += ask(l, r, p2);</span><br><span class="line">	<span class="keyword">return</span> ans % P;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">update</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> y,ll z)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">while</span> (Top[x] != Top[y]) &#123;</span><br><span class="line">		<span class="keyword">if</span> (dep[Top[x]] &lt; dep[Top[y]]) swap(x, y);</span><br><span class="line">		add(id[Top[x]], id[x], z, <span class="number">1</span>);</span><br><span class="line">		x = f[Top[x]];</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">if</span> (dep[x] &lt; dep[y]) swap(x, y);</span><br><span class="line">	add(id[y], id[x], z, <span class="number">1</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function">ll <span class="title">query</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> y)</span> </span>&#123;</span><br><span class="line">	ll ans = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">while</span> (Top[x] != Top[y]) &#123;</span><br><span class="line">		<span class="keyword">if</span> (dep[Top[x]] &lt; dep[Top[y]]) swap(x, y);</span><br><span class="line">		ans += ask(id[Top[x]], id[x], <span class="number">1</span>);</span><br><span class="line">		x = f[Top[x]];</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">if</span> (dep[x] &lt; dep[y]) swap(x, y);</span><br><span class="line">	ans += ask(id[y], id[x], <span class="number">1</span>);</span><br><span class="line">	<span class="keyword">return</span> ans % P;</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">add_w</span><span class="params">(<span class="keyword">int</span> x,ll z)</span> </span>&#123;</span><br><span class="line">	add(id[x], id[x] + siz[x] - <span class="number">1</span>, z, <span class="number">1</span>);</span><br><span class="line">&#125;</span><br><span class="line"></span><br><span class="line"><span class="function">ll <span class="title">query_w</span><span class="params">(<span class="keyword">int</span> x)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> ask(id[x], id[x] + siz[x] - <span class="number">1</span>, <span class="number">1</span>) % P;</span><br><span class="line">&#125;</span><br><span class="line">	</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">	n = read(), m = read(), r = read(), P = read();</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) w[i] = read();</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt; n; i++) &#123;</span><br><span class="line">		<span class="keyword">int</span> x = read(), y = read();</span><br><span class="line">		add_e(x, y); add_e(y, x);</span><br><span class="line">	&#125;</span><br><span class="line">	dfs1(r, <span class="number">0</span>);</span><br><span class="line">	dfs2(r, r);</span><br><span class="line">	buil(<span class="number">1</span>, n, <span class="number">1</span>);</span><br><span class="line">	<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= m; i++) &#123;</span><br><span class="line">		<span class="keyword">int</span> op = read();</span><br><span class="line">		<span class="keyword">if</span> (op == <span class="number">1</span>) &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read(), y = read();</span><br><span class="line">			ll z = read() % P;</span><br><span class="line">			update(x, y, z);</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span> <span class="keyword">if</span> (op == <span class="number">2</span>) &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read(), y = read();</span><br><span class="line">			<span class="built_in">printf</span> (<span class="string">"%lld\n"</span>, query(x, y));</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span> <span class="keyword">if</span> (op == <span class="number">3</span>) &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read();</span><br><span class="line">			ll z = read();</span><br><span class="line">			add_w(x, z % P);</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">else</span> &#123;</span><br><span class="line">			<span class="keyword">int</span> x = read();</span><br><span class="line">			<span class="built_in">printf</span> (<span class="string">"%lld\n"</span>, query_w(x));</span><br><span class="line">		&#125;</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
@@ -541,7 +541,6 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -556,7 +555,8 @@ L_{i,j}=
   <entry>
     <title>群论笔记</title>
     <url>/2019/12/29/%E7%BE%A4%E8%AE%BA%E7%AC%94%E8%AE%B0/</url>
-    <content><![CDATA[<p>$\sum_{n \ge 0} x^n=\frac{1}{1-x}$</p>
+    <content><![CDATA[<a id="more"></a>
+<p>$\sum_{n \ge 0} x^n=\frac{1}{1-x}$</p>
 <p>$\sum_{n \ge 1} x^n=\frac{x}{1-x}$?</p>
 <p>$\sum_{n \ge 1} x^n=x*(\sum_{n \ge 0} x^n)$</p>
 <p>$\sum_{n \ge 1} n x^n=$?</p>
@@ -578,7 +578,6 @@ L_{i,j}=
 <p>$\sum_{x\in X}\frac{1}{|G*x|}=\sum_{A \in X/G} \sum_{x \in A} \frac{1}{|A|}=|X/G|$</p>
 <p>$p(1)=2,p(2)=1,p(3)=4,p(4)=3$</p>
 <p>$(1~2)(3~4)$</p>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -594,7 +593,8 @@ L_{i,j}=
   <entry>
     <title>冒泡排序深入理解</title>
     <url>/2019/12/29/%E5%86%92%E6%B3%A1%E6%8E%92%E5%BA%8F%E6%B7%B1%E5%85%A5%E7%90%86%E8%A7%A3/</url>
-    <content><![CDATA[<h1 id="冒泡排序深入理解"><a href="#冒泡排序深入理解" class="headerlink" title="冒泡排序深入理解"></a>冒泡排序深入理解</h1><h3 id="对于冒泡排序有一个小性质-每一次都会把序列未排好序的最大数”沉底”-即推到序列尾部"><a href="#对于冒泡排序有一个小性质-每一次都会把序列未排好序的最大数”沉底”-即推到序列尾部" class="headerlink" title="对于冒泡排序有一个小性质: 每一次都会把序列未排好序的最大数”沉底”, 即推到序列尾部"></a>对于冒泡排序有一个小性质: 每一次都会把序列未排好序的最大数”沉底”, 即推到序列尾部</h3><h2 id="1-P4378-Out-of-Sorts-S"><a href="#1-P4378-Out-of-Sorts-S" class="headerlink" title="1.P4378 Out of Sorts S"></a>1.<a href="https://www.luogu.org/problem/P4378" target="_blank" rel="noopener">P4378 Out of Sorts S</a></h2><blockquote>
+    <content><![CDATA[<a id="more"></a>
+<h1 id="冒泡排序深入理解"><a href="#冒泡排序深入理解" class="headerlink" title="冒泡排序深入理解"></a>冒泡排序深入理解</h1><h3 id="对于冒泡排序有一个小性质-每一次都会把序列未排好序的最大数”沉底”-即推到序列尾部"><a href="#对于冒泡排序有一个小性质-每一次都会把序列未排好序的最大数”沉底”-即推到序列尾部" class="headerlink" title="对于冒泡排序有一个小性质: 每一次都会把序列未排好序的最大数”沉底”, 即推到序列尾部"></a>对于冒泡排序有一个小性质: 每一次都会把序列未排好序的最大数”沉底”, 即推到序列尾部</h3><h2 id="1-P4378-Out-of-Sorts-S"><a href="#1-P4378-Out-of-Sorts-S" class="headerlink" title="1.P4378 Out of Sorts S"></a>1.<a href="https://www.luogu.org/problem/P4378" target="_blank" rel="noopener">P4378 Out of Sorts S</a></h2><blockquote>
 <p>留意着农场之外的长期职业生涯的可能性，奶牛Bessie开始在不同的在线编程网站上学习算法。</p>
 <p>她到目前为止最喜欢的算法是“冒泡排序”。这是Bessie的对长度为<em>N</em>的数组<em>A</em>进行排序的奶牛码实现。</p>
 </blockquote>
@@ -700,7 +700,7 @@ L_{i,j}=
 </details>
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -716,6 +716,7 @@ L_{i,j}=
     <title>计数问题学习笔记</title>
     <url>/2019/12/29/%E8%AE%A1%E6%95%B0%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/</url>
     <content><![CDATA[<h1 id="计数问题学习笔记"><a href="#计数问题学习笔记" class="headerlink" title="计数问题学习笔记"></a>计数问题学习笔记</h1><h1 id="组合计数"><a href="#组合计数" class="headerlink" title="组合计数"></a>组合计数</h1><h2 id="插板法-略"><a href="#插板法-略" class="headerlink" title="插板法: 略"></a>插板法: 略</h2><h2 id="阶乘幂"><a href="#阶乘幂" class="headerlink" title="阶乘幂:"></a>阶乘幂:</h2><h3 id="上升阶乘幂"><a href="#上升阶乘幂" class="headerlink" title="上升阶乘幂:"></a>上升阶乘幂:</h3><script type="math/tex; mode=display">(x)^{(n)} = x(x+1)(x+2)\cdots(x+n-1) = \frac{(x+n-1)!}{(x-1)!}</script><h3 id="下降阶乘幂"><a href="#下降阶乘幂" class="headerlink" title="下降阶乘幂:"></a>下降阶乘幂:</h3><p>$(x)_{(n)}$</p>
+<a id="more"></a>
 <h2 id="卡特兰数"><a href="#卡特兰数" class="headerlink" title="卡特兰数:"></a>卡特兰数:</h2><p>定义式 <script type="math/tex">h_n = \displaystyle\sum^{n-1}_{k=0}h_kh_{n-1-k}</script></p>
 <p>通项式 <script type="math/tex">h_n = \tbinom{2n}{n}-\tbinom{2n}{n-1} = \frac{\tbinom{2n}{n}}{n+1}</script></p>
 <p>应用: 括号序列数量, 方格行走数, 凸多边形划分数, 二叉树数量</p>
@@ -776,7 +777,6 @@ L_{i,j}=
 <p><del>好像不是很难的鸭子</del></p>
 <h2 id="指数级生成函数"><a href="#指数级生成函数" class="headerlink" title="指数级生成函数:"></a>指数级生成函数:</h2><p>处理<strong>有标号</strong>问题时, 通常使用指数级生成函数</p>
 <p>生成函数: $\displaystyle\sum _{n\ge0}\frac{A_n}{n!}x^n$</p>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -793,7 +793,7 @@ L_{i,j}=
     <title>后缀自动机感性理解</title>
     <url>/2019/12/29/%E5%90%8E%E7%BC%80%E8%87%AA%E5%8A%A8%E6%9C%BA%E6%84%9F%E6%80%A7%E7%90%86%E8%A7%A3/</url>
     <content><![CDATA[<h1 id="后缀自动机感性理解"><a href="#后缀自动机感性理解" class="headerlink" title="后缀自动机感性理解"></a>后缀自动机感性理解</h1><p>后缀自动机实是不是很好理解, 尤其是直接看大段的证明, 不知道它在干什么, 可能会有点懵</p>
-<p>那我先介绍一下我的感性理解好了, 大家看这篇文章可能会更好的理解其他人的博客QAQ</p>
+<p>那我先介绍一下我的感性理解好了, 大家看这篇文章可能会更好的理解其他人的博客QAQ<br><a id="more"></a></p>
 <h3 id="前置芝士-trie树"><a href="#前置芝士-trie树" class="headerlink" title="前置芝士 : trie树"></a>前置芝士 : trie树</h3><p>先来讲一下假后缀树($ n^2 $) , 由于它是假的所以很容易理解, 不用怕</p>
 <p>偷图.jpg</p>
 <p><img src="https://cdn.luogu.com.cn/upload/image_hosting/f2wqgie6.png" alt=""></p>
@@ -842,7 +842,6 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -861,7 +860,7 @@ L_{i,j}=
 <h2 id="1-FFT快速傅里叶变换"><a href="#1-FFT快速傅里叶变换" class="headerlink" title="1. FFT快速傅里叶变换"></a>1. FFT快速傅里叶变换</h2><p>流程: 将多项式$\Theta (nlog_n)$转成点值表示形式 进行卷积, 再$\Theta (nlog_n)$ 转回来</p>
 <h3 id="离散傅里叶变换"><a href="#离散傅里叶变换" class="headerlink" title="离散傅里叶变换:"></a>离散傅里叶变换:</h3><p>朴素转为点值, 需要将一个一个x带入, 而这里傅里叶搞到了几个可以优化的复数根</p>
 <p>利用复数, 在复平面上画出一个单位圆, 将单位圆n等分, 每一个等分点为$\omega_n^i $,</p>
-<p>接下来将$\omega^1_n \omega^2_n\cdots\omega^n_n$ n个根带入, 其中$\omega_n^i = cos(\frac{k}{n}2\pi) + i * sin(\frac{k}{n}2\pi)$</p>
+<p>接下来将$\omega^1_n \omega^2_n\cdots\omega^n_n$ n个根带入, 其中$\omega_n^i = cos(\frac{k}{n}2\pi) + i * sin(\frac{k}{n}2\pi)$<br><a id="more"></a></p>
 <p><strong>稍等, 还要几个小性质才可以:</strong></p>
 <h3 id="性质一-omega-2k-2n-omega-n-k"><a href="#性质一-omega-2k-2n-omega-n-k" class="headerlink" title="性质一:  $\omega^{2k}_{2n} = \omega_n^k$"></a>性质一:  $\omega^{2k}_{2n} = \omega_n^k$</h3><h3 id="性质二-omega-n-k-frac-n-2-omega-n-k"><a href="#性质二-omega-n-k-frac-n-2-omega-n-k" class="headerlink" title="性质二: $\omega_n^{k+\frac{n}{2}} = - \omega_n^k$"></a>性质二: $\omega_n^{k+\frac{n}{2}} = - \omega_n^k$</h3><h3 id="接下来开始快速傅里叶变换"><a href="#接下来开始快速傅里叶变换" class="headerlink" title="接下来开始快速傅里叶变换:"></a>接下来开始快速傅里叶变换:</h3><p>设A(x) = $a_0 + a_1x + a_2x^2 + \cdots + a_{n-1}x^{n-1}$</p>
 <p>利用分治, 将A按x的指数分为奇偶两部分</p>
@@ -976,7 +975,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -992,7 +991,7 @@ L_{i,j}=
     <title>北京八十中游记</title>
     <url>/2019/12/29/%E5%8C%97%E4%BA%AC%E5%85%AB%E5%8D%81%E4%B8%AD%E6%B8%B8%E8%AE%B0/</url>
     <content><![CDATA[<h1 id="北京八十中游记"><a href="#北京八十中游记" class="headerlink" title="北京八十中游记"></a>北京八十中游记</h1><h2 id="day0"><a href="#day0" class="headerlink" title="day0:"></a>day0:</h2><p>坐了一下午的火车和地铁, 终于踉踉跄跄的来到了北京, 地面上还留着些小雪, 大家都很高兴, 因为再次逃脱了学习高考的无聊, 不过我还是有点小担心课内成绩, 怕是一回去就要使劲补课内了.</p>
-<p>我妈给我装了一书包东西, 但是我并没有看是啥, 只是觉得挺沉的.到了宿舍一翻包, 惊了, 一个苹果, 七瓶酸奶, 一袋mian包, 一袋子橘子和一袋子肠. 果然了.</p>
+<p>我妈给我装了一书包东西, 但是我并没有看是啥, 只是觉得挺沉的.到了宿舍一翻包, 惊了, 一个苹果, 七瓶酸奶, 一袋mian包, 一袋子橘子和一袋子肠. 果然了.<br><a id="more"></a></p>
 <h2 id="day1"><a href="#day1" class="headerlink" title="day1:"></a>day1:</h2><p>早晨吃饭, 要了几个饺子和一个三明治, 要了我20块钱, $太^{TM}贵了$,一下子感觉石家庄的美好, 算了, 以后早上还是吃面包就酸奶吧, 比这个好多了.</p>
 <p>感觉课上讲的东西不是很难, 拓展了思路, 换个环境学习有时也挺不错的. 晚上和jzp去操场跑了三圈, lhm摸了. 到现在为止没有找到能用的插座, 手机也是插在电脑上勉强度日, 只能写游记时打开了</p>
 <h2 id="day2"><a href="#day2" class="headerlink" title="day2:"></a>day2:</h2><p>今天讲了一天数学, 一上午多项式, 一下午线性代数, 挂了</p>
@@ -1004,7 +1003,6 @@ L_{i,j}=
 <h2 id="day5"><a href="#day5" class="headerlink" title="day5:"></a>day5:</h2><p>今天考试摸了, 做了做dp题(我好菜啊)</p>
 <p>和lhm叫了外卖</p>
 <p>晚上尝尝火锅</p>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -1022,9 +1020,9 @@ L_{i,j}=
 <p>发现dp[i][j] 为前面小于它的数长度为j-1的总和, 用树状数组前缀和优化一下搞成$O(n^2log_n)$</p>
 <p>先离散化, dp时先枚举位置,再枚举上升序列的长度</p>
 <p>树状数组要开二维哦,  打代码的时候发现dp数组可以用树状数组直接代替(小小的空间优化)</p>
+<a id="more"></a>
 <p>代码:</p>
 <figure class="highlight c++"><table><tr><td class="code"><pre><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;iostream&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstdio&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;cstring&gt;</span></span></span><br><span class="line"><span class="meta">#<span class="meta-keyword">include</span><span class="meta-string">&lt;algorithm&gt;</span></span></span><br><span class="line"><span class="keyword">using</span> <span class="keyword">namespace</span> <span class="built_in">std</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> N = <span class="number">1005</span>;</span><br><span class="line"><span class="keyword">const</span> <span class="keyword">int</span> P = <span class="number">1e9</span>+<span class="number">7</span>;</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">read</span><span class="params">(<span class="keyword">void</span>)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">int</span> x = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">char</span> c = getchar();</span><br><span class="line">	<span class="keyword">while</span> (!<span class="built_in">isdigit</span>(c)) c = getchar();</span><br><span class="line">	<span class="keyword">while</span> (<span class="built_in">isdigit</span>(c)) &#123;</span><br><span class="line">		x = (x &lt;&lt; <span class="number">3</span>) + (x &lt;&lt; <span class="number">1</span>) + c - <span class="string">'0'</span>;</span><br><span class="line">		c = getchar();</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">return</span> x;</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">int</span> T, n, m;</span><br><span class="line"><span class="keyword">int</span> a[N];</span><br><span class="line"><span class="class"><span class="keyword">struct</span> <span class="title">node</span>&#123;</span></span><br><span class="line">	<span class="keyword">int</span> pos, val;</span><br><span class="line">	<span class="keyword">bool</span> <span class="keyword">operator</span> &lt; (<span class="keyword">const</span> node &amp;i) <span class="keyword">const</span> &#123;</span><br><span class="line">		<span class="keyword">if</span> (val == i.val) <span class="keyword">return</span> pos &lt; i.pos;</span><br><span class="line">		<span class="keyword">return</span> val &lt; i.val;</span><br><span class="line">	&#125;</span><br><span class="line">&#125;p[N];</span><br><span class="line"><span class="function"><span class="keyword">bool</span> <span class="title">cmp</span><span class="params">(node i,node j)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> i.pos &lt; j.pos;</span><br><span class="line">&#125;</span><br><span class="line"><span class="keyword">long</span> <span class="keyword">long</span> d[N][N];</span><br><span class="line"><span class="function"><span class="keyword">inline</span> <span class="keyword">int</span> <span class="title">low</span><span class="params">(<span class="keyword">int</span> x)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">return</span> x &amp; -x;</span><br><span class="line">&#125;</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">sum</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">long</span> <span class="keyword">long</span> val = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">for</span> (;x;x -= low(x)) val += d[p][x];</span><br><span class="line">	<span class="keyword">return</span> val % P;</span><br><span class="line">&#125;</span><br><span class="line"><span class="function"><span class="keyword">void</span> <span class="title">add</span><span class="params">(<span class="keyword">int</span> x,<span class="keyword">int</span> k,<span class="keyword">int</span> p)</span> </span>&#123;</span><br><span class="line">	<span class="keyword">for</span> (;x &lt;= n; x += low(x)) d[p][x] = (d[p][x] + k) % P;</span><br><span class="line">&#125;</span><br><span class="line"><span class="function"><span class="keyword">int</span> <span class="title">main</span><span class="params">()</span> </span>&#123;</span><br><span class="line">	T = <span class="built_in">read</span>();</span><br><span class="line">	<span class="keyword">int</span> cnt = <span class="number">0</span>;</span><br><span class="line">	<span class="keyword">while</span> (T--) &#123;</span><br><span class="line">		cnt++;</span><br><span class="line">		n = <span class="built_in">read</span>(), m = <span class="built_in">read</span>();</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) p[i] = (node)&#123;i,<span class="built_in">read</span>()&#125;;</span><br><span class="line">		sort(p + <span class="number">1</span>,p + n + <span class="number">1</span>);</span><br><span class="line">		<span class="keyword">int</span> x = <span class="number">0</span>, k = <span class="number">0</span>;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">			<span class="keyword">if</span> (x == p[i].val) </span><br><span class="line">				p[i].val = k;</span><br><span class="line">			<span class="keyword">else</span> &#123;</span><br><span class="line">				x = p[i].val;</span><br><span class="line">				p[i].val = i;</span><br><span class="line">				k = i;</span><br><span class="line">			&#125;</span><br><span class="line">		&#125;</span><br><span class="line">		sort(p + <span class="number">1</span>,p + n + <span class="number">1</span>, cmp);</span><br><span class="line">		<span class="built_in">memset</span>(d, <span class="number">0</span>, <span class="keyword">sizeof</span>(d));</span><br><span class="line">		<span class="keyword">long</span> <span class="keyword">long</span> ans = <span class="number">0</span>;</span><br><span class="line">		<span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">1</span>;i &lt;= n; i++) &#123;</span><br><span class="line">			add(p[i].val, <span class="number">1</span>, <span class="number">1</span>);</span><br><span class="line">			<span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">2</span>;j &lt;= m; j++) &#123;</span><br><span class="line">				<span class="keyword">int</span> k = sum(p[i].val<span class="number">-1</span>, j<span class="number">-1</span>);</span><br><span class="line">				add(p[i].val, k, j);</span><br><span class="line">				<span class="keyword">if</span> (j == m) ans = (ans + k) % P;</span><br><span class="line">			&#125;</span><br><span class="line">		&#125;</span><br><span class="line">		<span class="keyword">if</span> (m == <span class="number">1</span>) ans += n;</span><br><span class="line">		<span class="built_in">printf</span> (<span class="string">"Case #%d: %lld\n"</span>, cnt, ans % P);</span><br><span class="line">	&#125;</span><br><span class="line">	<span class="keyword">return</span> <span class="number">0</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -1039,7 +1037,7 @@ L_{i,j}=
   <entry>
     <title>phq板子</title>
     <url>/2019/12/29/phq%E6%9D%BF%E5%AD%90/</url>
-    <content><![CDATA[<h1 id="phq板子"><a href="#phq板子" class="headerlink" title="phq板子"></a>phq板子</h1><p><a href="https://www.luogu.org/problem/P3369" target="_blank" rel="noopener">洛谷P3369</a></p>
+    <content><![CDATA[<h1 id="phq板子"><a href="#phq板子" class="headerlink" title="phq板子"></a>phq板子</h1><p><a href="https://www.luogu.org/problem/P3369" target="_blank" rel="noopener">洛谷P3369</a><br><a id="more"></a></p>
 <details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -1060,7 +1058,7 @@ L_{i,j}=
 </details>
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1084,7 +1082,7 @@ L_{i,j}=
 </ol>
 <p>令sum[i] = 集合 i 内所有数的和。</p>
 <p>令f[i]  = 集合 i内的数组成的排列，最大前缀和 = sum[i]的方案数。</p>
-<p>令g[i] = 集合 i内的数组成的排列，所有的最大前缀和都 &lt; 0 的方案数。</p>
+<p>令g[i] = 集合 i内的数组成的排列，所有的最大前缀和都 &lt; 0 的方案数。<br><a id="more"></a></p>
 <details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -1093,7 +1091,7 @@ L_{i,j}=
 </p>
 </details>
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1113,6 +1111,7 @@ L_{i,j}=
 <li>bfs</li>
 <li>状压dp</li>
 </ul>
+<a id="more"></a>
 <h3 id="第一波操作-差分"><a href="#第一波操作-差分" class="headerlink" title="第一波操作(差分):"></a>第一波操作(差分):</h3><p>d[i] = a[i] ^ a[i-1]</p>
 <p>例子: 10011100 (0表示不亮, 1为亮了) 它的”差分”数组为 11010010</p>
 <p>吃瓜群众: 为什么要这么表示</p>
@@ -1135,7 +1134,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1152,7 +1151,7 @@ L_{i,j}=
     <content><![CDATA[<p>首先进行一步转化</p>
 <p>$a_j \leq a_i + q - sqrt(abs(i - j))$</p>
 <p>$a_i + q \geq a_j + sqrt(abs(i-j))$</p>
-<p>  即 $q = max (a_j + sqrt(abs(i-j))) - a_i $</p>
+<p>  即 $q = max (a_j + sqrt(abs(i-j))) - a_i $<br><a id="more"></a></p>
 <p>我们对$i \geq j 和 j &gt; i$ 分类讨论, 其实解决一种情况后将序列翻转再做一遍即可</p>
 <p>有一种O($n^2$)的dp暴力应该不难想到</p>
 <p>那么我们现在思考如何以比较优秀的时间复杂度解决</p>
@@ -1176,7 +1175,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1198,7 +1197,7 @@ L_{i,j}=
 <p>考虑在修改时预处理以降低查询复杂度</p>
 <p>修改时处理将x膜1 ~ $\sqrt{n}$ 加上a[x], cnt[x] += a[x],  $O(\sqrt{n})$ </p>
 <p>查询时, 如果x &lt; $\sqrt{n}$ , 直接输出 mod[x][y%x]  , 否则 暴力枚举 , 复杂度$O(\sqrt{n})$ </p>
-<p>总复杂度$O(\sqrt{n})$ </p>
+<p>总复杂度$O(\sqrt{n})$<br><a id="more"></a></p>
 <details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -1211,7 +1210,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1228,7 +1227,7 @@ L_{i,j}=
     <content><![CDATA[<h4 id="P1502"><a href="#P1502" class="headerlink" title="P1502"></a><a href="&quot;https://www.luogu.org/problem/P1502&quot;">P1502</a></h4><h2 id="st表-并查集"><a href="#st表-并查集" class="headerlink" title="st表 + 并查集"></a>st表 + 并查集</h2><p>回顾:<strong>st表</strong></p>
 <p>f[i][j] 为序列中 i ~ i + $2^j$ - 1中的最大(小)值</p>
 <p>预处理 f[i][0] = $a_i$ , f[i][j+1] = max(f[i][j], f[i + (1 &lt;&lt; j)][j]) </p>
-<p>查询 : 对于区间[l, r], 我们将它分解为[l, $2^k$], 和[r - $2^k$ + 1, r]两个区间, 它们可能会有重叠, 但取max并不会影响区间最值</p>
+<p>查询 : 对于区间[l, r], 我们将它分解为[l, $2^k$], 和[r - $2^k$ + 1, r]两个区间, 它们可能会有重叠, 但取max并不会影响区间最值<br><a id="more"></a></p>
 <p>回到本题: </p>
 <p><img src="https://cdn.luogu.com.cn/upload/image_hosting/qosysovx.png" alt=""></p>
 <p>如图, 由题意将[l1, r1](黑), [l2, r2](绿)合并</p>
@@ -1247,7 +1246,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1266,6 +1265,7 @@ L_{i,j}=
 <p>一开始, 感觉无法同时权值分裂又排名分裂</p>
 <p>所以我按排名分裂, 维护子树最小值, 设计一个类似求第k大的函数,  找出区间最小值的位置</p>
 <p>详见代码, 还是很好懂的(除get_rk函数, 其他部分和文艺平衡树一样)</p>
+<a id="more"></a>
 <details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -1277,7 +1277,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1294,6 +1294,7 @@ L_{i,j}=
     <content><![CDATA[<p>介绍一个无建树做法</p>
 <h4 id="个人认为我的代码比较易懂-简直不需要注释"><a href="#个人认为我的代码比较易懂-简直不需要注释" class="headerlink" title="个人认为我的代码比较易懂(简直不需要注释)"></a>个人认为我的代码比较易懂(<del>简直不需要注释</del>)</h4><p>定义dp[x][0/1/2] 分别为x节点染绿 /红 /蓝 情况下子树中最多有几个点被染成绿色</p>
 <p>类似的 f[x][0/1/2] 为最少有几个点</p>
+<a id="more"></a>
 <details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -1304,7 +1305,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1320,7 +1321,7 @@ L_{i,j}=
     <url>/2019/12/29/P2486-SDOI2011-%E6%9F%93%E8%89%B2/</url>
     <content><![CDATA[<h3 id="P2486"><a href="#P2486" class="headerlink" title="P2486"></a><a href="https://www.luogu.org/problem/P2486" target="_blank" rel="noopener">P2486</a></h3><p>很经典的题~</p>
 <p>思路: 线段树染色+”熟练”剖分(某些出题人总是喜欢把序列上的题加个树链剖分搞到树上去)</p>
-<p>先想一想序列上怎么做吧</p>
+<p>先想一想序列上怎么做吧<br><a id="more"></a></p>
 <p><del>线段树是个好东西</del></p>
 <p>每个节点维护三个信息: ls: 左端点的颜色    rs: 右端点的颜色 cnt: [l, r] 中共有几个颜色段</p>
 <p>合并? </p>
@@ -1344,7 +1345,7 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1361,7 +1362,7 @@ L_{i,j}=
     <url>/2019/12/29/P1129-ZJOI2007-%E7%9F%A9%E9%98%B5%E6%B8%B8%E6%88%8F/</url>
     <content><![CDATA[<h2 id="二分图匹配"><a href="#二分图匹配" class="headerlink" title="二分图匹配"></a>二分图匹配</h2><p><a href="&quot;https://www.luogu.org/problem/P1129&quot;">P1129</a></p>
 <p>这个题还是有一定套路的</p>
-<p>将黑色格子所在的行和列连边, 跑一边最大匹配, 如果是完美匹配即可(所有点都是匹配点)</p>
+<p>将黑色格子所在的行和列连边, 跑一边最大匹配, 如果是完美匹配即可(所有点都是匹配点)<br><a id="more"></a></p>
 <p>why?</p>
 <p>在完美匹配的情况下</p>
 <p>假如 列1 -&gt; 行5 , 列4 -&gt; 行1 (-&gt;表示匹配) </p>
@@ -1378,7 +1379,7 @@ L_{i,j}=
 </details>
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>
@@ -1398,6 +1399,7 @@ L_{i,j}=
 <p>下午试机, 敲了敲fhq, 感觉机子有点慢但键盘海星, 回去的时候买了点特产(燕大的草稿本…</p>
 <p>虚拟机和Windows共享的文件夹竟然是NOIP(它还没死)?!</p>
 <p>不管,  睡了 </p>
+<a id="more"></a>
 <h2 id="Day-1"><a href="#Day-1" class="headerlink" title="Day 1:"></a>Day 1:</h2><p>今天是 <del>NOI</del> CSP-S的第一天, 有点小紧张和小期待</p>
 <p>压缩包密码输了5、6次才打开, 怕不是爆零的前奏吧</p>
 <p>不过T1, T2是真滴简单</p>
@@ -1426,7 +1428,6 @@ L_{i,j}=
 <p>这次就是来划划水, 拿不拿省一不好说</p>
 <p>不过挺值的, <del>毕竟只交了六分之一的钱就体验了一次NOI的感觉</del></p>
 <p>预祝CSP-S2020 RP++</p>
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -1441,6 +1442,7 @@ L_{i,j}=
     <title>CF437D The Child and Zoo</title>
     <url>/2019/12/29/CF437D-The-Child-and-Zoo/</url>
     <content><![CDATA[<p>模拟赛上出了此题， 大概是本蒟蒻唯一ac的题了</p>
+<a id="more"></a>
 <p>考场上第一眼康到这道题时， 因为只涉及路径上最小值最大的问题， 所以想到了货车运输， 跑出它的最大生成树，由最大生成树的性质可知， f(p, q） 必定在新建的树上的路径上</p>
 <p>题目中让求所有点对的f值之和， 好像不太好求， 所以我们分别考虑每条边对答案的贡献。 先将树上的边按边权从大到小排序，使用并查集维护联通块的大小， 一个一个加边， 它对答案的贡献就是两端点联通块大小的乘积再乘上新边边权.</p>
 <p>何哉？ 因为边权是从大到小排序的， 所以两联通块中的边权值均大于新边。 它的权值是最小的， 所以左端点所在联通块的点集到右端点所在联通块的点集的f值均为新边的边权。</p>
@@ -1455,7 +1457,6 @@ L_{i,j}=
 
 
 
-<a id="more"></a>
 <hr>
 ]]></content>
       <categories>
@@ -1472,7 +1473,7 @@ L_{i,j}=
     <url>/2019/12/29/Jsoi2015-%E6%9F%93%E8%89%B2%E9%97%AE%E9%A2%98/</url>
     <content><![CDATA[<h3 id="一道比较简单的容斥题"><a href="#一道比较简单的容斥题" class="headerlink" title="一道比较简单的容斥题(?"></a>一道比较简单的容斥题(?</h3><p>可以容斥一下, 设$i, j ,k$分别代表$i$行有颜色, $j$行有颜色, 出现$k$种颜色的方案数</p>
 <script type="math/tex; mode=display">
-ans = \sum_{i=0}^n\sum_{j=0}^m\sum_{k=0}^c(-1)^{(i+j+k+n+m+c)}C_n^iC_m^jC_c^k(k+1)^{(n*m)}</script><p>k+1是因为一个格子可以不填颜色, 反手一个预处理组合数, O(n^3)稳过</p>
+ans = \sum_{i=0}^n\sum_{j=0}^m\sum_{k=0}^c(-1)^{(i+j+k+n+m+c)}C_n^iC_m^jC_c^k(k+1)^{(n*m)}</script><p>k+1是因为一个格子可以不填颜色, 反手一个预处理组合数, O(n^3)稳过<br><a id="more"></a></p>
 <details><summary>talk is cheap, show me the code</summary>
 <p>
 
@@ -1482,7 +1483,7 @@ ans = \sum_{i=0}^n\sum_{j=0}^m\sum_{k=0}^c(-1)^{(i+j+k+n+m+c)}C_n^iC_m^jC_c^k(k+
 </details>
 
 
-<a id="more"></a>
+
 <hr>
 ]]></content>
       <categories>

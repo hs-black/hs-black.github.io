@@ -55,7 +55,7 @@
 <meta property="og:description" content="多项式全家桶(更新至开根)开始爆肝多项式 1. FFT快速傅里叶变换流程: 将多项式$\Theta (nlog_n)$转成点值表示形式 进行卷积, 再$\Theta (nlog_n)$ 转回来 离散傅里叶变换:朴素转为点值, 需要将一个一个x带入, 而这里傅里叶搞到了几个可以优化的复数根 利用复数, 在复平面上画出一个单位圆, 将单位圆n等分, 每一个等分点为$\omega_n^i $, 接下来将">
 <meta property="og:locale" content="zh_CN">
 <meta property="article:published_time" content="2019-12-29T07:21:22.000Z">
-<meta property="article:modified_time" content="2019-12-29T08:15:51.845Z">
+<meta property="article:modified_time" content="2020-01-01T02:48:51.916Z">
 <meta property="article:author" content="hs-black">
 <meta property="article:tag" content="学习笔记">
 <meta property="article:tag" content="多项式">
@@ -244,10 +244,16 @@
                 <i class="fa fa-calendar-o"></i>
               </span>
               <span class="post-meta-item-text">发表于</span>
-              
 
-              <time title="创建时间：2019-12-29 15:21:22 / 修改时间：16:15:51" itemprop="dateCreated datePublished" datetime="2019-12-29T15:21:22+08:00">2019-12-29</time>
+              <time title="创建时间：2019-12-29 15:21:22" itemprop="dateCreated datePublished" datetime="2019-12-29T15:21:22+08:00">2019-12-29</time>
             </span>
+              <span class="post-meta-item">
+                <span class="post-meta-item-icon">
+                  <i class="fa fa-calendar-check-o"></i>
+                </span>
+                <span class="post-meta-item-text">更新于</span>
+                <time title="修改时间：2020-01-01 10:48:51" itemprop="dateModified" datetime="2020-01-01T10:48:51+08:00">2020-01-01</time>
+              </span>
             <span class="post-meta-item">
               <span class="post-meta-item-icon">
                 <i class="fa fa-folder-o"></i>
@@ -309,7 +315,7 @@
 <h2 id="1-FFT快速傅里叶变换"><a href="#1-FFT快速傅里叶变换" class="headerlink" title="1. FFT快速傅里叶变换"></a>1. FFT快速傅里叶变换</h2><p>流程: 将多项式$\Theta (nlog_n)$转成点值表示形式 进行卷积, 再$\Theta (nlog_n)$ 转回来</p>
 <h3 id="离散傅里叶变换"><a href="#离散傅里叶变换" class="headerlink" title="离散傅里叶变换:"></a>离散傅里叶变换:</h3><p>朴素转为点值, 需要将一个一个x带入, 而这里傅里叶搞到了几个可以优化的复数根</p>
 <p>利用复数, 在复平面上画出一个单位圆, 将单位圆n等分, 每一个等分点为$\omega_n^i $,</p>
-<p>接下来将$\omega^1_n \omega^2_n\cdots\omega^n_n$ n个根带入, 其中$\omega_n^i = cos(\frac{k}{n}2\pi) + i * sin(\frac{k}{n}2\pi)$</p>
+<p>接下来将$\omega^1_n \omega^2_n\cdots\omega^n_n$ n个根带入, 其中$\omega_n^i = cos(\frac{k}{n}2\pi) + i * sin(\frac{k}{n}2\pi)$<br><a id="more"></a></p>
 <p><strong>稍等, 还要几个小性质才可以:</strong></p>
 <h3 id="性质一-omega-2k-2n-omega-n-k"><a href="#性质一-omega-2k-2n-omega-n-k" class="headerlink" title="性质一:  $\omega^{2k}_{2n} = \omega_n^k$"></a>性质一:  $\omega^{2k}_{2n} = \omega_n^k$</h3><h3 id="性质二-omega-n-k-frac-n-2-omega-n-k"><a href="#性质二-omega-n-k-frac-n-2-omega-n-k" class="headerlink" title="性质二: $\omega_n^{k+\frac{n}{2}} = - \omega_n^k$"></a>性质二: $\omega_n^{k+\frac{n}{2}} = - \omega_n^k$</h3><h3 id="接下来开始快速傅里叶变换"><a href="#接下来开始快速傅里叶变换" class="headerlink" title="接下来开始快速傅里叶变换:"></a>接下来开始快速傅里叶变换:</h3><p>设A(x) = $a_0 + a_1x + a_2x^2 + \cdots + a_{n-1}x^{n-1}$</p>
 <p>利用分治, 将A按x的指数分为奇偶两部分</p>
@@ -424,7 +430,7 @@
 
 
 
-<a id="more"></a>
+
 <hr>
 
     </div>
@@ -622,7 +628,7 @@
 <div class="copyright">
   
   &copy; 
-  <span itemprop="copyrightYear">2019</span>
+  <span itemprop="copyrightYear">2020</span>
   <span class="with-love">
     <i class="fa fa-user"></i>
   </span>
