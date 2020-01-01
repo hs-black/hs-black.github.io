@@ -85,9 +85,9 @@
     <link href="http://hs-black.xyz/2019/12/29/%E5%B0%8F%E7%BB%93%E8%AE%BA/"/>
     <id>http://hs-black.xyz/2019/12/29/%E5%B0%8F%E7%BB%93%E8%AE%BA/</id>
     <published>2019-12-29T07:22:48.000Z</published>
-    <updated>2020-01-01T02:45:00.382Z</updated>
+    <updated>2020-01-01T06:11:54.757Z</updated>
     
-    <content type="html"><![CDATA[<h1 id="小结论"><a href="#小结论" class="headerlink" title="小结论"></a>小结论</h1><h2 id="数学相关"><a href="#数学相关" class="headerlink" title="数学相关:"></a>数学相关:</h2><ul><li>$\displaystyle\sum_{k=1}^n \frac{1}{k} = lnk$</li><li>$C_n^m = C^{m-1}_{n-1} +C^m_{n-1}$</li><li>$C^m_n = \frac{n}{m} * C^{m-1}_{n-1}$</li><li>$C^0_n + C^1_n +  \cdots + C^n_n = 2^n$</li><li>$C_n^k$ k为奇数相加等于k为偶数相加</li><li>n/x下取整的可能值最多有根号n个</li><li>1~N内质数个数大概为$\frac{N}{lnN}$</li></ul><a id="more"></a><h2 id="图论trick"><a href="#图论trick" class="headerlink" title="图论trick:"></a>图论trick:</h2><ul><li><h3 id="关于三点两两求lca"><a href="#关于三点两两求lca" class="headerlink" title="关于三点两两求lca"></a>关于三点两两求lca</h3><ul><li>其中有两个lca相同(求另一个可以三个一起异或起来)</li><li>不同的也是深度最大的那个</li><li>不同lca的三点在树上的分叉点</li><li>换根lca就是分叉点</li></ul></li><li><h3 id="关于源点和汇点"><a href="#关于源点和汇点" class="headerlink" title="关于源点和汇点"></a>关于源点和汇点</h3><ul><li>求一些点到另一些点的最短路可以建超级源点和汇点</li><li>一些点向另一些点连边可以新建源点和汇点</li></ul></li><li><p>分层图可以解决特殊边的问题,  可以通过dp减少空间</p></li><li><p>最大/小值多想想生成树</p></li></ul><h2 id="人类智慧"><a href="#人类智慧" class="headerlink" title="人类智慧:"></a>人类智慧:</h2><ul><li>将点不断分成两个集合, 使每两点至少有一次在不同的集合, 可以根据某一位在二进制上是否为一</li></ul><h2 id="基础算法与奇技淫巧"><a href="#基础算法与奇技淫巧" class="headerlink" title="基础算法与奇技淫巧:"></a>基础算法与奇技淫巧:</h2><ul><li><p>二分大于k的值设为一</p></li><li><p>无法直接dp可以试试先贪心排序</p></li><li><p>区间操作没准可以变成差分</p></li><li><p>闲的没事可以试试倒序操作</p></li><li><p>最大值最小, 最小值最大试试二分</p></li><li><p>实在想不出来学会面向数据编程, 小数据暴力, 大数据瞎搞</p></li><li><p>将数据分块, 大范围暴力, 小范围存储</p></li><li><p>逆序问题可以先进行排序</p></li><li><p>整体求值可以化为每个部分对答案的贡献, 在加上数据结构或重新化为另一个整体</p></li></ul><h2 id="方法"><a href="#方法" class="headerlink" title="方法:"></a>方法:</h2><ul><li>主元, 让你的式子的变量逐渐有某种规律(靠人类智慧</li><li>转化, 将一个问题转化为另一个已知问题(可能有多步转化</li><li>放弃, 适时的放弃能让你拿到更多的分数</li></ul><h2 id="心态和考场trick"><a href="#心态和考场trick" class="headerlink" title="心态和考场trick:"></a>心态和考场trick:</h2><ul><li>心态, 我会大家会, 我不会大家也会, 我会不会大家都会, 无所谓(滑稽</li><li>浏览一遍题目, 看看自己最少能拿多少分, 掌握最佳的分配时间</li><li>尝试hack自己, 用边界条件和细节问题</li><li>留出一个小时左右打对拍, 检查是否mle或没开够</li><li>做不出题时感觉题目很奇怪多半是题看错了</li><li>别的选手使劲敲键盘, 那就跟着敲几下, 吓唬一下别人(滑稽</li><li>想出题赶紧写, 调过样例, 去个厕所, 想不出来, 去个厕所, ak稳了, 去个厕所(滑稽</li><li>尽量吃熟悉的食物</li><li>检查时再读一遍题, 看看有没有输出”IMPOSSIBLE”啥的</li><li>尽管爆零, 走出考场时要大喊”我 AK 了”, 不留遗憾, 涨涨人品(滑稽</li><li>to be continued</li></ul><hr>]]></content>
+    <content type="html"><![CDATA[<h1 id="小结论"><a href="#小结论" class="headerlink" title="小结论"></a>小结论</h1><h2 id="数学相关"><a href="#数学相关" class="headerlink" title="数学相关:"></a>数学相关:</h2><ul><li>$\displaystyle\sum_{k=1}^n \frac{1}{k} = lnk$</li><li>$C_n^m = C^{m-1}_{n-1} +C^m_{n-1}$</li><li>$C^m_n = \frac{n}{m} * C^{m-1}_{n-1}$</li><li>$C^0_n + C^1_n +  \cdots + C^n_n = 2^n$</li><li>$C_n^k$ k为奇数相加等于k为偶数相加</li><li>n/x下取整的可能值最多有根号n个</li><li>1~N内质数个数大概为$\frac{N}{lnN}$</li><li>对于大模数, 可以用小模数得出结果再用中国剩余定理还原</li><li>若(a, b) = 1,  则(a + k * b, b) = 1</li></ul><h2 id="动态规划"><a href="#动态规划" class="headerlink" title="动态规划:"></a>动态规划:</h2><ul><li>答案要求两数相等时, dp时可以维护两数的差而不是两数分别是什么</li></ul><a id="more"></a><h2 id="图论trick"><a href="#图论trick" class="headerlink" title="图论trick:"></a>图论trick:</h2><ul><li><h3 id="关于三点两两求lca"><a href="#关于三点两两求lca" class="headerlink" title="关于三点两两求lca"></a>关于三点两两求lca</h3><ul><li>其中有两个lca相同(求另一个可以三个一起异或起来)</li><li>不同的也是深度最大的那个</li><li>不同lca的三点在树上的分叉点</li><li>换根lca就是分叉点</li></ul></li><li><h3 id="关于源点和汇点"><a href="#关于源点和汇点" class="headerlink" title="关于源点和汇点"></a>关于源点和汇点</h3><ul><li>求一些点到另一些点的最短路可以建超级源点和汇点</li><li>一些点向另一些点连边可以新建源点和汇点</li></ul></li><li><p>分层图可以解决特殊边的问题,  可以通过dp减少空间</p></li><li><p>最大/小值多想想生成树</p></li></ul><h2 id="人类智慧"><a href="#人类智慧" class="headerlink" title="人类智慧:"></a>人类智慧:</h2><ul><li>将点不断分成两个集合, 使每两点至少有一次在不同的集合, 可以根据某一位在二进制上是否为一</li></ul><h2 id="基础算法与奇技淫巧"><a href="#基础算法与奇技淫巧" class="headerlink" title="基础算法与奇技淫巧:"></a>基础算法与奇技淫巧:</h2><ul><li><p>二分大于k的值设为一</p></li><li><p>无法直接dp可以试试先贪心排序</p></li><li><p>区间操作没准可以变成差分</p></li><li><p>闲的没事可以试试倒序操作</p></li><li><p>最大值最小, 最小值最大试试二分</p></li><li><p>实在想不出来学会面向数据编程, 小数据暴力, 大数据瞎搞</p></li><li><p>将数据分块, 大范围暴力, 小范围存储</p></li><li><p>逆序问题可以先进行排序</p></li><li><p>整体求值可以化为每个部分对答案的贡献, 在加上数据结构或重新化为另一个整体</p></li></ul><h2 id="方法"><a href="#方法" class="headerlink" title="方法:"></a>方法:</h2><ul><li>主元, 让你的式子的变量逐渐有某种规律(靠人类智慧</li><li>转化, 将一个问题转化为另一个已知问题(可能有多步转化</li><li>放弃, 适时的放弃能让你拿到更多的分数</li></ul><h2 id="心态和考场trick"><a href="#心态和考场trick" class="headerlink" title="心态和考场trick:"></a>心态和考场trick:</h2><ul><li>心态, 我会大家会, 我不会大家也会, 我会不会大家都会, 无所谓(滑稽</li><li>浏览一遍题目, 看看自己最少能拿多少分, 掌握最佳的分配时间</li><li>尝试hack自己, 用边界条件和细节问题</li><li>留出一个小时左右打对拍, 检查是否mle或没开够</li><li>做不出题时感觉题目很奇怪多半是题看错了</li><li>别的选手使劲敲键盘, 那就跟着敲几下, 吓唬一下别人(滑稽</li><li>想出题赶紧写, 调过样例, 去个厕所, 想不出来, 去个厕所, ak稳了, 去个厕所(滑稽</li><li>尽量吃熟悉的食物</li><li>检查时再读一遍题, 看看有没有输出”IMPOSSIBLE”啥的</li><li>尽管爆零, 走出考场时要大喊”我 AK 了”, 不留遗憾, 涨涨人品(滑稽</li><li>to be continued</li></ul><hr>]]></content>
     
     <summary type="html">
     
@@ -99,6 +99,11 @@
 &lt;li&gt;$C_n^k$ k为奇数相加等于k为偶数相加&lt;/li&gt;
 &lt;li&gt;n/x下取整的可能值最多有根号n个&lt;/li&gt;
 &lt;li&gt;1~N内质数个数大概为$\frac{N}{lnN}$&lt;/li&gt;
+&lt;li&gt;对于大模数, 可以用小模数得出结果再用中国剩余定理还原&lt;/li&gt;
+&lt;li&gt;若(a, b) = 1,  则(a + k * b, b) = 1&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2 id=&quot;动态规划&quot;&gt;&lt;a href=&quot;#动态规划&quot; class=&quot;headerlink&quot; title=&quot;动态规划:&quot;&gt;&lt;/a&gt;动态规划:&lt;/h2&gt;&lt;ul&gt;
+&lt;li&gt;答案要求两数相等时, dp时可以维护两数的差而不是两数分别是什么&lt;/li&gt;
 &lt;/ul&gt;
     
     </summary>
@@ -344,9 +349,9 @@
     
       <category term="数学" scheme="http://hs-black.xyz/tags/%E6%95%B0%E5%AD%A6/"/>
     
-      <category term="计数" scheme="http://hs-black.xyz/tags/%E8%AE%A1%E6%95%B0/"/>
-    
       <category term="学习笔记" scheme="http://hs-black.xyz/tags/%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/"/>
+    
+      <category term="计数" scheme="http://hs-black.xyz/tags/%E8%AE%A1%E6%95%B0/"/>
     
   </entry>
   

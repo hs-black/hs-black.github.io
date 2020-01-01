@@ -162,6 +162,11 @@ base^{2^{i-1}}-1=(base^{2^{i-2}}-1)*(base^{2^{i-2}}+1)</script><p>为一个偶�
 <li>$C_n^k$ k为奇数相加等于k为偶数相加</li>
 <li>n/x下取整的可能值最多有根号n个</li>
 <li>1~N内质数个数大概为$\frac{N}{lnN}$</li>
+<li>对于大模数, 可以用小模数得出结果再用中国剩余定理还原</li>
+<li>若(a, b) = 1,  则(a + k * b, b) = 1</li>
+</ul>
+<h2 id="动态规划"><a href="#动态规划" class="headerlink" title="动态规划:"></a>动态规划:</h2><ul>
+<li>答案要求两数相等时, dp时可以维护两数的差而不是两数分别是什么</li>
 </ul>
 <a id="more"></a>
 <h2 id="图论trick"><a href="#图论trick" class="headerlink" title="图论trick:"></a>图论trick:</h2><ul>
@@ -785,8 +790,8 @@ L_{i,j}=
       </categories>
       <tags>
         <tag>数学</tag>
-        <tag>计数</tag>
         <tag>学习笔记</tag>
+        <tag>计数</tag>
       </tags>
   </entry>
   <entry>
