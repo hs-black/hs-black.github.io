@@ -47,20 +47,22 @@
   };
 </script>
 
-  <meta name="description" content="脑残的孩子就要慢慢学">
-<meta property="og:type" content="website">
-<meta property="og:title" content="Hs-black">
-<meta property="og:url" content="http://hs-black.xyz/archives/2019/page/2/index.html">
+  <meta name="description" content="本章主要介绍了几个常用的数论筛法, 由浅入深, 如果有我学过的新筛法会持续更新">
+<meta property="og:type" content="article">
+<meta property="og:title" content="数学全家桶之数论筛法">
+<meta property="og:url" content="http://hs-black.xyz/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/index.html">
 <meta property="og:site_name" content="Hs-black">
-<meta property="og:description" content="脑残的孩子就要慢慢学">
+<meta property="og:description" content="本章主要介绍了几个常用的数论筛法, 由浅入深, 如果有我学过的新筛法会持续更新">
 <meta property="og:locale" content="zh_CN">
+<meta property="article:published_time" content="2020-01-14T07:05:31.000Z">
+<meta property="article:modified_time" content="2020-01-14T12:32:27.340Z">
 <meta property="article:author" content="hs-black">
 <meta property="article:tag" content="算法">
 <meta property="article:tag" content=" hs-black">
 <meta property="article:tag" content=" OIer">
 <meta name="twitter:card" content="summary">
 
-<link rel="canonical" href="http://hs-black.xyz/archives/2019/page/2/">
+<link rel="canonical" href="http://hs-black.xyz/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/">
 
 
 <script id="page-configurations">
@@ -68,11 +70,11 @@
   CONFIG.page = {
     sidebar: "",
     isHome: false,
-    isPost: false
+    isPost: true
   };
 </script>
 
-  <title>归档 | Hs-black</title>
+  <title>数学全家桶之数论筛法 | Hs-black</title>
   
 
 
@@ -216,237 +218,156 @@
           <div class="content">
             
 
+  <div class="posts-expand">
+      
   
   
+  <article itemscope itemtype="http://schema.org/Article" class="post-block " lang="zh-CN">
+    <link itemprop="mainEntityOfPage" href="http://hs-black.xyz/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/">
+
+    <span hidden itemprop="author" itemscope itemtype="http://schema.org/Person">
+      <meta itemprop="image" content="/images/avatar.png">
+      <meta itemprop="name" content="hs-black">
+      <meta itemprop="description" content="脑残的孩子就要慢慢学">
+    </span>
+
+    <span hidden itemprop="publisher" itemscope itemtype="http://schema.org/Organization">
+      <meta itemprop="name" content="Hs-black">
+    </span>
+      <header class="post-header">
+        <h1 class="post-title" itemprop="name headline">
+          数学全家桶之数论筛法
+        </h1>
+
+        <div class="post-meta">
+            <span class="post-meta-item">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-calendar-o"></i>
+              </span>
+              <span class="post-meta-item-text">发表于</span>
+              
+
+              <time title="创建时间：2020-01-14 15:05:31 / 修改时间：20:32:27" itemprop="dateCreated datePublished" datetime="2020-01-14T15:05:31+08:00">2020-01-14</time>
+            </span>
+
+          
   
-  <div class="post-block">
-    <div class="posts-collapse">
-      <div class="collection-title">
-        
-        <span class="collection-header">还行! 目前共计 31 篇日志。 继续努力。</span>
-      </div>
+  <span class="post-meta-item">
+    
+      <span class="post-meta-item-icon">
+        <i class="fa fa-comment-o"></i>
+      </span>
+      <span class="post-meta-item-text">Valine：</span>
+    
+    <a title="valine" href="/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/#comments" itemprop="discussionUrl">
+      <span class="post-comments-count valine-comment-count" data-xid="/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/" itemprop="commentCount"></span>
+    </a>
+  </span>
+  
+  <br>
+            <span class="post-meta-item" title="本文字数">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-file-word-o"></i>
+              </span>
+                <span class="post-meta-item-text">本文字数：</span>
+              <span>883</span>
+            </span>
+            <span class="post-meta-item" title="阅读时长">
+              <span class="post-meta-item-icon">
+                <i class="fa fa-clock-o"></i>
+              </span>
+                <span class="post-meta-item-text">阅读时长 &asymp;</span>
+              <span>1 分钟</span>
+            </span>
+
+        </div>
+      </header>
+
+    
+    
+    
+    <div class="post-body" itemprop="articleBody">
 
       
-    <div class="collection-year">
-      <h1 class="collection-header">2019</h1>
-    </div>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:21:40+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/%E8%AE%A1%E6%95%B0%E9%97%AE%E9%A2%98%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" itemprop="url">
-            <span itemprop="name">计数问题学习笔记</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:21:31+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/%E5%90%8E%E7%BC%80%E8%87%AA%E5%8A%A8%E6%9C%BA%E6%84%9F%E6%80%A7%E7%90%86%E8%A7%A3/" itemprop="url">
-            <span itemprop="name">后缀自动机感性理解</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:21:22+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/%E5%A4%9A%E9%A1%B9%E5%BC%8F%E5%85%A8%E5%AE%B6%E6%A1%B6-%E6%9C%AA%E5%AE%8C/" itemprop="url">
-            <span itemprop="name">多项式全家桶</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:21:02+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/%E5%8C%97%E4%BA%AC%E5%85%AB%E5%8D%81%E4%B8%AD%E6%B8%B8%E8%AE%B0/" itemprop="url">
-            <span itemprop="name">北京八十中游记</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:20:52+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/UVA12983-The-Battle-of-Chibi/" itemprop="url">
-            <span itemprop="name">UVA12983 The Battle of Chibi</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:20:45+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/phq%E6%9D%BF%E5%AD%90/" itemprop="url">
-            <span itemprop="name">phq板子</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:20:34+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/P5369-PKUSC2018-%E6%9C%80%E5%A4%A7%E5%89%8D%E7%BC%80%E5%92%8C/" itemprop="url">
-            <span itemprop="name">P5369 [PKUSC2018]最大前缀和</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:20:25+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/P3943-%E6%98%9F%E7%A9%BA/" itemprop="url">
-            <span itemprop="name">P3943 星空</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:20:15+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/P3515-POI2011-Lightning-Conductor/" itemprop="url">
-            <span itemprop="name">P3515 [POI2011]Lightning Conductor</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
-  <article itemscope itemtype="http://schema.org/Article">
-    <header class="post-header">
-
-      <div class="post-meta">
-        <time itemprop="dateCreated"
-              datetime="2019-12-29T15:20:05+08:00"
-              content="2019-12-29">
-          12-29
-        </time>
-      </div>
-
-      <h2 class="post-title">
-          <a class="post-title-link" href="/2019/12/29/P3396-%E5%93%88%E5%B8%8C%E5%86%B2%E7%AA%81/" itemprop="url">
-            <span itemprop="name">P3396 哈希冲突</span>
-          </a>
-      </h2>
-
-    </header>
-  </article>
-
+        <div class="note default">
+            <p>本章主要介绍了几个常用的数论筛法, 由浅入深, 如果有我学过的新筛法会持续更新</p>
+          </div>
+<a id="more"></a>
+<h2 id="素数筛"><a href="#素数筛" class="headerlink" title="素数筛:"></a>素数筛:</h2><p>几条关于素数的小性质:</p>
+<ul>
+<li>1 ~ N中大约有 $\frac{N}{logN}$ 个素数</li>
+</ul>
+<h3 id="1-埃氏筛"><a href="#1-埃氏筛" class="headerlink" title="1. 埃氏筛"></a>1. 埃氏筛</h3><p>对于一个数x(x &gt; 1), x的倍数除x以外一定不是质数, 因为这个数可以分解为两个数相乘</p>
+<p>利用这个原理, 设数组vis[x]表示x是否为质数, 从2枚举到n, 把每个数的倍数除它本身外标记为”不是质数”</p>
+<p>对于x, 如果它不是任意小于它的数的倍数即没有被标记过, 那它就是个质数</p>
+<p>时间复杂度 $\Theta(nlogn)$</p>
+<p>可以有个优化, 就是合数不用枚举倍数, 因为小于它的质数一定会把它的倍数筛掉</p>
+<p>时间复杂度 $\Theta(nloglongn)$</p>
+<p>代码:</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">2</span>;i &lt;= n; i++) &#123;</span><br><span class="line">    <span class="keyword">if</span> (vis[i]) <span class="keyword">continue</span>;</span><br><span class="line">    prime[++tot] = i;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> j = i + i;j &lt;= n; j += i) </span><br><span class="line">        vis[j] = <span class="number">1</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<h3 id="2-线性筛"><a href="#2-线性筛" class="headerlink" title="2. 线性筛"></a>2. 线性筛</h3><p>观察发现有些数被筛了好几回, 如12被2, 3同时筛过</p>
+<p>如果我们能利用每个数的特征来让每个数只被筛一次, 那么复杂度将变得更优</p>
+<p>这个特征可以是每个数的最小质因子</p>
+<p>设计e[x]数组表示x的最小质因子是谁, prime数组存储已经筛到的质数, 从2枚举到n, 假如当前数为x, 其最小质因子为p, 对于prime数组中所有小于等于p的质数$p_i$, 让$e[x \cdot p_i] = p_i$ </p>
+<p>尝试用递归的方式理解: 例如数字$30 = 2 <em> 3 </em> 5$, 30的最小质因子是2, 所以它是被15筛掉的, $15 = 3 * 5$, 最小质因子为3, 它是被5筛掉的</p>
+<p>时间复杂度 $\Theta(n)$, 其他应用: 筛次小质因子</p>
+<figure class="highlight cpp"><table><tr><td class="gutter"><pre><span class="line">1</span><br><span class="line">2</span><br><span class="line">3</span><br><span class="line">4</span><br><span class="line">5</span><br><span class="line">6</span><br><span class="line">7</span><br></pre></td><td class="code"><pre><span class="line"><span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">2</span>;i &lt;= n; i++) &#123;</span><br><span class="line">    <span class="keyword">if</span> (!e[i]) e[i] = i, prime[++tot] = i;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= tot &amp;&amp; prime[j] * i &lt;= n; j++) &#123;</span><br><span class="line">        e[i * prime[j]] = prime[j];</span><br><span class="line">        <span class="keyword">if</span> (prime[j] &gt;= e[i]) <span class="keyword">break</span>;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<h2 id="数论筛法"><a href="#数论筛法" class="headerlink" title="数论筛法:"></a>数论筛法:</h2><hr>
 
     </div>
+
+    
+    
+    
+      
+
+        
+
+<div>
+<ul class="post-copyright">
+  <li class="post-copyright-author">
+    <strong>本文作者： </strong>hs-black
+  </li>
+  <li class="post-copyright-link">
+    <strong>本文链接：</strong>
+    <a href="http://hs-black.xyz/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/" title="数学全家桶之数论筛法">http://hs-black.xyz/2020/01/14/数学全家桶之数论筛法/</a>
+  </li>
+  <li class="post-copyright-license">
+    <strong>版权声明： </strong>本博客所有文章除特别声明外，均采用 <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/zh-CN" rel="noopener" target="_blank"><i class="fa fa-fw fa-creative-commons"></i>BY-NC-SA</a> 许可协议。转载请注明出处！
+  </li>
+</ul>
+</div>
+
+
+      <footer class="post-footer">
+
+        
+
+
+        
+    <div class="post-nav">
+      <div class="post-nav-item">
+    <a href="/2020/01/01/%E8%99%9A%E6%A0%91%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/" rel="prev" title="虚树学习笔记">
+      <i class="fa fa-chevron-left"></i> 虚树学习笔记
+    </a></div>
+      <div class="post-nav-item">
+    <a href="/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E5%87%BD%E6%95%B0/" rel="next" title="数学全家桶之数论函数">
+      数学全家桶之数论函数 <i class="fa fa-chevron-right"></i>
+    </a></div>
+    </div>
+      </footer>
+    
+  </article>
+  
+  
+  
+
   </div>
-  
-  
-  
-
-  
-  <nav class="pagination">
-    <a class="extend prev" rel="prev" href="/archives/2019/"><i class="fa fa-angle-left" aria-label="上一页"></i></a><a class="page-number" href="/archives/2019/">1</a><span class="page-number current">2</span><a class="page-number" href="/archives/2019/page/3/">3</a><a class="extend next" rel="next" href="/archives/2019/page/3/"><i class="fa fa-angle-right" aria-label="下一页"></i></a>
-  </nav>
-
 
 
           </div>
           
+    <div class="comments" id="valine-comments"></div>
 
 <script>
   window.addEventListener('tabs:register', () => {
@@ -493,6 +414,7 @@
 
       <!--noindex-->
       <div class="post-toc-wrap sidebar-panel">
+          <div class="post-toc motion-element"><ol class="nav"><li class="nav-item nav-level-2"><a class="nav-link" href="#素数筛"><span class="nav-number">1.</span> <span class="nav-text">素数筛:</span></a><ol class="nav-child"><li class="nav-item nav-level-3"><a class="nav-link" href="#1-埃氏筛"><span class="nav-number">1.1.</span> <span class="nav-text">1. 埃氏筛</span></a></li><li class="nav-item nav-level-3"><a class="nav-link" href="#2-线性筛"><span class="nav-number">1.2.</span> <span class="nav-text">2. 线性筛</span></a></li></ol></li><li class="nav-item nav-level-2"><a class="nav-link" href="#数论筛法"><span class="nav-number">2.</span> <span class="nav-text">数论筛法:</span></a></li></ol></div>
       </div>
       <!--/noindex-->
 
@@ -660,6 +582,56 @@
   
 
   
+      
+<script type="text/x-mathjax-config">
+    MathJax.Ajax.config.path['mhchem'] = '//cdn.jsdelivr.net/npm/mathjax-mhchem@3';
+
+  MathJax.Hub.Config({
+    tex2jax: {
+      inlineMath: [ ['$', '$'], ['\\(', '\\)'] ],
+      processEscapes: true,
+      skipTags: ['script', 'noscript', 'style', 'textarea', 'pre', 'code']
+    },
+    TeX: {
+        extensions: ['[mhchem]/mhchem.js'],
+      equationNumbers: {
+        autoNumber: 'AMS'
+      }
+    }
+  });
+
+  MathJax.Hub.Register.StartupHook('TeX Jax Ready', function() {
+    MathJax.InputJax.TeX.prefilterHooks.Add(function(data) {
+      if (data.display) {
+        var next = data.script.nextSibling;
+        while (next && next.nodeName.toLowerCase() === '#text') {
+          next = next.nextSibling;
+        }
+        if (next && next.nodeName.toLowerCase() === 'br') {
+          next.parentNode.removeChild(next);
+        }
+      }
+    });
+  });
+
+  MathJax.Hub.Queue(function() {
+    var all = MathJax.Hub.getAllJax(), i;
+    for (i = 0; i < all.length; i += 1) {
+      element = document.getElementById(all[i].inputID + '-Frame').parentNode;
+      if (element.nodeName.toLowerCase() == 'li') {
+        element = element.parentNode;
+      }
+      element.classList.add('has-jax');
+    }
+  });
+</script>
+<script>
+  NexT.utils.getScript('//cdn.jsdelivr.net/npm/mathjax@2/MathJax.js?config=TeX-AMS-MML_HTMLorMML', () => {
+    MathJax.Hub.Typeset();
+  }, window.MathJax);
+</script>
+
+    
 
   
 

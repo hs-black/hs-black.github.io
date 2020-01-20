@@ -1,6 +1,100 @@
 <?xml version="1.0" encoding="utf-8"?>
 <search>
   <entry>
+    <title>数学全家桶之数论函数</title>
+    <url>/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E5%87%BD%E6%95%B0/</url>
+    <content><![CDATA[<div class="note default">
+            <p>本章主要讲解了几个主要的数论函数及应用, 如果我学到了一些新的奇技淫巧可能会更新</p>
+          </div>
+<a id="more"></a>
+<h3 id="取整函数"><a href="#取整函数" class="headerlink" title="取整函数"></a>取整函数</h3><p>对于实数x, 记$\lfloor x \rfloor$为不超过x的最大整数</p>
+<p>$\lfloor x \rfloor$ 是满足下列关系的唯一整数</p>
+<script type="math/tex; mode=display">
+x-1 < \lfloor x \rfloor \leq x < \lfloor x \rfloor + 1</script><p>其他性质: </p>
+<ul>
+<li>对于正整数n, 1 到 n 中 d 的倍数有 $ \lfloor \frac{n}{d} \rfloor $个</li>
+<li>$\lfloor \frac {\lfloor \frac{x}{a} \rfloor}{b}  \rfloor = \lfloor \frac{x}{ab} \rfloor$</li>
+<li>对于正整数n, d(小于等于n), $\lfloor \frac{n}{d} \rfloor$ 的不同取值个数不超过$2 \sqrt n$ </li>
+</ul>
+<h4 id="整除分块"><a href="#整除分块" class="headerlink" title="整除分块:"></a>整除分块:</h4><p>若$\lfloor \frac{n}{a} \rfloor$与$\lfloor \frac{n}{b} \rfloor$相等, 则a的最大值为$\large \left \lfloor \frac N{\left \lfloor \frac Nb \right \rfloor } \right \rfloor$</p>
+<p>代码:</p>
+<figure class="highlight cpp"><table><tr><td class="code"><pre><span class="line"><span class="keyword">for</span> (<span class="keyword">int</span> l = <span class="number">1</span>, r;l &lt;= n; l = r + <span class="number">1</span>) &#123;</span><br><span class="line">    r = n / (n / i);</span><br><span class="line">    <span class="keyword">do</span> something...</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<p>证明</p>
+<p>学习了<a href="https://blog.csdn.net/u013700358/article/details/97166124" target="_blank" rel="noopener">这篇博客</a></p>
+<script type="math/tex; mode=display">
+设\lfloor \frac{N}{b} \rfloor = p, 则N = pb + q \\
+若存在d, 使得\lfloor \frac{N}{b + d} \rfloor = p, 则N = p(b+d) + q' \\
+pb+q = pb + pd + q' \\
+d = \frac qp - \frac {q'}p \\
+d_{max} = \lfloor \frac{q}{p} \rfloor \\
+a_{max} = b + d_{max} = b + \lfloor \frac{q}{p} \rfloor = \lfloor \frac{pb + N - pb}{p} \rfloor = \large  \left \lfloor \frac{N}{\lfloor \frac{N}{b} \rfloor} \right \rfloor</script><h3 id="调和数"><a href="#调和数" class="headerlink" title="调和数"></a>调和数</h3><p>定义: $H_n = \displaystyle \sum_{k=1}^n \frac1k$</p>
+<p>$H_n = ln(H+1) + \gamma$ 其中$\gamma \approx 0.5772156649$</p>
+<h3 id="积性函数"><a href="#积性函数" class="headerlink" title="积性函数 :"></a>积性函数 :</h3><p>对于数论函数f(x), 对于互质两数a, b, f(ab) = f(a) * f(b)</p>
+<p>特殊的,对于a, b不互质也满足上式, 则称f(x)为完全积性函数</p>
+<h4 id="常见积性函数"><a href="#常见积性函数" class="headerlink" title="常见积性函数"></a>常见积性函数</h4><ol>
+<li>μ(n)——莫比乌斯函数。<script type="math/tex">\mu(d)=\begin{cases} 1 &\text{d = 1}\\ (-1)^r &\text{$d=p_1p_2...p_r,其中p_i为素数$}\\ 0 &\text{others} \end{cases}</script> </li>
+<li>φ(n)——欧拉函数。表示不大于n且与n互质的正整数个数，十分常见的数论函数。用数学式子表示即：φ(n) = $\sum^{n}_{d=1}[gcd(d, n) == 1]$;</li>
+<li>d(n)——约数个数。表示n的约数的个数。用式子表示为：d(n) = $\sum^n_{d = 1} [d |n]$;</li>
+<li><p>σ(n)——约数和函数。 即n的各个约数之和。表示为：σ(n)  = $\sum_{d|n}d$  = $\sum^{n}_{d = 1} [d | n] \cdot d$ ; </p>
+<p>(PS：接下来列举的是完全积性函数)</p>
+</li>
+<li><p>ϵ(n)——元函数。ϵ(n) = [n=1]。</p>
+</li>
+<li>I(n)——恒等函数。所谓恒等就是这个函数的值恒为1。</li>
+<li>id(n)——单位函数。id(n)=n。</li>
+</ol>
+<h3 id="狄利克雷卷积"><a href="#狄利克雷卷积" class="headerlink" title="狄利克雷卷积 :"></a>狄利克雷卷积 :</h3><p>设f , g为数论函数, 其狄利克雷卷积为 $f * g = \sum_{d | n} f(d) \cdot g(n / d)$ </p>
+<p>其性质满足交换律, 结合律和分配律</p>
+<p>几条比较常用的小性质 :</p>
+<h4 id="单位元-f-epsilon-f"><a href="#单位元-f-epsilon-f" class="headerlink" title="单位元 : $f * \epsilon = f$"></a>单位元 : $f * \epsilon = f$</h4><h4 id="莫比乌斯反演-mu-I-epsilon"><a href="#莫比乌斯反演-mu-I-epsilon" class="headerlink" title="莫比乌斯反演 $\mu * I = \epsilon$"></a>莫比乌斯反演 $\mu * I = \epsilon$</h4><div class="note default">
+            <p>证明 : </p><p>若 n &gt; 1</p><script type="math/tex; mode=display">\mu * I = \sum_{d | n} \mu(d),    设 n = p^{\alpha_1}_1p^{\alpha_2}_2 \cdots p^{\alpha_k}_k</script><p>因为含有平方因子的\mu值一定为零,  所以我们只考虑每个质因子选一个或不选</p><p>然后根据组合数选奇数项之和等于选偶数项之和(也可以用二项式定理), 得出$\mu * I = 0$</p><p>若n = 1, $\mu * I = 1$</p><p>证毕</p>
+          </div>
+<h4 id="欧拉函数相关-n-phi-I"><a href="#欧拉函数相关-n-phi-I" class="headerlink" title="欧拉函数相关 $ n = \phi * I $"></a>欧拉函数相关 $ n = \phi * I $</h4><p>例题: <a href="https://www.luogu.com.cn/problem/P2257" target="_blank" rel="noopener">yy的gcd</a></p>
+<p>从经典的问题谈起: 有多少对(x,y)使得$x \leq n , y \leq m ~gcd(x, y) = 1$</p>
+<script type="math/tex; mode=display">
+\sum_{x=1}^n\sum_{y=1}^m[gcd(x, y)~=~1] = \sum_{x=1}^n\sum_{y=1}^m\sum_{d|gcd(x,y)}\mu(d)
+\\
+=\sum_{x=1}\sum^m_{y=1}\sum_{d|x,d|y}\mu(d)
+\\
+=\sum_{d=1}^{min(n,m)}\mu(d) \lfloor \frac nd \rfloor \lfloor \frac md \rfloor
+$$ {\displaystyle}
+
+
+回到本问题</script><p>\sum_{p \in P}\sum_{x=1}^n\sum_{y=1}^m[gcd(x, y)~=~p]  = \sum_{p \in P}\sum_{x=1}^{\lfloor \frac np \rfloor}\sum_{y=1}^{\lfloor \frac mp \rfloor}[gcd(x, y)~=~1]<br>\\<br>=\sum_{p \in P}\sum_{x=1}^{\lfloor \frac np \rfloor}\sum_{y=1}^{\lfloor \frac mp \rfloor}\sum_{d|x,d|y}\mu(d)<br>\\<br>=\sum_{p \in P} \sum_{d=1}^{\frac {min(n,m)}{p}}\mu(d) \lfloor \frac n{pd} \rfloor \lfloor \frac m{md} \rfloor<br>\\<br>= \sum_{t = 1}^{min(n, m)} \lfloor \frac nt \rfloor \lfloor \frac mt \rfloor \sum_{p \in P, p | t} \mu(\frac{t}{p})</p>
+<p>$$</p>
+<hr>
+]]></content>
+  </entry>
+  <entry>
+    <title>数学全家桶之数论筛法</title>
+    <url>/2020/01/14/%E6%95%B0%E5%AD%A6%E5%85%A8%E5%AE%B6%E6%A1%B6%E4%B9%8B%E6%95%B0%E8%AE%BA%E7%AD%9B%E6%B3%95/</url>
+    <content><![CDATA[<div class="note default">
+            <p>本章主要介绍了几个常用的数论筛法, 由浅入深, 如果有我学过的新筛法会持续更新</p>
+          </div>
+<a id="more"></a>
+<h2 id="素数筛"><a href="#素数筛" class="headerlink" title="素数筛:"></a>素数筛:</h2><p>几条关于素数的小性质:</p>
+<ul>
+<li>1 ~ N中大约有 $\frac{N}{logN}$ 个素数</li>
+</ul>
+<h3 id="1-埃氏筛"><a href="#1-埃氏筛" class="headerlink" title="1. 埃氏筛"></a>1. 埃氏筛</h3><p>对于一个数x(x &gt; 1), x的倍数除x以外一定不是质数, 因为这个数可以分解为两个数相乘</p>
+<p>利用这个原理, 设数组vis[x]表示x是否为质数, 从2枚举到n, 把每个数的倍数除它本身外标记为”不是质数”</p>
+<p>对于x, 如果它不是任意小于它的数的倍数即没有被标记过, 那它就是个质数</p>
+<p>时间复杂度 $\Theta(nlogn)$</p>
+<p>可以有个优化, 就是合数不用枚举倍数, 因为小于它的质数一定会把它的倍数筛掉</p>
+<p>时间复杂度 $\Theta(nloglongn)$</p>
+<p>代码:</p>
+<figure class="highlight cpp"><table><tr><td class="code"><pre><span class="line"><span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">2</span>;i &lt;= n; i++) &#123;</span><br><span class="line">    <span class="keyword">if</span> (vis[i]) <span class="keyword">continue</span>;</span><br><span class="line">    prime[++tot] = i;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> j = i + i;j &lt;= n; j += i) </span><br><span class="line">        vis[j] = <span class="number">1</span>;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<h3 id="2-线性筛"><a href="#2-线性筛" class="headerlink" title="2. 线性筛"></a>2. 线性筛</h3><p>观察发现有些数被筛了好几回, 如12被2, 3同时筛过</p>
+<p>如果我们能利用每个数的特征来让每个数只被筛一次, 那么复杂度将变得更优</p>
+<p>这个特征可以是每个数的最小质因子</p>
+<p>设计e[x]数组表示x的最小质因子是谁, prime数组存储已经筛到的质数, 从2枚举到n, 假如当前数为x, 其最小质因子为p, 对于prime数组中所有小于等于p的质数$p_i$, 让$e[x \cdot p_i] = p_i$ </p>
+<p>尝试用递归的方式理解: 例如数字$30 = 2 <em> 3 </em> 5$, 30的最小质因子是2, 所以它是被15筛掉的, $15 = 3 * 5$, 最小质因子为3, 它是被5筛掉的</p>
+<p>时间复杂度 $\Theta(n)$, 其他应用: 筛次小质因子</p>
+<figure class="highlight cpp"><table><tr><td class="code"><pre><span class="line"><span class="keyword">for</span> (<span class="keyword">int</span> i = <span class="number">2</span>;i &lt;= n; i++) &#123;</span><br><span class="line">    <span class="keyword">if</span> (!e[i]) e[i] = i, prime[++tot] = i;</span><br><span class="line">    <span class="keyword">for</span> (<span class="keyword">int</span> j = <span class="number">1</span>;j &lt;= tot &amp;&amp; prime[j] * i &lt;= n; j++) &#123;</span><br><span class="line">        e[i * prime[j]] = prime[j];</span><br><span class="line">        <span class="keyword">if</span> (prime[j] &gt;= e[i]) <span class="keyword">break</span>;</span><br><span class="line">    &#125;</span><br><span class="line">&#125;</span><br></pre></td></tr></table></figure>
+<h2 id="数论筛法"><a href="#数论筛法" class="headerlink" title="数论筛法:"></a>数论筛法:</h2><hr>
+]]></content>
+  </entry>
+  <entry>
     <title>虚树学习笔记</title>
     <url>/2020/01/01/%E8%99%9A%E6%A0%91%E5%AD%A6%E4%B9%A0%E7%AC%94%E8%AE%B0/</url>
     <content><![CDATA[<p>以消耗战为例</p>
