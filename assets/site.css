@@ -777,3 +777,25 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
   .id-card h1 { margin-top: 12px; }
   .icon-links { grid-template-columns: 1fr 1fr; }
 }
+
+/* ---------- animation play / scrub bar (assets/anim.js) ---------- */
+.anim-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+  font-size: 13px;
+  color: var(--text-faint);
+}
+.anim-bar button {
+  width: 30px; height: 30px;
+  border: 1px solid var(--border);
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.anim-bar button:hover { border-color: var(--accent); }
+.anim-bar input[type="range"] { flex: 1; min-width: 80px; }
+.anim-bar .anim-time { font-family: var(--font-mono); font-variant-numeric: tabular-nums; white-space: nowrap; }

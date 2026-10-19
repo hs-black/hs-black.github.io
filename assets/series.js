@@ -38,6 +38,25 @@
         ['smol-infrastructure', '基础设施：GPU 集群、通信与存储'],
       ],
     },
+    systems: {
+      title: '动画图解 LLM 系统',
+      posts: [
+        ['kv-cache', 'KV cache'],
+        ['paged-attention', 'PagedAttention'],
+        ['continuous-batching', 'Continuous batching'],
+        ['prefix-caching', 'Prefix caching'],
+        ['speculative-decoding', '投机解码'],
+        ['dspark', 'DSpark'],
+        ['sparse-attention', '稀疏注意力'],
+        ['llm-quantization', 'LLM 量化'],
+        ['distributed-inference', '分布式推理'],
+        ['cpu-overhead', 'CPU overhead 与异步调度'],
+        ['cuda-graph', 'CUDA Graph'],
+        ['rmsnorm-kernel', 'RMSNorm 与 GPU 算子优化'],
+        ['gradient-checkpointing', 'Gradient checkpointing'],
+        ['deepseek-v4-runtime', 'DeepSeek-V4 运行时：每张 GPU 里装着什么'],
+      ],
+    },
     reports: {
       title: '模型技术报告精读',
       posts: [

@@ -144,3 +144,15 @@ body.deck-page {
 .slide .widget .seg button { font-size: 20px; padding: 6px 16px; }
 .slide .widget output, .slide .widget .val { font-family: var(--font-mono); }
 .slide .hint { font-size: 16px; color: var(--text-faint); }
+
+/* Animation bar inside a slide: pinned to the bottom of the canvas. */
+.slide > .anim-bar {
+  position: absolute;
+  left: 96px; right: 96px; bottom: 40px;
+  margin: 0;
+  font-size: 16px;
+  opacity: 0.35;
+  transition: opacity 0.2s;
+}
+.slide > .anim-bar:hover, .slide > .anim-bar:focus-within { opacity: 1; }
+.slide > .anim-bar button { width: 36px; height: 36px; font-size: 14px; }

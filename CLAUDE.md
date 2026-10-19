@@ -23,6 +23,7 @@ assets/site.css       shared styles + color tokens (light/dark)
 assets/slides.css     slide-deck styles (load after site.css)
 assets/slides.js      slide engine (navigation, fragments, slidechange event)
 assets/series.js      series list + nav for multi-part posts
+assets/anim.js        timeline animation engine (smooth, scrubbable, step-able)
 assets/img/           avatar and other shared images
 assets/favicon.svg
 files/resume.pdf      linked from the home page
@@ -132,6 +133,14 @@ controls `.ctrls` > `.ctrl` (label · range · output), `.seg` toggle buttons an
   `posts/next-token/` for the pattern).
 - Navigation: ← → / space / PageUp/Down, click (left third goes back), swipe,
   `F` for fullscreen, `#N` in the URL opens slide N.
+- Smooth animation: build a timeline with `assets/anim.js` (`Anim.timeline()`
+  → `.to(sel, {x, y, scale, opacity, fill, draw, text, attr}, {at, dur})`,
+  `.label()` for stops) and bind it with `Anim.slide(slideEl, tl, { steps:
+  true, controls: true })`: each label is reached by one key press, the
+  scene is a pure function of time so going back and scrubbing work. Don't
+  mix anim steps with ordinary `.fragment`s on the same slide. In articles,
+  `Anim.inView(el, tl)`. The header comment of anim.js has the full API; see
+  `posts/kv-cache/` for a deck built this way.
 - Live widgets go in `<div class="widget" data-interactive>`: clicks inside
   don't turn the page, and focused inputs/buttons keep their keys. See
   `posts/scaling-pipeline/` and `posts/scaling-collectives/`.
