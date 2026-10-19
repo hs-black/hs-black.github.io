@@ -82,6 +82,10 @@ Kinds, used in both the post header and the home list:
   unsure of a fact, research it and state the settled answer plainly. Source
   chapters and papers go in a final 参考与延伸阅读 section, which is the only
   place sources are narrated.
+- Don't talk about the post itself: no reading plans or structure
+  announcements ("下面按报告的顺序走一遍", "本文分三部分", "每遇到一个新部件先讲…再讲…",
+  "本节讲…"). Open with the subject — a question, a number, the problem —
+  and let headings and the TOC carry the structure.
 - Use the English term when the Chinese one is uncommon in the ML community
   (micro-batch, all-reduce, kernel, warp, rollout, KV cache, prefill/decode…).
   Decks read like a talk: "目录", not "这套幻灯片讲什么".
