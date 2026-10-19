@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linear attention：把历史写进状态 · Zunzhe Zhang</title>
+<meta name="description" content="用可回放动画推导线性 attention 的 S/z 累加器、归一化读出、遗忘门与 delta 更新，理解固定状态和精确历史检索的取舍。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
+.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
+.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">动画图解 LLM 系统</div>
+<h1 class="rise" style="--d:1">Linear attention：把历史写进状态</h1>
+<p class="muted rise" style="--d:2">不逐条翻 KV，能不能维护一个随时可查的“记事本”？</p>
+<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
+</section>
+<section class="slide lesson" id="softmax">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>先看普通 attention 在读什么</h2>
+<p class="intro">当前 Q 给每个 K 打分，softmax 归一化后，再把 V 加权相加。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="新查询重新扫描各个历史 KV，然后展示可替代的固定大小状态">
+</svg>
+<div class="captions">
+<p>一行 attention：y = Σ softmax(q·kᵢ / √d)ᵢ × vᵢ。每个历史位置都有一个权重。</p>
+<p>新 Q 到来后，所有匹配分数都可能改变，所以通常要重新读取历史 K、V。</p>
+<p>线性 attention 换一种相似度形式，让历史先合并成固定大小的状态，再由 Q 查询。</p>
+</div>
+</section>
+<section class="slide lesson" id="kernel">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>关键改写：让求和先发生</h2>
+<p class="intro">用 φ(q)ᵀφ(k) 作为相似度，并用权重总和归一化。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="历史的外积和被括成状态 S，特征和被括成状态 z，Q 从求和中移出">
+</svg>
+<div class="captions">
+<p>选非负特征映射 φ，例如 ELU(x) + 1。这样相似度非负，可以组成归一化加权平均。</p>
+<p>分子：Σ [φ(q)ᵀφ(kᵢ)]vᵢᵀ = φ(q)ᵀ [Σ φ(kᵢ)vᵢᵀ]。把 Q 从求和里提出来。</p>
+<p>分母同样提出来：Σ φ(q)ᵀφ(kᵢ) = φ(q)ᵀ [Σ φ(kᵢ)]。历史只需维护 S 和 z。</p>
+</div>
+<p class="note">这是核化相似度下的等价重排。一般有限维 φ 不等于原始 softmax attention。</p>
+</section>
+<section class="slide lesson" id="state">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>每来一个 token，更新两个累加器</h2>
+<p class="intro">S 保存 key 与 value 的关联，z 保存用于归一化的 key 总量。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="三个 token 的外积依次流入两维累加器，S 和 z 数值逐步改变">
+</svg>
+<div class="captions">
+<p>状态从 S₀ = 0、z₀ = 0 开始。假设 φ(k) 有 2 维，v 为 1 维，方便把每个数画出来。</p>
+<p>第一个 token：φ(k₁) = [1, 0]，v₁ = 2。外积写入 S = [2, 0]，z = [1, 0]。</p>
+<p>第二个 token：φ(k₂) = [0, 1]，v₂ = 4。累加后 S = [2, 4]，z = [1, 1]。</p>
+<p>第三个 token：φ(k₃) = [1, 1]，v₃ = 3。累加后 S = [5, 7]，z = [2, 2]。</p>
+</div>
+<p class="note">所有数字为手算示例；先更新到位置 t，再读出，就包含当前 token。</p>
+</section>
+<section class="slide lesson" id="read">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>查询时，分子和分母一起读</h2>
+<p class="intro">继续用刚才的状态：S = [5, 7]，z = [2, 2]；当前 φ(q) = [2, 1]。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="查询向量与状态及归一化向量相乘，得到分子17分母6再相除">
+</svg>
+<div class="captions">
+<p>Q 不需要逐条拿出旧 token；直接对固定大小的 S、z 做两次乘法。</p>
+<p>分子 = 2 × 5 + 1 × 7 = 17。分母 = 2 × 2 + 1 × 2 = 6。</p>
+<p>输出 y = 17 / 6 ≈ 2.83。分母把“总贡献”变成“加权平均”，避免仅因历史变长而放大输出。</p>
+</div>
+<p class="note">实际实现会处理分母接近 0 的数值稳定性，例如加 ε。</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>公式里的每个维度</h2>
+<div class="formula">S<sub>t</sub> = S<sub>t−1</sub> + φ(k<sub>t</sub>) v<sub>t</sub>ᵀ<br>z<sub>t</sub> = z<sub>t−1</sub> + φ(k<sub>t</sub>)<br>y<sub>t</sub>ᵀ = φ(q<sub>t</sub>)ᵀ S<sub>t</sub> / [φ(q<sub>t</sub>)ᵀ z<sub>t</sub>]</div>
+<div class="two-col">
+<div class="card">
+<h3>状态的大小</h3>
+<p>φ(k) 有 d<sub>φ</sub> 维，v 有 d<sub>v</sub> 维。S 是 d<sub>φ</sub> × d<sub>v</sub> 的矩阵；z 是 d<sub>φ</sub> 维向量。</p>
+</div>
+<div class="card">
+<h3>为什么叫“线性”</h3>
+<p>固定这些维度后，每个 token 更新与查询的工作量不随历史长度增长，总工作量随 token 数线性增长。</p>
+</div>
+</div>
+</section>
+<section class="slide lesson" id="forget">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>加一个门：让旧记忆逐渐淡出</h2>
+<p class="intro">把旧状态乘 α，再写入新信息；0 ≤ α ≤ 1 控制保留多少。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="旧状态柱随遗忘门缩小，新 token 贡献写入，归一化状态同步衰减">
+</svg>
+<div class="captions">
+<p>纯累加会把越来越多内容挤进同一状态。旧信息与新信息可能互相干扰。</p>
+<p>先把旧 S 缩为 αS，再加入新的 φ(k)vᵀ。α 较小，遗忘更快；α 接近 1，保留更久。</p>
+<p>在这个归一化示例里，z 也用相同门控更新。旧 token 的权重随之后各步门值的乘积衰减。</p>
+</div>
+<p class="note">动画取 α = 0.5。现代门控线性模型还会采用向量门、不同归一化与更复杂的状态更新。</p>
+</section>
+<section class="slide lesson" id="delta">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>Delta rule：先读旧答案，再写误差</h2>
+<p class="intro">把状态看成一张关联表。遇到同一个 key，先问“我现在记得什么？”</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="读取 key 方向上的旧值2，与目标5相减得误差3，再以步长0.5改写到3.5">
+</svg>
+<div class="captions">
+<p>这里换成不带上页分母的 fast-weight 记忆。key k = [1, 0]，状态对它的旧预测是 2，新目标 value 是 5。</p>
+<p>误差 e = v − Sᵀk = 5 − 2 = 3。只把需要修正的部分写回，而不是再完整叠上一份 5。</p>
+<p>用 β = 0.5：S ← S + βkeᵀ。该方向的记忆从 2 变成 3.5；另一个正交 key 对应的 4 保持不变。</p>
+</div>
+<p class="note">示例 key 为单位向量；一般 key 会相互相关，更新也会影响相关方向。DeltaNet 是另一类状态更新规则。</p>
+</section>
+<section class="slide lesson" id="parallel">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>训练时，状态更新也能按块并行</h2>
+<p class="intro">逐 token 递推适合 decode；prefill 和训练更适合把工作组织成大块。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="串行 token 被组合为三个计算块，块内工作并行、块间通过状态相连">
+</svg>
+<div class="captions">
+<p>最朴素的执行方式依次处理 t₁、t₂、t₃……，很难喂满 GPU。</p>
+<p>对可结合的状态更新，可以用并行 scan 或 chunkwise 公式。每个 chunk 内做矩阵乘法，chunk 之间传递状态。</p>
+<p>Delta rule 需要更专门的块算法；目标相同：保留递推语义，同时让 GPU 做更多规整的大块运算。</p>
+</div>
+<p class="note">这是执行组织方式；具体块公式依赖累加、门控或 delta 更新规则。</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>它省掉了什么，又把难题放在哪？</h2>
+<table>
+<thead>
+<tr>
+<th>
+</th>
+<th>Full softmax attention</th>
+<th>基础 linear attention</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Decode 的历史状态</td>
+<td>O(n(d<sub>k</sub> + d<sub>v</sub>))</td>
+<td>O(d<sub>φ</sub>d<sub>v</sub> + d<sub>φ</sub>)</td>
+</tr>
+<tr>
+<td>每步读历史的计算</td>
+<td>O(n(d<sub>k</sub> + d<sub>v</sub>))</td>
+<td>O(d<sub>φ</sub>d<sub>v</sub>)</td>
+</tr>
+<tr>
+<td>历史的形态</td>
+<td>保留每个位置，逐项匹配</td>
+<td>写进有限容量的状态</td>
+</tr>
+<tr>
+<td>关键挑战</td>
+<td>长历史的容量与带宽</td>
+<td>精确检索、干扰与遗忘</td>
+</tr>
+</tbody>
+</table>
+<p class="intro">混合架构可以让部分层维护线性状态，部分层保留 full attention。<a href="/posts/kimi-linear/">Kimi Linear</a> 与 <a href="/posts/qwen3-next/">Qwen3-Next</a> 可以接着看。</p>
+<p class="note">复杂度按一个 head、固定特征映射成本计算。FlashAttention 优化 softmax attention 的 IO，并未把它改成线性状态模型。</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">参考资料</div>
+<h2>参考与延伸阅读</h2>
+<ul class="reference-list">
+<li>
+<a href="https://arxiv.org/abs/2006.16236" target="_blank" rel="noopener noreferrer">Transformers are RNNs：核化相似度与线性递推</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2312.06635" target="_blank" rel="noopener noreferrer">Gated Linear Attention Transformers with Hardware-Efficient Training</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2406.06484" target="_blank" rel="noopener noreferrer">Parallelizing Linear Transformers with the Delta Rule over Sequence Length</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2412.06464" target="_blank" rel="noopener noreferrer">Gated Delta Networks：结合遗忘门与 delta 更新</a>
+</li>
+</ul>
+<p class="related">继续看：<a href="/posts/kv-cache/">KV cache</a> · <a href="/posts/sparse-attention/">Sparse attention</a> · <a href="/posts/kimi-linear/">Kimi Linear</a>
+</p>
+</section>
+</div>
+</main><script src="/assets/slides.js"></script><script src="/assets/anim.js"></script><script>
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
+const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
+const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
+const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
+const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
+function scene(id,svg,steps){
+ const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
+ const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
+ steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
+ const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
+ Anim.slide(el,tl,{steps:true,controls:true});
+}
+const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
+
+
+let sm=B('query',55,125,150,70,'当前 Q','accentbox')+B('state',815,125,220,70,'固定状态 S','greenbox ghost');for(let i=0;i<4;i++)sm+=B('kv'+i,370,30+i*75,190,56,'K'+(i+1)+' / V'+(i+1))+L('match'+i,220,160,355,58+i*75,'hotwire ghost');scene('softmax',sm,[{name:'每个新 Q 都重新匹配',run:(tl,t)=>{a(tl,t,'[id^=match]',{opacity:1});[0,1,2,3].forEach(i=>a(tl,t,'#kv'+i,{x:-15},i*.1))}},{name:'用状态组织历史',run:(tl,t)=>{[0,1,2,3].forEach(i=>a(tl,t,'#kv'+i,{x:400,y:(1.5-i)*75,scale:.3,opacity:0},i*.12));a(tl,t,'#state',{opacity:1},.7)}}]);
+scene('kernel',T(560,50,'yᵀ = Σ [φ(q)ᵀφ(kᵢ)] vᵢᵀ / Σ [φ(q)ᵀφ(kᵢ)]','value')+B('q',70,135,170,70,'φ(q)ᵀ','accentbox')+B('sum',350,100,350,65,'S = Σ φ(kᵢ)vᵢᵀ')+B('z',350,220,350,65,'z = Σ φ(kᵢ)')+B('out',835,155,220,70,'分子 ÷ 分母','greenbox')+L('n',250,170,335,133,'wire ghost')+L('d',250,170,335,253,'wire ghost')+L('ny',715,133,820,188,'wire ghost')+L('dy',715,253,820,188,'wire ghost'),[{name:'历史先合并成 S',run:(tl,t)=>{a(tl,t,'#sum',{x:-20,scale:1.06});a(tl,t,'#n,#ny',{opacity:1})}},{name:'归一化也保存为 z',run:(tl,t)=>{a(tl,t,'#z',{x:-20,scale:1.06});a(tl,t,'#d,#dy',{opacity:1});a(tl,t,'#out',{scale:1.05},.4)}}]);
+let state=T(205,35,'当前写入','label')+T(610,35,'S：关联累加器','label')+T(930,35,'z：归一化累加器','label')+B('incoming',45,130,300,80,'[1,0] × 2','accentbox')+L('writeS',360,150,485,130)+L('writeZ',360,190,805,230);for(let i=0;i<2;i++)state+=B('s'+i,500,75+i*120,220,85,'0','accentbox')+B('z'+i,820,75+i*120,220,85,'0','greenbox');scene('state',state,[{name:'写入第一个 token',run:(tl,t)=>{a(tl,t,'#incoming',{x:65});a(tl,t,'#s0 text',{text:2});a(tl,t,'#z0 text',{text:1})}},{name:'累加第二个 token',run:(tl,t)=>{a(tl,t,'#incoming',{x:0});a(tl,t,'#incoming text',{text:2,fmt:()=> '[0,1] × 4'});a(tl,t,'#s1 text',{text:4});a(tl,t,'#z1 text',{text:1})}},{name:'累加第三个 token',run:(tl,t)=>{a(tl,t,'#incoming',{x:65});a(tl,t,'#incoming text',{text:3,fmt:()=> '[1,1] × 3'});a(tl,t,'#s0 text',{text:5});a(tl,t,'#s1 text',{text:7});a(tl,t,'#z0 text',{text:2});a(tl,t,'#z1 text',{text:2})}}]);
+scene('read',B('q',40,130,215,80,'φ(q) = [2,1]','accentbox')+B('s',350,55,240,75,'S = [5,7]')+B('z',350,215,240,75,'z = [2,2]')+B('num',680,55,165,75,'17','accentbox ghost')+B('den',680,215,165,75,'6','greenbox ghost')+B('result',915,130,160,80,'2.83','accentbox ghost')+L('qs',270,155,335,95)+L('qz',270,185,335,252)+L('sn',605,95,665,95)+L('zd',605,252,665,252),[{name:'算分子与分母',run:(tl,t)=>{a(tl,t,'#q',{x:20});a(tl,t,'#num,#den',{opacity:1});a(tl,t,'#s,#z',{scale:1.05})}},{name:'归一化得到输出',run:(tl,t)=>{a(tl,t,'#num',{x:55,y:35,scale:.8});a(tl,t,'#den',{x:55,y:-35,scale:.8});a(tl,t,'#result',{opacity:1},.5)}}]);
+scene('forget',T(195,35,'旧状态','label')+T(550,35,'门控后的状态','label')+T(925,35,'新写入','label')+R('old',90,90,260,120,'accentbox')+R('faded',425,90,260,120,'accentbox')+B('gate',400,250,300,55,'α = 0.5','greenbox')+B('new',825,120,200,75,'φ(k)vᵀ','accentbox')+T(220,280,'S 与 z 同步缩放','label'),[{name:'旧记忆乘遗忘门',run:(tl,t)=>{a(tl,t,'#faded',{attr:{width:130},opacity:.55});a(tl,t,'#gate',{scale:1.07})}},{name:'写入新贡献',run:(tl,t)=>{a(tl,t,'#new',{x:-260,y:0,scale:.6});a(tl,t,'#faded',{attr:{width:220},opacity:.9},.4)}}]);
+scene('delta',T(220,35,'状态 S 的两条方向','label')+B('first',60,70,300,75,'2','accentbox')+B('second',60,190,300,75,'4')+B('key',450,65,230,65,'k = [1,0]','greenbox')+B('target',450,205,230,65,'目标 v = 5','greenbox')+B('error',805,65,250,75,'误差 = 3','ghost accentbox')+B('write',805,205,250,65,'β × e = 1.5','ghost greenbox')+L('read',375,108,435,98)+L('err',695,98,790,98,'wire'),[{name:'先算预测误差',run:(tl,t)=>{a(tl,t,'#first',{x:25});a(tl,t,'#error',{opacity:1});a(tl,t,'#key',{scale:1.05})}},{name:'沿 key 方向修正',run:(tl,t)=>{a(tl,t,'#write',{opacity:1});a(tl,t,'#first text',{text:3.5,fmt:v=>v.toFixed(1)},.25);a(tl,t,'#first',{x:0,scale:1.07},.25)}}]);
+let par=T(180,65,'逐 token 递推','label')+T(180,230,'chunkwise','label');for(let i=0;i<9;i++)par+=B('token'+i,350+i*75,35,63,55,'t'+(i+1),'box');for(let i=0;i<3;i++)par+=B('chunk'+i,350+i*245,190,215,85,'chunk '+(i+1),'accentbox ghost');par+=L('link0',575,232,585,232,'hotwire ghost')+L('link1',820,232,830,232,'hotwire ghost');scene('parallel',par,[{name:'把 token 组织成块',run:(tl,t)=>{for(let i=0;i<9;i++)a(tl,t,'#token'+i,{y:135,opacity:.15,scale:.7},i*.04);a(tl,t,'[id^=chunk]',{opacity:1},.4)}},{name:'块内并行，块间传状态',run:(tl,t)=>{a(tl,t,'[id^=link]',{opacity:1});[0,1,2].forEach(i=>a(tl,t,'#chunk'+i,{y:-12},i*.2))}}]);
+</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>

@@ -1,0 +1,563 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>DeepSeek-V4-Flash 推理：一枚 token，4 张卡 · Zunzhe Zhang</title>
+<meta name="description" content="逐卡动画展示 V4-Flash 的 HBM 读取、注意力分片、MoE 通信、KV 更新与 prefill/decode。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css"><style>
+.slide.ds {padding:52px 76px 80px;gap:16px;justify-content:flex-start}
+.ds .kicker{font-size:16px}.ds h1{font-size:72px}.ds h2{font-size:43px}.ds p{font-size:24px;line-height:1.5}.ds .intro{max-width:1000px;color:var(--text-soft)}
+.ds .scene{width:100%;height:330px;flex:none;display:block}.ds .scene.tall{height:360px}.ds p.intro + .scene{height:260px}.ds svg text{font-family:var(--font-sans);fill:var(--text);font-size:19px}.ds svg .tiny{font-size:15px}.ds svg .soft{fill:var(--text-soft)}
+.ds .box{fill:var(--surface);stroke:var(--border);stroke-width:1.6}.ds .purple{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.8}.ds .orange{fill:color-mix(in srgb,var(--accent-2) 12%,var(--surface));stroke:var(--accent-2);stroke-width:1.8}
+.ds .wire{fill:none;stroke:var(--border);stroke-width:2}.ds .flow{fill:none;stroke:var(--accent);stroke-width:3;stroke-linecap:round}.ds .token{fill:var(--accent);stroke:var(--surface);stroke-width:2}.ds .token2{fill:var(--accent-2);stroke:var(--surface);stroke-width:2}
+.ds .later{opacity:0}.ds .caption{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;font-size:20px;line-height:1.45}.ds .caption>div{border-top:2px solid var(--border);padding-top:12px}.ds .caption b{color:var(--accent);display:block;margin-bottom:4px}.ds .note{font-size:17px;color:var(--text-soft)}
+.ds .stats{display:flex;gap:48px;margin:24px 0}.ds .stats strong{font-size:60px;letter-spacing:-.04em;display:block;color:var(--accent)}.ds .stats span{font-size:20px;color:var(--text-soft)}
+.ds .pill{display:inline-block;border:1px solid var(--border);padding:8px 14px;border-radius:8px;font-size:19px}.ds .twocol{display:grid;grid-template-columns:1fr 1fr;gap:28px}.ds .panel{padding:22px 26px;background:var(--surface);border:1px solid var(--border);border-radius:16px}.ds .panel h3{font-size:26px;margin:0 0 12px}.ds .panel p{font-size:22px}.ds .formula{padding:20px 26px;background:var(--accent-soft);border-radius:14px;font-family:var(--font-mono);font-size:23px}
+.ds table{width:100%;border-collapse:collapse;font-size:21px}.ds td,.ds th{padding:10px 16px;border-bottom:1px solid var(--border);text-align:left}.ds th{color:var(--text-soft);font-weight:500}.ds .refs{font-size:22px;line-height:1.7;display:grid;gap:10px}.ds .refs small{display:block;color:var(--text-soft);font-size:18px}
+.slide.ds > .anim-bar{left:76px;right:76px;bottom:27px;opacity:.8}.ds .footer{font-size:18px;color:var(--text-soft);margin-top:auto}.ds a{position:relative;z-index:1}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide ds" style="justify-content:center">
+<div class="kicker">INFERENCE WALKTHROUGH · 2026-10-20</div>
+<h1>DeepSeek-V4-Flash 推理：<br><span class="accent">一枚 token，4 张卡</span>
+</h1>
+<p class="intro">权重留在显存，计算把它读进芯片；上下文记忆逐步增长，token 的表示在卡间流动。</p>
+<div class="stats">
+<div><strong>4</strong><span>教学划分的 GPU 数</span>
+</div>
+<div><strong>43</strong><span>每步经过的主干层</span>
+</div>
+<div><strong>4 × 4096</strong><span>mHC 残差形状</span>
+</div>
+</div>
+<p class="note">采用 TP=4 的教学划分：按头、按专家分权重；卡数用于解释数据流，容量需另按权重精度和请求规模计算。</p>
+</section>
+<section class="slide ds" id="placement">
+<div class="kicker">01 / 先摆好模型</div>
+<h2>每张卡都有自己的权重和上下文记忆</h2>
+<svg class="scene tall" viewBox="0 0 1128 360" role="img" aria-label="4 张 GPU 各自持有权重分片、注意力头和 KV cache">
+<g id="gpu0">
+<rect class="box" x="18" y="30" width="245" height="132" rx="12"/>
+</g>
+<text x="34" y="56" class="" text-anchor="start">GPU 0</text>
+<text x="34" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
+<text x="34" y="108" class="tiny" text-anchor="start">64 个本地路由专家</text>
+<g id="resident0">
+<rect class="purple" x="32" y="123" width="215" height="26" rx="12"/>
+<text x="139.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
+</g>
+<g id="gpu1">
+<rect class="box" x="298" y="30" width="245" height="132" rx="12"/>
+</g>
+<text x="314" y="56" class="" text-anchor="start">GPU 1</text>
+<text x="314" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
+<text x="314" y="108" class="tiny" text-anchor="start">64 个本地路由专家</text>
+<g id="resident1">
+<rect class="purple" x="312" y="123" width="215" height="26" rx="12"/>
+<text x="419.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
+</g>
+<g id="gpu2">
+<rect class="box" x="578" y="30" width="245" height="132" rx="12"/>
+</g>
+<text x="594" y="56" class="" text-anchor="start">GPU 2</text>
+<text x="594" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
+<text x="594" y="108" class="tiny" text-anchor="start">64 个本地路由专家</text>
+<g id="resident2">
+<rect class="purple" x="592" y="123" width="215" height="26" rx="12"/>
+<text x="699.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
+</g>
+<g id="gpu3">
+<rect class="box" x="858" y="30" width="245" height="132" rx="12"/>
+</g>
+<text x="874" y="56" class="" text-anchor="start">GPU 3</text>
+<text x="874" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
+<text x="874" y="108" class="tiny" text-anchor="start">64 个本地路由专家</text>
+<g id="resident3">
+<rect class="purple" x="872" y="123" width="215" height="26" rx="12"/>
+<text x="979.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
+</g>
+<text x="565" y="260" class="soft" text-anchor="middle">每张卡重复经过所有主干层：Attention 分头，MoE 分专家。</text>
+</svg>
+<p class="note">每层 256 个路由专家均分；Q / O 按头分片。这组划分中，shared KV、mHC 与共享专家在各卡保留副本。4 路残差是模型维度，与 GPU 数量无关。</p>
+</section>
+<section class="slide ds" id="prefill">
+<div class="kicker">02 / Prefill</div>
+<h2>先把提示词读完，建好每层 KV</h2>
+<p class="intro">图中展示 GPU 0–3；四张卡协作完成每一层。</p>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="Prompt 的 token 批量进入多张卡，生成各层 KV cache">
+<g>
+<rect class="orange" x="15" y="95" width="245" height="110" rx="12"/>
+<text x="137.5" y="157.0" text-anchor="middle">Prompt：一批 token</text>
+</g>
+<text x="135" y="243" class="soft" text-anchor="middle">prefill</text>
+<g id="prefgpu0">
+<rect class="box" x="390" y="20" width="245" height="58" rx="12"/>
+<text x="512.5" y="56.0" text-anchor="middle">GPU 0：Q / KV / MoE</text>
+</g>
+<g id="prefkv0">
+<rect class="purple" x="805" y="20" width="275" height="58" rx="12"/>
+<text x="942.5" y="56.0" text-anchor="middle">本层 KV（按类型保存）</text>
+</g>
+<path class="wire" d="M260 150 L390 49"/>
+<path class="wire" d="M635 49 L805 49"/>
+<circle id="pref0" class="token" cx="260" cy="150" r="9"/>
+<g id="prefgpu1">
+<rect class="box" x="390" y="98" width="245" height="58" rx="12"/>
+<text x="512.5" y="134.0" text-anchor="middle">GPU 1：Q / KV / MoE</text>
+</g>
+<g id="prefkv1">
+<rect class="purple" x="805" y="98" width="275" height="58" rx="12"/>
+<text x="942.5" y="134.0" text-anchor="middle">本层 KV（按类型保存）</text>
+</g>
+<path class="wire" d="M260 150 L390 127"/>
+<path class="wire" d="M635 127 L805 127"/>
+<circle id="pref1" class="token" cx="260" cy="150" r="9"/>
+<g id="prefgpu2">
+<rect class="box" x="390" y="176" width="245" height="58" rx="12"/>
+<text x="512.5" y="212.0" text-anchor="middle">GPU 2：Q / KV / MoE</text>
+</g>
+<g id="prefkv2">
+<rect class="purple" x="805" y="176" width="275" height="58" rx="12"/>
+<text x="942.5" y="212.0" text-anchor="middle">本层 KV（按类型保存）</text>
+</g>
+<path class="wire" d="M260 150 L390 205"/>
+<path class="wire" d="M635 205 L805 205"/>
+<circle id="pref2" class="token" cx="260" cy="150" r="9"/>
+<g id="prefgpu3">
+<rect class="box" x="390" y="254" width="245" height="58" rx="12"/>
+<text x="512.5" y="290.0" text-anchor="middle">GPU 3：Q / KV / MoE</text>
+</g>
+<g id="prefkv3">
+<rect class="purple" x="805" y="254" width="275" height="58" rx="12"/>
+<text x="942.5" y="290.0" text-anchor="middle">本层 KV（按类型保存）</text>
+</g>
+<path class="wire" d="M260 150 L390 283"/>
+<path class="wire" d="M635 283 L805 283"/>
+<circle id="pref3" class="token" cx="260" cy="150" r="9"/>
+</svg>
+<div class="caption">
+<div><b>一批 token 一起算</b>矩阵乘法可复用权重，因果 mask 保证只看过去。</div>
+<div><b>每层都有自己的 KV</b>不是只在输入端存一份；43 层各自更新。</div>
+<div><b>读完开始生成</b>最后一个位置的 logits 给出首个输出 token。</div>
+</div>
+</section>
+<section class="slide ds" id="hbm">
+<div class="kicker">03 / 放大一张 GPU</div>
+<h2>一次 kernel：读显存，算，写回</h2>
+<p class="intro">各张 GPU 都重复这个过程；这里放大 GPU 0。</p>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="常驻权重和 KV 从 HBM 被读取到片上计算，再写回临时激活">
+<g>
+<rect class="box" x="20" y="35" width="360" height="260" rx="12"/>
+</g>
+<text x="40" y="68" class="" text-anchor="start">GPU 0 · HBM 显存</text>
+<g>
+<rect class="purple" x="45" y="90" width="310" height="52" rx="12"/>
+<text x="200.0" y="123.0" text-anchor="middle">常驻 W：本层权重</text>
+</g>
+<g>
+<rect class="orange" x="45" y="160" width="310" height="52" rx="12"/>
+<text x="200.0" y="193.0" text-anchor="middle">常驻 KV：历史状态</text>
+</g>
+<g>
+<rect class="box" x="45" y="230" width="310" height="42" rx="12"/>
+<text x="200.0" y="258.0" text-anchor="middle">临时：激活 / 通信工作区</text>
+</g>
+<g>
+<rect class="box" x="530" y="85" width="240" height="165" rx="12"/>
+</g>
+<text x="650" y="117" class="" text-anchor="middle">SM：计算单元</text>
+<text x="650" y="158" class="tiny" text-anchor="middle">片上 SRAM / 寄存器</text>
+<text x="650" y="203" class="tiny" text-anchor="middle">矩阵乘 · 归一化 · 注意力</text>
+<g>
+<rect class="purple" x="900" y="115" width="205" height="90" rx="12"/>
+<text x="1002.5" y="167.0" text-anchor="middle">新激活 h′</text>
+</g>
+<path class="wire" d="M355 116 L530 155"/>
+<path class="wire" d="M355 186 L530 180"/>
+<path class="wire" d="M770 166 L900 160"/>
+<circle id="wread" class="token" cx="355" cy="116" r="9"/>
+<circle id="kvread" class="token2" cx="355" cy="186" r="9"/>
+<circle id="compute" class="token" cx="650" cy="230" r="9"/>
+</svg>
+<div class="caption">
+<div><b>读</b>本轮需要的权重块和 KV 块搬到片上。</div>
+<div><b>算</b>SM 用片上数据计算，分块反复推进。</div>
+<div><b>写</b>输出写入激活 / 通信 buffer；原权重和历史 KV 仍在。</div>
+</div>
+</section>
+<section class="slide ds" id="tensor">
+<div class="kicker">04 / Tensor Parallel</div>
+<h2>各卡算自己的头，再把输出加起来</h2>
+<p class="intro">图中展示 GPU 0–3；总共 64 个头分到 4 张卡。</p>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="各 GPU 并行完成局部注意力头，输出投影部分和通过 all-reduce 汇合">
+<g>
+<rect class="purple" x="15" y="25" width="205" height="56" rx="12"/>
+<text x="117.5" y="60.0" text-anchor="middle">GPU 0 · 16 Q 头</text>
+</g>
+<g>
+<rect class="box" x="315" y="25" width="280" height="56" rx="12"/>
+<text x="455.0" y="60.0" text-anchor="middle">读本地 KV → 注意力</text>
+</g>
+<g>
+<rect class="orange" x="690" y="25" width="160" height="56" rx="12"/>
+<text x="770.0" y="60.0" text-anchor="middle">O 的部分和</text>
+</g>
+<path class="wire" d="M220 53 L315 53"/>
+<path class="wire" d="M595 53 L690 53"/>
+<path class="wire" d="M850 53 L965 165"/>
+<circle id="tp0" class="token" cx="220" cy="53" r="9"/>
+<g>
+<rect class="purple" x="15" y="102" width="205" height="56" rx="12"/>
+<text x="117.5" y="137.0" text-anchor="middle">GPU 1 · 16 Q 头</text>
+</g>
+<g>
+<rect class="box" x="315" y="102" width="280" height="56" rx="12"/>
+<text x="455.0" y="137.0" text-anchor="middle">读本地 KV → 注意力</text>
+</g>
+<g>
+<rect class="orange" x="690" y="102" width="160" height="56" rx="12"/>
+<text x="770.0" y="137.0" text-anchor="middle">O 的部分和</text>
+</g>
+<path class="wire" d="M220 130 L315 130"/>
+<path class="wire" d="M595 130 L690 130"/>
+<path class="wire" d="M850 130 L965 165"/>
+<circle id="tp1" class="token" cx="220" cy="130" r="9"/>
+<g>
+<rect class="purple" x="15" y="179" width="205" height="56" rx="12"/>
+<text x="117.5" y="214.0" text-anchor="middle">GPU 2 · 16 Q 头</text>
+</g>
+<g>
+<rect class="box" x="315" y="179" width="280" height="56" rx="12"/>
+<text x="455.0" y="214.0" text-anchor="middle">读本地 KV → 注意力</text>
+</g>
+<g>
+<rect class="orange" x="690" y="179" width="160" height="56" rx="12"/>
+<text x="770.0" y="214.0" text-anchor="middle">O 的部分和</text>
+</g>
+<path class="wire" d="M220 207 L315 207"/>
+<path class="wire" d="M595 207 L690 207"/>
+<path class="wire" d="M850 207 L965 165"/>
+<circle id="tp2" class="token" cx="220" cy="207" r="9"/>
+<g>
+<rect class="purple" x="15" y="256" width="205" height="56" rx="12"/>
+<text x="117.5" y="291.0" text-anchor="middle">GPU 3 · 16 Q 头</text>
+</g>
+<g>
+<rect class="box" x="315" y="256" width="280" height="56" rx="12"/>
+<text x="455.0" y="291.0" text-anchor="middle">读本地 KV → 注意力</text>
+</g>
+<g>
+<rect class="orange" x="690" y="256" width="160" height="56" rx="12"/>
+<text x="770.0" y="291.0" text-anchor="middle">O 的部分和</text>
+</g>
+<path class="wire" d="M220 284 L315 284"/>
+<path class="wire" d="M595 284 L690 284"/>
+<path class="wire" d="M850 284 L965 165"/>
+<circle id="tp3" class="token" cx="220" cy="284" r="9"/>
+<g>
+<rect class="purple" x="930" y="130" width="185" height="74" rx="12"/>
+<text x="1022.5" y="174.0" text-anchor="middle">all-reduce</text>
+</g>
+</svg>
+<div class="caption">
+<div><b>输入可见于各卡</b>mHC 预混合得到 d 维输入，Q 投影按头分工。</div>
+<div><b>KV 共用的含义</b>同卡内多个头读一份 KV；此划分中各卡有 KV 副本。</div>
+<div><b>输出再合起来</b>分片输出投影产生部分和，all-reduce 得到完整结果。</div>
+</div>
+</section>
+<section class="slide ds" id="local-experts">
+<div class="kicker">05 / 按专家分权重</div>
+<h2>专家待在原卡，token 在那里计算</h2>
+<p class="intro">这组划分中：各卡都有 token 表示，执行本地专家后合并。</p>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="六个路由专家分布在四张卡，每张卡计算本地被选专家并归约">
+<g>
+<rect class="orange" x="15" y="120" width="195" height="80" rx="12"/>
+<text x="112.5" y="167.0" text-anchor="middle">相同 token 表示</text>
+</g>
+<g>
+<rect class="box" x="350" y="15" width="370" height="58" rx="12"/>
+<text x="535.0" y="51.0" text-anchor="middle">GPU 0 计算：E0、E2</text>
+</g>
+<path class="wire" d="M210 160 L350 44"/>
+<path class="wire" d="M720 44 L920 160"/>
+<circle id="ep0" class="token" cx="210" cy="160" r="9"/>
+<g>
+<rect class="box" x="350" y="93" width="370" height="58" rx="12"/>
+<text x="535.0" y="129.0" text-anchor="middle">GPU 1 计算：E64</text>
+</g>
+<path class="wire" d="M210 160 L350 122"/>
+<path class="wire" d="M720 122 L920 160"/>
+<circle id="ep1" class="token" cx="210" cy="160" r="9"/>
+<g>
+<rect class="box" x="350" y="171" width="370" height="58" rx="12"/>
+<text x="535.0" y="207.0" text-anchor="middle">GPU 2 计算：E128、E129</text>
+</g>
+<path class="wire" d="M210 160 L350 200"/>
+<path class="wire" d="M720 200 L920 160"/>
+<circle id="ep2" class="token" cx="210" cy="160" r="9"/>
+<g>
+<rect class="box" x="350" y="249" width="370" height="58" rx="12"/>
+<text x="535.0" y="285.0" text-anchor="middle">GPU 3 计算：E192</text>
+</g>
+<path class="wire" d="M210 160 L350 278"/>
+<path class="wire" d="M720 278 L920 160"/>
+<circle id="ep3" class="token" cx="210" cy="160" r="9"/>
+<g>
+<rect class="purple" x="900" y="118" width="215" height="85" rx="12"/>
+<text x="1007.5" y="167.5" text-anchor="middle">加权部分和归约</text>
+</g>
+<text x="1000" y="250" class="soft" text-anchor="middle">再加共享专家</text>
+</svg>
+<div class="caption">
+<div><b>路由一次选 6 个</b>图中专家 ID 是一组示例，可能集中或分散在各卡。</div>
+<div><b>本地权重留在 HBM</b>本轮没选中的专家仍然常驻，只是不参与该 token。</div>
+<div><b>汇合后继续</b>本地加权结果 all-reduce，再加共享专家。</div>
+</div>
+</section>
+<section class="slide ds" id="dispatch">
+<div class="kicker">06 / 高吞吐 Expert Parallel</div>
+<h2>token 分片时：发输入，收结果</h2>
+<p class="intro">服务系统还可以把 token 分散到各卡，再按需交换激活。这样就得到典型的 EP dispatch / combine。</p>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="EP 将 token 激活发送给专家所在卡，专家读取本地权重并返回结果">
+<g>
+<rect class="purple" x="15" y="105" width="205" height="110" rx="12"/>
+<text x="117.5" y="167.0" text-anchor="middle">token 所属卡</text>
+</g>
+<g>
+<rect class="box" x="430" y="30" width="255" height="70" rx="12"/>
+<text x="557.5" y="72.0" text-anchor="middle">专家所在卡 1</text>
+</g>
+<g id="epresult0">
+<rect class="orange" x="830" y="30" width="275" height="70" rx="12"/>
+<text x="967.5" y="72.0" text-anchor="middle">专家结果</text>
+</g>
+<path class="wire" d="M220 160 L430 65"/>
+<path class="wire" d="M685 65 L830 65"/>
+<circle id="dispatch0" class="token" cx="220" cy="160" r="9"/>
+<g>
+<rect class="box" x="430" y="133" width="255" height="70" rx="12"/>
+<text x="557.5" y="175.0" text-anchor="middle">专家所在卡 2</text>
+</g>
+<g id="epresult1">
+<rect class="orange" x="830" y="133" width="275" height="70" rx="12"/>
+<text x="967.5" y="175.0" text-anchor="middle">专家结果</text>
+</g>
+<path class="wire" d="M220 160 L430 168"/>
+<path class="wire" d="M685 168 L830 168"/>
+<circle id="dispatch1" class="token" cx="220" cy="160" r="9"/>
+<g>
+<rect class="box" x="430" y="236" width="255" height="70" rx="12"/>
+<text x="557.5" y="278.0" text-anchor="middle">专家所在卡 3</text>
+</g>
+<g id="epresult2">
+<rect class="orange" x="830" y="236" width="275" height="70" rx="12"/>
+<text x="967.5" y="278.0" text-anchor="middle">专家结果</text>
+</g>
+<path class="wire" d="M220 160 L430 271"/>
+<path class="wire" d="M685 271 L830 271"/>
+<circle id="dispatch2" class="token" cx="220" cy="160" r="9"/>
+</svg>
+<div class="caption">
+<div><b>Dispatch</b>按专家目的地打包 token 激活，发给对应卡。</div>
+<div><b>本地专家计算</b>先算 gate / up，再做 SwiGLU 和 down 投影。</div>
+<div><b>Combine</b>结果回到 token 所属卡，按路由权重相加。</div>
+</div>
+</section>
+<section class="slide ds" id="append">
+<div class="kicker">07 / Decode cache</div>
+<h2>每来一个 token，更新局部；满一组，再记长期</h2>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="局部 KV 环形覆盖，四个新 token 组成一个新的 CSA 压缩条目">
+<text x="20" y="35" class="soft" text-anchor="start">最近窗口：环形更新，始终只保留最近 128 个位置</text>
+<g id="ring0">
+<rect class="box" x="20" y="60" width="115" height="45" rx="12"/>
+<text x="77.5" y="89.5" text-anchor="middle">KV 0</text>
+</g>
+<g id="ring1">
+<rect class="box" x="155" y="60" width="115" height="45" rx="12"/>
+<text x="212.5" y="89.5" text-anchor="middle">KV 1</text>
+</g>
+<g id="ring2">
+<rect class="box" x="290" y="60" width="115" height="45" rx="12"/>
+<text x="347.5" y="89.5" text-anchor="middle">KV 2</text>
+</g>
+<g id="ring3">
+<rect class="box" x="425" y="60" width="115" height="45" rx="12"/>
+<text x="482.5" y="89.5" text-anchor="middle">KV 3</text>
+</g>
+<g id="ring4">
+<rect class="box" x="560" y="60" width="115" height="45" rx="12"/>
+<text x="617.5" y="89.5" text-anchor="middle">KV 4</text>
+</g>
+<g id="ring5">
+<rect class="box" x="695" y="60" width="115" height="45" rx="12"/>
+<text x="752.5" y="89.5" text-anchor="middle">KV 5</text>
+</g>
+<g id="ring6">
+<rect class="box" x="830" y="60" width="115" height="45" rx="12"/>
+<text x="887.5" y="89.5" text-anchor="middle">KV 6</text>
+</g>
+<g id="ring7">
+<rect class="box" x="965" y="60" width="115" height="45" rx="12"/>
+<text x="1022.5" y="89.5" text-anchor="middle">KV 7</text>
+</g>
+<text x="20" y="153" class="soft" text-anchor="start">CSA：新 token 先进入压缩状态，每满 4 个追加一条</text>
+<g id="append0">
+<rect class="orange" x="20" y="180" width="115" height="55" rx="12"/>
+<text x="77.5" y="214.5" text-anchor="middle">t+1</text>
+</g>
+<g id="append1">
+<rect class="orange" x="155" y="180" width="115" height="55" rx="12"/>
+<text x="212.5" y="214.5" text-anchor="middle">t+2</text>
+</g>
+<g id="append2">
+<rect class="orange" x="290" y="180" width="115" height="55" rx="12"/>
+<text x="347.5" y="214.5" text-anchor="middle">t+3</text>
+</g>
+<g id="append3">
+<rect class="orange" x="425" y="180" width="115" height="55" rx="12"/>
+<text x="482.5" y="214.5" text-anchor="middle">t+4</text>
+</g>
+<g>
+<rect class="purple" x="700" y="180" width="380" height="55" rx="12"/>
+<text x="890.0" y="214.5" text-anchor="middle">长期压缩 KV：… cₙ</text>
+</g>
+<g id="newentry" class="later">
+<g>
+<rect class="purple" x="960" y="253" width="120" height="45" rx="12"/>
+<text x="1020.0" y="282.5" text-anchor="middle">cₙ₊₁</text>
+</g>
+</g>
+<text x="20" y="305" class="soft" text-anchor="start">HCA 每满 128 个才产出一条；CSA indexer 也维护自己的压缩 key。</text>
+</svg>
+<div class="caption">
+<div><b>窗口更新</b>新 KV 写入当前位置，最老的局部位置被复用。</div>
+<div><b>压缩追加</b>只在组完成后追加条目；未满组保留在状态 buffer。</div>
+<div><b>严格因果</b>每个 query 只读当时已完成、已可见的压缩条目。</div>
+</div>
+</section>
+<section class="slide ds" id="decode">
+<div class="kicker">08 / Decode 循环</div>
+<h2>生成一个，再接着生成一个</h2>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="每个 decode token 依次经过所有层和输出头，然后进入下一轮">
+<g>
+<rect class="orange" x="15" y="110" width="160" height="85" rx="12"/>
+<text x="95.0" y="159.5" text-anchor="middle">当前 token</text>
+</g>
+<g>
+<rect class="purple" x="270" y="80" width="265" height="145" rx="12"/>
+<text x="402.5" y="159.5" text-anchor="middle">全部 43 层</text>
+</g>
+<g>
+<rect class="box" x="625" y="110" width="185" height="85" rx="12"/>
+<text x="717.5" y="159.5" text-anchor="middle">输出头</text>
+</g>
+<g>
+<rect class="orange" x="910" y="110" width="195" height="85" rx="12"/>
+<text x="1007.5" y="159.5" text-anchor="middle">采样新 token</text>
+</g>
+<path class="wire" d="M175 152 L270 152"/>
+<path class="wire" d="M535 152 L625 152"/>
+<path class="wire" d="M810 152 L910 152"/>
+<path class="wire" d="M1007 195 V285 H95 V195"/>
+<circle id="cycle" class="token" cx="95" cy="178" r="9"/>
+<text x="565" y="325" class="soft" text-anchor="middle">每一轮：逐层计算并更新 cache → 采样 → 追加 token → 下一轮</text>
+</svg>
+<div class="caption">
+<div><b>计算要穿过所有层</b>每层都包含 Attention、MoE 和 mHC。</div>
+<div><b>KV 留着复用</b>历史 token 的每层表示无需从头再算。</div>
+<div><b>权重反复被读取</b>模型有 284B 参数；每 token 激活约 13B，所选专家随 token 变化。</div>
+</div>
+</section>
+<section class="slide ds" id="budget">
+<div class="kicker">09 / 计算与内存账</div>
+<h2>快在哪里，取决于本轮在等什么</h2>
+<div class="twocol">
+<div class="panel">
+<h3>Prefill：一批 token</h3>
+<p>大矩阵乘法更容易占满计算单元；长序列还要读写注意力状态和生成压缩 KV。</p>
+</div>
+<div class="panel">
+<h3>Decode：每请求一个 token</h3>
+<p>小 batch 常受权重 / KV 读取和通信延迟影响。合批增加权重复用；请求也会争用 KV 空间。</p>
+</div>
+</div>
+<div class="formula">每卡显存 = 本地权重 + KV 副本 + 压缩状态 + 激活 / 工作区</div>
+<p class="intro">估容量用完整权重的实际存储精度、分片与复制方式，再加请求的 KV。13B 激活参数描述每 token 计算规模。</p>
+<p class="note">MTP 可先给出草稿，再由主干验证；收益还取决于接受率、验证开销与 batch。</p>
+</section>
+<section class="slide ds" id="waves">
+<div class="kicker">10 / 通信与计算重叠</div>
+<h2>切成小波次，让传输和计算接上</h2>
+<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="多个专家 wave 在 dispatch、计算和 combine 阶段交错推进">
+<text x="20" y="64" class="" text-anchor="start">Dispatch</text>
+<g id="wave00">
+<rect class="orange" x="180" y="30" width="145" height="55" rx="12"/>
+<text x="252.5" y="64.5" text-anchor="middle">wave 1</text>
+</g>
+<g id="wave01">
+<rect class="orange" x="385" y="30" width="145" height="55" rx="12"/>
+<text x="457.5" y="64.5" text-anchor="middle">wave 2</text>
+</g>
+<g id="wave02">
+<rect class="orange" x="590" y="30" width="145" height="55" rx="12"/>
+<text x="662.5" y="64.5" text-anchor="middle">wave 3</text>
+</g>
+<text x="20" y="154" class="" text-anchor="start">专家计算</text>
+<g id="wave10">
+<rect class="purple" x="330" y="120" width="145" height="55" rx="12"/>
+<text x="402.5" y="154.5" text-anchor="middle">wave 1</text>
+</g>
+<g id="wave11">
+<rect class="purple" x="535" y="120" width="145" height="55" rx="12"/>
+<text x="607.5" y="154.5" text-anchor="middle">wave 2</text>
+</g>
+<g id="wave12">
+<rect class="purple" x="740" y="120" width="145" height="55" rx="12"/>
+<text x="812.5" y="154.5" text-anchor="middle">wave 3</text>
+</g>
+<text x="20" y="244" class="" text-anchor="start">Combine</text>
+<g id="wave20">
+<rect class="orange" x="480" y="210" width="145" height="55" rx="12"/>
+<text x="552.5" y="244.5" text-anchor="middle">wave 1</text>
+</g>
+<g id="wave21">
+<rect class="orange" x="685" y="210" width="145" height="55" rx="12"/>
+<text x="757.5" y="244.5" text-anchor="middle">wave 2</text>
+</g>
+<g id="wave22">
+<rect class="orange" x="890" y="210" width="145" height="55" rx="12"/>
+<text x="962.5" y="244.5" text-anchor="middle">wave 3</text>
+</g>
+<path class="flow" id="waveclock" d="M180 15 L180 285"/>
+<text x="1070" y="300" class="tiny" text-anchor="end">时间 →</text>
+<text x="565" y="325" class="soft" text-anchor="middle">下一波在传输入，这一波在计算，上一波在传结果。</text>
+</svg>
+<div class="caption">
+<div><b>分成 waves</b>每波只放一部分专家任务。</div>
+<div><b>就绪就开算</b>当前波收齐输入，立即进入计算。</div>
+<div><b>看剩下的等待</b>性能由关键路径决定；重叠程度取决于负载与互连。</div>
+</div>
+</section>
+<section class="slide ds" id="references">
+<div class="kicker">11 / 参考与延伸阅读</div>
+<h2>从架构走到真正的推理系统</h2>
+<div class="refs">
+<div><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash 官方模型卡</a><small>Preview 模型的总参数、激活参数与权重精度。</small>
+</div>
+<div><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json">官方 config.json</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/inference/model.py">推理实现 model.py</a><small>层数、维度、压缩周期、mHC、路由与 cache 更新。</small>
+</div>
+<div><a href="https://arxiv.org/html/2606.19348v1">DeepSeek-V4 技术报告</a><small>§2 架构，§3.1 专家通信与计算重叠，§4.2 模型配置。</small>
+</div>
+<div><a href="/posts/deepseek-v4/">技术报告精读</a> · <a href="/posts/deepseek-v4-flash/">Flash 架构</a> · <a href="/posts/deepseek-v4-pro-inference/">V4-Pro 推理</a>
+</div>
+</div>
+<p class="note">配置核对：2026-10-20。动画中的 token、专家选择、显存块大小是教学示例。</p>
+</section>
+</div>
+</main><script src="/assets/slides.js"></script><script src="/assets/anim.js"></script><script>window.deckTimelines=[];{const el=document.getElementById('prefill'), t=Anim.timeline({root:el});t.to('#pref0',{"x": 145, "y": -101},{"dur": 0.7, "at": 0});t.to('#pref1',{"x": 145, "y": -23},{"dur": 0.7, "at": 0});t.to('#pref2',{"x": 145, "y": 55},{"dur": 0.7, "at": 0});t.to('#pref3',{"x": 145, "y": 133},{"dur": 0.7, "at": 0});t.label('批量计算各卡分片');t.to('#pref0',{"x": 565, "y": -101},{"dur": 0.7, "at": 0.9});t.to('#pref1',{"x": 565, "y": -23},{"dur": 0.7, "at": 0.9});t.to('#pref2',{"x": 565, "y": 55},{"dur": 0.7, "at": 0.9});t.to('#pref3',{"x": 565, "y": 133},{"dur": 0.7, "at": 0.9});t.label('形成各层 cache');t.to('#prefkv0,#prefkv1,#prefkv2,#prefkv3',{"y": 5},{"dur": 0.7});t.label('保留给后续 decode');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('hbm'), t=Anim.timeline({root:el});t.to('#wread',{"x": 250, "y": 114},{"dur": 0.7, "at": 0});t.to('#kvread',{"x": 340, "y": 44},{"dur": 0.7, "at": 0});t.label('HBM 读取');t.to('#compute',{"scale": 2},{"dur": 0.7});t.label('片上计算');t.to('#compute',{"scale": 1, "x": 350, "y": -40},{"dur": 0.7});t.label('写入新激活');t.to('#compute',{"x": -310, "y": 21},{"dur": 0.7});t.label('临时 buffer 可复用');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('tensor'), t=Anim.timeline({root:el});t.to('#tp0',{"x": 115},{"dur": 0.7, "at": 0});t.to('#tp1',{"x": 115},{"dur": 0.7, "at": 0});t.to('#tp2',{"x": 115},{"dur": 0.7, "at": 0});t.to('#tp3',{"x": 115},{"dur": 0.7, "at": 0});t.label('本地注意力计算');t.to('#tp0',{"x": 485},{"dur": 0.7, "at": 0.9});t.to('#tp1',{"x": 485},{"dur": 0.7, "at": 0.9});t.to('#tp2',{"x": 485},{"dur": 0.7, "at": 0.9});t.to('#tp3',{"x": 485},{"dur": 0.7, "at": 0.9});t.label('各自产生部分和');t.to('#tp0',{"x": 725, "y": 112},{"dur": 0.7, "at": 1.8});t.to('#tp1',{"x": 725, "y": 35},{"dur": 0.7, "at": 1.8});t.to('#tp2',{"x": 725, "y": -42},{"dur": 0.7, "at": 1.8});t.to('#tp3',{"x": 725, "y": -119},{"dur": 0.7, "at": 1.8});t.label('all-reduce 汇总');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('local-experts'), t=Anim.timeline({root:el});t.to('#ep0',{"x": 155, "y": -116},{"dur": 0.7, "at": 0});t.to('#ep1',{"x": 155, "y": -38},{"dur": 0.7, "at": 0});t.to('#ep2',{"x": 155, "y": 40},{"dur": 0.7, "at": 0});t.to('#ep3',{"x": 155, "y": 118},{"dur": 0.7, "at": 0});t.label('执行本地选中专家');t.to('#ep0',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.to('#ep1',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.to('#ep2',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.to('#ep3',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.label('加权归约六份专家结果');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('dispatch'), t=Anim.timeline({root:el});t.to('#dispatch0',{"x": 225, "y": -95},{"dur": 0.7, "at": 0});t.to('#dispatch1',{"x": 225, "y": 8},{"dur": 0.7, "at": 0});t.to('#dispatch2',{"x": 225, "y": 111},{"dur": 0.7, "at": 0});t.label('Dispatch 激活');t.to('#dispatch0',{"x": 625, "y": -95},{"dur": 0.7, "at": 0.9});t.to('#dispatch1',{"x": 625, "y": 8},{"dur": 0.7, "at": 0.9});t.to('#dispatch2',{"x": 625, "y": 111},{"dur": 0.7, "at": 0.9});t.label('专家计算结果');t.to('#dispatch0',{"x": -190, "y": 0},{"dur": 0.7, "at": 1.8});t.to('#dispatch1',{"x": -190, "y": 0},{"dur": 0.7, "at": 1.8});t.to('#dispatch2',{"x": -190, "y": 0},{"dur": 0.7, "at": 1.8});t.label('Combine 返回并加权');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('append'), t=Anim.timeline({root:el});t.to('#append0',{"x": 730, "y": 32},{"dur": 0.7, "at": 0.0});t.to('#ring0 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 0.0});t.label('新增 token 1');t.to('#append1',{"x": 595, "y": 32},{"dur": 0.7, "at": 0.8});t.to('#ring1 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 0.8});t.label('新增 token 2');t.to('#append2',{"x": 460, "y": 32},{"dur": 0.7, "at": 1.6});t.to('#ring2 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 1.6});t.label('新增 token 3');t.to('#append3',{"x": 325, "y": 32},{"dur": 0.7, "at": 2.4000000000000004});t.to('#ring3 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 2.4000000000000004});t.label('新增 token 4');t.to('#append0,#append1,#append2,#append3',{"opacity": 0},{"dur": 0.7, "at": 3.3});t.to('#newentry',{"opacity": 1},{"dur": 0.7, "at": 3.3});t.label('完成组，追加压缩条目');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('decode'), t=Anim.timeline({root:el});t.to('#cycle',{"x": 300},{"dur": 0.7});t.label('逐层处理');t.to('#cycle',{"x": 625},{"dur": 0.7});t.label('输出词表分数');t.to('#cycle',{"x": 910},{"dur": 0.7});t.label('采样新 token');t.to('#cycle',{"y": 107},{"dur": 0.7});t.to('#cycle',{"x": 0},{"dur": 0.7});t.to('#cycle',{"y": 0},{"dur": 0.7});t.label('下一轮解码');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('waves'), t=Anim.timeline({root:el});t.to('#waveclock',{"x": 150},{"dur": 0.7});t.label('第一波进入计算');t.to('#waveclock',{"x": 285},{"dur": 0.7});t.label('计算与下一波传输重叠');t.to('#waveclock',{"x": 430},{"dur": 0.7});t.label('三种工作同时推进');t.to('#waveclock',{"x": 855},{"dur": 0.7});t.label('最后一波完成回传');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>

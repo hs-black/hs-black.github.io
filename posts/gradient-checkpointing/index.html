@@ -106,7 +106,7 @@
       <div class="caps">
         <p>前向经过每一层，都把这一层的激活压进显存（右侧的栈），左边的曲线是显存随时间的变化。</p>
         <p>反向从最后一层往回走，用完一层的激活就释放一层：后进先出。反向每层的计算量约是前向的 2 倍，所以下降段更长。</p>
-        <p>每个训练 step 重复一次：显存曲线是<b>锯齿形</b>，峰值出现在前向刚结束时，等于所有层的激活之和。</p>
+        <p>每个训练 step 重复一次：显存曲线是<b>锯齿形</b>，只看图中保存的激活，峰值在前向结束时：各层保存量相加。</p>
       </div>
     </section>
 
@@ -116,7 +116,7 @@
       <h2>一层 Transformer 存了多少</h2>
       <svg class="fig" viewBox="0 0 1152 400" aria-label="一层 Transformer 激活的组成条形图，以及 GPT-3 175B 形状下 96 层的总量"></svg>
       <div class="caps">
-        <p>按算子数一遍（16 位激活，\(s\) 序列长、\(b\) micro-batch、\(h\) 隐藏维、\(a\) 头数）：每层 \(sbh\,(34 + 5as/h)\) 字节。图中按 GPT-3 175B 的形状画（\(a=96,\ s=2048,\ h=12288\)，\(5as/h = 80\)）。</p>
+        <p>按标准 attention 的 Transformer 账本数一遍（16 位激活，\(s\) 序列长、\(b\) micro-batch、\(h\) 隐藏维、\(a\) 头数）：每层 \(sbh\,(34 + 5as/h)\) 字节。图中按 GPT-3 175B 的形状画（\(a=96,\ s=2048,\ h=12288\)，\(5as/h = 80\)）。</p>
         <p>\(b=1\) 时一层约 <b>2.87 GB</b>，96 层就是 <b>275 GB</b>：远超一张 80 GB 的卡，而这还没算权重和优化器状态。</p>
         <p>和 \(s^2\) 成正比的那一块（softmax 输出、dropout mask 与输出）占了 70%。FlashAttention 不存这个 \(s \times s\) 矩阵，剩下 \(34\,sbh\)：一层 0.86 GB，96 层仍有 82 GB。</p>
       </div>
@@ -215,7 +215,7 @@
       <h2>只重算最占显存、最便宜的那部分</h2>
       <svg class="fig" viewBox="0 0 1152 390" aria-label="一层激活的组成中 attention core 部分被丢弃后显存降低 70%，计算只增加 2.7%"></svg>
       <div class="caps">
-        <p>同一层里，不同激活"每字节的重算代价"差别很大。\(QK^\top\)、softmax、dropout、乘 \(V\) 这几步（attention core）产生的激活和 \(s^2\) 成正比，FLOPs 却很少。</p>
+        <p>同一层里，不同激活"每字节的重算代价"差别很大。\(QK^\top\)、softmax、dropout、乘 \(V\) 这几步（attention core）产生的激活和 \(s^2\) 成正比；在这里的 GPT-3 形状下，它占总 FLOPs 的比例很小。</p>
         <p>只把这几步重算，其余照存：每层激活从 \(sbh(34 + 5as/h)\) 降到 \(34\,sbh\)。GPT-3 省 70%，MT-NLG 省 65%。</p>
         <p>代价只有 2.7%（GPT-3）和 1.6%（MT-NLG）的额外 FLOPs，远低于整层重算的 33%。再配合序列并行，把剩下的 \(34\,sbh\) 也按张量并行度 \(t\) 切开。</p>
       </div>
@@ -238,7 +238,7 @@
       <h2>重算已经藏在 attention kernel 里</h2>
       <svg class="fig" viewBox="0 0 1152 400" aria-label="FlashAttention 前向逐块计算注意力分数后丢弃，只保存输出和每行的 logsumexp，反向时再逐块重算"></svg>
       <div class="caps">
-        <p>标准实现把 \(s\times s\) 的注意力概率 \(P\) 整个写进显存留给反向。FlashAttention 按块算：每块分数算完、累加进输出就丢，只存输出 \(O\) 和每行一个 logsumexp。</p>
+        <p>标准实现把 \(s\times s\) 的注意力概率 \(P\) 整个写进显存留给反向。FlashAttention 按块算：每块分数算完、累加进输出就丢，保留 Q、K、V 和输出 \(O\)，另外存每行一个 logsumexp。</p>
         <p>反向时用 \(Q, K, V\) 和 logsumexp 把每块 \(P\) <b>重算</b>出来。这正是选择性重算，只是做在一个 kernel 里，不用读写 HBM 上的 \(P\)，往往比不重算还快。</p>
       </div>
     </section>
@@ -282,7 +282,7 @@
       <h2>1F1B：第一级要扛 p 个 micro-batch 的激活</h2>
       <svg class="fig" viewBox="0 0 1152 400" aria-label="4 级 1F1B 流水线时间线，以及每级同时在途的激活；加上重算后在途激活变细、反向变长"></svg>
       <div class="caps">
-        <p>4 级流水线、8 个 micro-batch 的 1F1B 调度。第 \(i\) 级在稳态时同时持有 \(p - i\) 个 micro-batch 的激活：<b>第一级最多</b>。</p>
+        <p>4 级流水线、8 个 micro-batch 的 1F1B 调度。级编号从 0 开始，第 \(i\) 级在稳态时最多持有 \(p - i\) 个 micro-batch 的激活：<b>第一级最多</b>。</p>
         <p>第一级有 \(L/p\) 层、持有 \(p\) 份，合起来正好是 \(L\) 层的激活，和 \(p\) 无关：流水线切得再细，第一级的激活也不减少。</p>
         <p>加上重算：每份在途激活只剩层输入，变得很细；反向块里多出一段重算（橙色），整条流水线变长。也可以只对放不下的那几个 micro-batch 重算。</p>
       </div>
@@ -324,7 +324,7 @@ y = checkpoint_sequential(nn.Sequential(*blocks), 4, x,
         <svg class="fig" viewBox="0 0 380 380" style="width:388px" aria-label="普通前向与 checkpoint 前向时 autograd 保存的张量数量对比"></svg>
       </div>
       <div class="caps">
-        <p>右边是 autograd 保存的张量：普通前向每个 block 留下一堆；包上 <code>checkpoint</code> 后每个 block 只留输入。</p>
+        <p>右边是 autograd 保存的张量：普通前向每个 block 留下一堆；包上 <code>checkpoint</code> 后主要保留输入。<code>checkpoint_sequential</code> 的最后一段仍按普通前向执行。</p>
         <p>务必显式写 <code>use_reentrant=False</code>（新版本不写会报警告）。非 reentrant 版本支持 <code>torch.autograd.grad</code>、不要求输入 <code>requires_grad</code>、能处理嵌套结构里的张量，重算到所需激活就提前停下。</p>
         <p>dropout 的随机数默认会被保存并在重算时恢复（<code>preserve_rng_state=True</code>），两次前向结果一致。</p>
       </div>
@@ -366,7 +366,7 @@ y = checkpoint(blk, x, use_reentrant=False, context_fn=ctx_fn)</pre></div>
       <svg class="fig" viewBox="0 0 1152 400" aria-label="各种激活节省方法在激活显存与额外计算二维平面上的位置"></svg>
       <div class="caps">
         <p>横轴是额外计算，纵轴是剩下的激活显存（以不重算为 100%；按 GPT-3 175B 形状、标准 attention 估算）。左下角最好。</p>
-        <p>先拿便宜的：FlashAttention 和选择性重算几乎不花算力就省掉七成；剩下的再用部分层重算、逐层重算或 offload 补，按显存缺口决定重算多少层。</p>
+        <p>先拿便宜的：在这个形状下，FlashAttention / attention core 重算用少量额外计算省掉约七成激活；剩下的再用部分层重算、逐层重算或 offload 补，按显存缺口决定重算多少层。</p>
       </div>
     </section>
 
@@ -375,8 +375,8 @@ y = checkpoint(blk, x, use_reentrant=False, context_fn=ctx_fn)</pre></div>
       <div class="kicker">小结</div>
       <h2>小结</h2>
       <ul class="s24 tight">
-        <li>激活是前向产生、反向要用的张量；显存曲线是锯齿形，峰值在前向结束时，等于所有层激活之和。</li>
-        <li>每层 \(sbh(34 + 5as/h)\) 字节：GPT-3 175B 形状下 96 层约 275 GB。</li>
+        <li>激活是前向产生、反向要用的张量；图中的保存量先堆积再释放。实际总显存还包括权重、梯度与临时工作区。</li>
+        <li>标准 attention 的账本：每层 \(sbh(34 + 5as/h)\) 字节；GPT-3 175B 形状下 96 层约 275 GB。</li>
         <li>checkpoint：只存层输入，反向前重算；逐层重算后峰值 ≈ \(L\) 个输入 + 1 层，计算 +33%。</li>
         <li>分段的最优段长 \(k^*=\sqrt{nc/A}\)；checkpoint 和一层一样大时就是 √n，Transformer 里接近每层一个。</li>
         <li>选择性重算 attention core：省 65%–70%，只多 1.6%–2.7% FLOPs；FlashAttention 在 kernel 内做了同样的事。</li>
@@ -394,7 +394,7 @@ y = checkpoint(blk, x, use_reentrant=False, context_fn=ctx_fn)</pre></div>
         <li>Griewank &amp; Walther, <a href="https://doi.org/10.1145/347837.347846">Algorithm 799: revolve</a>（2000）：自动微分里的最优 checkpoint 调度</li>
         <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（2022）：激活公式、选择性重算、序列并行与实测</li>
         <li>Huang et al., <a href="https://arxiv.org/abs/1811.06965">GPipe</a>（2019）：流水线里的 re-materialization</li>
-        <li>Dao et al., <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a>（2022）：分块计算与反向重算</li>
+        <li>Dao et al., <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a>（2022）：分块计算与反向重算；<a href="/posts/flash-attention/">FlashAttention 1、2、3 动画讲解</a></li>
         <li>PyTorch 文档：<a href="https://docs.pytorch.org/docs/stable/checkpoint.html">torch.utils.checkpoint</a>（含选择性 checkpoint），<a href="https://docs.pytorch.org/docs/stable/autograd.html#torch.autograd.graph.save_on_cpu">save_on_cpu</a></li>
         <li><a href="https://github.com/pytorch/torchtitan">torchtitan</a>：逐层 / 选择性重算与 FSDP2 的组合方式</li>
         <li>本系列相关：<a href="/posts/scaling-memory/">训练的账本：显存、FLOPs 与 MFU</a>，<a href="/posts/scaling-pipeline/">流水线并行</a>，<a href="/posts/scaling-data-parallel/">数据并行、ZeRO 与 FSDP</a></li>

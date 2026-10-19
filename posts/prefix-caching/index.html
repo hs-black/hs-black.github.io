@@ -1,0 +1,672 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Prefix caching：相同的开头，只算一次 · Zunzhe Zhang</title>
+<meta name="description" content="用动画讲清 prefix cache 的精确前缀匹配、满块哈希链、KV 复用、共享引用计数、缓存命中与驱逐。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
+.scene{display:block;width:1152px;height:340px;flex:none;overflow:visible}
+.scene text{fill:var(--text);font-family:var(--font-sans);font-size:21px}
+.scene .minor{fill:var(--text-soft);font-size:17px}.scene .tiny{fill:var(--text-faint);font-size:15px}
+.scene .big{font-size:32px;font-weight:650}.scene .mono{font-family:var(--font-mono)}
+.scene .wire{stroke:var(--text-faint);stroke-width:2;fill:none}.scene .hotwire{stroke:var(--accent);stroke-width:4;fill:none}
+.captions{position:relative;min-height:76px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.5;color:var(--text-soft)}
+.captions p:first-child{opacity:1}.captions b{color:var(--text);font-weight:650}
+.slide .note{font-size:17px;color:var(--text-faint);line-height:1.4}.slide .formula{font-family:var(--font-mono);font-size:28px;padding:22px 28px;border-radius:16px;background:var(--accent-soft)}
+.slide .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.slide .card{padding:28px;border:1px solid var(--border);border-radius:18px;background:var(--surface)}
+.slide .card h3{font-size:29px;margin:0 0 15px}.slide .card p{font-size:25px;color:var(--text-soft)}
+.slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
+.slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
+.slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">LLM 推理系统 · 复用</div>
+<h1 class="rise small-title" style="--d:1">Prefix caching：相同的开头，只算一次</h1>
+<p class="muted rise" style="--d:2">系统提示词反复出现，它的 KV 也可以反复使用。</p>
+<p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
+<p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
+</section>
+<section class="slide lesson" id="pc-repeat">
+<div class="kicker">01 · 重复工作</div>
+<h2>开头一样，为什么每次都从头算？</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="开头一样，为什么每次都从头算？">
+<defs>
+<marker id="pc-repeat-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="36" class="minor" text-anchor="start" opacity="1">三个问题，共用同一段系统提示词</text>
+<g class="common0" opacity="1">
+<rect x="30" y="64" width="660" height="62" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="360.0" y="102.0" class="" text-anchor="middle" opacity="1">你是助教，请用直观例子回答……</text>
+</g>
+<g class="question0" opacity="1">
+<rect x="725" y="64" width="270" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="860.0" y="102.0" class="" text-anchor="middle" opacity="1">问题 A</text>
+</g>
+<g class="common1" opacity="1">
+<rect x="30" y="150" width="660" height="62" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="360.0" y="188.0" class="" text-anchor="middle" opacity="1">你是助教，请用直观例子回答……</text>
+</g>
+<g class="question1" opacity="1">
+<rect x="725" y="150" width="270" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="860.0" y="188.0" class="" text-anchor="middle" opacity="1">问题 B</text>
+</g>
+<g class="common2" opacity="1">
+<rect x="30" y="236" width="660" height="62" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="360.0" y="274.0" class="" text-anchor="middle" opacity="1">你是助教，请用直观例子回答……</text>
+</g>
+<g class="question2" opacity="1">
+<rect x="725" y="236" width="270" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="860.0" y="274.0" class="" text-anchor="middle" opacity="1">问题 C</text>
+</g>
+<text x="1030" y="103" class="work0" text-anchor="start" opacity="0">算</text>
+<text x="1030" y="189" class="work1" text-anchor="start" opacity="0">复用</text>
+<text x="1030" y="275" class="work2" text-anchor="start" opacity="0">复用</text>
+</svg>
+<div class="captions">
+<p class="caption-0">很多请求带着相同的系统提示词、工具说明或文档开头。普通 prefill 会把它们反复算一遍。</p>
+<p class="caption-1">第一次请求先正常计算这段前缀，留下各层的 K、V。</p>
+<p class="caption-2">后续请求找到同一段已计算前缀后，可以直接接上它的 KV，只处理后面的新内容。</p>
+</div>
+<p class="note">图中文字只表示提示词片段；匹配发生在分词后的 token 和模型执行上下文上。</p>
+</section>
+<section class="slide lesson" id="pc-exact">
+<div class="kicker">02 · 精确前缀</div>
+<h2>中间改了一个 token，后面也会跟着变</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="中间改了一个 token，后面也会跟着变">
+<defs>
+<marker id="pc-exact-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="35" class="minor" text-anchor="start" opacity="1">已缓存的 token</text>
+<g class="cached0" opacity="1">
+<rect x="30" y="67" width="125" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="92.5" y="99.0" class="" text-anchor="middle" opacity="1">A</text>
+</g>
+<g class="cached1" opacity="1">
+<rect x="180" y="67" width="125" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="242.5" y="99.0" class="" text-anchor="middle" opacity="1">B</text>
+</g>
+<g class="cached2" opacity="1">
+<rect x="330" y="67" width="125" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="392.5" y="99.0" class="" text-anchor="middle" opacity="1">C</text>
+</g>
+<g class="cached3" opacity="1">
+<rect x="480" y="67" width="125" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="542.5" y="99.0" class="" text-anchor="middle" opacity="1">D</text>
+</g>
+<g class="cached4" opacity="1">
+<rect x="630" y="67" width="125" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="692.5" y="99.0" class="" text-anchor="middle" opacity="1">E</text>
+</g>
+<g class="cached5" opacity="1">
+<rect x="780" y="67" width="125" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="842.5" y="99.0" class="" text-anchor="middle" opacity="1">F</text>
+</g>
+<text x="30" y="174" class="minor" text-anchor="start" opacity="1">新请求的 token</text>
+<g class="new0" opacity="1">
+<rect x="30" y="206" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="92.5" y="238.0" class="" text-anchor="middle" opacity="1">A</text>
+</g>
+<g class="new1" opacity="1">
+<rect x="180" y="206" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="242.5" y="238.0" class="" text-anchor="middle" opacity="1">B</text>
+</g>
+<g class="new2" opacity="1">
+<rect x="330" y="206" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="392.5" y="238.0" class="" text-anchor="middle" opacity="1">X</text>
+</g>
+<g class="new3" opacity="1">
+<rect x="480" y="206" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="542.5" y="238.0" class="" text-anchor="middle" opacity="1">D</text>
+</g>
+<g class="new4" opacity="1">
+<rect x="630" y="206" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="692.5" y="238.0" class="" text-anchor="middle" opacity="1">E</text>
+</g>
+<g class="new5" opacity="1">
+<rect x="780" y="206" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="842.5" y="238.0" class="" text-anchor="middle" opacity="1">F</text>
+</g>
+<rect class="match" x="22" y="59" width="141" height="206" rx="16" fill="none" stroke="var(--accent)" stroke-width="3"/>
+<text x="30" y="319" class="matched" text-anchor="start" opacity="0">可复用：A B</text>
+<text x="482" y="319" class="minor miss" text-anchor="start" opacity="0">从 X 开始，后面的 KV 都重新计算</text>
+</svg>
+<div class="captions">
+<p class="caption-0">这里先逐 token 看匹配。缓存是 A B C D E F，新请求是 A B X D E F。</p>
+<p class="caption-1">从开头连续匹配，A、B 一样，走到第三个 token 就停。</p>
+<p class="caption-2">D、E、F 虽然字面相同，它们看到的历史已从 C 变成 X，对应的 KV 也会改变。</p>
+</div>
+<p class="note">标准因果 attention 中，某个 token 的表示依赖它之前的整个前缀；这里的逐 token 匹配用于解释原理。</p>
+</section>
+<section class="slide lesson" id="pc-hash">
+<div class="kicker">03 · 查找</div>
+<h2>用一条哈希链，记住“这个块之前是什么”</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="用一条哈希链，记住“这个块之前是什么”">
+<defs>
+<marker id="pc-hash-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="35" class="minor" text-anchor="start" opacity="1">按块建立键：每块 4 个 token</text>
+<g class="hblock0" opacity="1">
+<rect x="30" y="74" width="270" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="165.0" y="106.0" class="" text-anchor="middle" opacity="1">A B C D</text>
+</g>
+<g class="hblock1" opacity="1">
+<rect x="370" y="74" width="270" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="505.0" y="106.0" class="" text-anchor="middle" opacity="1">E F G H</text>
+</g>
+<g class="hblock2" opacity="1">
+<rect x="710" y="74" width="270" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="845.0" y="106.0" class="" text-anchor="middle" opacity="1">I J K L</text>
+</g>
+<g class="hash0" opacity="0">
+<rect x="30" y="218" width="270" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="165.0" y="250.0" class="" text-anchor="middle" opacity="1">h0 = H(起点, ABCD)</text>
+</g>
+<g class="hash1" opacity="0">
+<rect x="370" y="218" width="270" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="505.0" y="250.0" class="" text-anchor="middle" opacity="1">h1 = H(h0, EFGH)</text>
+</g>
+<g class="hash2" opacity="0">
+<rect x="710" y="218" width="270" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="845.0" y="250.0" class="" text-anchor="middle" opacity="1">h2 = H(h1, IJKL)</text>
+</g>
+<path d="M 165 124 V 218" class="hotwire down0" opacity="0" marker-end="url(#pc-hash-arrow)"/>
+<path d="M 505 124 V 218" class="hotwire down1" opacity="0" marker-end="url(#pc-hash-arrow)"/>
+<path d="M 845 124 V 218" class="hotwire down2" opacity="0" marker-end="url(#pc-hash-arrow)"/>
+<path d="M 300 243 H 370" class="hotwire chain0" opacity="0" marker-end="url(#pc-hash-arrow)"/>
+<path d="M 640 243 H 710" class="hotwire chain1" opacity="0" marker-end="url(#pc-hash-arrow)"/>
+</svg>
+<div class="captions">
+<p class="caption-0">实际缓存常按满块管理。每块的键不仅包括本块 token，还包括它前面的前缀。</p>
+<p class="caption-1">第一块从起点算出 h0。第二块用 h0 和 EFGH 算出 h1，把此前的历史接进来。</p>
+<p class="caption-2">这样，相同的 EFGH 只要前文不同，缓存键就不同。其他执行条件也必须一致，才能共享结果。</p>
+</div>
+<p class="note">H 表示哈希；vLLM 还把 LoRA、图像内容标识、cache salt 等必要条件纳入键。模型实例定义复用边界。</p>
+</section>
+<section class="slide lesson" id="pc-reuse">
+<div class="kicker">04 · 命中</div>
+<h2>直接接上 KV，只计算没见过的后缀</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="直接接上 KV，只计算没见过的后缀">
+<defs>
+<marker id="pc-reuse-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="35" class="minor" text-anchor="start" opacity="1">新请求：10 个 token；前 8 个已经缓存</text>
+<g class="reuseblock0" opacity="1">
+<rect x="30" y="74" width="250" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="155.0" y="106.0" class="" text-anchor="middle" opacity="1">0–3</text>
+</g>
+<g class="reuseblock1" opacity="1">
+<rect x="320" y="74" width="250" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="445.0" y="106.0" class="" text-anchor="middle" opacity="1">4–7</text>
+</g>
+<g class="reuseblock2" opacity="1">
+<rect x="610" y="74" width="250" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="735.0" y="106.0" class="" text-anchor="middle" opacity="1">8–9</text>
+</g>
+<g class="cachedkv" opacity="1">
+<rect x="30" y="228" width="540" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="300.0" y="270.0" class="" text-anchor="middle" opacity="1">已有 KV：P5、P2</text>
+</g>
+<g class="prefill" opacity="1">
+<rect x="610" y="228" width="250" height="70" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="735.0" y="270.0" class="" text-anchor="middle" opacity="1">GPU prefill</text>
+</g>
+<path d="M 155 124 V 228" class="hotwire reuse0" opacity="0" marker-end="url(#pc-reuse-arrow)"/>
+<path d="M 445 124 V 228" class="hotwire reuse1" opacity="0" marker-end="url(#pc-reuse-arrow)"/>
+<path d="M 735 124 V 228" class="hotwire compute" opacity="0" marker-end="url(#pc-reuse-arrow)"/>
+<text x="932" y="111" class="hit" text-anchor="start" opacity="0">8 命中</text>
+<text x="932" y="275" class="misscount" text-anchor="start" opacity="0">2 待计算</text>
+</svg>
+<div class="captions">
+<p class="caption-0">块大小为 4，缓存中已有前 8 个 token 的计算结果。新请求总共 10 个 token。</p>
+<p class="caption-1">前两块命中：新请求的 block table 直接引用 P5、P2，不需要再跑这 8 个 token 的 prefill。</p>
+<p class="caption-2">GPU 计算最后 2 个 token，同时读取已有前缀的 KV。省的是前缀计算，后缀依然需要理解整个历史。</p>
+</div>
+<p class="note">满块缓存示意；为了得到首个输出的 logits，提示词全命中时，引擎仍可能保留最后一个 token 做计算。</p>
+</section>
+<section class="slide lesson" id="pc-share">
+<div class="kicker">05 · 共享</div>
+<h2>两条请求，读同一份 KV</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="两条请求，读同一份 KV">
+<defs>
+<marker id="pc-share-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<g class="requestA" opacity="1">
+<rect x="30" y="70" width="230" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="145.0" y="109.5" class="" text-anchor="middle" opacity="1">请求 A → P5</text>
+</g>
+<g class="requestB" opacity="0">
+<rect x="30" y="216" width="230" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="145.0" y="255.5" class="" text-anchor="middle" opacity="1">请求 B → P5</text>
+</g>
+<g class="sharedkv" opacity="1">
+<rect x="555" y="105" width="300" height="100" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="705.0" y="162.0" class="" text-anchor="middle" opacity="1">共享的前缀 KV</text>
+</g>
+<path d="M 260 102 L 555 140" class="hotwire aedge" opacity="1" marker-end="url(#pc-share-arrow)"/>
+<path d="M 260 248 L 555 170" class="hotwire bedge" opacity="0" marker-end="url(#pc-share-arrow)"/>
+<text x="932" y="147" class="refnum big" text-anchor="start" opacity="1">1</text>
+<text x="932" y="182" class="minor" text-anchor="start" opacity="1">引用计数</text>
+<text x="555" y="286" class="minor alive" text-anchor="start" opacity="0">A 结束，B 仍在读取这块</text>
+</svg>
+<div class="captions">
+<p class="caption-0">A 正在使用 P5，引用计数是 1。已计算的前缀只读，可以安全地被多条请求共用。</p>
+<p class="caption-1">B 命中 P5，让自己的 block table 也指向它。引用计数变成 2，显存中的 KV 仍只有一份。</p>
+<p class="caption-2">A 结束后计数减回 1。因为 B 还在用，P5 必须保留。</p>
+</div>
+<p class="note">请求生成的不同后缀各用自己的块；共享前缀保持只读。</p>
+</section>
+<section class="slide lesson" id="pc-evict">
+<div class="kicker">06 · 生命周期</div>
+<h2>没人使用，可以先留着，也可以被替换</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="没人使用，可以先留着，也可以被替换">
+<defs>
+<marker id="pc-evict-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<g class="finished" opacity="1">
+<rect x="35" y="78" width="250" height="72" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="160.0" y="121.0" class="" text-anchor="middle" opacity="1">A、B 都已结束</text>
+</g>
+<g class="retained" opacity="1">
+<rect x="460" y="78" width="300" height="72" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="610.0" y="121.0" class="" text-anchor="middle" opacity="1">P5：缓存内容仍在</text>
+</g>
+<text x="510" y="199" class="minor refzero" text-anchor="start" opacity="1">refcount = 0</text>
+<text x="510" y="199" class="minor refone" text-anchor="start" opacity="0">refcount = 1</text>
+<g class="newrequest" opacity="1">
+<rect x="880" y="78" width="220" height="72" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="990.0" y="121.0" class="" text-anchor="middle" opacity="1">新请求 C</text>
+</g>
+<path d="M 880 114 H 760" class="hotwire pressure" opacity="0" marker-end="url(#pc-evict-arrow)"/>
+<g class="replacement" opacity="0">
+<rect x="460" y="78" width="300" height="72" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="610.0" y="121.0" class="" text-anchor="middle" opacity="1">P5：改存 C 的 KV</text>
+</g>
+<text x="460" y="291" class="minor eviction" text-anchor="start" opacity="0">旧缓存键已移除，下次找它就是 miss</text>
+</svg>
+<div class="captions">
+<p class="caption-0">当所有请求都结束，P5 的引用计数归零。它已经可以回收，但缓存内容还可以暂时留在显存中。</p>
+<p class="caption-1">如果另一个请求及时命中，就重新使用它；如果新请求需要空闲块，分配器可以选中这个闲置块。</p>
+<p class="caption-2">驱逐时先移除旧缓存键，再覆盖 P5。旧前缀下次到来会 miss，重新 prefill 后再建立缓存。</p>
+</div>
+<p class="note">vLLM 通过空闲队列管理可回收块；仍被活跃请求引用的块不能被直接覆盖。</p>
+</section>
+<section class="slide">
+<div class="kicker">07 · 实际提示词</div>
+<h2>稳定的内容放前面，可变的内容放后面</h2>
+<div class="route">
+<span>系统提示词</span> → <span>固定工具 / 文档</span> → <span>用户问题</span>
+</div>
+<p>相同 token 的前缀越长，能复用的计算越多。把时间戳、随机标识放在开头，会让后面的公共内容也失去匹配。</p>
+<div class="two-col">
+<div class="card">
+<h3>典型命中</h3>
+<p>重复系统提示词；同一长文档上的多轮提问。</p>
+</div>
+<div class="card">
+<h3>典型 miss</h3>
+<p>前缀 token 改变；内容已被驱逐；模型或其他必要上下文不同。</p>
+</div>
+</div>
+</section>
+<section class="slide">
+<div class="kicker">08 · 省在哪里</div>
+<h2>更快开始回答，后面的生成仍要继续</h2>
+<div class="two-col">
+<div class="card">
+<h3>省 prefill</h3>
+<p>跳过已计算前缀，减少到首个输出 token 的等待。共享块还可省重复的 KV 空间。</p>
+</div>
+<div class="card">
+<h3>仍然需要 decode</h3>
+<p>每个新 token 仍要做模型计算、读历史 KV。缓存前缀不等于缓存整段答案。</p>
+</div>
+</div>
+<p class="links">
+<a href="/posts/continuous-batching/">Continuous batching 管“这一轮算谁”</a>
+<br>
+<a href="/posts/paged-attention/">PagedAttention 管“KV 放在哪里”</a> · Prefix caching 管“哪段已经算过”</p>
+</section>
+<section class="slide">
+<div class="kicker">参考与延伸阅读</div>
+<h2>缓存的是计算过的历史</h2>
+<ul class="reference-list">
+<li>
+<a href="https://docs.vllm.ai/en/latest/design/prefix_caching/">vLLM：Automatic Prefix Caching</a>：满块哈希、引用计数、空闲队列与驱逐流程。</li>
+<li>
+<a href="https://docs.vllm.ai/en/latest/features/automatic_prefix_caching/">vLLM：Automatic Prefix Caching 的使用与场景</a>：长文档问答、多轮对话与 prefill 收益。</li>
+<li>
+<a href="https://arxiv.org/abs/2309.06180">PagedAttention 论文</a>：块级 KV 共享的基础。</li>
+</ul>
+<p class="links">
+<a href="/posts/paged-attention/">回到显存分页</a> · <a href="/posts/continuous-batching/">回到连续调度</a> · <a href="/blog/">返回博客</a>
+</p>
+</section>
+</div>
+</main>
+<script src="/assets/slides.js">
+</script>
+<script src="/assets/anim.js">
+</script>
+<script>
+(() => {
+  const scenes = [
+  {
+    "id": "pc-repeat",
+    "steps": [
+      {
+        "label": "第一次计算",
+        "actions": [
+          [
+            ".common0 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ],
+          [
+            ".work0",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      },
+      {
+        "label": "后续请求复用",
+        "actions": [
+          [
+            ".common1 rect,.common2 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ],
+          [
+            ".work1,.work2",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pc-exact",
+    "steps": [
+      {
+        "label": "逐个匹配",
+        "actions": [
+          [
+            ".match",
+            {
+              "attr": {
+                "width": 291
+              }
+            }
+          ],
+          [
+            ".new0 rect,.new1 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ],
+          [
+            ".matched",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      },
+      {
+        "label": "遇到第一个差异",
+        "actions": [
+          [
+            ".new2 rect",
+            {
+              "stroke": "var(--accent-2)"
+            }
+          ],
+          [
+            ".new3,.new4,.new5",
+            {
+              "opacity": 0.45
+            }
+          ],
+          [
+            ".miss",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pc-hash",
+    "steps": [
+      {
+        "label": "第一块",
+        "actions": [
+          [
+            ".hash0,.down0",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".hblock0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "接上前缀",
+        "actions": [
+          [
+            ".hash1,.hash2,.down1,.down2,.chain0,.chain1",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".hblock1 rect,.hblock2 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pc-reuse",
+    "steps": [
+      {
+        "label": "复用两个满块",
+        "actions": [
+          [
+            ".reuse0,.reuse1,.hit",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".reuseblock0 rect,.reuseblock1 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "计算新后缀",
+        "actions": [
+          [
+            ".compute,.misscount",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".prefill rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".reuseblock2 rect",
+            {
+              "stroke": "var(--accent-2)"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pc-share",
+    "steps": [
+      {
+        "label": "第二个请求命中",
+        "actions": [
+          [
+            ".requestB,.bedge",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".refnum",
+            {
+              "text": 2
+            }
+          ]
+        ]
+      },
+      {
+        "label": "一个请求结束",
+        "actions": [
+          [
+            ".requestA,.aedge",
+            {
+              "opacity": 0.15
+            }
+          ],
+          [
+            ".refnum",
+            {
+              "text": 1
+            }
+          ],
+          [
+            ".alive",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pc-evict",
+    "steps": [
+      {
+        "label": "分配压力到来",
+        "actions": [
+          [
+            ".pressure",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".newrequest rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".retained rect",
+            {
+              "stroke": "var(--accent-2)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "驱逐并复用空间",
+        "actions": [
+          [
+            ".replacement,.eviction,.refone",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".retained,.refzero",
+            {
+              "opacity": 0
+            }
+          ]
+        ]
+      }
+    ]
+  }
+];
+  window.lessonTimelines = {};
+  scenes.forEach(({id, steps}) => {
+    const slide = document.getElementById(id);
+    const tl = Anim.timeline({root: slide});
+    tl.label('起点', 0);
+    let at = 0;
+    steps.forEach((step, i) => {
+      const start = at + 0.12;
+      tl.to('.caption-' + i, {opacity: 0}, {at: start, dur: 0.16});
+      tl.to('.caption-' + (i + 1), {opacity: 1}, {at: start + 0.16, dur: 0.2});
+      step.actions.forEach(([selector, props, delay = 0, dur = 0.85]) => {
+        tl.to(selector, props, {at: start + delay, dur});
+      });
+      at = Math.max(tl.duration, start + 1.0);
+      tl.label(step.label, at);
+    });
+    Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
+    window.lessonTimelines[id] = tl;
+  });
+})();
+</script>
+<script src="/assets/post-links.js">
+</script>
+<script src="/assets/posts.js">
+</script>
+</body>
+</html>

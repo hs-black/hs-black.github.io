@@ -1,0 +1,842 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang</title>
+<meta name="description" content="用可回放动画理解 KV cache 分页、逻辑块到物理块的映射、按需分配与释放，以及共享前缀和写时复制。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
+.scene{display:block;width:1152px;height:340px;flex:none;overflow:visible}
+.scene text{fill:var(--text);font-family:var(--font-sans);font-size:21px}
+.scene .minor{fill:var(--text-soft);font-size:17px}.scene .tiny{fill:var(--text-faint);font-size:15px}
+.scene .big{font-size:32px;font-weight:650}.scene .mono{font-family:var(--font-mono)}
+.scene .wire{stroke:var(--text-faint);stroke-width:2;fill:none}.scene .hotwire{stroke:var(--accent);stroke-width:4;fill:none}
+.captions{position:relative;min-height:76px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.5;color:var(--text-soft)}
+.captions p:first-child{opacity:1}.captions b{color:var(--text);font-weight:650}
+.slide .note{font-size:17px;color:var(--text-faint);line-height:1.4}.slide .formula{font-family:var(--font-mono);font-size:28px;padding:22px 28px;border-radius:16px;background:var(--accent-soft)}
+.slide .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.slide .card{padding:28px;border:1px solid var(--border);border-radius:18px;background:var(--surface)}
+.slide .card h3{font-size:29px;margin:0 0 15px}.slide .card p{font-size:25px;color:var(--text-soft)}
+.slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
+.slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
+.slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">LLM 推理系统 · 显存管理</div>
+<h1 class="rise small-title" style="--d:1">PagedAttention：让 KV cache 按需生长</h1>
+<p class="muted rise" style="--d:2">token 要按顺序读，显存不必连成一整片。</p>
+<p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
+<p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
+</section>
+<section class="slide lesson" id="pg-reserve">
+<div class="kicker">01 · 问题</div>
+<h2>答案有多长，开始时并不知道</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="答案有多长，开始时并不知道">
+<defs>
+<marker id="pg-reserve-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="36" y="33" class="minor" text-anchor="start" opacity="1">给每个请求预留 12 个 token 的空间</text>
+<text x="36" y="107" class="" text-anchor="start" opacity="1">请求 A：用了 5 个</text>
+<g class="reserve0-0" opacity="1">
+<rect x="300" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="327.0" y="108.0" class="" text-anchor="middle" opacity="1">1</text>
+</g>
+<g class="reserve0-1" opacity="1">
+<rect x="363" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="390.0" y="108.0" class="" text-anchor="middle" opacity="1">2</text>
+</g>
+<g class="reserve0-2" opacity="1">
+<rect x="426" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="453.0" y="108.0" class="" text-anchor="middle" opacity="1">3</text>
+</g>
+<g class="reserve0-3" opacity="1">
+<rect x="489" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="516.0" y="108.0" class="" text-anchor="middle" opacity="1">4</text>
+</g>
+<g class="reserve0-4" opacity="1">
+<rect x="552" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="579.0" y="108.0" class="" text-anchor="middle" opacity="1">5</text>
+</g>
+<g class="reserve0-5" opacity="1">
+<rect x="615" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="642.0" y="108.0" class="" text-anchor="middle" opacity="1">6</text>
+</g>
+<g class="reserve0-6" opacity="1">
+<rect x="678" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="705.0" y="108.0" class="" text-anchor="middle" opacity="1">7</text>
+</g>
+<g class="reserve0-7" opacity="1">
+<rect x="741" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="768.0" y="108.0" class="" text-anchor="middle" opacity="1">8</text>
+</g>
+<g class="reserve0-8" opacity="1">
+<rect x="804" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="831.0" y="108.0" class="" text-anchor="middle" opacity="1">9</text>
+</g>
+<g class="reserve0-9" opacity="1">
+<rect x="867" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="894.0" y="108.0" class="" text-anchor="middle" opacity="1">10</text>
+</g>
+<g class="reserve0-10" opacity="1">
+<rect x="930" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="957.0" y="108.0" class="" text-anchor="middle" opacity="1">11</text>
+</g>
+<g class="reserve0-11" opacity="1">
+<rect x="993" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1020.0" y="108.0" class="" text-anchor="middle" opacity="1">12</text>
+</g>
+<rect class="used0-0" x="300" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<rect class="used0-1" x="363" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<rect class="used0-2" x="426" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<rect class="used0-3" x="489" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<rect class="used0-4" x="552" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<text x="36" y="219" class="" text-anchor="start" opacity="1">请求 B：用了 3 个</text>
+<g class="reserve1-0" opacity="1">
+<rect x="300" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="327.0" y="220.0" class="" text-anchor="middle" opacity="1">1</text>
+</g>
+<g class="reserve1-1" opacity="1">
+<rect x="363" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="390.0" y="220.0" class="" text-anchor="middle" opacity="1">2</text>
+</g>
+<g class="reserve1-2" opacity="1">
+<rect x="426" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="453.0" y="220.0" class="" text-anchor="middle" opacity="1">3</text>
+</g>
+<g class="reserve1-3" opacity="1">
+<rect x="489" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="516.0" y="220.0" class="" text-anchor="middle" opacity="1">4</text>
+</g>
+<g class="reserve1-4" opacity="1">
+<rect x="552" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="579.0" y="220.0" class="" text-anchor="middle" opacity="1">5</text>
+</g>
+<g class="reserve1-5" opacity="1">
+<rect x="615" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="642.0" y="220.0" class="" text-anchor="middle" opacity="1">6</text>
+</g>
+<g class="reserve1-6" opacity="1">
+<rect x="678" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="705.0" y="220.0" class="" text-anchor="middle" opacity="1">7</text>
+</g>
+<g class="reserve1-7" opacity="1">
+<rect x="741" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="768.0" y="220.0" class="" text-anchor="middle" opacity="1">8</text>
+</g>
+<g class="reserve1-8" opacity="1">
+<rect x="804" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="831.0" y="220.0" class="" text-anchor="middle" opacity="1">9</text>
+</g>
+<g class="reserve1-9" opacity="1">
+<rect x="867" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="894.0" y="220.0" class="" text-anchor="middle" opacity="1">10</text>
+</g>
+<g class="reserve1-10" opacity="1">
+<rect x="930" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="957.0" y="220.0" class="" text-anchor="middle" opacity="1">11</text>
+</g>
+<g class="reserve1-11" opacity="1">
+<rect x="993" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1020.0" y="220.0" class="" text-anchor="middle" opacity="1">12</text>
+</g>
+<rect class="used1-0" x="300" y="188" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<rect class="used1-1" x="363" y="188" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<rect class="used1-2" x="426" y="188" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
+<text x="300" y="310" class="big waste" text-anchor="start" opacity="0">24 个位置，只存了 8 个 token 的 KV</text>
+</svg>
+<div class="captions">
+<p class="caption-0">生成一个 token，就要把它的 K、V 留下来，供后续 token 读取。</p>
+<p class="caption-1">如果每个请求一开始都预留最大长度，短答案也会占着一大片空地。</p>
+<p class="caption-2">这里两条请求实际只用了 8 个位置，却预留了 24 个。空位挡住了其他请求。</p>
+</div>
+<p class="note">每个方格代表一个 token 在各层的 KV；图中容量仅用于演示。</p>
+</section>
+<section class="slide lesson" id="pg-map">
+<div class="kicker">02 · 分页</div>
+<h2>顺序留在表里，数据放进空闲块</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="顺序留在表里，数据放进空闲块">
+<defs>
+<marker id="pg-map-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="36" y="35" class="minor" text-anchor="start" opacity="1">请求 A 的逻辑顺序</text>
+<g class="logical0" opacity="1">
+<rect x="36" y="72" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="101.0" y="104.0" class="" text-anchor="middle" opacity="1">0–3</text>
+</g>
+<g class="logical1" opacity="1">
+<rect x="192" y="72" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="257.0" y="104.0" class="" text-anchor="middle" opacity="1">4–7</text>
+</g>
+<g class="logical2" opacity="1">
+<rect x="348" y="72" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="413.0" y="104.0" class="" text-anchor="middle" opacity="1">8–9</text>
+</g>
+<text x="36" y="184" class="minor" text-anchor="start" opacity="1">block table</text>
+<g class="map0" opacity="0">
+<rect x="36" y="212" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="101.0" y="244.0" class="" text-anchor="middle" opacity="1">P5</text>
+</g>
+<g class="map1" opacity="0">
+<rect x="192" y="212" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="257.0" y="244.0" class="" text-anchor="middle" opacity="1">P1</text>
+</g>
+<g class="map2" opacity="0">
+<rect x="348" y="212" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="413.0" y="244.0" class="" text-anchor="middle" opacity="1">P7</text>
+</g>
+<text x="660" y="35" class="minor" text-anchor="start" opacity="1">GPU 上的物理块池</text>
+<g class="physical0" opacity="1">
+<rect x="660" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="709.0" y="114.0" class="" text-anchor="middle" opacity="1">P0</text>
+</g>
+<g class="physical1" opacity="1">
+<rect x="772" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="821.0" y="114.0" class="" text-anchor="middle" opacity="1">P1</text>
+</g>
+<g class="physical2" opacity="1">
+<rect x="884" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="933.0" y="114.0" class="" text-anchor="middle" opacity="1">P2</text>
+</g>
+<g class="physical3" opacity="1">
+<rect x="996" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1045.0" y="114.0" class="" text-anchor="middle" opacity="1">P3</text>
+</g>
+<g class="physical4" opacity="1">
+<rect x="660" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="709.0" y="230.0" class="" text-anchor="middle" opacity="1">P4</text>
+</g>
+<g class="physical5" opacity="1">
+<rect x="772" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="821.0" y="230.0" class="" text-anchor="middle" opacity="1">P5</text>
+</g>
+<g class="physical6" opacity="1">
+<rect x="884" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="933.0" y="230.0" class="" text-anchor="middle" opacity="1">P6</text>
+</g>
+<g class="physical7" opacity="1">
+<rect x="996" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1045.0" y="230.0" class="" text-anchor="middle" opacity="1">P7</text>
+</g>
+<path d="M 100 262 C 100 330, 821 330, 821 260" class="hotwire link0" opacity="0" marker-end="url(#pg-map-arrow)"/>
+<path d="M 256 262 C 256 330, 821 330, 821 144" class="hotwire link1" opacity="0" marker-end="url(#pg-map-arrow)"/>
+<path d="M 412 262 C 412 330, 1045 330, 1045 260" class="hotwire link2" opacity="0" marker-end="url(#pg-map-arrow)"/>
+</svg>
+<div class="captions">
+<p class="caption-0">先把序列切成小块：每块放 4 个 token 的 KV。最后一块可以暂时没装满。</p>
+<p class="caption-1">block table 记录“逻辑第几块，对应物理哪一块”：这里是 [P5, P1, P7]。</p>
+<p class="caption-2">物理块可以散落在显存里。请求看到的 token 顺序仍然是 0、1、2……</p>
+</div>
+<p class="note">教学块大小 B = 4；实际引擎按模型与 kernel 选择块大小。</p>
+</section>
+<section class="slide lesson" id="pg-read">
+<div class="kicker">03 · 寻址</div>
+<h2>读 token 6，先查表，再找偏移</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="读 token 6，先查表，再找偏移">
+<defs>
+<marker id="pg-read-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<g class="query" opacity="1">
+<rect x="36" y="83" width="240" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="156.0" y="124.0" class="" text-anchor="middle" opacity="1">读取 token 6</text>
+</g>
+<text x="36" y="197" class="minor" text-anchor="start" opacity="1">逻辑块 = 6 ÷ 4 取整 = 1</text>
+<text x="36" y="233" class="minor" text-anchor="start" opacity="1">块内偏移 = 6 mod 4 = 2</text>
+<g class="lookup" opacity="1">
+<rect x="370" y="83" width="230" height="68" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="485.0" y="124.0" class="" text-anchor="middle" opacity="1">table[1] = P1</text>
+</g>
+<path d="M 276 117 H 370" class="hotwire lookupwire" opacity="0" marker-end="url(#pg-read-arrow)"/>
+<text x="718" y="49" class="minor" text-anchor="start" opacity="1">物理块 P1</text>
+<g class="offset0" opacity="1">
+<rect x="718" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="761.0" y="115.0" class="" text-anchor="middle" opacity="1">4</text>
+</g>
+<g class="offset1" opacity="1">
+<rect x="814" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="857.0" y="115.0" class="" text-anchor="middle" opacity="1">5</text>
+</g>
+<g class="offset2" opacity="1">
+<rect x="910" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="953.0" y="115.0" class="" text-anchor="middle" opacity="1">6</text>
+</g>
+<g class="offset3" opacity="1">
+<rect x="1006" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1049.0" y="115.0" class="" text-anchor="middle" opacity="1">7</text>
+</g>
+<path d="M 600 117 H 710" class="hotwire readwire" opacity="0" marker-end="url(#pg-read-arrow)"/>
+<g class="kernel" opacity="0">
+<rect x="718" y="240" width="374" height="66" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="905.0" y="280.0" class="" text-anchor="middle" opacity="1">attention kernel 读取 K、V</text>
+</g>
+<path d="M 953 138 V 240" class="hotwire towork" opacity="0" marker-end="url(#pg-read-arrow)"/>
+</svg>
+<div class="captions">
+<p class="caption-0">attention 仍然按逻辑序列读历史。分页改变的是地址计算。</p>
+<p class="caption-1">token 6 落在逻辑块 1。查表得到 P1，再取 P1 里偏移为 2 的 K、V。</p>
+<p class="caption-2">PagedAttention kernel 一边按表定位，一边计算 attention。无需先把整个历史复制成连续数组。</p>
+</div>
+<p class="note">token 编号从 0 开始，token 6 是第 7 个；图中只画一层、一个 KV head 的寻址。</p>
+</section>
+<section class="slide lesson" id="pg-grow">
+<div class="kicker">04 · 生长</div>
+<h2>写满一块，再拿下一块</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="写满一块，再拿下一块">
+<defs>
+<marker id="pg-grow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="36" y="35" class="minor" text-anchor="start" opacity="1">已经生成 4 个 token</text>
+<g class="full0" opacity="1">
+<rect x="36" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="80.0" y="104.0" class="" text-anchor="middle" opacity="1">0</text>
+</g>
+<g class="full1" opacity="1">
+<rect x="133" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="177.0" y="104.0" class="" text-anchor="middle" opacity="1">1</text>
+</g>
+<g class="full2" opacity="1">
+<rect x="230" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="274.0" y="104.0" class="" text-anchor="middle" opacity="1">2</text>
+</g>
+<g class="full3" opacity="1">
+<rect x="327" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="371.0" y="104.0" class="" text-anchor="middle" opacity="1">3</text>
+</g>
+<g class="oldmap" opacity="1">
+<rect x="36" y="196" width="170" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="121.0" y="234.0" class="minor" text-anchor="middle" opacity="1">逻辑块 0 → P5</text>
+</g>
+<g class="freeblock" opacity="1">
+<rect x="655" y="65" width="185" height="80" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="747.5" y="112.0" class="" text-anchor="middle" opacity="1">
+</text>
+</g>
+<text x="655" y="49" class="minor" text-anchor="start" opacity="1">物理块 P2</text>
+<g class="nexttoken" opacity="0">
+<rect x="485" y="72" width="95" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="532.5" y="104.0" class="" text-anchor="middle" opacity="1">4</text>
+</g>
+<g class="newmap" opacity="0">
+<rect x="36" y="196" width="170" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="121.0" y="234.0" class="minor" text-anchor="middle" opacity="1">逻辑块 1 → P2</text>
+</g>
+<text x="655" y="208" class="minor" text-anchor="start" opacity="1">已有 P5 保持原位</text>
+<text x="655" y="252" class="minor claim" text-anchor="start" opacity="0">只为新增的 KV 分配一块</text>
+</svg>
+<div class="captions">
+<p class="caption-0">P5 已装满 4 个 token。下一次 decode 会为 token 4 生成新的 K、V。</p>
+<p class="caption-1">从空闲池取出 P2，把新 token 的 KV 写进去。原来的 P5 不需要搬家。</p>
+<p class="caption-2">block table 追加一项。以后继续填 P2，直到它也装满。</p>
+</div>
+<p class="note">一般只有尾块会留下未用槽位；不同模型的分层存储细节由引擎处理。</p>
+</section>
+<section class="slide lesson" id="pg-release">
+<div class="kicker">05 · 回收</div>
+<h2>请求结束，块就能交给下一位</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="请求结束，块就能交给下一位">
+<defs>
+<marker id="pg-release-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="40" y="40" class="minor" text-anchor="start" opacity="1">请求 A：P5、P2</text>
+<g class="tableA" opacity="1">
+<rect x="40" y="79" width="210" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="145.0" y="120.0" class="" text-anchor="middle" opacity="1">A 的 block table</text>
+</g>
+<g class="pool" opacity="1">
+<rect x="360" y="223" width="500" height="80" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="610.0" y="270.0" class="" text-anchor="middle" opacity="1">
+</text>
+</g>
+<text x="360" y="329" class="minor" text-anchor="start" opacity="1">空闲块池</text>
+<text x="910" y="109" class="done" text-anchor="start" opacity="0">A 已结束</text>
+<g class="newB" opacity="0">
+<rect x="40" y="223" width="140" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="110.0" y="264.0" class="" text-anchor="middle" opacity="1">新请求 B</text>
+</g>
+<path d="M 180 257 H 210" class="hotwire assignB" opacity="0" marker-end="url(#pg-release-arrow)"/>
+<g class="release0" opacity="1">
+<rect x="420" y="79" width="140" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="490.0" y="120.0" class="" text-anchor="middle" opacity="1">P5</text>
+</g>
+<g class="release1" opacity="1">
+<rect x="620" y="79" width="140" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="690.0" y="120.0" class="" text-anchor="middle" opacity="1">P2</text>
+</g>
+</svg>
+<div class="captions">
+<p class="caption-0">一个请求结束后，它独占的 KV 不再需要。这里先看不保留 prefix cache 的情况。</p>
+<p class="caption-1">移除 A 的 block table，P5、P2 回到空闲池。无需把其他请求挪到一起。</p>
+<p class="caption-2">B 可以立刻拿走空闲块。分页让“结束、释放、再使用”变成小块之间的交接。</p>
+</div>
+<p class="note">启用 prefix caching 时，引用计数归零的满块可以先保留内容，等有新需求再驱逐。</p>
+</section>
+<section class="slide lesson" id="pg-cow">
+<div class="kicker">06 · 共享</div>
+<h2>只读时共用，要写入时再分开</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="只读时共用，要写入时再分开">
+<defs>
+<marker id="pg-cow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<g class="branchA" opacity="1">
+<rect x="32" y="64" width="180" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="122.0" y="101.0" class="" text-anchor="middle" opacity="1">分支 A</text>
+</g>
+<g class="branchB" opacity="1">
+<rect x="32" y="206" width="180" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="122.0" y="243.0" class="" text-anchor="middle" opacity="1">分支 B</text>
+</g>
+<g class="shared" opacity="1">
+<rect x="438" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="552.0" y="159.5" class="" text-anchor="middle" opacity="1">P3：a b c _</text>
+</g>
+<path d="M 212 94 L 438 137" class="hotwire edgeA" opacity="1" marker-end="url(#pg-cow-arrow)"/>
+<path d="M 212 236 L 438 167" class="hotwire edgeB" opacity="1" marker-end="url(#pg-cow-arrow)"/>
+<text x="445" y="227" class="ref2" text-anchor="start" opacity="1">refcount = 2</text>
+<g class="copy" opacity="0">
+<rect x="438" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="552.0" y="159.5" class="" text-anchor="middle" opacity="1">P8：a b c _</text>
+</g>
+<g class="writeA" opacity="0">
+<rect x="438" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="552.0" y="159.5" class="" text-anchor="middle" opacity="1">P3：a b c X</text>
+</g>
+<g class="writeB" opacity="0">
+<rect x="822" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="936.0" y="159.5" class="" text-anchor="middle" opacity="1">P8：a b c Y</text>
+</g>
+<path d="M 212 236 C 500 310, 800 310, 910 195" class="hotwire newedge" opacity="0" marker-end="url(#pg-cow-arrow)"/>
+<text x="835" y="227" class="ref1" text-anchor="start" opacity="0">各自 refcount = 1</text>
+</svg>
+<div class="captions">
+<p class="caption-0">同一提示词生成两种续写时，两条分支可共享已算好的 KV。这里共享的尾块还剩一个空位。</p>
+<p class="caption-1">A、B 要写入不同 token，不能同时改同一尾块。给 B 分配 P8，复制已有的 a、b、c。</p>
+<p class="caption-2">A 在 P3 写 X，B 在 P8 写 Y。更早的完整只读块仍可继续共享，这就是写时复制。</p>
+</div>
+<p class="note">这是分支采样的写时复制示意；满块 prefix cache 命中通常直接共享，不必复制。</p>
+</section>
+<section class="slide">
+<div class="kicker">07 · 容量</div>
+<h2>把浪费限制在尾块里</h2>
+<div class="formula">所需块数 = ceil(序列长度 / 块大小)</div>
+<div class="two-col">
+<div class="card">
+<h3>长度 10，块大小 4</h3>
+<p>分配 3 块，共 12 个位置。前两块装满，尾块空 2 个。</p>
+</div>
+<div class="card">
+<h3>每条序列的尾部空位 &lt; 1 块</h3>
+<p>固定大小块可以互换使用，避免为了连续地址留下大段碎片。</p>
+</div>
+</div>
+<p class="note">这里计算的是 KV 的 token 槽位，不含 block table、模型权重和临时工作区；共享还会进一步减少实际块数。</p>
+</section>
+<section class="slide">
+<div class="kicker">08 · 合起来看</div>
+<h2>调度决定谁上场，分页决定住哪里</h2>
+<div class="route">
+<span>请求到来</span> → <span>调度本轮 token</span> → <span>分配 / 查找 KV 块</span> → <span>GPU 计算</span>
+</div>
+<p>分页让长度不同的请求更容易共存；调度器才能不断让新请求填进空位。</p>
+<p class="links">继续看：<a href="/posts/continuous-batching/">Continuous batching：每一轮重新组队</a>
+<br>
+<a href="/posts/prefix-caching/">Prefix caching：相同的开头，只算一次</a> · <a href="/posts/scaling-memory/">显存预算</a>
+</p>
+</section>
+<section class="slide">
+<div class="kicker">参考与延伸阅读</div>
+<h2>从内存池走到推理引擎</h2>
+<ul class="reference-list">
+<li>
+<a href="https://arxiv.org/abs/2309.06180">Kwon et al. — Efficient Memory Management for Large Language Model Serving with PagedAttention</a>（SOSP 2023）：分页、块共享与写时复制。</li>
+<li>
+<a href="https://docs.vllm.ai/en/latest/design/paged_attention/">vLLM：Paged Attention</a>：attention kernel 如何根据 block table 访问 KV。</li>
+<li>
+<a href="https://docs.vllm.ai/en/latest/design/prefix_caching/">vLLM：Automatic Prefix Caching</a>：缓存块的引用、释放与驱逐。</li>
+</ul>
+<p class="links">
+<a href="/blog/">返回博客</a> · <a href="/posts/continuous-batching/">下一站：连续批处理 →</a>
+</p>
+</section>
+</div>
+</main>
+<script src="/assets/slides.js">
+</script>
+<script src="/assets/anim.js">
+</script>
+<script>
+(() => {
+  const scenes = [
+  {
+    "id": "pg-reserve",
+    "steps": [
+      {
+        "label": "写入 KV",
+        "actions": [
+          [
+            ".used0-0",
+            {
+              "opacity": 1
+            },
+            0.0
+          ],
+          [
+            ".used0-1",
+            {
+              "opacity": 1
+            },
+            0.08
+          ],
+          [
+            ".used0-2",
+            {
+              "opacity": 1
+            },
+            0.16
+          ],
+          [
+            ".used0-3",
+            {
+              "opacity": 1
+            },
+            0.24
+          ],
+          [
+            ".used0-4",
+            {
+              "opacity": 1
+            },
+            0.32
+          ],
+          [
+            ".used1-0",
+            {
+              "opacity": 1
+            },
+            0.0
+          ],
+          [
+            ".used1-1",
+            {
+              "opacity": 1
+            },
+            0.08
+          ],
+          [
+            ".used1-2",
+            {
+              "opacity": 1
+            },
+            0.16
+          ]
+        ]
+      },
+      {
+        "label": "看见浪费",
+        "actions": [
+          [
+            ".waste",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pg-map",
+    "steps": [
+      {
+        "label": "建立映射",
+        "actions": [
+          [
+            ".map0,.map1,.map2",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      },
+      {
+        "label": "连接物理块",
+        "actions": [
+          [
+            ".link0",
+            {
+              "opacity": 1
+            },
+            0.0
+          ],
+          [
+            ".link1",
+            {
+              "opacity": 1
+            },
+            0.12
+          ],
+          [
+            ".link2",
+            {
+              "opacity": 1
+            },
+            0.24
+          ],
+          [
+            ".physical5 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ],
+          [
+            ".physical1 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ],
+          [
+            ".physical7 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pg-read",
+    "steps": [
+      {
+        "label": "定位地址",
+        "actions": [
+          [
+            ".lookupwire,.readwire",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".lookup rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".offset2 rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "参与计算",
+        "actions": [
+          [
+            ".towork,.kernel",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pg-grow",
+    "steps": [
+      {
+        "label": "分配下一块",
+        "actions": [
+          [
+            ".nexttoken",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".freeblock rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ],
+          [
+            ".nexttoken",
+            {
+              "x": 210,
+              "y": 12
+            },
+            0.2
+          ]
+        ]
+      },
+      {
+        "label": "追加映射",
+        "actions": [
+          [
+            ".newmap",
+            {
+              "opacity": 1,
+              "x": 200
+            }
+          ],
+          [
+            ".claim",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pg-release",
+    "steps": [
+      {
+        "label": "结束并归还",
+        "actions": [
+          [
+            ".done",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".tableA",
+            {
+              "opacity": 0.2
+            }
+          ],
+          [
+            ".release0,.release1",
+            {
+              "y": 155
+            }
+          ]
+        ]
+      },
+      {
+        "label": "服务新请求",
+        "actions": [
+          [
+            ".newB,.assignB",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".release0",
+            {
+              "x": -210,
+              "y": 155
+            }
+          ],
+          [
+            ".release0 rect",
+            {
+              "stroke": "var(--accent)"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "pg-cow",
+    "steps": [
+      {
+        "label": "复制尾块",
+        "actions": [
+          [
+            ".copy",
+            {
+              "opacity": 1,
+              "x": 384
+            }
+          ],
+          [
+            ".edgeB,.ref2",
+            {
+              "opacity": 0
+            }
+          ],
+          [
+            ".newedge,.ref1",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      },
+      {
+        "label": "各自写入",
+        "actions": [
+          [
+            ".writeA,.writeB",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".copy,.shared",
+            {
+              "opacity": 0
+            }
+          ]
+        ]
+      }
+    ]
+  }
+];
+  window.lessonTimelines = {};
+  scenes.forEach(({id, steps}) => {
+    const slide = document.getElementById(id);
+    const tl = Anim.timeline({root: slide});
+    tl.label('起点', 0);
+    let at = 0;
+    steps.forEach((step, i) => {
+      const start = at + 0.12;
+      tl.to('.caption-' + i, {opacity: 0}, {at: start, dur: 0.16});
+      tl.to('.caption-' + (i + 1), {opacity: 1}, {at: start + 0.16, dur: 0.2});
+      step.actions.forEach(([selector, props, delay = 0, dur = 0.85]) => {
+        tl.to(selector, props, {at: start + delay, dur});
+      });
+      at = Math.max(tl.duration, start + 1.0);
+      tl.label(step.label, at);
+    });
+    Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
+    window.lessonTimelines[id] = tl;
+  });
+})();
+</script>
+<script src="/assets/post-links.js">
+</script>
+<script src="/assets/posts.js">
+</script>
+</body>
+</html>

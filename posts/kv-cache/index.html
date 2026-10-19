@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KV cache：记住已经算过的历史 · Zunzhe Zhang</title>
+<meta name="description" content="用可回放动画看清 QKV、因果掩码、prefill 写入、decode 读取，以及 KV cache 的容量与带宽成本。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
+.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
+.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">动画图解 LLM 系统</div>
+<h1 class="rise" style="--d:1">KV cache：记住已经算过的历史</h1>
+<p class="muted rise" style="--d:2">每次只生成一个新 token，为什么显存却越用越多？</p>
+<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
+</section>
+<section class="slide lesson" id="qkv">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>Q 是问题，K 是索引，V 是内容</h2>
+<p class="intro">当前 token 带着 Q 查历史：先匹配 K，再把对应的 V 混合起来。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="查询 Q 依次匹配三个 K，再把三个 V 按权重汇入输出">
+</svg>
+<div class="captions">
+<p>假设正在补全“猫坐在……”。每个 token 的 hidden state 经过投影，得到 <b>Q、K、V</b>。</p>
+<p>当前的 Q 与历史 K 做点积，得到一排匹配分数。分数越高，这个位置越值得关注。</p>
+<p>softmax 把分数变成和为 1 的权重，再用这些权重加权求和 V，得到 attention 输出。</p>
+</div>
+<p class="note">词语、权重和张量尺寸均为示意；真实 token 划分由 tokenizer 决定。</p>
+</section>
+<section class="slide lesson" id="causal">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>历史不会因为新词而改变</h2>
+<p class="intro">因果 attention 只允许一个位置读取自己和前面的位置。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="因果 attention 矩阵保持旧三角不变，新 token 只增加一行查询">
+</svg>
+<div class="captions">
+<p>横轴是被读取的 K，纵轴是发起查询的 Q。右上角是未来，被 causal mask 挡住。</p>
+<p>旧位置的输入与可见历史都没变，所以已有 token 在每层产生的 K、V 可以继续使用。</p>
+<p>新 token 加入后，只多出最后一行查询。每层追加一份 K、V，就能留给后续步骤。</p>
+</div>
+</section>
+<section class="slide lesson" id="prefill">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>Prefill：一次处理整段提示词</h2>
+<p class="intro">已知的 prompt 可以在一次前向中并行计算；因果约束由 mask 保证。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="四个 prompt token 并行产生 KV 并写入显存，最后一个位置预测新 token">
+</svg>
+<div class="captions">
+<p>把“猫 / 坐 / 在 / 垫上”送入模型。这里画一个 attention 层，真实模型逐层执行。</p>
+<p>这一层并行产生所有输入位置的 Q、K、V；K、V 写入这一层的 cache。</p>
+<p>各位置通过 causal attention 读取允许看到的历史。最后一个位置的输出继续经过后续层，预测第一个新 token。</p>
+</div>
+</section>
+<section class="slide lesson" id="decode">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>Decode：写一份，读一排</h2>
+<p class="intro">下一步只为刚生成的那个 token 计算新的 hidden state、Q、K、V。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="新 token 的 KV 追加进缓存，所有可见 KV 从 HBM 分块流入 SM 后形成输出">
+</svg>
+<div class="captions">
+<p>新 token 到达当前层。历史 K、V 已在 HBM 中，Q 只是这一轮的临时查询。</p>
+<p>先生成新 K、V，并追加到 cache。当前 token 也可以关注自己。</p>
+<p>attention kernel 分块读取可见 K、V，用当前 Q 得到输出。旧 K、V 保留在 HBM，下一轮继续读。</p>
+</div>
+</section>
+<section class="slide lesson" id="reuse">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>省的是重复计算，历史读取还在</h2>
+<p class="intro">缓存保留每层的 K、V；当前 token 仍然要经过模型的每一层。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="旧 token 的重复计算消失，但随着历史长度增长缓存扫描字节仍然增多">
+</svg>
+<div class="captions">
+<p>没有缓存：每生成一个词，都把旧 token 的投影和前向重新计算一遍。</p>
+<p>有缓存：旧 K、V 原地复用，只计算新 token 的那一份。缓存越长，避免的重复工作越多。</p>
+<p>但 full attention 的新 Q 仍需扫描全部历史。序列从 4 增长到 8，单层读取的 KV 也近似翻倍。</p>
+</div>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>显存怎么算？数一数这些轴</h2>
+<p class="intro">标准 MHA / GQA，且 K 与 V 的 head dimension 相同：</p>
+<div class="formula">KV bytes = 2 × layers × tokens × KV heads × head dim × bytes</div>
+<div class="widget" data-interactive>
+<div class="memory-inputs">
+<label>层数<input id="layers" type="range" min="8" max="80" step="8" value="32">
+<output id="layers-o">32</output>
+</label>
+<label>token 数<input id="tokens" type="range" min="1024" max="32768" step="1024" value="8192">
+<output id="tokens-o">8192</output>
+</label>
+<label>KV 头数<input id="heads" type="range" min="1" max="32" step="1" value="8">
+<output id="heads-o">8</output>
+</label>
+<label>并发序列<input id="batch" type="range" min="1" max="32" step="1" value="1">
+<output id="batch-o">1</output>
+</label>
+</div>
+<div class="readout-grid">
+<div>
+<p>单条序列</p>
+<strong id="one">1.00 GiB</strong>
+</div>
+<div>
+<p>所有序列合计</p>
+<strong id="all">1.00 GiB</strong>
+</div>
+</div>
+</div>
+<p class="note">固定 head dim = 128、BF16 = 2 bytes；假设序列等长。未计分页空隙、元数据与并行副本。GiB = 2³⁰ bytes。</p>
+</section>
+<section class="slide lesson" id="bandwidth">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>容量够了，也可能被带宽拖慢</h2>
+<p class="intro">Decode 的 attention 要反复搬历史；每次只带来一小份新结果。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="KV 块从 HBM 经过带宽通道进入计算单元，读取计数随数据到达而增加">
+</svg>
+<div class="captions">
+<p>左侧是 HBM 中的 KV，右侧是执行 attention 的 SM。数据分块搬入，在片上计算并累积输出。</p>
+<p>若一条序列的 KV 总计 1 GiB，那么生成一个 token，跨全部层的 KV 读取量约为 1 GiB。</p>
+<p>再加入权重读取、调度和其他算子，才得到完整的 token 延迟。压缩 KV 既省容量，也可能减少这段搬运。</p>
+</div>
+<p class="note">1 GiB 为简化示例；实际流量取决于 kernel 复用、cache 命中与并行方式。</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>把“存得下”和“读得快”分开想</h2>
+<div class="two-col">
+<div class="card">
+<h3>存得下更多历史</h3>
+<p>减少 KV 头数、压缩表示、量化，直接减少数据量。<a href="/posts/kv-cache-compression/">KV cache 压缩</a> 从这几个轴动手。</p>
+</div>
+<div class="card">
+<h3>用好已经分配的显存</h3>
+<p>
+<a href="/posts/paged-attention/">PagedAttention</a> 把缓存分块管理，减少预留和碎片；数据本身仍然需要保存。</p>
+</div>
+<div class="card">
+<h3>复用相同 prompt</h3>
+<p>
+<a href="/posts/prefix-caching/">Prefix caching</a> 在请求间复用完整匹配的前缀，避免重复 prefill。</p>
+</div>
+<div class="card">
+<h3>少读历史位置</h3>
+<p>
+<a href="/posts/sparse-attention/">Sparse attention</a> 只读取选中的位置。节省多少取决于选择策略和 kernel。</p>
+</div>
+</div>
+</section>
+<section class="slide lesson">
+<div class="kicker">参考资料</div>
+<h2>参考与延伸阅读</h2>
+<ul class="reference-list">
+<li>
+<a href="https://huggingface.co/docs/transformers/en/cache_explanation" target="_blank" rel="noopener noreferrer">Hugging Face · Caching：prefill、decode 与缓存实现</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2305.13245" target="_blank" rel="noopener noreferrer">GQA：用较少 KV heads 服务多个 query heads</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">PagedAttention：高效管理推理中的 KV cache</a>
+</li>
+</ul>
+<p class="related">继续看：<a href="/posts/kv-cache-compression/">KV 压缩</a> · <a href="/posts/sparse-attention/">Sparse attention</a> · <a href="/posts/linear-attention/">Linear attention</a>
+</p>
+</section>
+</div>
+</main><script src="/assets/slides.js"></script><script src="/assets/anim.js"></script><script>
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
+const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
+const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
+const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
+const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
+function scene(id,svg,steps){
+ const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
+ const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
+ steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
+ const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
+ Anim.slide(el,tl,{steps:true,controls:true});
+}
+const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
+
+
+scene('qkv',B('q',55,130,130,70,'Q：在','accentbox')+[0,1,2].map(i=>B('k'+i,330,30+i*95,160,60,['K：猫','K：坐','K：在'][i])+B('v'+i,650,30+i*95,150,60,['V：猫','V：坐','V：在'][i])+L('score'+i,195,165,320,60+i*95,'wire ghost')+T(563,69+i*95,['0.2','0.3','0.5'][i],'ghost weight')).join('')+B('out',920,130,150,70,'输出','accentbox')+[0,1,2].map(i=>L('mix'+i,810,60+i*95,910,165,'hotwire ghost')).join(''),[
+{name:'Q 匹配 K',run:(tl,t)=>{a(tl,t,'[id^=score]',{opacity:1});a(tl,t,'[id^=k]',{x:20},.1);a(tl,t,'.weight',{opacity:1},.45)}},
+{name:'按权重混合 V',run:(tl,t)=>{a(tl,t,'[id^=mix]',{opacity:1});[0,1,2].forEach(i=>a(tl,t,'#v'+i,{x:60},i*.14));a(tl,t,'#out',{scale:1.1},.5)}}]);
+let mat=T(490,28,'历史 K 位置','label')+T(165,178,'查询 Q','label');for(let r=0;r<5;r++)for(let c=0;c<5;c++)mat+=R('m'+r+c,300+c*62,50+r*52,52,42,c<=r?'accentbox':'box soft');mat+=B('old',750,80,300,70,'旧 K、V 保持不变')+B('new',750,215,300,70,'追加新 K、V','accentbox ghost');
+scene('causal',mat,[{name:'固定旧历史',run:(tl,t)=>{a(tl,t,'#old',{scale:1.06});for(let r=0;r<4;r++)for(let c=0;c<=r;c++)a(tl,t,'#m'+r+c,{fill:'var(--accent-2)'},0)}},{name:'多一行新查询',run:(tl,t)=>{for(let c=0;c<5;c++)a(tl,t,'#m4'+c,{fill:'var(--accent)',y:7},c*.08);a(tl,t,'#new',{opacity:1},.4)}}]);
+let pre=T(180,27,'已知 prompt','label')+T(555,27,'单层 QKV 投影','label')+T(910,27,'HBM：本层 KV cache','label');for(let i=0;i<4;i++)pre+=B('p'+i,70,55+i*64,210,48,['猫','坐','在','垫上'][i])+L('pwire'+i,290,79+i*64,440,79+i*64,'wire')+B('projection'+i,450,55+i*64,170,48,'K、V','accentbox')+B('cache'+i,810,55+i*64,210,48,'K、V','greenbox ghost');
+scene('prefill',pre,[{name:'并行写入 KV',run:(tl,t)=>{for(let i=0;i<4;i++){a(tl,t,'#projection'+i,{x:330},i*.08);a(tl,t,'#cache'+i,{opacity:1},.8)}}},{name:'预测第一个新词',run:(tl,t)=>{a(tl,t,'#p3',{x:30});a(tl,t,'#cache3',{scale:1.1});a(tl,t,'#cache3 text',{text:1,fmt:()=> '预测下一个词'},.6)}}]);
+let dec=T(200,27,'HBM：历史 cache','label')+T(745,27,'SM：当前 token 的计算','label');for(let i=0;i<5;i++)dec+=B('slot'+i,45,50+i*52,260,44,i<4?'K'+(i+1)+' / V'+(i+1):'空位',i<4?'box':'box soft');dec+=B('newkv',650,55,210,56,'新 K₅ / V₅','accentbox')+B('query',650,150,210,56,'当前 Q₅','accentbox')+B('answer',900,150,160,56,'输出','greenbox ghost')+L('channel',320,175,635,175,'wire');for(let i=0;i<5;i++)dec+=R('packet'+i,325,155,28,28,'accentbox ghost');
+scene('decode',dec,[{name:'追加当前 KV',run:(tl,t)=>{a(tl,t,'#newkv',{x:-600,y:203});a(tl,t,'#newkv',{opacity:0},.85,.2);a(tl,t,'#slot4',{opacity:1});a(tl,t,'#slot4 text',{text:1,fmt:()=> 'K₅ / V₅'},.5)}},{name:'分块读取历史',run:(tl,t)=>{for(let i=0;i<5;i++){a(tl,t,'#packet'+i,{opacity:1,x:295},i*.1,.6);a(tl,t,'#slot'+i,{scale:1.04},i*.08)}a(tl,t,'#answer',{opacity:1},.7)}}]);
+let reuse=T(180,48,'每步重算','label')+T(180,165,'有 KV cache','label')+T(180,282,'历史读取量','label');for(let i=0;i<8;i++){reuse+=B('compute'+i,320+i*85,20,73,53,i<7?'旧':'新',i<7?'box':'accentbox');reuse+=B('cached'+i,320+i*85,135,73,53,i<7?'存':'新',i<7?'greenbox':'accentbox');}reuse+=R('readbar',320,255,340,40,'accentbox')+T(740,283,'4 → 8 份 KV','label');scene('reuse',reuse,[{name:'复用七份旧结果',run:(tl,t)=>{for(let i=0;i<7;i++){a(tl,t,'#compute'+i,{opacity:.15,y:15},i*.06);a(tl,t,'#cached'+i,{y:-8},i*.06)}}},{name:'读取随历史增长',run:(tl,t)=>{a(tl,t,'#readbar',{attr:{width:680}});a(tl,t,'#cached7',{x:12})}}]);
+scene('bandwidth',B('hbm',40,60,250,210,'HBM：KV cache')+B('sm',770,60,290,210,'SM：attention','accentbox')+L('bus',310,165,750,165,'wire')+[0,1,2,3].map(i=>R('chunk'+i,325+i*65,135,45,60,'accentbox')).join('')+T(530,90,'每次生成都要搬','label')+'<text id="traffic" x="530" y="255" text-anchor="middle" class="value">0 GiB</text>',[
+{name:'历史流入计算单元',run:(tl,t)=>{[0,1,2,3].forEach(i=>a(tl,t,'#chunk'+i,{x:390-i*65,y:(i-1.5)*15},i*.13));a(tl,t,'#traffic',{text:1,fmt:v=>v.toFixed(2)+' GiB'})}},
+{name:'缩小搬运的数据',run:(tl,t)=>{[0,1,2,3].forEach(i=>a(tl,t,'#chunk'+i,{scale:.6},i*.1));a(tl,t,'#traffic',{text:.5,fmt:v=>v.toFixed(2)+' GiB（示意）'})}}]);
+function updateMemory(){let v={};['layers','tokens','heads','batch'].forEach(k=>{v[k]=+document.getElementById(k).value;document.getElementById(k+'-o').textContent=v[k]});const gib=2*v.layers*v.tokens*v.heads*128*2/2**30;document.getElementById('one').textContent=gib.toFixed(2)+' GiB';document.getElementById('all').textContent=(gib*v.batch).toFixed(2)+' GiB'}document.querySelectorAll('.memory-inputs input').forEach(e=>e.addEventListener('input',updateMemory));updateMemory();
+</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>

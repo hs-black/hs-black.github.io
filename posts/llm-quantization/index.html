@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LLM 量化：字节、误差与计算 · Zunzhe Zhang</title>
+<meta name="description" content="用动画讲 scale、round、clamp、反量化、离群值、per-group 精度、低位 GEMM 数据流，以及权重、激活与 KV cache 的独立账本。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson {padding:38px 64px 86px;gap:12px;justify-content:flex-start}
+.slide.lesson h2{font-size:42px;line-height:1.2}.slide.lesson .kicker{font-size:16px}
+.scene{width:100%;height:350px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:22px}.scene .small{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:16px;fill:var(--text-soft)}.scene .mono{font-family:var(--font-mono)}
+.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .accent{fill:var(--accent)}.scene .orange{fill:var(--accent-2)}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .dim{fill:var(--bg-soft);stroke:var(--border);stroke-width:1}.scene .ghost{opacity:0}
+.lesson .narration{font-size:24px;line-height:1.55;color:var(--text-soft);min-height:74px}.narration b{color:var(--text)}.lesson .note{font-size:16px;color:var(--text-faint);line-height:1.45}.lesson .formula{font-family:var(--font-mono);font-size:25px;color:var(--accent);padding:12px 18px;border-radius:12px;background:var(--accent-soft)}
+.lesson .reference-list{font-size:22px;line-height:1.6}.lesson .reference-list li+li{margin-top:12px}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.lesson .card{padding:24px;border:1px solid var(--border);background:var(--surface);border-radius:18px;font-size:24px}.lesson .card h3{font-size:28px;margin:0 0 14px}.lesson .card p+p{margin-top:16px}.lesson .mini{font-size:21px;line-height:1.55}.slide.center h1{font-size:76px}.slide.center .subtitle{font-size:30px;max-width:1000px;color:var(--text-soft)}
+
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">动画图解 LLM 系统 · 2026-10-20
+</div>
+<h1 class="rise" style="--d:1">LLM 量化
+</h1>
+<p class="subtitle rise" style="--d:2">用更少的位搬数据，把误差花在模型承受得住的地方
+</p>
+<p class="small muted rise" style="--d:3">按 → 推进 · 底部时间轴可拖动 · F 全屏
+</p>
+</section>
+<section class="slide lesson" id="bytes">
+<div class="kicker">01 · 从字节开始
+</div>
+<h2>同样一百亿个参数，位宽减半，权重字节就减半
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="同样一百亿个参数，位宽减半，权重字节就减半">
+<text x="75" y="55" text-anchor="start" class="" >16 bit</text>
+<text x="75" y="165" text-anchor="start" class="" >8 bit</text>
+<text x="75" y="275" text-anchor="start" class="" >4 bit</text>
+<rect x="240" y="25" width="36" height="56" rx="12" class="accentbox" id="bit00" style="opacity: 0;"/>
+<rect x="286" y="25" width="36" height="56" rx="12" class="accentbox" id="bit01" style="opacity: 0;"/>
+<rect x="332" y="25" width="36" height="56" rx="12" class="accentbox" id="bit02" style="opacity: 0;"/>
+<rect x="378" y="25" width="36" height="56" rx="12" class="accentbox" id="bit03" style="opacity: 0;"/>
+<rect x="424" y="25" width="36" height="56" rx="12" class="accentbox" id="bit04" style="opacity: 0;"/>
+<rect x="470" y="25" width="36" height="56" rx="12" class="accentbox" id="bit05" style="opacity: 0;"/>
+<rect x="516" y="25" width="36" height="56" rx="12" class="accentbox" id="bit06" style="opacity: 0;"/>
+<rect x="562" y="25" width="36" height="56" rx="12" class="accentbox" id="bit07" style="opacity: 0;"/>
+<rect x="608" y="25" width="36" height="56" rx="12" class="accentbox" id="bit08" style="opacity: 0;"/>
+<rect x="654" y="25" width="36" height="56" rx="12" class="accentbox" id="bit09" style="opacity: 0;"/>
+<rect x="700" y="25" width="36" height="56" rx="12" class="accentbox" id="bit010" style="opacity: 0;"/>
+<rect x="746" y="25" width="36" height="56" rx="12" class="accentbox" id="bit011" style="opacity: 0;"/>
+<rect x="792" y="25" width="36" height="56" rx="12" class="accentbox" id="bit012" style="opacity: 0;"/>
+<rect x="838" y="25" width="36" height="56" rx="12" class="accentbox" id="bit013" style="opacity: 0;"/>
+<rect x="884" y="25" width="36" height="56" rx="12" class="accentbox" id="bit014" style="opacity: 0;"/>
+<rect x="930" y="25" width="36" height="56" rx="12" class="accentbox" id="bit015" style="opacity: 0;"/>
+<text x="1060" y="60" text-anchor="middle" class="small" >2 byte</text>
+<rect x="240" y="135" width="36" height="56" rx="12" class="accentbox" id="bit10" style="opacity: 0;"/>
+<rect x="286" y="135" width="36" height="56" rx="12" class="accentbox" id="bit11" style="opacity: 0;"/>
+<rect x="332" y="135" width="36" height="56" rx="12" class="accentbox" id="bit12" style="opacity: 0;"/>
+<rect x="378" y="135" width="36" height="56" rx="12" class="accentbox" id="bit13" style="opacity: 0;"/>
+<rect x="424" y="135" width="36" height="56" rx="12" class="accentbox" id="bit14" style="opacity: 0;"/>
+<rect x="470" y="135" width="36" height="56" rx="12" class="accentbox" id="bit15" style="opacity: 0;"/>
+<rect x="516" y="135" width="36" height="56" rx="12" class="accentbox" id="bit16" style="opacity: 0;"/>
+<rect x="562" y="135" width="36" height="56" rx="12" class="accentbox" id="bit17" style="opacity: 0;"/>
+<rect x="608" y="135" width="36" height="56" rx="12" class="dim" id="bit18" style="opacity: 0;"/>
+<rect x="654" y="135" width="36" height="56" rx="12" class="dim" id="bit19" style="opacity: 0;"/>
+<rect x="700" y="135" width="36" height="56" rx="12" class="dim" id="bit110" style="opacity: 0;"/>
+<rect x="746" y="135" width="36" height="56" rx="12" class="dim" id="bit111" style="opacity: 0;"/>
+<rect x="792" y="135" width="36" height="56" rx="12" class="dim" id="bit112" style="opacity: 0;"/>
+<rect x="838" y="135" width="36" height="56" rx="12" class="dim" id="bit113" style="opacity: 0;"/>
+<rect x="884" y="135" width="36" height="56" rx="12" class="dim" id="bit114" style="opacity: 0;"/>
+<rect x="930" y="135" width="36" height="56" rx="12" class="dim" id="bit115" style="opacity: 0;"/>
+<text x="1060" y="170" text-anchor="middle" class="small" >1 byte</text>
+<rect x="240" y="245" width="36" height="56" rx="12" class="accentbox" id="bit20" style="opacity: 0;"/>
+<rect x="286" y="245" width="36" height="56" rx="12" class="accentbox" id="bit21" style="opacity: 0;"/>
+<rect x="332" y="245" width="36" height="56" rx="12" class="accentbox" id="bit22" style="opacity: 0;"/>
+<rect x="378" y="245" width="36" height="56" rx="12" class="accentbox" id="bit23" style="opacity: 0;"/>
+<rect x="424" y="245" width="36" height="56" rx="12" class="dim" id="bit24" style="opacity: 0;"/>
+<rect x="470" y="245" width="36" height="56" rx="12" class="dim" id="bit25" style="opacity: 0;"/>
+<rect x="516" y="245" width="36" height="56" rx="12" class="dim" id="bit26" style="opacity: 0;"/>
+<rect x="562" y="245" width="36" height="56" rx="12" class="dim" id="bit27" style="opacity: 0;"/>
+<rect x="608" y="245" width="36" height="56" rx="12" class="dim" id="bit28" style="opacity: 0;"/>
+<rect x="654" y="245" width="36" height="56" rx="12" class="dim" id="bit29" style="opacity: 0;"/>
+<rect x="700" y="245" width="36" height="56" rx="12" class="dim" id="bit210" style="opacity: 0;"/>
+<rect x="746" y="245" width="36" height="56" rx="12" class="dim" id="bit211" style="opacity: 0;"/>
+<rect x="792" y="245" width="36" height="56" rx="12" class="dim" id="bit212" style="opacity: 0;"/>
+<rect x="838" y="245" width="36" height="56" rx="12" class="dim" id="bit213" style="opacity: 0;"/>
+<rect x="884" y="245" width="36" height="56" rx="12" class="dim" id="bit214" style="opacity: 0;"/>
+<rect x="930" y="245" width="36" height="56" rx="12" class="dim" id="bit215" style="opacity: 0;"/>
+<text x="1060" y="280" text-anchor="middle" class="small" >½ byte</text>
+</svg>
+<p class="narration">一个 BF16 / FP16 权重占 2 byte；INT8 占 1 byte；4 bit 打包后平均占半个 byte。<b>10B 权重的原始存储约为 20、10、5 GB</b>。
+</p>
+<p class="note">十进制 GB；只算权重数据，不含 scale、zero-point、对齐、KV cache 与临时工作区。
+</p>
+</section>
+<section class="slide lesson" id="round">
+<div class="kicker">02 · 量化三步
+</div>
+<h2>先缩放，再取整，最后截到能存的范围
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="先缩放，再取整，最后截到能存的范围">
+<text x="575" y="35" text-anchor="middle" class="small" >对称 4 bit 示例：整数范围 −7 … 7，scale s = 0.25</text>
+<path d="M110 165 L1040 165" class="wire" />
+<path d="M155 153 L155 177" class="wire" />
+<text x="155" y="208" text-anchor="middle" class="tiny" >-1.75</text>
+<path d="M215 153 L215 177" class="wire" />
+<text x="215" y="208" text-anchor="middle" class="tiny" >-1.5</text>
+<path d="M275 153 L275 177" class="wire" />
+<text x="275" y="208" text-anchor="middle" class="tiny" >-1.25</text>
+<path d="M335 153 L335 177" class="wire" />
+<text x="335" y="208" text-anchor="middle" class="tiny" >-1.0</text>
+<path d="M395 153 L395 177" class="wire" />
+<text x="395" y="208" text-anchor="middle" class="tiny" >-0.75</text>
+<path d="M455 153 L455 177" class="wire" />
+<text x="455" y="208" text-anchor="middle" class="tiny" >-0.5</text>
+<path d="M515 153 L515 177" class="wire" />
+<text x="515" y="208" text-anchor="middle" class="tiny" >-0.25</text>
+<path d="M575 153 L575 177" class="wire" />
+<text x="575" y="208" text-anchor="middle" class="tiny" >0.0</text>
+<path d="M635 153 L635 177" class="wire" />
+<text x="635" y="208" text-anchor="middle" class="tiny" >0.25</text>
+<path d="M695 153 L695 177" class="wire" />
+<text x="695" y="208" text-anchor="middle" class="tiny" >0.5</text>
+<path d="M755 153 L755 177" class="wire" />
+<text x="755" y="208" text-anchor="middle" class="tiny" >0.75</text>
+<path d="M815 153 L815 177" class="wire" />
+<text x="815" y="208" text-anchor="middle" class="tiny" >1.0</text>
+<path d="M875 153 L875 177" class="wire" />
+<text x="875" y="208" text-anchor="middle" class="tiny" >1.25</text>
+<path d="M935 153 L935 177" class="wire" />
+<text x="935" y="208" text-anchor="middle" class="tiny" >1.5</text>
+<path d="M995 153 L995 177" class="wire" />
+<text x="995" y="208" text-anchor="middle" class="tiny" >1.75</text>
+<circle id="float-point" cx="868" cy="100" r="17" fill="var(--accent-2)"/>
+<text x="868" y="70" text-anchor="middle" class="small" >x = 1.22</text>
+<g >
+<rect x="345" y="268" width="465" height="60" rx="12" class="accentbox" />
+<text x="577.5" y="306.0" text-anchor="middle" class="" >q = clamp(round(x / s), −7, 7)</text>
+</g>
+<text x="875" y="306" text-anchor="middle" class="small ghost" id="q-value" >q = 5</text>
+</svg>
+<p class="narration">把连续数轴变成有限格点：1.22 ÷ 0.25 = 4.88，四舍五入得到 <b>q = 5</b>。整数超出范围就 clamp 到边界；scale 决定一格有多宽。
+</p>
+<p class="note">此处采用对称的 −7…7 编码作教学示例；具体 INT4 kernel 的编码与 zero-point 约定可能不同。
+</p>
+</section>
+<section class="slide lesson" id="dequant">
+<div class="kicker">03 · 反量化
+</div>
+<h2>存的是 5，计算时按比例读成 1.25
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="存的是 5，计算时按比例读成 1.25">
+<g >
+<rect x="65" y="115" width="180" height="100" rx="12" class="accentbox" />
+<text x="155.0" y="173.0" text-anchor="middle" class="" >q = 5</text>
+</g>
+<path d="M245 165 L345 165" class="wire" />
+<g >
+<rect x="345" y="115" width="260" height="100" rx="12" class="box" />
+<text x="475.0" y="173.0" text-anchor="middle" class="" >× scale 0.25</text>
+</g>
+<path d="M605 165 L705 165" class="wire" />
+<g id="dequantized" class="ghost">
+<rect x="705" y="115" width="190" height="100" rx="12" class="accentbox" />
+<text x="800.0" y="173.0" text-anchor="middle" class="" >x̂ = 1.25</text>
+</g>
+<g >
+<rect x="930" y="115" width="170" height="100" rx="12" class="box" />
+<text x="1015.0" y="173.0" text-anchor="middle" class="" >原值 1.22</text>
+</g>
+<text x="575" y="295" text-anchor="middle" class="small ghost" id="error-value" >量化误差 = 1.25 − 1.22 = +0.03</text>
+</svg>
+<p class="narration">反量化 x̂ = s × q，把整数重新解释为近似浮点数。<b>取整丢掉的信息不会回来</b>，这里留下 +0.03 的误差；截断到边界时误差可能更大。
+</p>
+<p class="note">一般仿射量化还带 zero-point z：q = clamp(round(x/s) + z)，x̂ = s(q − z)。
+</p>
+</section>
+<section class="slide lesson" id="outlier">
+<div class="kicker">04 · 离群值
+</div>
+<h2>一个 8，拉大了所有人的刻度
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="一个 8，拉大了所有人的刻度">
+<text x="65" y="40" text-anchor="start" class="" >一组权重</text>
+<g >
+<rect x="215" y="10" width="140" height="65" rx="12" class="box" />
+<text x="285.0" y="50.5" text-anchor="middle" class="" >0.2</text>
+</g>
+<g >
+<rect x="385" y="10" width="140" height="65" rx="12" class="box" />
+<text x="455.0" y="50.5" text-anchor="middle" class="" >0.4</text>
+</g>
+<g >
+<rect x="555" y="10" width="140" height="65" rx="12" class="box" />
+<text x="625.0" y="50.5" text-anchor="middle" class="" >-0.3</text>
+</g>
+<g >
+<rect x="725" y="10" width="140" height="65" rx="12" class="box" />
+<text x="795.0" y="50.5" text-anchor="middle" class="" >0.6</text>
+</g>
+<g >
+<rect x="895" y="10" width="140" height="65" rx="12" class="accentbox" />
+<text x="965.0" y="50.5" text-anchor="middle" class="" >8</text>
+</g>
+<text x="65" y="135" text-anchor="start" class="" >共用 scale</text>
+<path d="M260 135 L1050 135" class="wire" />
+<text x="600" y="177" text-anchor="middle" class="small" >s = 8 / 7 ≈ 1.14，小数几乎都落在 0 附近</text>
+<g id="collapsed0" class="ghost">
+<rect x="215" y="215" width="140" height="65" rx="12" class="box" />
+<text x="285.0" y="255.5" text-anchor="middle" class="" >0</text>
+</g>
+<g id="collapsed1" class="ghost">
+<rect x="385" y="215" width="140" height="65" rx="12" class="box" />
+<text x="455.0" y="255.5" text-anchor="middle" class="" >0</text>
+</g>
+<g id="collapsed2" class="ghost">
+<rect x="555" y="215" width="140" height="65" rx="12" class="box" />
+<text x="625.0" y="255.5" text-anchor="middle" class="" >0</text>
+</g>
+<g id="collapsed3" class="ghost">
+<rect x="725" y="215" width="140" height="65" rx="12" class="box" />
+<text x="795.0" y="255.5" text-anchor="middle" class="" >1</text>
+</g>
+<g id="collapsed4" class="ghost">
+<rect x="895" y="215" width="140" height="65" rx="12" class="box" />
+<text x="965.0" y="255.5" text-anchor="middle" class="" >7</text>
+</g>
+</svg>
+<p class="narration">为了装下最大的 8，共用 scale 变成 8/7。0.2、0.4、−0.3 都舍入到 0。<b>范围越大，同样位数的格点越粗</b>，小值更容易被抹掉。
+</p>
+<p class="note">玩具权重；采用上一页的对称 −7…7 量化范围。
+</p>
+</section>
+<section class="slide lesson" id="groups">
+<div class="kicker">05 · 更细的 scale
+</div>
+<h2>分组以后，小值重新有了自己的刻度
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="分组以后，小值重新有了自己的刻度">
+<text x="85" y="45" text-anchor="start" class="" >组 A：小值</text>
+<text x="85" y="200" text-anchor="start" class="" >组 B：大值</text>
+<g >
+<rect x="260" y="10" width="120" height="65" rx="12" class="box" />
+<text x="320.0" y="50.5" text-anchor="middle" class="" >0.2</text>
+</g>
+<g >
+<rect x="405" y="10" width="120" height="65" rx="12" class="box" />
+<text x="465.0" y="50.5" text-anchor="middle" class="" >0.4</text>
+</g>
+<g >
+<rect x="550" y="10" width="120" height="65" rx="12" class="box" />
+<text x="610.0" y="50.5" text-anchor="middle" class="" >-0.3</text>
+</g>
+<g >
+<rect x="695" y="10" width="120" height="65" rx="12" class="box" />
+<text x="755.0" y="50.5" text-anchor="middle" class="" >0.6</text>
+</g>
+<g >
+<rect x="870" y="10" width="220" height="65" rx="12" class="accentbox" />
+<text x="980.0" y="50.5" text-anchor="middle" class="" >s = 0.6 / 7</text>
+</g>
+<g >
+<rect x="260" y="165" width="120" height="65" rx="12" class="box" />
+<text x="320.0" y="205.5" text-anchor="middle" class="" >8</text>
+</g>
+<g >
+<rect x="870" y="165" width="220" height="65" rx="12" class="accentbox" />
+<text x="980.0" y="205.5" text-anchor="middle" class="" >s = 8 / 7</text>
+</g>
+<g id="group0" class="ghost">
+<rect x="260" y="90" width="120" height="55" rx="12" class="accentbox" />
+<text x="320.0" y="125.5" text-anchor="middle" class="" >0.171</text>
+</g>
+<g id="group1" class="ghost">
+<rect x="405" y="90" width="120" height="55" rx="12" class="accentbox" />
+<text x="465.0" y="125.5" text-anchor="middle" class="" >0.429</text>
+</g>
+<g id="group2" class="ghost">
+<rect x="550" y="90" width="120" height="55" rx="12" class="accentbox" />
+<text x="610.0" y="125.5" text-anchor="middle" class="" >−0.343</text>
+</g>
+<g id="group3" class="ghost">
+<rect x="695" y="90" width="120" height="55" rx="12" class="accentbox" />
+<text x="755.0" y="125.5" text-anchor="middle" class="" >0.600</text>
+</g>
+<g id="group4" class="ghost">
+<rect x="260" y="245" width="120" height="55" rx="12" class="accentbox" />
+<text x="320.0" y="280.5" text-anchor="middle" class="" >8.000</text>
+</g>
+</svg>
+<p class="narration">per-channel 或 per-group 量化，让一小片权重共用一个 scale。<b>误差通常更小，但要多存 scale，也要让 kernel 高效读取它们</b>。
+</p>
+<p class="note">人为分组与最近偶数舍入仅展示原理；真实矩阵按通道或固定 group 分组。异常通道也可保留更高精度。
+</p>
+</section>
+<section class="slide lesson" id="kernel">
+<div class="kicker">06 · 数据走到计算单元
+</div>
+<h2>文件变小，只完成了一半
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="文件变小，只完成了一半">
+<g >
+<rect x="35" y="100" width="205" height="130" rx="12" class="accentbox" />
+<text x="137.5" y="173.0" text-anchor="middle" class="" >HBM：W4 打包</text>
+</g>
+<path d="M240 165 L330 165" class="wire" />
+<g >
+<rect x="330" y="100" width="225" height="130" rx="12" class="box" />
+<text x="442.5" y="173.0" text-anchor="middle" class="" >寄存器 / shared</text>
+</g>
+<path d="M555 165 L650 165" class="wire" />
+<g >
+<rect x="650" y="100" width="220" height="130" rx="12" class="accentbox" />
+<text x="760.0" y="173.0" text-anchor="middle" class="" >矩阵乘 + 累加</text>
+</g>
+<path d="M870 165 L945 165" class="wire" />
+<g >
+<rect x="945" y="100" width="170" height="130" rx="12" class="box" />
+<text x="1030.0" y="173.0" text-anchor="middle" class="" >输出激活</text>
+</g>
+<g id="scale-packet" >
+<rect x="100" y="275" width="110" height="48" rx="12" class="box" />
+<text x="155.0" y="307.0" text-anchor="middle" class="" >scale</text>
+</g>
+<g id="weight-packet" >
+<rect x="60" y="32" width="100" height="48" rx="12" class="accentbox" />
+<text x="110.0" y="64.0" text-anchor="middle" class="" >W4</text>
+</g>
+<g id="dequant-packet" class="ghost">
+<rect x="380" y="102" width="100" height="48" rx="12" class="accentbox" />
+<text x="430.0" y="134.0" text-anchor="middle" class="" >W16</text>
+</g>
+<g id="activation-packet" >
+<rect x="680" y="30" width="100" height="48" rx="12" class="box" />
+<text x="730.0" y="62.0" text-anchor="middle" class="" >A16</text>
+</g>
+<g id="result-packet" class="ghost">
+<rect x="690" y="102" width="100" height="48" rx="12" class="accentbox" />
+<text x="740.0" y="134.0" text-anchor="middle" class="" >Y</text>
+</g>
+<text x="440" y="277" text-anchor="middle" class="small" >解包、反量化</text>
+<text x="755" y="277" text-anchor="middle" class="small" >常用更高精度累加</text>
+</svg>
+<p class="narration">W4A16 里，权重以 4 bit 搬进芯片，kernel 在局部解包、按 scale 还原，再与 16 bit 激活计算。<b>把整份权重先展开回 HBM，会吃掉搬运上的节省</b>。
+</p>
+<p class="note">图中采用 W4 → W16 的示意路径；实际 kernel 取决于硬件。W8A8、FP8 等可使用对应低精度矩阵指令。
+</p>
+</section>
+<section class="slide lesson" id="budget">
+<div class="kicker">07 · 别把三份精度混在一起
+</div>
+<h2>只压缩权重，KV cache 不会跟着变小
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="只压缩权重，KV cache 不会跟着变小">
+<text x="75" y="35" text-anchor="start" class="" >一张卡上的显存账本</text>
+<rect x="100" y="80" width="460" height="100" rx="12" class="accentbox" id="memw" />
+<text x="330.0" y="135" text-anchor="middle" class="small" id="label-memw">权重 W</text>
+<rect x="560" y="80" width="330" height="100" rx="12" class="box" id="memkv" />
+<text x="725.0" y="135" text-anchor="middle" class="small" id="label-memkv">KV cache</text>
+<rect x="890" y="80" width="140" height="100" rx="12" class="box" id="mema" />
+<text x="960.0" y="135" text-anchor="middle" class="small" id="label-mema">激活 / 临时</text>
+<text x="200" y="258" text-anchor="middle" class="" id="which-format">W4A16</text>
+<text x="715" y="258" text-anchor="middle" class="small" >KV 仍可能是 BF16</text>
+<text x="575" y="325" text-anchor="middle" class="small" >W 的位宽、A 的位宽、KV 的位宽，是三个独立选择。</text>
+</svg>
+<p class="narration">W4A16 表示权重 4 bit、激活 16 bit。长上下文或大量并发时，<b>KV cache 仍可能占显存的大头</b>；量化 KV 需要单独的格式、scale 与 attention kernel 支持。
+</p>
+<p class="note">条形长度为示意，并非某一模型的实际显存占比。
+</p>
+</section>
+<section class="slide lesson" id="compute">
+<div class="kicker">08 · 计算精度
+</div>
+<h2>低位输入，不等于用低位把长串乘积加完
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="低位输入，不等于用低位把长串乘积加完">
+<text x="575" y="35" text-anchor="middle" class="small" >INT8 × INT8 → INT32 累加 → 乘 scale</text>
+<g >
+<rect x="100" y="75" width="110" height="70" rx="12" class="accentbox" />
+<text x="155.0" y="118.0" text-anchor="middle" class="" >2</text>
+</g>
+<text x="235" y="119" text-anchor="middle" class="" >×</text>
+<g >
+<rect x="270" y="75" width="110" height="70" rx="12" class="accentbox" />
+<text x="325.0" y="118.0" text-anchor="middle" class="" >3</text>
+</g>
+<g id="prod0" class="ghost">
+<rect x="185" y="200" width="160" height="65" rx="12" class="box" />
+<text x="265.0" y="240.5" text-anchor="middle" class="" >6</text>
+</g>
+<g >
+<rect x="440" y="75" width="110" height="70" rx="12" class="accentbox" />
+<text x="495.0" y="118.0" text-anchor="middle" class="" >-1</text>
+</g>
+<text x="575" y="119" text-anchor="middle" class="" >×</text>
+<g >
+<rect x="610" y="75" width="110" height="70" rx="12" class="accentbox" />
+<text x="665.0" y="118.0" text-anchor="middle" class="" >4</text>
+</g>
+<g id="prod1" class="ghost">
+<rect x="525" y="200" width="160" height="65" rx="12" class="box" />
+<text x="605.0" y="240.5" text-anchor="middle" class="" >-4</text>
+</g>
+<g >
+<rect x="780" y="75" width="110" height="70" rx="12" class="accentbox" />
+<text x="835.0" y="118.0" text-anchor="middle" class="" >3</text>
+</g>
+<text x="915" y="119" text-anchor="middle" class="" >×</text>
+<g >
+<rect x="950" y="75" width="110" height="70" rx="12" class="accentbox" />
+<text x="1005.0" y="118.0" text-anchor="middle" class="" >-2</text>
+</g>
+<g id="prod2" class="ghost">
+<rect x="865" y="200" width="160" height="65" rx="12" class="box" />
+<text x="945.0" y="240.5" text-anchor="middle" class="" >-6</text>
+</g>
+<text x="575" y="328" text-anchor="middle" class="small ghost" id="intsum" >整数和 −4 × sₓ × s𝑤 → 近似浮点输出</text>
+</svg>
+<p class="narration">矩阵乘是很多乘积求和。INT8 路径常用 INT32 累加，避免低位累加很快溢出，再按 scale 转回输出。<b>浮点低精度 FP8 则用指数与尾数表示数值</b>，编码和整数不同。
+</p>
+<p class="note">三个乘法为示意。支持的指令、累加类型与缩放粒度要和 GPU、模型及 kernel 一起选择。
+</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">09 · 怎样量化一个真实模型
+</div>
+<h2>让校准数据告诉你：误差会在哪些地方放大
+</h2>
+<div class="two-col">
+<div class="card">
+<h3>PTQ：训练后量化
+</h3>
+<p>用代表性数据跑过模型，观察权重与激活范围。
+</p>
+<p>选择位宽、group size、scale 与 clipping；GPTQ、AWQ、SmoothQuant 分别从重构误差、重要权重和激活范围着手。
+</p>
+<p>量化后比较任务质量与长上下文表现。
+</p>
+</div>
+<div class="card">
+<h3>最后测真正的推理路径
+</h3>
+<p>测权重、KV 和临时空间总量。
+</p>
+<p>分别看 prefill、单请求 decode 与高并发吞吐。
+</p>
+<p>同样是 4 bit，不同 GPU、矩阵形状和 kernel，可能得到完全不同的时间收益。
+</p>
+</div>
+</div>
+</section>
+<section class="slide lesson">
+<div class="kicker">参考与延伸阅读
+</div>
+<h2>把原理接回真实系统
+</h2>
+<ul class="reference-list">
+<li>
+<a href="https://arxiv.org/abs/2210.17323" target="_blank" rel="noreferrer">GPTQ · Accurate Post-Training Quantization for Generative Pre-trained Transformers</a>
+<br>
+<span class="mini muted">利用近似二阶信息控制权重量化的输出误差。</span>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2306.00978" target="_blank" rel="noreferrer">AWQ · Activation-aware Weight Quantization</a>
+<br>
+<span class="mini muted">依据激活统计保护重要权重，面向低位部署。</span>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2211.10438" target="_blank" rel="noreferrer">SmoothQuant · Accurate and Efficient Post-Training Quantization for LLMs</a>
+<br>
+<span class="mini muted">将激活中的量化难点平滑到权重，服务 W8A8 推理。</span>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2402.02750" target="_blank" rel="noreferrer">KIVI · A Tuning-Free Asymmetric 2bit Quantization for KV Cache</a>
+<br>
+<span class="mini muted">KV 的分布与量化粒度需要单独设计。</span>
+</li>
+</ul>
+<p class="mini">继续：<a href="/posts/kv-cache-compression/">KV cache 压缩</a> · <a href="/posts/scaling-mixed-precision/">混合精度</a> · <a href="/posts/scaling-roofline/">Roofline</a>
+</p>
+</section>
+</div>
+</main>
+<script src="/assets/slides.js">
+</script>
+<script src="/assets/anim.js">
+</script>
+<script>(()=>{'use strict';
+function bind(id,make){const el=document.getElementById(id);const tl=Anim.timeline({root:el});make(tl);Anim.slide(el,tl,{steps:true,controls:true});}
+bind('bytes',tl=>{[0,1,2].forEach(r=>tl.to('[id^=bit'+r+']',{opacity:1},{dur:.5,stagger:.015}).label('位宽'+r));});
+bind('round',tl=>{tl.to('#float-point',{attr:{cy:165}},{dur:.6}).label('映到数轴');tl.to('#float-point',{attr:{cx:875}},{dur:.6}).to('#q-value',{opacity:1},{dur:.4}).label('舍入到格点');});
+bind('dequant',tl=>{tl.to('#dequantized',{opacity:1,x:-10},{dur:.65}).label('反量化');tl.to('#error-value',{opacity:1},{dur:.5}).label('留下误差');});
+bind('outlier',tl=>{tl.to('[id^=collapsed]',{opacity:1,y:-12},{dur:.6,stagger:.12}).label('被大范围压扁');});
+bind('groups',tl=>{tl.to('#group0,#group1,#group2,#group3',{opacity:1},{dur:.6,stagger:.08}).label('小组细刻度');tl.to('#group4',{opacity:1},{dur:.5}).label('大值单独处理');});
+bind('kernel',tl=>{tl.to('#weight-packet',{x:320,y:70},{dur:.8}).to('#scale-packet',{x:280,y:-70},{at:'<',dur:.8}).label('搬入压缩权重');tl.to('#weight-packet,#scale-packet',{opacity:0},{dur:.3}).to('#dequant-packet',{opacity:1},{at:'<',dur:.3}).to('#dequant-packet',{x:310},{dur:.8}).to('#activation-packet',{y:72},{at:'<',dur:.8}).label('局部反量化并计算');tl.to('#dequant-packet,#activation-packet',{opacity:0},{dur:.3}).to('#result-packet',{opacity:1},{at:'<',dur:.3}).to('#result-packet',{x:290},{dur:.7}).label('写回输出');});
+bind('budget',tl=>{tl.to('#memw',{attr:{width:115}},{dur:.85}).to('#label-memw',{x:-170},{at:'<',dur:.85}).label('权重量化');tl.to('#memkv',{stroke:'var(--accent-2)'},{dur:.5}).label('KV 大小未变');});
+bind('compute',tl=>{tl.to('[id^=prod]',{opacity:1},{dur:.55,stagger:.13}).label('并行乘法');tl.to('#intsum',{opacity:1},{dur:.6}).label('宽位累加');});
+})();
+</script>
+<script src="/assets/post-links.js">
+</script>
+<script src="/assets/posts.js">
+</script>
+</body>
+</html>

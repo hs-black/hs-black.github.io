@@ -49,6 +49,11 @@
     .tag-cloud sup { margin-left: 3px; color: var(--text-faint); font-size: 11px; }
     .empty { margin-top: 32px; color: var(--text-faint); }
     .tl .entry-meta time { display: none; }
+    .lesson-entry { margin: 0 0 28px; padding: 22px 24px; border: 1px solid var(--border); border-radius: 16px; background: linear-gradient(120deg, var(--accent-soft), var(--surface)); }
+    .lesson-entry h2 { margin: 0 0 8px; font-size: 23px; }
+    .lesson-entry p { margin: 0; color: var(--text-soft); font-size: 15px; }
+    .lesson-entry .lesson-links { display: flex; flex-wrap: wrap; gap: 8px 20px; margin-top: 14px; font-size: 14px; }
+    .lesson-entry small { display: block; color: var(--text-soft); margin-bottom: 8px; }
   </style>
 </head>
 <body>
@@ -65,8 +70,20 @@
   <main class="wrap">
     <header class="post-header">
       <h1>Blog</h1>
-      <p class="post-meta">文章、交互演示和幻灯片。每一页都是手写的 HTML。 · <a href="/feed.xml">RSS</a></p>
+      <p class="post-meta">大模型的原理、架构与系统：文章、交互演示和动画幻灯片。 · <a href="/feed.xml">RSS</a></p>
     </header>
+
+    <section class="lesson-entry" aria-labelledby="lesson-heading">
+      <small>按步播放 · 拖动回看</small>
+      <h2 id="lesson-heading">动画图解 LLM 系统</h2>
+      <p>看一个 token 怎样读写缓存、进入计算单元，再跨过 GPU 之间的连线。</p>
+      <div class="lesson-links">
+        <a href="/posts/kv-cache/">从 KV cache 开始 →</a>
+        <a href="/posts/deepseek-v4-flash/">V4 Flash 架构</a>
+        <a href="/posts/deepseek-v4-pro/">V4 Pro 架构</a>
+        <a href="/blog/?view=series&amp;kind=deck">全部幻灯片</a>
+      </div>
+    </section>
 
     <div class="blog-tools">
       <div class="views" role="group" aria-label="浏览方式">

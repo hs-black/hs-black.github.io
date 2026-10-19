@@ -18,6 +18,28 @@
   const KINDS = { article: ['文章', 'kind'], interactive: ['交互', 'kind interactive'], deck: ['幻灯片', 'kind deck'] };
 
   const POSTS = [
+    {"slug": "deepseek-v4-flash", "title": "DeepSeek-V4-Flash 架构：一个 token 的旅程", "date": "2026-10-20", "kind": "deck", "cat": "models", "tags": ["DeepSeek", "架构", "MoE", "稀疏注意力"], "desc": "用可回放动画讲清 V4-Flash 的 mHC、SWA、CSA、HCA、MoE 和输出头。"},
+    {"slug": "deepseek-v4-flash-inference", "title": "DeepSeek-V4-Flash 推理：一枚 token，4 张卡", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["DeepSeek", "推理", "KV cache", "并行", "通信"], "desc": "逐卡动画展示 V4-Flash 的 HBM 读取、注意力分片、MoE 通信、KV 更新与 prefill/decode。"},
+    {"slug": "deepseek-v4-pro", "title": "DeepSeek-V4-Pro 架构：一个 token 的旅程", "date": "2026-10-20", "kind": "deck", "cat": "models", "tags": ["DeepSeek", "架构", "MoE", "稀疏注意力"], "desc": "用可回放动画讲清 V4-Pro 的 mHC、SWA、CSA、HCA、MoE 和输出头。"},
+    {"slug": "deepseek-v4-pro-inference", "title": "DeepSeek-V4-Pro 推理：一枚 token，8 张卡", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["DeepSeek", "推理", "KV cache", "并行", "通信"], "desc": "逐卡动画展示 V4-Pro 的 HBM 读取、注意力分片、MoE 通信、KV 更新与 prefill/decode。"},
+    {"slug": "kv-cache", "title": "KV cache：记住已经算过的历史", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["KV cache", "推理", "显存"], "desc": "用可回放动画看清 QKV、因果掩码、prefill 写入、decode 读取，以及 KV cache 的容量与带宽成本。"},
+    {"slug": "kv-cache-compression", "title": "KV cache 压缩：把历史装得更小", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["KV cache", "低精度", "长上下文"], "desc": "用动画区分 GQA/MQA、MLA latent、token 合并与淘汰、低位量化，计算容量收益并理解精度与带宽代价。"},
+    {"slug": "sparse-attention", "title": "Sparse attention：只看需要的历史", "date": "2026-10-20", "kind": "deck", "cat": "models", "tags": ["注意力", "稀疏注意力", "长上下文"], "desc": "动画讲解 causal mask、滑动窗口、全局 token、内容选择与 block sparse，理解少读哪些 KV、选择成本，以及稀疏访问和缓存压缩的区别。"},
+    {"slug": "linear-attention", "title": "Linear attention：把历史写进状态", "date": "2026-10-20", "kind": "deck", "cat": "models", "tags": ["线性注意力", "架构", "长上下文"], "desc": "用可回放动画推导线性 attention 的 S/z 累加器、归一化读出、遗忘门与 delta 更新，理解固定状态和精确历史检索的取舍。"},
+    {"slug": "paged-attention", "title": "PagedAttention：让 KV cache 按需生长", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["KV cache", "显存", "推理"], "desc": "用可回放动画理解 KV cache 分页、逻辑块到物理块的映射、按需分配与释放，以及共享前缀和写时复制。"},
+    {"slug": "continuous-batching", "title": "Continuous batching：每一轮重新组队", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["调度", "推理", "KV cache"], "desc": "用动画看静态 batch 的空转、逐轮调度、新请求入队、decode 与 prefill 的区别，以及 chunked prefill 的 token 预算。"},
+    {"slug": "prefix-caching", "title": "Prefix caching：相同的开头，只算一次", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["KV cache", "推理", "调度"], "desc": "用动画讲清 prefix cache 的精确前缀匹配、满块哈希链、KV 复用、共享引用计数、缓存命中与驱逐。"},
+    {"slug": "speculative-decoding", "title": "投机解码", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["投机解码", "推理"], "desc": "用动画讲清并行验证、贪心前缀接受、p/q 接受概率、残差重采样、KV 回滚与投机解码的时间账本。"},
+    {"slug": "dspark", "title": "DSpark", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["投机解码", "DeepSeek", "调度"], "desc": "用动画理解 DSpark 的并行 backbone、轻量 Markov head、条件接受率、前缀存活概率与负载感知验证调度。"},
+    {"slug": "llm-quantization", "title": "LLM 量化", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["量化", "低精度", "显存"], "desc": "用动画讲 scale、round、clamp、反量化、离群值、per-group 精度、低位 GEMM 数据流，以及权重、激活与 KV cache 的独立账本。"},
+    {"slug": "distributed-inference", "title": "分布式推理：数据怎样走过每张卡", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["推理", "并行", "通信", "MoE"], "desc": "用逐卡动画解释 HBM、权重、KV cache 与激活流动，连起 prefill、decode、TP、PP 和 EP。"},
+    {"slug": "cpu-overhead", "title": "CPU overhead：GPU 为什么在等", "date": "2026-10-20", "kind": "deck", "cat": "inference", "tags": ["推理", "调度", "profiling"], "desc": "从 CPU 入队到 GPU 执行，用时间线动画讲异步提交、空闲间隔、同步、batching 与正确测量。"},
+    {"slug": "cuda-graph", "title": "CUDA Graph：把一轮计算录下来", "date": "2026-10-20", "kind": "deck", "cat": "kernels", "tags": ["GPU", "kernel", "推理"], "desc": "动画解释 CUDA Graph 捕获、重放、固定地址、shape buckets、padding、内存池，以及与 kernel fusion 的区别。"},
+    {"slug": "flash-attention", "title": "FlashAttention 1、2、3", "date": "2026-10-20", "kind": "deck", "cat": "kernels", "tags": ["GPU", "kernel", "注意力"], "desc": "从 attention 的显存往返讲起，用可拖动动画理解分块计算、online softmax、反向重算、FlashAttention-2 的 split-Q，以及 FlashAttention-3 在 Hopper 上的异步流水线。"},
+    {"slug": "rmsnorm-kernel", "title": "RMSNorm 与 GPU 算子优化", "date": "2026-10-19", "kind": "deck", "cat": "kernels", "tags": ["GPU", "kernel", "RMSNorm"], "desc": "用动画讲 RMSNorm：公式、反向推导、FP32 累加，以及在 GPU 上把它写成一个跑满带宽的融合 kernel——向量化读、warp shuffle 归约、寄存器缓存、残差与 FP8 量化融合、Triton 实现和反向的两阶段 dg 归约。"},
+    {"slug": "gradient-checkpointing", "title": "Gradient checkpointing", "date": "2026-10-19", "kind": "deck", "cat": "training", "tags": ["显存", "激活重算"], "desc": "用动画讲激活重算：激活为什么要存、显存锯齿、逐层 checkpoint 与 √n 策略、选择性重算、FlashAttention、CPU offload、与流水线并行和 FSDP 的配合，以及 torch.utils.checkpoint 的用法和一个可拖动的显存/算力权衡。"},
+    {"slug": "optimizers", "title": "优化器：从 SGD 到 Muon", "date": "2026-10-19", "kind": "deck", "cat": "recipes", "tags": ["优化器"], "desc": "一套动画幻灯片：把 GD、动量、Nesterov、AdaGrad、RMSProp、Adam、AdamW、Lion、Adafactor、Shampoo 和 Muon 放到同一片 loss 地形上实际跑一遍，附可交互的优化器游乐场。"},
+
     { slug: "deepseek-v4", title: "DeepSeek-V4 技术报告精读", date: "2026-10-19", kind: "interactive", cat: "models", tags: ["DeepSeek", "架构", "稀疏注意力", "MoE", "长上下文", "优化器", "低精度"],
       desc: "拆解 DeepSeek-V4：CSA/HCA 注意力、mHC、Muon、FP4 QAT 与多教师蒸馏，附成本计算器。" },
     { slug: "qwen3-next", title: "Qwen3-Next：混合线性注意力与超稀疏 MoE", date: "2026-10-19", kind: "interactive", cat: "models", tags: ["Qwen", "架构", "线性注意力", "MoE", "投机解码"],

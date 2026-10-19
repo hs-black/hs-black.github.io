@@ -77,6 +77,7 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
+      <div class="callout">动画讲解：<a href="/posts/deepseek-v4-flash/">Flash 架构</a> · <a href="/posts/deepseek-v4-flash-inference/">Flash 逐卡推理</a> · <a href="/posts/deepseek-v4-pro/">Pro 架构</a> · <a href="/posts/deepseek-v4-pro-inference/">Pro 逐卡推理</a>。跟着一个 token，看压缩缓存、专家计算和跨卡通信怎样接起来。</div>
       <p>在一百万 token 的上下文下，DeepSeek-V4-Pro 每生成一个 token 的推理 FLOPs 只有 V3.2 的 27%，KV cache 只有 10%；小一号的 V4-Flash 分别是 10% 和 7%。这是 DeepSeek 2026 年 4 月随 V4 预览版发布的 58 页技术报告《DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence》（arXiv 2606.19348）开篇给的数字，报告的主线就是<strong>让一百万 token 的上下文变得便宜到可以日常使用</strong>。</p>
       <p>为什么做得到？答案大部分在注意力里：V4 几乎把 V3 的注意力推倒重来，换成 CSA + HCA 混合注意力。此外它换了残差连接（mHC），换了优化器（Muon），又在训练、推理、后训练三套基础设施上做了一大堆配套工作。</p>
 

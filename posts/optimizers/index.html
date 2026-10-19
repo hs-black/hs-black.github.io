@@ -772,7 +772,11 @@
       const sp = document.createElement('span');
       sp.hidden = true; sp.textContent = '0';
       host.appendChild(sp);
-      tl.to(sp, { text: 1, fmt: (v) => { fn(v); return String(v); } }, { dur: o.dur ?? 4, at: o.at, ease: o.ease || 'linear' });
+      const start = o.at ?? tl.duration;
+      const fmt = (v) => { fn(v); return String(v); };
+      // Initialize the drawing on every seek, including before this drive starts.
+      tl.set(sp, { text: 0, fmt }, { at: 0 });
+      tl.to(sp, { text: 1, fmt }, { dur: o.dur ?? 4, at: start, ease: o.ease || 'linear' });
       return tl;
     }
     // Cross-fade the slide's stacked .cap paragraphs.

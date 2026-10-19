@@ -1,0 +1,895 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Continuous batching：每一轮重新组队 · Zunzhe Zhang</title>
+<meta name="description" content="用动画看静态 batch 的空转、逐轮调度、新请求入队、decode 与 prefill 的区别，以及 chunked prefill 的 token 预算。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
+.scene{display:block;width:1152px;height:340px;flex:none;overflow:visible}
+.scene text{fill:var(--text);font-family:var(--font-sans);font-size:21px}
+.scene .minor{fill:var(--text-soft);font-size:17px}.scene .tiny{fill:var(--text-faint);font-size:15px}
+.scene .big{font-size:32px;font-weight:650}.scene .mono{font-family:var(--font-mono)}
+.scene .wire{stroke:var(--text-faint);stroke-width:2;fill:none}.scene .hotwire{stroke:var(--accent);stroke-width:4;fill:none}
+.captions{position:relative;min-height:76px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.5;color:var(--text-soft)}
+.captions p:first-child{opacity:1}.captions b{color:var(--text);font-weight:650}
+.slide .note{font-size:17px;color:var(--text-faint);line-height:1.4}.slide .formula{font-family:var(--font-mono);font-size:28px;padding:22px 28px;border-radius:16px;background:var(--accent-soft)}
+.slide .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.slide .card{padding:28px;border:1px solid var(--border);border-radius:18px;background:var(--surface)}
+.slide .card h3{font-size:29px;margin:0 0 15px}.slide .card p{font-size:25px;color:var(--text-soft)}
+.slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
+.slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
+.slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">LLM 推理系统 · 调度</div>
+<h1 class="rise small-title" style="--d:1">Continuous batching：每一轮重新组队</h1>
+<p class="muted rise" style="--d:2">短答案先离场，新请求马上补上。</p>
+<p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
+<p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
+</section>
+<section class="slide lesson" id="cb-static">
+<div class="kicker">01 · 空转</div>
+<h2>短请求结束了，为什么还在占位置？</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="短请求结束了，为什么还在占位置？">
+<defs>
+<marker id="cb-static-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="33" class="minor" text-anchor="start" opacity="1">同一批请求，一起开始</text>
+<text x="1040" y="33" class="minor" text-anchor="end" opacity="1">生成轮次 →</text>
+<text x="30" y="93" class="" text-anchor="start" opacity="1">请求 A</text>
+<g class="static0-0" opacity="1">
+<rect x="180" y="57" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="239.0" y="91.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static0-1" opacity="1">
+<rect x="315" y="57" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="374.0" y="91.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static0-2" opacity="1">
+<rect x="450" y="57" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="509.0" y="91.5" class="" text-anchor="middle" opacity="1">空等</text>
+</g>
+<g class="static0-3" opacity="1">
+<rect x="585" y="57" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="644.0" y="91.5" class="" text-anchor="middle" opacity="1">空等</text>
+</g>
+<g class="static0-4" opacity="1">
+<rect x="720" y="57" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="779.0" y="91.5" class="" text-anchor="middle" opacity="1">空等</text>
+</g>
+<g class="static0-5" opacity="1">
+<rect x="855" y="57" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="914.0" y="91.5" class="" text-anchor="middle" opacity="1">空等</text>
+</g>
+<text x="30" y="171" class="" text-anchor="start" opacity="1">请求 B</text>
+<g class="static1-0" opacity="1">
+<rect x="180" y="135" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="239.0" y="169.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static1-1" opacity="1">
+<rect x="315" y="135" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="374.0" y="169.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static1-2" opacity="1">
+<rect x="450" y="135" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="509.0" y="169.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static1-3" opacity="1">
+<rect x="585" y="135" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="644.0" y="169.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static1-4" opacity="1">
+<rect x="720" y="135" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="779.0" y="169.5" class="" text-anchor="middle" opacity="1">空等</text>
+</g>
+<g class="static1-5" opacity="1">
+<rect x="855" y="135" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="914.0" y="169.5" class="" text-anchor="middle" opacity="1">空等</text>
+</g>
+<text x="30" y="249" class="" text-anchor="start" opacity="1">请求 C</text>
+<g class="static2-0" opacity="1">
+<rect x="180" y="213" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="239.0" y="247.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static2-1" opacity="1">
+<rect x="315" y="213" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="374.0" y="247.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static2-2" opacity="1">
+<rect x="450" y="213" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="509.0" y="247.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static2-3" opacity="1">
+<rect x="585" y="213" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="644.0" y="247.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static2-4" opacity="1">
+<rect x="720" y="213" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="779.0" y="247.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<g class="static2-5" opacity="1">
+<rect x="855" y="213" width="118" height="55" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="914.0" y="247.5" class="" text-anchor="middle" opacity="1">token</text>
+</g>
+<rect class="sweep" x="176" y="50" width="126" height="225" rx="12" fill="none" stroke="var(--accent)" stroke-width="3"/>
+<text x="180" y="321" class="minor stuck" text-anchor="start" opacity="0">A 的位置已经空了，但 D 仍在等整批结束</text>
+</svg>
+<div class="captions">
+<p class="caption-0">把 A、B、C 一起送进一个静态 batch。它们分别需要生成 2、4、6 个 token。</p>
+<p class="caption-1">两轮后 A 就结束了。固定的批次还要陪 B、C 走完，A 对应的位置开始空转。</p>
+<p class="caption-2">直到 C 也完成，下一批才开始。长短不一的答案，把同一张 GPU 切出了许多等待。</p>
+</div>
+<p class="note">方格表示生成一轮的工作，不表示真实耗时；静态 batch 这里指批次成员在完成前不变。</p>
+</section>
+<section class="slide lesson" id="cb-loop">
+<div class="kicker">02 · 调度单位</div>
+<h2>一轮 forward，就是一次换人的机会</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="一轮 forward，就是一次换人的机会">
+<defs>
+<marker id="cb-loop-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<g class="scheduler" opacity="1">
+<rect x="40" y="103" width="210" height="90" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="145.0" y="155.0" class="" text-anchor="middle" opacity="1">调度器</text>
+</g>
+<g class="batch" opacity="1">
+<rect x="430" y="58" width="220" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="540.0" y="100.0" class="" text-anchor="middle" opacity="1">本轮：[A, B, C]</text>
+</g>
+<g class="gpu" opacity="1">
+<rect x="840" y="103" width="210" height="90" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="945.0" y="155.0" class="" text-anchor="middle" opacity="1">GPU forward</text>
+</g>
+<path d="M 250 148 L 430 93" class="hotwire submit" opacity="0" marker-end="url(#cb-loop-arrow)"/>
+<path d="M 650 93 L 840 148" class="hotwire run" opacity="0" marker-end="url(#cb-loop-arrow)"/>
+<path d="M 945 193 V 282 H 145 V 193" class="hotwire return" opacity="0" marker-end="url(#cb-loop-arrow)"/>
+<text x="545" y="322" class="minor" text-anchor="middle" opacity="1">输出 token + 更新结束状态</text>
+<g class="result0" opacity="0">
+<rect x="700" y="230" width="66" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="733.0" y="262.0" class="" text-anchor="middle" opacity="1">a</text>
+</g>
+<g class="result1" opacity="0">
+<rect x="778" y="230" width="66" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="811.0" y="262.0" class="" text-anchor="middle" opacity="1">b</text>
+</g>
+<g class="result2" opacity="0">
+<rect x="856" y="230" width="66" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="889.0" y="262.0" class="" text-anchor="middle" opacity="1">c</text>
+</g>
+</svg>
+<div class="captions">
+<p class="caption-0">自回归生成是一个循环：读历史，算下一个 token，再把它接回历史。</p>
+<p class="caption-1">调度器把当前可运行的请求组成 batch，GPU 为每条普通 decode 请求处理一个 token。</p>
+<p class="caption-2">拿到新 token 后检查结束条件，再决定下一轮谁留下、谁离开、谁加入。</p>
+</div>
+<p class="note">普通 decode 每请求每轮推进一个 token；投机解码等机制可一次验证多个 token。</p>
+</section>
+<section class="slide lesson" id="cb-replace">
+<div class="kicker">03 · 连续批处理</div>
+<h2>A 刚离场，D 就能补进来</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="A 刚离场，D 就能补进来">
+<defs>
+<marker id="cb-replace-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="40" y="35" class="minor" text-anchor="start" opacity="1">本轮运行的槽位</text>
+<g class="slot0" opacity="1">
+<rect x="40" y="76" width="210" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="145.0" y="125.5" class="" text-anchor="middle" opacity="1">A</text>
+</g>
+<g class="slot1" opacity="1">
+<rect x="278" y="76" width="210" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="383.0" y="125.5" class="" text-anchor="middle" opacity="1">B</text>
+</g>
+<g class="slot2" opacity="1">
+<rect x="516" y="76" width="210" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="621.0" y="125.5" class="" text-anchor="middle" opacity="1">C</text>
+</g>
+<text x="850" y="35" class="minor" text-anchor="start" opacity="1">等待队列</text>
+<g class="waiting" opacity="1">
+<rect x="850" y="76" width="180" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="940.0" y="125.5" class="" text-anchor="middle" opacity="1">D</text>
+</g>
+<text x="145" y="217" class="doneA" text-anchor="middle" opacity="0">A 完成</text>
+<g class="leaving" opacity="0">
+<rect x="40" y="76" width="210" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="145.0" y="125.5" class="" text-anchor="middle" opacity="1">A</text>
+</g>
+<text x="40" y="311" class="big nextbatch" text-anchor="start" opacity="0">下一轮：[D, B, C]</text>
+</svg>
+<div class="captions">
+<p class="caption-0">这一轮跑 A、B、C，D 在等待。batch 的成员不需要从头到尾固定。</p>
+<p class="caption-1">A 输出结束 token，调度器移除 A，并归还它不再使用的资源。</p>
+<p class="caption-2">下一轮把已准备好的 D 加进来。B、C 继续生成，不必停下来重开整批。</p>
+</div>
+<p class="note">D 这里已完成 prefill；新提示词的 prefill 也需要被调度，不能凭空跳过。</p>
+</section>
+<section class="slide lesson" id="cb-prefill">
+<div class="kicker">04 · 两种工作</div>
+<h2>长提示词和逐字生成，节奏不一样</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="长提示词和逐字生成，节奏不一样">
+<defs>
+<marker id="cb-prefill-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="35" class="minor" text-anchor="start" opacity="1">Prefill：提示词的许多 token</text>
+<g class="prompt0" opacity="1">
+<rect x="30" y="75" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="73.0" y="107.0" class="" text-anchor="middle" opacity="1">我</text>
+</g>
+<g class="prompt1" opacity="1">
+<rect x="126" y="75" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="169.0" y="107.0" class="" text-anchor="middle" opacity="1">想</text>
+</g>
+<g class="prompt2" opacity="1">
+<rect x="222" y="75" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="265.0" y="107.0" class="" text-anchor="middle" opacity="1">了解</text>
+</g>
+<g class="prompt3" opacity="1">
+<rect x="318" y="75" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="361.0" y="107.0" class="" text-anchor="middle" opacity="1">GPU</text>
+</g>
+<g class="prompt4" opacity="1">
+<rect x="414" y="75" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="457.0" y="107.0" class="" text-anchor="middle" opacity="1">推理</text>
+</g>
+<g class="prompt5" opacity="1">
+<rect x="510" y="75" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="553.0" y="107.0" class="" text-anchor="middle" opacity="1">系统</text>
+</g>
+<text x="700" y="35" class="minor" text-anchor="start" opacity="1">Decode：每条请求的新 token</text>
+<g class="decode0" opacity="1">
+<rect x="700" y="75" width="110" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="755.0" y="107.0" class="" text-anchor="middle" opacity="1">Aₙ</text>
+</g>
+<g class="decode1" opacity="1">
+<rect x="824" y="75" width="110" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="879.0" y="107.0" class="" text-anchor="middle" opacity="1">Bₙ</text>
+</g>
+<g class="decode2" opacity="1">
+<rect x="948" y="75" width="110" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1003.0" y="107.0" class="" text-anchor="middle" opacity="1">Cₙ</text>
+</g>
+<g class="compute" opacity="0">
+<rect x="30" y="210" width="564" height="72" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="312.0" y="253.0" class="" text-anchor="middle" opacity="1">大批矩阵运算</text>
+</g>
+<g class="memory" opacity="0">
+<rect x="700" y="210" width="358" height="72" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="879.0" y="253.0" class="" text-anchor="middle" opacity="1">反复读取权重与 KV</text>
+</g>
+<path d="M 312 125 V 210" class="hotwire prefillwire" opacity="0" marker-end="url(#cb-prefill-arrow)"/>
+<path d="M 879 125 V 210" class="hotwire decodewire" opacity="0" marker-end="url(#cb-prefill-arrow)"/>
+</svg>
+<div class="captions">
+<p class="caption-0">新请求先处理提示词，建立 KV cache，这叫 prefill。之后进入 decode，逐轮生成。</p>
+<p class="caption-1">prefill 一次处理许多 token，矩阵运算更容易摊薄权重读取；长提示词可能占住 GPU 较久。</p>
+<p class="caption-2">decode 每轮的计算较少，却要读取权重和历史 KV。调度器需要照顾正在等下一字的人。</p>
+</div>
+<p class="note">计算与带宽的占比随模型、batch 和上下文长度变化；这里展示常见工作形态。</p>
+</section>
+<section class="slide lesson" id="cb-budget">
+<div class="kicker">05 · Chunked prefill</div>
+<h2>先留出下一字，再把空余预算给提示词</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="先留出下一字，再把空余预算给提示词">
+<defs>
+<marker id="cb-budget-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="35" class="minor" text-anchor="start" opacity="1">本轮 token 预算 = 8</text>
+<g class="budget0" opacity="1">
+<rect x="30" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="81.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget1" opacity="1">
+<rect x="147" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="198.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget2" opacity="1">
+<rect x="264" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="315.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget3" opacity="1">
+<rect x="381" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="432.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget4" opacity="1">
+<rect x="498" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="549.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget5" opacity="1">
+<rect x="615" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="666.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget6" opacity="1">
+<rect x="732" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="783.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="budget7" opacity="1">
+<rect x="849" y="76" width="102" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="900.0" y="108.0" class="" text-anchor="middle" opacity="1">·</text>
+</g>
+<g class="dec0" opacity="1">
+<rect x="30" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="81.0" y="240.0" class="" text-anchor="middle" opacity="1">A</text>
+</g>
+<g class="dec1" opacity="1">
+<rect x="147" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="198.0" y="240.0" class="" text-anchor="middle" opacity="1">B</text>
+</g>
+<g class="dec2" opacity="1">
+<rect x="264" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="315.0" y="240.0" class="" text-anchor="middle" opacity="1">C</text>
+</g>
+<g class="chunk0" opacity="1">
+<rect x="381" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="432.0" y="240.0" class="" text-anchor="middle" opacity="1">p0</text>
+</g>
+<g class="chunk1" opacity="1">
+<rect x="498" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="549.0" y="240.0" class="" text-anchor="middle" opacity="1">p1</text>
+</g>
+<g class="chunk2" opacity="1">
+<rect x="615" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="666.0" y="240.0" class="" text-anchor="middle" opacity="1">p2</text>
+</g>
+<g class="chunk3" opacity="1">
+<rect x="732" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="783.0" y="240.0" class="" text-anchor="middle" opacity="1">p3</text>
+</g>
+<g class="chunk4" opacity="1">
+<rect x="849" y="208" width="102" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="900.0" y="240.0" class="" text-anchor="middle" opacity="1">p4</text>
+</g>
+<text x="30" y="309" class="minor" text-anchor="start" opacity="1">3 个 decode token</text>
+<text x="381" y="309" class="minor" text-anchor="start" opacity="1">剩余 5 个位置，给长提示词的一段</text>
+<g class="remain" opacity="1">
+<rect x="994" y="208" width="125" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="1056.5" y="240.0" class="minor" text-anchor="middle" opacity="1">p5…p11</text>
+</g>
+</svg>
+<div class="captions">
+<p class="caption-0">把每轮处理的 token 总数限制为 8。现在 A、B、C 各需要一个 decode token。</p>
+<p class="caption-1">先把 3 个 decode token 放进去，剩余预算是 5。</p>
+<p class="caption-2">新请求有 12 个提示词 token，这一轮先算 5 个，其余留到后续轮次。这叫 chunked prefill。</p>
+</div>
+<p class="note">这是 vLLM 的 decode 优先策略示意；总 token 数上限对应 max_num_batched_tokens。</p>
+</section>
+<section class="slide lesson" id="cb-chunks">
+<div class="kicker">06 · 时间轴</div>
+<h2>长提示词分几轮完成，老请求持续前进</h2>
+<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="长提示词分几轮完成，老请求持续前进">
+<defs>
+<marker id="cb-chunks-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
+</marker>
+</defs>
+<text x="30" y="35" class="minor" text-anchor="start" opacity="1">请求 P：12 个提示词 token</text>
+<text x="30" y="96" class="" text-anchor="start" opacity="1">第 1 轮</text>
+<g class="decrow0" opacity="1">
+<rect x="170" y="60" width="220" height="56" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="280.0" y="95.0" class="minor" text-anchor="middle" opacity="1">A、B、C decode</text>
+</g>
+<g class="prefrow0" opacity="1">
+<rect x="430" y="60" width="285" height="56" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="572.5" y="95.0" class="" text-anchor="middle" opacity="1">P：0–4</text>
+</g>
+<text x="30" y="180" class="" text-anchor="start" opacity="1">第 2 轮</text>
+<g class="decrow1" opacity="1">
+<rect x="170" y="144" width="220" height="56" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="280.0" y="179.0" class="minor" text-anchor="middle" opacity="1">A、B、C decode</text>
+</g>
+<g class="prefrow1" opacity="1">
+<rect x="430" y="144" width="285" height="56" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="572.5" y="179.0" class="" text-anchor="middle" opacity="1">P：5–9</text>
+</g>
+<text x="30" y="264" class="" text-anchor="start" opacity="1">第 3 轮</text>
+<g class="decrow2" opacity="1">
+<rect x="170" y="228" width="220" height="56" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="280.0" y="263.0" class="minor" text-anchor="middle" opacity="1">A、B、C decode</text>
+</g>
+<g class="prefrow2" opacity="1">
+<rect x="430" y="228" width="114" height="56" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
+<text x="487.0" y="263.0" class="" text-anchor="middle" opacity="1">P：10–11</text>
+</g>
+<text x="867" y="264" class="minor ready" text-anchor="start" opacity="0">P 可进入 decode</text>
+<rect class="iteration" x="160" y="52" width="630" height="72" rx="12" fill="none" stroke="var(--accent)" stroke-width="3"/>
+</svg>
+<div class="captions">
+<p class="caption-0">第 1 轮：A、B、C 生成下一字，P 处理最前面的 5 个提示词 token。</p>
+<p class="caption-1">第 2 轮：沿用 P 已算好的前缀 KV，继续处理后面 5 个。A、B、C 又各前进一步。</p>
+<p class="caption-2">第 3 轮：P 处理最后 2 个 token，prefill 完成。后续就能和大家一起 decode。</p>
+</div>
+<p class="note">表中每轮只标记调度内容，不按真实耗时等比例绘制；后续 chunk 仍会读前面 chunk 的 KV。</p>
+</section>
+<section class="slide">
+<div class="kicker">07 · 两道预算</div>
+<h2>token 预算够，显存也得装得下</h2>
+<div class="two-col">
+<div class="card">
+<h3>这一轮算多少？</h3>
+<p>token 预算限制本轮计算规模；序列数限制同时服务多少条请求。</p>
+</div>
+<div class="card">
+<h3>历史要存多少？</h3>
+<p>KV cache 累积的是所有在途请求的历史。长上下文会持续占用显存块。</p>
+</div>
+</div>
+<p>资源不足时，调度器会让请求等待；某些策略也会暂停请求，之后重算或恢复。</p>
+<p class="links">
+<a href="/posts/paged-attention/">PagedAttention 如何按需分配 KV 块 →</a>
+</p>
+</section>
+<section class="slide">
+<div class="kicker">08 · 调参的目标</div>
+<h2>吞吐、首字时间、字间间隔，一起看</h2>
+<div class="two-col">
+<div class="card">
+<h3>Prefill chunk 小一些</h3>
+<p>已有请求更快拿到下一字；长提示词需要更多轮才能处理完。</p>
+</div>
+<div class="card">
+<h3>Prefill chunk 大一些</h3>
+<p>长提示词更快完成、计算更集中；同一轮的 decode 可能要等更久。</p>
+</div>
+</div>
+<p class="note">TTFT：到第一个输出 token 的时间。ITL：相邻输出 token 的间隔。吞吐：单位时间完成的工作量。用真实到达率与长度分布一起测。</p>
+</section>
+<section class="slide">
+<div class="kicker">参考与延伸阅读</div>
+<h2>把一个 batch，变成持续流动的队伍</h2>
+<ul class="reference-list">
+<li>
+<a href="https://www.usenix.org/conference/osdi22/presentation/yu">Yu et al. — Orca: A Distributed Serving System for Transformer-Based Generative Models</a>（OSDI 2022）：iteration-level scheduling。</li>
+<li>
+<a href="https://docs.vllm.ai/en/latest/configuration/optimization/">vLLM：Optimization and Tuning</a>：chunked prefill、decode 优先与 token 预算。</li>
+<li>
+<a href="https://arxiv.org/abs/2309.06180">PagedAttention 论文</a>：连续调度依赖的 KV 显存管理。</li>
+</ul>
+<p class="links">
+<a href="/posts/prefix-caching/">下一站：相同前缀如何省掉 prefill →</a>
+<br>
+<a href="/posts/scaling-inference/">分布式推理</a> · <a href="/blog/">返回博客</a>
+</p>
+</section>
+</div>
+</main>
+<script src="/assets/slides.js">
+</script>
+<script src="/assets/anim.js">
+</script>
+<script>
+(() => {
+  const scenes = [
+  {
+    "id": "cb-static",
+    "steps": [
+      {
+        "label": "A 先完成",
+        "actions": [
+          [
+            ".static0-0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static0-1 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static1-0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static1-1 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static2-0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static2-1 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".sweep",
+            {
+              "x": 270
+            }
+          ],
+          [
+            ".stuck",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      },
+      {
+        "label": "等待最长请求",
+        "actions": [
+          [
+            ".static1-2 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static1-3 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static2-2 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static2-3 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static2-4 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".static2-5 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".sweep",
+            {
+              "x": 675
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cb-loop",
+    "steps": [
+      {
+        "label": "提交这一轮",
+        "actions": [
+          [
+            ".submit,.run",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".gpu rect",
+            {
+              "fill": "var(--accent-soft)",
+              "stroke": "var(--accent)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "更新状态",
+        "actions": [
+          [
+            ".return,.result0,.result1,.result2",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cb-replace",
+    "steps": [
+      {
+        "label": "移除已结束请求",
+        "actions": [
+          [
+            ".doneA",
+            {
+              "opacity": 1
+            }
+          ],
+          [
+            ".slot0",
+            {
+              "opacity": 0.15
+            }
+          ],
+          [
+            ".leaving",
+            {
+              "opacity": 0.6,
+              "y": 100
+            }
+          ]
+        ]
+      },
+      {
+        "label": "补入新请求",
+        "actions": [
+          [
+            ".waiting",
+            {
+              "x": -810
+            }
+          ],
+          [
+            ".leaving,.slot0",
+            {
+              "opacity": 0
+            }
+          ],
+          [
+            ".nextbatch",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cb-prefill",
+    "steps": [
+      {
+        "label": "处理提示词",
+        "actions": [
+          [
+            ".prompt0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.0
+          ],
+          [
+            ".prompt1 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.07
+          ],
+          [
+            ".prompt2 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.14
+          ],
+          [
+            ".prompt3 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.21000000000000002
+          ],
+          [
+            ".prompt4 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.28
+          ],
+          [
+            ".prompt5 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.35000000000000003
+          ],
+          [
+            ".compute,.prefillwire",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      },
+      {
+        "label": "继续生成",
+        "actions": [
+          [
+            ".decode0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.0
+          ],
+          [
+            ".decode1 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.1
+          ],
+          [
+            ".decode2 rect",
+            {
+              "fill": "var(--accent-soft)"
+            },
+            0.2
+          ],
+          [
+            ".memory,.decodewire",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cb-budget",
+    "steps": [
+      {
+        "label": "安排 decode",
+        "actions": [
+          [
+            ".dec0,.dec1,.dec2",
+            {
+              "y": -132
+            }
+          ],
+          [
+            ".budget0 text,.budget1 text,.budget2 text",
+            {
+              "opacity": 0
+            }
+          ],
+          [
+            ".budget0 rect,.budget1 rect,.budget2 rect",
+            {
+              "stroke": "var(--accent)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "填入 prefill chunk",
+        "actions": [
+          [
+            ".chunk0,.chunk1,.chunk2,.chunk3,.chunk4",
+            {
+              "y": -132
+            }
+          ],
+          [
+            ".budget3 text,.budget4 text,.budget5 text,.budget6 text,.budget7 text",
+            {
+              "opacity": 0
+            }
+          ],
+          [
+            ".remain rect",
+            {
+              "stroke": "var(--accent-2)"
+            }
+          ]
+        ]
+      }
+    ]
+  },
+  {
+    "id": "cb-chunks",
+    "steps": [
+      {
+        "label": "第一段",
+        "actions": [
+          [
+            ".decrow0 rect,.prefrow0 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "接着算",
+        "actions": [
+          [
+            ".iteration",
+            {
+              "y": 84
+            }
+          ],
+          [
+            ".decrow1 rect,.prefrow1 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ]
+        ]
+      },
+      {
+        "label": "完成提示词",
+        "actions": [
+          [
+            ".iteration",
+            {
+              "y": 168
+            }
+          ],
+          [
+            ".decrow2 rect,.prefrow2 rect",
+            {
+              "fill": "var(--accent-soft)"
+            }
+          ],
+          [
+            ".ready",
+            {
+              "opacity": 1
+            }
+          ]
+        ]
+      }
+    ]
+  }
+];
+  window.lessonTimelines = {};
+  scenes.forEach(({id, steps}) => {
+    const slide = document.getElementById(id);
+    const tl = Anim.timeline({root: slide});
+    tl.label('起点', 0);
+    let at = 0;
+    steps.forEach((step, i) => {
+      const start = at + 0.12;
+      tl.to('.caption-' + i, {opacity: 0}, {at: start, dur: 0.16});
+      tl.to('.caption-' + (i + 1), {opacity: 1}, {at: start + 0.16, dur: 0.2});
+      step.actions.forEach(([selector, props, delay = 0, dur = 0.85]) => {
+        tl.to(selector, props, {at: start + delay, dur});
+      });
+      at = Math.max(tl.duration, start + 1.0);
+      tl.label(step.label, at);
+    });
+    Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
+    window.lessonTimelines[id] = tl;
+  });
+})();
+</script>
+<script src="/assets/post-links.js">
+</script>
+<script src="/assets/posts.js">
+</script>
+</body>
+</html>

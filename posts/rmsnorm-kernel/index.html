@@ -93,7 +93,7 @@
         <p>输入是一个 token 的 hidden state：一行 \(d\) 个数（这里画 16 个，数值示意），大小参差不齐。</p>
         <p>先逐个平方，再求平均：这就是 <b>mean(x²)</b>，均方。</p>
         <p>开根号得到 <b>RMS</b>（均方根），它刻画了这一行"整体有多大"。</p>
-        <p>每个数除以 RMS：这一行的 RMS 被拉回 1，方向不变，只改长度。\(\varepsilon\)（常取 1e-5 或 1e-6）防止除零。</p>
+        <p>每个数除以 RMS：忽略很小的 ε 时，这一行的 RMS 被拉回 1，方向不变，只改长度。\(\varepsilon\)（常取 1e-5 或 1e-6）防止除零。</p>
         <p>最后逐元素乘可学习的增益 \(g\)（长度 \(d\)），让每个通道自己决定尺度。没有偏置 \(b\)。</p>
       </div>
     </section>
@@ -181,11 +181,11 @@
     <!-- 10 -->
     <section class="slide an" id="s-gpu">
       <div class="kicker">GPU</div>
-      <h2>H100：算力和带宽差了两个多数量级</h2>
+      <h2>H100：算力上限要看用哪种计算单元</h2>
       <svg class="fig" viewBox="0 0 1152 410" aria-label="H100 的 132 个 SM 依次点亮，旁边是峰值算力和带宽"></svg>
       <div class="caps">
-        <p>H100 SXM 有 132 个 SM，BF16 稠密算力 989 TFLOPS，HBM3 带宽 3.35 TB/s。两者一除：每从 HBM 读 1 个字节，可以做约 <b>295</b> 次浮点运算。</p>
-        <p>每个 SM 有自己的寄存器堆和 shared memory；线程以 32 个为一组（<b>warp</b>）同步执行。kernel 的工作就是让这 132 个 SM 都有活干，并且少碰 HBM。</p>
+        <p>H100 SXM 有 132 个 SM，FP32 CUDA core 峰值约 67 TFLOPS，HBM3 带宽 3.35 TB/s：两者相除约 <b>20 FLOP/字节</b>。RMSNorm 的平方、归约和缩放主要走这条 FP32 路径。</p>
+        <p>每个 SM 有寄存器与 shared memory，32 个线程组成一个 <b>warp</b>。大矩阵乘走 Tensor Core，BF16 稠密峰值可达 989 TFLOPS；评估归约 kernel，则看 FP32 CUDA core 的算力上限。</p>
       </div>
     </section>
 
@@ -193,11 +193,11 @@
     <section class="slide an" id="s-roof">
       <div class="kicker">Roofline</div>
       <h2>RMSNorm 在屋顶的斜坡最底下</h2>
-      <svg class="fig" viewBox="0 0 1152 410" aria-label="H100 roofline 图，RMSNorm 的算术强度约为 1，远在拐点 295 左侧"></svg>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="H100 roofline 图，RMSNorm 的算术强度约为 1，远在 FP32 拐点 20 左侧"></svg>
       <div class="caps">
         <p>Roofline：横轴是算术强度（每字节做多少 FLOP），纵轴是能达到的算力。拐点左边受带宽限制，右边受算力限制。</p>
-        <p>RMSNorm 每个元素约 4 次运算（平方、累加、乘 r、乘 g），却要读 2 字节、写 2 字节：强度约 <b>1</b>，离拐点 295 差了两个多数量级。大 GEMM 则在屋顶的平台上。</p>
-        <p>算一笔账：8192 个 token、d = 4096 时，搬数据要约 40 µs，计算只要约 0.14 µs。优化 RMSNorm 只有两件事：<b>少搬字节</b>，以及<b>让搬运接近峰值带宽</b>。</p>
+        <p>RMSNorm 每个元素约 4 次运算（平方、累加、乘 r、乘 g），却要读 2 字节、写 2 字节：强度约 <b>1</b>，位于 FP32 拐点 20 左侧。图中屋顶采用 FP32 CUDA core 峰值；Tensor Core 矩阵乘有另一条更高的屋顶。</p>
+        <p>算一笔账：8192 个 token、d = 4096 时，按峰值估算，搬数据下限约 40 µs，FP32 运算下限约 2 µs。优化 RMSNorm 只有两件事：<b>少搬字节</b>，以及<b>让搬运接近峰值带宽</b>。</p>
       </div>
     </section>
 
@@ -446,10 +446,10 @@ rmsnorm_fwd[(M,)](x, w, y, rstd, x.stride(0), N, eps,
       <div class="kicker">小结</div>
       <h2>小结</h2>
       <ul class="s24 tight">
-        <li>RMSNorm = 除以均方根再乘增益；去掉了 LayerNorm 的均值和偏置，保留缩放不变性。</li>
+        <li>RMSNorm = 除以均方根再乘增益；不减均值，通常不加偏置；忽略 ε 时，对输入的正比例缩放保持不变。</li>
         <li>反向：\(dx = r(\hat g - \hat x\cdot\mathrm{mean}(\hat g\odot\hat x))\)，\(dg = \sum_{\text{tokens}} dy\odot\hat x\)；前向存下每行的 \(r\)。</li>
-        <li>平方和一定在 FP32 里累加：BF16 会在 256 附近停住，FP16 会溢出。</li>
-        <li>算术强度约 1 FLOP/B，纯 memory-bound：目标是每元素只读 2 字节、写 2 字节，并接近峰值带宽。</li>
+        <li>平方和一定在 FP32 里累加：BF16 顺序连加 1 会在 256 停住，FP16 平方可能溢出。</li>
+        <li>大张量时算术强度约 1 FLOP/B，受带宽限制：目标是每元素只读 2 字节、写 2 字节，并接近峰值带宽。</li>
         <li>做法：一行一个 block（或 warp）、128-bit 读、warp shuffle + shared memory 归约、x 留在寄存器里。</li>
         <li>再往前一步是和残差相加、FP8 量化融合：13 → 7 字节/元素，3 次 launch 变 1 次。</li>
         <li>反向的 dg 是跨行归约：P 个 program 各求部分和，第二个 kernel 按列相加。</li>
@@ -468,7 +468,7 @@ rmsnorm_fwd[(M,)](x, w, y, rstd, x.stride(0), N, eps,
         <li>Guo, Zadouri &amp; Dao, <a href="https://sysml.cs.princeton.edu/blogs/memory-bound-kernels.html">Getting Memory-bound Kernels to Speed-of-Light</a> 与 <a href="https://github.com/Dao-AILab/quack">QuACK</a>：H100 上约 3 TB/s 的归约 kernel、cluster 归约</li>
         <li>NVIDIA CUDA C++ Programming Guide：<a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#warp-shuffle-functions">Warp Shuffle Functions</a>；H100 规格见 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100</a></li>
         <li><a href="https://github.com/linkedin/Liger-Kernel">Liger Kernel</a>：训练用的 Triton RMSNorm 前向 / 反向</li>
-        <li>本系列：<a href="/posts/scaling-roofline/">Roofline：算力、带宽与算术强度</a>，<a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a></li>
+        <li>本系列：<a href="/posts/scaling-roofline/">Roofline：算力、带宽与算术强度</a>，<a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a>，<a href="/posts/flash-attention/">FlashAttention 1、2、3</a></li>
       </ul>
     </section>
 
@@ -893,7 +893,7 @@ rmsnorm_fwd[(M,)](x, w, y, rstd, x.stride(0), N, eps,
         tl.to(p, { opacity: 1 }, { at: 0.4 + k * 0.18, dur: 0.1 }).to(p, { x: -80 - (k % 3) * 40 }, { at: 0.4 + k * 0.18, dur: 0.7, ease: 'in' }).to(p, { opacity: 0 }, { at: 0.95 + k * 0.18, dur: 0.15 });
       }
       const stat = G(svg);
-      const rows = [['132', 'SM'], ['989', 'TFLOPS · BF16 稠密'], ['3.35', 'TB/s · HBM3 带宽'], ['295', 'FLOP / 字节']];
+      const rows = [['132', 'SM'], ['67', 'TFLOPS · FP32 CUDA core'], ['3.35', 'TB/s · HBM3 带宽'], ['20', 'FLOP / 字节']];
       const nums = rows.map(([v, l], i) => {
         const t = T(stat, 820, 76 + i * 92, '0', { 'text-anchor': 'start', 'font-size': 46, 'font-weight': 700, fill: i === 3 ? 'var(--accent-2)' : 'var(--text)', class: 'mono' });
         T(stat, 822, 100 + i * 92, l, { 'text-anchor': 'start', 'font-size': 16, fill: 'var(--text-soft)' });
@@ -923,15 +923,15 @@ rmsnorm_fwd[(M,)](x, w, y, rstd, x.stride(0), N, eps,
       [0.1, 1, 10, 100, 1000].forEach((v) => { T(svg, X(v), 392, String(v), { 'font-size': 14, fill: 'var(--text-faint)', class: 'mono' }); T(svg, 98, Y(v) + 5, String(v), { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-faint)', class: 'mono' }); });
       T(svg, X(1000), 412, 'FLOP / 字节', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-soft)' });
       T(svg, 40, 30, 'TFLOPS', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
-      const roof = P(svg, `M${X(0.1)} ${Y(0.335)} L${X(295.2)} ${Y(989)} L${X(1000)} ${Y(989)}`, { stroke: 'var(--accent)', 'stroke-width': 4 });
-      const ridge = P(svg, `M${X(295.2)} ${Y(989)} L${X(295.2)} ${Y(0.1)}`, { stroke: 'var(--accent)', 'stroke-dasharray': '4 5', opacity: 0 });
+      const roof = P(svg, `M${X(0.1)} ${Y(0.335)} L${X(20)} ${Y(67)} L${X(1000)} ${Y(67)}`, { stroke: 'var(--accent)', 'stroke-width': 4 });
+      const ridge = P(svg, `M${X(20)} ${Y(67)} L${X(20)} ${Y(0.1)}`, { stroke: 'var(--accent)', 'stroke-dasharray': '4 5', opacity: 0 });
       const t1 = T(svg, X(3), Y(3.35 * 3) - 18, '3.35 TB/s × 强度', { 'font-size': 15, fill: 'var(--accent)', opacity: 0, transform: `rotate(-29 ${X(3)} ${Y(10)})` });
-      const t2 = T(svg, X(600), Y(989) - 12, '989 TFLOPS', { 'font-size': 15, fill: 'var(--accent)', opacity: 0 });
-      const t3 = T(svg, X(295.2), Y(0.1) - 8, '295', { 'font-size': 14, fill: 'var(--accent)', opacity: 0, class: 'mono' });
+      const t2 = T(svg, X(600), Y(67) - 12, '67 TFLOPS · FP32', { 'font-size': 15, fill: 'var(--accent)', opacity: 0 });
+      const t3 = T(svg, X(20), Y(0.1) - 8, '20', { 'font-size': 14, fill: 'var(--accent)', opacity: 0, class: 'mono' });
       tl.to(roof, { draw: 1 }, { at: 0.2, dur: 1.4 }).to([t1, t2, ridge, t3], { opacity: 1 }, { at: 1.5, dur: 0.5 });
       tl.label('a', 2.2);
       cap(tl, sl, 1, 2.3);
-      const dots = [[1, 3.35, 'RMSNorm ≈ 1', 'var(--accent-2)'], [0.167, 0.56, '逐元素 add ≈ 0.17', 'var(--text-soft)'], [683, 989, 'GEMM 2048³ ≈ 683', 'var(--accent)']];
+      const dots = [[1, 3.35, 'RMSNorm ≈ 1', 'var(--accent-2)'], [0.167, 0.56, '逐元素 add ≈ 0.17', 'var(--text-soft)'], [341, 67, 'FP32 GEMM ≈ 341', 'var(--accent)']];
       dots.forEach(([ai, tf, l, c], i) => {
         const g = G(svg, { opacity: 0 });
         C(g, X(ai), Y(tf), 9, { fill: c, stroke: 'var(--surface)', 'stroke-width': 2 });
@@ -944,16 +944,16 @@ rmsnorm_fwd[(M,)](x, w, y, rstd, x.stride(0), N, eps,
       const pan = G(svg, { opacity: 0 });
       T(pan, 790, 70, 'M = 8192, d = 4096, BF16', { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 600 });
       T(pan, 790, 112, '搬运 134 MB ÷ 3.35 TB/s', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
-      T(pan, 790, 212, '计算 134 MFLOP ÷ 989 TFLOPS', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      T(pan, 790, 212, '计算 134 MFLOP ÷ 67 TFLOPS', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
       tl.to(pan, { opacity: 1 }, { at: 4.2, dur: 0.4 });
       const mb = R(svg, 790, 124, 0, 30, { rx: 5, fill: 'var(--accent-2)' });
       const cb = R(svg, 790, 224, 0, 30, { rx: 2, fill: 'var(--accent)' });
       const mt = T(svg, 790, 182, '0', { 'text-anchor': 'start', 'font-size': 22, 'font-weight': 700, class: 'mono', fill: 'var(--accent-2)', opacity: 0 });
       const ct = T(svg, 790, 282, '0', { 'text-anchor': 'start', 'font-size': 22, 'font-weight': 700, class: 'mono', fill: 'var(--accent)', opacity: 0 });
-      tl.to(mb, { attr: { width: 340 } }, { at: 4.6, dur: 1.4, ease: 'out' }).to(cb, { attr: { width: 340 * 0.14 / 40 + 1.5 } }, { at: 4.6, dur: 0.3 });
+      tl.to(mb, { attr: { width: 340 } }, { at: 4.6, dur: 1.4, ease: 'out' }).to(cb, { attr: { width: 340 * 2 / 40 + 1.5 } }, { at: 4.6, dur: 0.3 });
       tl.to([mt, ct], { opacity: 1 }, { at: 4.6, dur: 0.3 });
       tl.to(mt, { text: 40, fmt: (v) => '≈ ' + Math.round(v) + ' µs' }, { at: 4.6, dur: 1.4, ease: 'out' });
-      tl.to(ct, { text: 0.14, fmt: (v) => '≈ ' + v.toFixed(2) + ' µs' }, { at: 4.6, dur: 0.6 });
+      tl.to(ct, { text: 2, fmt: (v) => '≈ ' + v.toFixed(2) + ' µs' }, { at: 4.6, dur: 0.6 });
     });
 
     // ---------------- 12. eager ----------------
