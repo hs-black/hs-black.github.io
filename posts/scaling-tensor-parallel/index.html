@@ -82,7 +82,7 @@
     <article class="prose">
       <p>数据并行和 ZeRO 解决的是「模型状态」的冗余：参数、梯度、优化器状态在每张卡上各存一份太浪费，就把它们切开。但它们有一个共同的前提：<strong>每张卡仍然完整地跑一遍每一层的计算</strong>，于是每张卡都要为自己那份 micro-batch 存下这一层全部的中间激活。当模型的 hidden size 很大、序列很长时，单卡哪怕只放 1 条序列的激活也装不下，ZeRO 就帮不上忙了。</p>
       <p>张量并行（Tensor Parallelism，TP）换了一个思路：不切 batch，而是把<strong>每一个矩阵乘法本身</strong>拆到多张卡上。这样参数、梯度、优化器状态和（大部分）激活都被切开了，而且不需要在用之前把参数拼回完整形状。代价是：通信从「每步一次」变成了「每层好几次」，而且就在计算的关键路径上。序列并行（Sequence Parallelism，SP）是 TP 的一个小补丁，把 TP 没切开的那部分激活也沿序列维切掉，通信量不变。</p>
-      <p>这篇按 Megatron-LM 的做法，从一个矩阵乘法开始，一直推到完整的 Transformer 层、词表并行的 embedding 和交叉熵、精确的通信量、显存账，以及为什么 TP 几乎总是被限制在一台机器的 8 张卡之内。</p>
+      <p>下面我们从一个矩阵乘法开始，沿着 Megatron-LM 的构造一直推到完整的 Transformer 层、词表并行的 embedding 和交叉熵、精确的通信量、显存账，以及为什么 TP 几乎总是被限制在一台机器的 8 张卡之内。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -102,7 +102,7 @@
           <li><a href="#overlap">把通信藏到计算后面</a></li>
           <li><a href="#fsdp-tp">TP 与 FSDP 混合：什么时候各用多少</a></li>
           <li><a href="#practice">实践清单</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -177,7 +177,7 @@
         <figcaption>两张卡的例子。列并行切输出维，行并行切收缩维（contracting dimension）。切收缩维的乘法一定会留下要求和的部分和。</figcaption>
       </figure>
 
-      <p>用 Scaling Book 的记号更紧凑：下标表示这一维被切在哪个设备轴上，\(\cdot_k\) 表示沿 \(k\) 维收缩。列并行是 \(X[N, k]\cdot_k W[k, n_Y] \to Y[N, n_Y]\)，没有切收缩维，所以不需要通信；行并行是 \(X[N, k_Y]\cdot_k W[k_Y, n]\to Y[N, n]\{U_Y\}\)，切了收缩维，结果带着一个「未归约」标记 \(\{U_Y\}\)，必须 Reduce 一次。这是判断「这一步要不要通信」的通用规则：<strong>只要收缩的那一维被切了，结果就是部分和</strong>。</p>
+      <p>还有一种更紧凑的写法：给张量的维度加下标，表示这一维被切在哪个设备轴上（这里 \(Y\) 就是 TP 所在的那组卡），\(\cdot_k\) 表示沿 \(k\) 维收缩。列并行是 \(X[N, k]\cdot_k W[k, n_Y] \to Y[N, n_Y]\)，没有切收缩维，所以不需要通信；行并行是 \(X[N, k_Y]\cdot_k W[k_Y, n]\to Y[N, n]\{U_Y\}\)，切了收缩维，结果带着一个「未归约」标记 \(\{U_Y\}\)，必须 Reduce 一次。这是判断「这一步要不要通信」的通用规则：<strong>只要收缩的那一维被切了，结果就是部分和</strong>。</p>
       <p>反向传播时情况恰好对调。对 \(Y=XW\)，有 \(\partial L/\partial X = (\partial L/\partial Y)\,W^\top\) 和 \(\partial L/\partial W = X^\top(\partial L/\partial Y)\)。</p>
       <ul>
         <li>列并行：每张卡有 \(dY_i\)（\([N, n/t]\)）和 \(W_i\)。\(dX = \sum_i dY_i W_i^\top\)：这次收缩的是被切开的 \(n\) 维，所以每张卡算出的是部分和，<strong>反向需要 All-Reduce</strong>。权重梯度 \(dW_i = X^\top dY_i\) 只用到本地数据，不需要通信。</li>
@@ -256,7 +256,7 @@
       <p>GQA（Grouped-Query Attention）里 \(n_{kv}\lt n_h\)，每 \(n_h/n_{kv}\) 个 query 头共享一组 K/V。切的时候要让一组 query 头和它们共享的那个 KV 头在同一张卡上：</p>
       <ul>
         <li>\(t\le n_{kv}\) 且 \(t\mid n_{kv}\)：最干净。每张卡拿 \(n_{kv}/t\) 个 KV 头和它们对应的 \(n_h/t\) 个 query 头，没有任何额外开销。</li>
-        <li>\(n_{kv}\lt t\le n_h\)：KV 头不够分。常见做法是复制 KV 头：每个 KV 头放到 \(t/n_{kv}\) 张卡上，每张卡只用它服务自己的那几个 query 头。这样 K/V 的权重被复制了，<strong>它们的梯度在这几张卡上是不同的部分和，需要额外的 All-Reduce 才能保持同步</strong>；KV 的激活也不再按 \(1/t\) 缩小。Ultra-Scale Playbook 用 Llama-3 8B 举例：32 个 query 头、8 个 KV 头，理论上 TP 可以到 32，但要小心处理 KV 头的同步。推理框架（如 vLLM）在 TP 度大于 KV 头数时也是复制 KV 头。</li>
+        <li>\(n_{kv}\lt t\le n_h\)：KV 头不够分。常见做法是复制 KV 头：每个 KV 头放到 \(t/n_{kv}\) 张卡上，每张卡只用它服务自己的那几个 query 头。这样 K/V 的权重被复制了，<strong>它们的梯度在这几张卡上是不同的部分和，需要额外的 All-Reduce 才能保持同步</strong>；KV 的激活也不再按 \(1/t\) 缩小。以 Llama-3 8B 为例：32 个 query 头、8 个 KV 头，TP 最多可以开到 32，但一旦超过 8，每个 KV 头都要复制到多张卡上，并处理好这些副本的梯度同步。推理框架（如 vLLM）在 TP 度大于 KV 头数时也是复制 KV 头。</li>
       </ul>
       <p>Llama 3 系列的 8B / 70B / 405B 都是 8 个 KV 头，所以 TP=8 正好每卡一个 KV 头。下面用 Llama-3 70B（\(h=8192\)，\(n_h=64\)，\(n_{kv}=8\)，\(d_h=128\)，\(F=28672\)，\(V=128256\)）在 TP=8 下列一遍每张卡上的权重形状：</p>
       <div class="table-wrap">
@@ -280,7 +280,7 @@
         <li><strong>f</strong>：放在 TP 区域入口（列并行层之前）。前向是恒等（输入在各卡上本来就一样），反向是 All-Reduce（因为 \(dX\) 在各卡上是部分和）。</li>
         <li><strong>g</strong>：放在 TP 区域出口（行并行层之后）。前向是 All-Reduce（把部分和加起来），反向是恒等（输出的梯度在各卡上一样，直接往回传）。</li>
       </ul>
-      <p>它们是一对共轭（conjugate）：一个在前向通信，另一个在反向通信。Ultra-Scale Playbook 把 g 写作 f*，Megatron 的序列并行论文写作 \(\bar f\)，说的是同一件事。用 PyTorch 写出来只有几行：</p>
+      <p>它们是一对共轭（conjugate）：一个在前向通信，另一个在反向通信。你在别处也会看到 g 被写成 \(f^*\) 或 \(\bar f\)，指的是同一个算子。用 PyTorch 写出来只有几行：</p>
       <pre><code>class CopyToTP(torch.autograd.Function):        # f
     @staticmethod
     def forward(ctx, x):  return x
@@ -304,7 +304,7 @@ class ReduceFromTP(torch.autograd.Function):    # g
       <p>纯 TP 的问题也在这里：复制区域里的激活是完整的 \([b, s, h]\)，每张卡都存一份，没有被 \(t\) 除。序列并行要解决的就是这部分。</p>
 
       <h2 id="vocab">词表并行：embedding 与交叉熵</h2>
-      <p>词表很大（Llama 3 是 128256），embedding 表 \([V, h]\) 和输出层（LM head）\([h, V]\) 在小模型里能占到总参数的 1/4 以上（Llama-3 8B 的两张表合计约 10.5 亿参数），而且 logits \([b, s, V]\) 是整个网络里最大的单个激活。所以它们也要切，切在词表维上。</p>
+      <p>词表很大（Llama 3 是 128256），embedding 表 \([V, h]\) 和输出层（LM head）\([h, V]\) 加起来是一笔不小的参数：Llama-3 8B 的两张表合计约 10.5 亿参数，占全模型的 13%；1B 量级的小模型里这个比例能超过 1/4。而且 logits \([b, s, V]\) 是整个网络里最大的单个激活。所以它们也要切，切在词表维上。</p>
       <h3>输入 embedding</h3>
       <p>第 \(i\) 张卡持有词表下标 \([iV/t, (i+1)V/t)\) 这一段行。查表时，每张卡对每个 token 判断：在自己的范围内就查出那一行，不在就输出全零向量。这样每张卡得到一个 \([b, s, h]\) 的张量，每个 token 只有一张卡给出了非零值。All-Reduce（求和）之后，每张卡都拿到完整的 embedding 输出。从矩阵角度看，查表等于 one-hot 矩阵 \([N, V]\) 乘 embedding 表 \([V, h]\)，切的是收缩维 \(V\)，所以它是一个行并行层，出口跟一个 g。</p>
       <h3>LM head 与交叉熵</h3>
@@ -321,7 +321,7 @@ class ReduceFromTP(torch.autograd.Function):    # g
       <p>还有两个小细节。第一，词表大小要能被 \(t\) 整除，而且每卡的那一段最好是 128 的倍数，GEMM 才高效：Megatron-LM 论文把 GPT-2 的 50257 补到了 51200（\(128\times 8 = 1024\) 的倍数）。补出来的行永远不会作为目标出现，相当于浪费一点点算力。第二，如果输入和输出 embedding 共享权重（tied），两边的切法要一致，梯度在同一张卡上相加即可。</p>
 
       <h2 id="sp">序列并行：把剩下的激活也切开</h2>
-      <p>先算一下纯 TP 的激活里有多少没被切开。Korthikanti 等人（Megatron 序列并行论文）对 GPT 结构的一层逐项记账（bf16，不做重计算），得到每层激活：</p>
+      <p>先算一下纯 TP 的激活里有多少没被切开。对 GPT 结构的一层逐项记账（bf16，不做重计算），每层要存的激活字节数是：</p>
       $$\text{无并行：}\; sbh\left(34 + 5\frac{a s}{h}\right)\qquad \text{TP：}\; sbh\left(10 + \frac{24}{t} + 5\frac{a s}{h t}\right)$$
       <p>这里 \(a\) 是头数。\(5as/h\) 那项来自 \(QK^\top\)、softmax、dropout 这些 \(s^2\) 大小的张量（用了 FlashAttention 就不存了）。关键是那个 \(10\)：它来自两个 LayerNorm 的输入（各 \(2sbh\)）、两个 dropout mask（各 \(sbh\)）以及注意力和 MLP 入口线性层的输入（各 \(2sbh\)），这些都在复制区域里，不随 \(t\) 缩小。\(t=8\) 时，\(24/8=3\)，复制部分 10 反而是大头。</p>
       <p>观察：复制区域里的操作（LayerNorm、Dropout、残差相加）对每个 token 都是独立的。LayerNorm 要在 \(h\) 维上算均值方差，所以不能沿 \(h\) 切；但沿序列维 \(s\) 切完全没问题：</p>
@@ -331,7 +331,7 @@ class ReduceFromTP(torch.autograd.Function):    # g
         <li><strong>SP → TP（入口，原来的 f 处）</strong>：列并行层需要每张卡都有完整的 \([b, s, h]\)。各卡手里是不同的序列段，所以要 <strong>All-Gather</strong>（沿 \(s\)）。这个算子叫 \(g\)：前向 All-Gather，反向 Reduce-Scatter。</li>
         <li><strong>TP → SP（出口，原来的 g 处）</strong>：行并行层输出完整形状的部分和，下一个区域只需要求和结果的 \(1/t\)（一段序列）。「先求和再切」正好就是 <strong>Reduce-Scatter</strong>（沿 \(s\)）。这个算子叫 \(\bar g\)：前向 Reduce-Scatter，反向 All-Gather。</li>
       </ul>
-      <p>（命名上要注意：Megatron 序列并行论文里 \(g/\bar g\) 指 SP 版的这一对；Megatron-LM 原论文里 \(f/g\) 指纯 TP 版的那一对。本文前面用的是后者。）</p>
+      <p>注意这里的 \(g\) 是一个新算子，和纯 TP 里那个「前向 All-Reduce」的 g 不是一回事。可以这样记：SP 把纯 TP 入口的 f 换成了 \(g\)（All-Gather），把出口的 g 换成了 \(\bar g\)（Reduce-Scatter）；两者仍然是一对共轭，一个的前向是另一个的反向。</p>
 
       <figure class="diagram">
         <svg viewBox="0 0 720 210" role="img" aria-label="TP+SP 的区域转换">
@@ -394,18 +394,18 @@ class ReduceFromTP(torch.autograd.Function):    # g
       </div>
 
       <h3>通信量不变</h3>
-      <p>纯 TP 每层前向 2 次 All-Reduce；TP+SP 每层前向 2 次 All-Gather + 2 次 Reduce-Scatter。操作次数翻倍，但环形 All-Reduce 本来就等于一次 Reduce-Scatter 加一次 All-Gather，所以字节数完全一样：每层前向每卡发送 \(4\cdot\frac{t-1}{t}\cdot 2bsh\) 字节。反向是对偶的，同样不变。Korthikanti 等人的测量里，SP 甚至让一层的前向略快（LayerNorm 和 Dropout 只处理 \(1/t\) 的数据），不过他们也指出：同样的数据量下，RS + AG 两次调用实际比一次 All-Reduce 稍慢。</p>
+      <p>纯 TP 每层前向 2 次 All-Reduce；TP+SP 每层前向 2 次 All-Gather + 2 次 Reduce-Scatter。操作次数翻倍，但环形 All-Reduce 本来就等于一次 Reduce-Scatter 加一次 All-Gather，所以字节数完全一样：每层前向每卡发送 \(4\cdot\frac{t-1}{t}\cdot 2bsh\) 字节。反向是对偶的，同样不变。实际跑起来，SP 还让一层的前向略快一点：在一个 22B GPT 模型上，单层前向从 7.7 ms 降到 7.2 ms，因为 LayerNorm 和 Dropout 只处理 \(1/t\) 的数据。这个收益被另一件事抵消了一部分：同样的数据量，RS + AG 两次调用比一次 All-Reduce 要慢一些。</p>
 
       <h3>SP 带来的两个新细节</h3>
       <ul>
         <li><strong>LayerNorm 梯度需要同步了。</strong>纯 TP 里各卡的 LayerNorm 看到同样的输入，梯度天然一致；SP 里各卡看的是不同的 token，梯度是部分和，需要在 TP 组内 All-Reduce（像数据并行那样）。参数只有 \(h\) 个，代价很小。</li>
-        <li><strong>反向里多一次 All-Gather。</strong>列并行层算权重梯度 \(dW_i = Y^\top dZ_i\) 需要完整的输入 \(Y\)（\([b,s,h]\)）。如果前向把 All-Gather 出来的完整 \(Y\) 存着，SP 省下的显存就又吐回去了。Korthikanti 等人的做法是每张卡只存自己那段 \(Y_i^s\)，反向时再 All-Gather 一次，并且让它和 \(dY\) 的计算重叠。这次额外的 All-Gather 是用通信换显存，严格说来 TP+SP 的总字节数比纯 TP 多了这一项。</li>
+        <li><strong>反向里多一次 All-Gather。</strong>列并行层算权重梯度 \(dW_i = Y^\top dZ_i\) 需要完整的输入 \(Y\)（\([b,s,h]\)）。如果前向把 All-Gather 出来的完整 \(Y\) 存着，SP 省下的显存就又吐回去了。所以每张卡只存自己那段 \(Y_i^s\)，反向时再 All-Gather 一次，并且让它和 \(dY\) 的计算重叠。这次额外的 All-Gather 是用通信换显存，严格说来 TP+SP 的总字节数比纯 TP 多了这一项。</li>
       </ul>
 
       <h3>显存</h3>
       <p>有了 SP，每层激活里不再有任何复制项：</p>
       $$\text{TP+SP：}\; \frac{sbh}{t}\left(34 + 5\frac{a s}{h}\right)$$
-      <p>每个张量都被 \(t\) 除。再配合选择性重计算（只重算注意力里那些 \(s^2\) 大小、FLOPs 很少的部分；FlashAttention 本身就是这样做的），每层降到 \(34\,sbh/t\)。论文报告：两项技术各自把激活显存减少约一半，合起来约 5 倍。</p>
+      <p>每个张量都被 \(t\) 除。再配合选择性重计算（只重算注意力里那些 \(s^2\) 大小、FLOPs 很少的部分；FlashAttention 本身就是这样做的），每层降到 \(34\,sbh/t\)。在 22B 到 1T 参数的 GPT 模型上，序列并行和选择性重计算各自把激活显存减少约一半，合起来约 5 倍。</p>
 
       <h2 id="demo-block">演示：一层 Transformer 里的 TP / TP+SP</h2>
       <p>下面把一层 Llama 风格的 Transformer（RMSNorm → 注意力 → 残差 → RMSNorm → SwiGLU MLP → 残差）拆成一步一步的算子。每个小方块代表一张卡上的激活张量：方块的竖边是序列维 \(s\)，横边是当前的特征维（\(h\)、\(F\) 或头）；实心部分是这张卡实际持有的那块，斜线表示「完整形状但只是部分和」。通信步骤用橙色标出，并给出每张卡要发送的字节数（环形算法）。</p>
@@ -457,8 +457,8 @@ class ReduceFromTP(torch.autograd.Function):    # g
         </table>
       </div>
       <p>算一个具体的例子：Llama-3 70B，\(b=1\)，\(s=4096\)，TP=8。\(M=2\times 4096\times 8192\) 字节 = 64 MiB。一次 All-Reduce 每卡发送 \(2\times\frac{7}{8}\times 64 = 112\) MiB，每层前向 + 反向 4 次就是 448 MiB，80 层合计 35 GiB，这只是一条 4K 序列。如果按 H100 NVLink 的 450 GB/s 算，每层约 1.04 ms。</p>
-      <p>同一层的计算量：每层参数约 8.56 亿，前向 FLOPs 约 \(2\cdot bs\cdot 8.56\times10^8 \approx 7.0\) TFLOP，加上因果注意力的 \(2bs^2h\approx 0.27\) TFLOP，约 7.3 TFLOP；前向 + 反向约 3 倍，再除以 8 张卡，每卡 2.73 TFLOP，按 H100 的 990 TFLOP/s 峰值是 2.76 ms。通信 / 计算 ≈ 0.38。看起来通信不到计算的一半，但要注意三点：一是计算按 100% 峰值算，实际 MFU 在 40%–50% 时计算时间会长一倍，比例反而更好看，但实测 NVLink 带宽也到不了 450 GB/s（Scaling Book 的实测是 All-Reduce 大消息约 370 GB/s，58 MB 量级的消息只有约 150 GB/s）；二是 TP 的通信很难和计算重叠（下面会讲），所以这 38% 大部分是直接加在关键路径上的；三是 \(s\) 和 \(b\) 不影响这个比例（通信和计算都正比于 \(bs\)，注意力项除外），它只取决于 \(h\)、\(F\) 和 \(t\)。</p>
-      <p>Ultra-Scale Playbook 附录里给出了单个线性层能否重叠的条件：把下一层的 All-Gather（每卡 \(\frac{t-1}{t}\cdot bsh\) 个元素）藏在当前 \([h,h]\) 线性层的计算（\(2bsh^2/t\) FLOPs）后面，需要</p>
+      <p>同一层的计算量：每层参数约 8.56 亿，前向 FLOPs 约 \(2\cdot bs\cdot 8.56\times10^8 \approx 7.0\) TFLOP，加上因果注意力的 \(2bs^2h\approx 0.27\) TFLOP，约 7.3 TFLOP；前向 + 反向约 3 倍，再除以 8 张卡，每卡 2.73 TFLOP，按 H100 的 990 TFLOP/s 峰值是 2.76 ms。通信 / 计算 ≈ 0.38。看起来通信不到计算的一半，但要注意三点：一是计算按 100% 峰值算，实际 MFU 在 40%–50% 时计算时间会长一倍，比例反而更好看，但 NVLink 实际也跑不满 450 GB/s：8×H100 上的 All-Reduce 在大消息下约 370 GB/s，58 MB 量级的消息（正好是 70B 一个 MLP 权重分片的大小）只有约 150 GB/s；二是 TP 的通信很难和计算重叠（下面会讲），所以这 38% 大部分是直接加在关键路径上的；三是 \(s\) 和 \(b\) 不影响这个比例（通信和计算都正比于 \(bs\)，注意力项除外），它只取决于 \(h\)、\(F\) 和 \(t\)。</p>
+      <p>再细看一个线性层：能不能把下一层的 All-Gather（每卡 \(\frac{t-1}{t}\cdot bsh\) 个元素）藏在当前 \([h,h]\) 线性层的计算（\(2bsh^2/t\) FLOPs）后面？两者的时间之比要满足</p>
       $$\frac{t_\text{comm}}{t_\text{compute}} = \frac{t-1}{2h}\cdot\frac{\text{peak\_flops}}{\text{peak\_bw}} \le 1$$
       <p>同样和 \(s\)、\(b\) 无关。对 H100（990 TFLOP/s，450 GB/s，按元素计算时带宽要再除以 2 字节）、\(h=8192\)、\(t=8\)，左边约 \(\frac{7}{16384}\times\frac{990\times10^{12}}{225\times10^{9}}\approx 1.9\)，也就是单个 \([h,h]\) 层的计算不足以盖住通信；MLP 的 \([h,F]\) 层更宽，情况好一些。</p>
 
@@ -470,7 +470,7 @@ class ReduceFromTP(torch.autograd.Function):    # g
         <li>注意力子层：RMSNorm 输入 \(2sbh\)；QKV 投影输入 \(2sbh\)；FlashAttention 需要的 \(Q\)（\(2sbh\)）、\(K,V\)（\(4sb\,n_{kv}d_h\)）、输出 \(O\)（\(2sbh\)，同时也是 \(W_O\) 的输入）；softmax 的 logsumexp 很小，忽略。</li>
         <li>MLP 子层：RMSNorm 输入 \(2sbh\)；gate/up 投影输入 \(2sbh\)；gate 输出、up 输出、SwiGLU 输出（down 的输入）各 \(2sbF\)。</li>
       </ul>
-      <p>合计每层 \(12sbh + 4sb\,n_{kv}d_h + 6sbF\) 字节。其中两个 RMSNorm 输入和两个投影输入（\(8sbh\)）在纯 TP 下是复制的，其余被 \(t\) 除；TP+SP 下全部被 \(t\) 除（假设投影输入按 Korthikanti 的做法只存分片）。全重计算时每层只存层输入 \(2sbh\)（SP 下也是 \(/t\)）。最后的 logits 按 fp32 存，\(4sbV/t\)。这只是一个近似模型，不同框架的实际数字会有出入（比如有的实现会在 SwiGLU 反向时重算 SiLU，有的 FlashAttention 会额外存 RNG 状态），但量级和随 \(t\) 的变化趋势是对的。</p>
+      <p>合计每层 \(12sbh + 4sb\,n_{kv}d_h + 6sbF\) 字节。其中两个 RMSNorm 输入和两个投影输入（\(8sbh\)）在纯 TP 下是复制的，其余被 \(t\) 除；TP+SP 下全部被 \(t\) 除（投影输入只存本卡那段，反向时再 All-Gather）。全重计算时每层只存层输入 \(2sbh\)（SP 下也是 \(/t\)）。最后的 logits 按 fp32 存，\(4sbV/t\)。不同框架具体存哪些张量略有差别（比如有的实现会在 SwiGLU 反向时重算 SiLU），但量级和随 \(t\) 的变化趋势是一样的。</p>
       <p>用这个模型，Llama-3 70B、\(s=4096\)、\(b=1\)、TP=8：纯 TP 每层 0.35 GiB，80 层 28 GiB；TP+SP 每层 0.13 GiB，80 层 10.5 GiB。SP 在这里省下了 17 GiB。</p>
 
       <h2 id="node">为什么 TP 留在节点内</h2>
@@ -480,16 +480,16 @@ class ReduceFromTP(torch.autograd.Function):    # g
         <li><strong>频繁。</strong>每层前向 2 次、反向 2 次（SP 下翻倍成 4+4 次更小的操作），一个 80 层的模型每个 micro-batch 有几百次集合通信。</li>
         <li><strong>通信量不随 \(t\) 缩小。</strong>每卡发送 \(\propto\frac{t-1}{t}M\)，\(t\) 越大越接近 \(M\)；而每卡的计算量是 \(\propto 1/t\)。所以 \(t\) 翻倍，计算减半，通信几乎不变，通信占比翻倍。</li>
       </ol>
-      <p>第三点可以写成一个干净的上界。Scaling Book 用只有两个矩阵的 MLP 建模：前向计算 \(T_\text{math} = \frac{4BDF}{Y\cdot C}\)（\(B\) 是 token 数，\(Y\) 是 TP 度，\(C\) 是单卡算力），通信是一次 All-Gather 加一次 Reduce-Scatter，\(T_\text{comms}\approx\frac{2\cdot 2\cdot BD}{W}\)（bf16 两字节，\(W\) 是单卡带宽）。要计算受限，需要</p>
+      <p>第三点可以写成一个干净的上界。我们用一个只有两个矩阵的 MLP 来建模：前向计算 \(T_\text{math} = \frac{4BDF}{Y\cdot C}\)（\(B\) 是 token 数，\(Y\) 是 TP 度，\(C\) 是单卡算力），通信是一次 All-Gather 加一次 Reduce-Scatter，\(T_\text{comms}\approx\frac{2\cdot 2\cdot BD}{W}\)（bf16 两字节，\(W\) 是单卡带宽）。要计算受限，需要</p>
       $$\frac{4BDF}{Y C} \gt \frac{4BD}{W}\quad\Longleftrightarrow\quad Y \lt \frac{F\cdot W}{C}$$
-      <p>\(B\) 和 \(D\) 都消掉了：TP 能做多大只取决于 MLP 宽度 \(F\) 和硬件的「算力 / 带宽」比 \(C/W\)。对 H100，节点内 \(C/W = 990\times10^{12}/450\times10^{9}\approx 2200\)；跨节点时每个节点只有 400 GB/s 出口带宽，Scaling Book 给出约 2475。Llama-3 70B 的 \(F=28672\)，节点内上界约 \(28672/2200 \approx 13\)，实际上节点只有 8 张卡，就是 8。跨节点时情况要糟得多：一个 8 卡节点的 400 GB/s 出口由 8 张卡共享，环上跨节点那一段每卡只有约 50 GB/s，比 NVLink 慢近一个数量级。Scaling Book 的结论是：TP 在 \(Y \gt F/2475\) 时变成通信受限，通常把 TP 限制在节点内，最多两个节点。</p>
-      <p>Ultra-Scale Playbook 的实测也是这个形状：对一个 3B 模型和一个 70B 模型扫 TP 度，单卡吞吐随 TP 增大而下降，从 TP=8 到 TP=16（从 NVLink 变成跨节点的 EFA）掉得最明显，到 TP=32 掉得更厉害；而另一方面，TP 越大，能放下的 batch 越大（激活被切得更碎）。这是一个算得快和放得下之间的取舍。</p>
+      <p>\(B\) 和 \(D\) 都消掉了：TP 能做多大只取决于 MLP 宽度 \(F\) 和硬件的「算力 / 带宽」比 \(C/W\)。对 H100，节点内 \(C/W = 990\times10^{12}/450\times10^{9}\approx 2200\)。Llama-3 70B 的 \(F=28672\)，节点内上界约 \(28672/2200 \approx 13\)，而一个节点只有 8 张卡，所以就是 8。出了节点情况要糟得多：一个 8 卡节点对外总共只有 400 GB/s（8 张 400 Gbps 网卡），由 8 张卡共享，摊到每张卡约 50 GB/s，比 NVLink 慢近一个数量级。即便用分层的集合通信把整个节点的出口带宽都用上，\(C/W\) 也变成 \(990/400\approx 2475\)，TP 在 \(Y \gt F/2475\) 时就会通信受限。所以 TP 通常限制在一个节点内，最多跨两个节点。</p>
+      <p>在 H100 集群上实测（例如一个 3B 模型、序列长度 4096，扫 TP 度）也是这个形状：单卡吞吐随 TP 增大而下降，从 TP=8 到 TP=16（从 NVLink 变成跨节点的 EFA 网络）掉得最明显，到 TP=32 掉得更厉害；而另一方面，TP 越大，能放下的 batch 越大（激活被切得更碎）。这是一个算得快和放得下之间的取舍。</p>
       <div class="callout">
         <p>Blackwell 一代的 GB200 NVL72 把 NVLink 域扩到 72 张卡（每卡 900 GB/s），「节点」这个边界就从 8 挪到了 72。上面的不等式没变，只是 \(W\) 在更大的范围内都很高。即便如此，第三点（通信占比随 \(t\) 线性增长）依然成立，所以 TP 度也不会无限增大。</p>
       </div>
 
       <h2 id="demo-calc">演示：显存与通信随 TP 度的变化</h2>
-      <p>选一个模型和训练配置，看每张卡的显存和「通信时间 / 计算时间」怎么随 TP 度变化。显存按上一节的记账模型；时间按：每层前向 + 反向每卡发送 \(8\frac{t-1}{t}M\) 字节（SP 时加上重收集的 \(2\frac{t-1}{t}M\)），除以带宽（\(t\) 不超过 NVLink 域时用 NVLink 带宽，否则用每卡跨节点带宽）；计算按 \(3\times\)前向 FLOPs \(/t\) 除以峰值算力。带宽和算力是公开的标称峰值，实际能达到的都更低，所以这里的比例是一个示意，不是性能预测。</p>
+      <p>选一个模型和训练配置，看每张卡的显存和「通信时间 / 计算时间」怎么随 TP 度变化。显存按上一节的记账模型；时间按：每层前向 + 反向每卡发送 \(8\frac{t-1}{t}M\) 字节（SP 时加上重收集的 \(2\frac{t-1}{t}M\)），除以带宽（\(t\) 不超过 NVLink 域时用 NVLink 带宽，否则用每卡跨节点带宽）；计算按 \(3\times\)前向 FLOPs \(/t\) 除以峰值算力。带宽和算力都按标称峰值算，实际能跑到的更低，所以这里的比例用来看趋势，不是性能预测。</p>
 
       <div class="demo" id="calc">
         <div class="demo-label">每卡显存 / 通信计算比 vs TP 度</div>
@@ -528,14 +528,14 @@ class ReduceFromTP(torch.autograd.Function):    # g
       <h2 id="overlap">把通信藏到计算后面</h2>
       <p>TP 的通信难以重叠，但不是完全不能。常见的几种手段：</p>
       <ul>
-        <li><strong>分块流水（collective matmul）。</strong>把 All-Gather + 矩阵乘拆成 \(t\) 段：先用本地已有的那段输入算一部分输出，同时去取下一段；Reduce-Scatter 同理，算完一段输出就立刻发出去，同时算下一段。这样通信和计算交错进行。Playbook 提到 Megatron-LM 和 Nanotron 都实现了 All-Gather 与第一个全连接层（FC1）的部分重叠。Scaling Book 在分片矩阵乘法一章把这叫 collective matmul。</li>
-        <li><strong>反向里和权重梯度重叠。</strong>列并行层反向时，\(dX\) 的 All-Reduce（或 SP 下的 Reduce-Scatter）可以和 \(dW = X^\top dY\) 的计算同时进行，因为后者不依赖前者。SP 下重新 All-Gather 输入 \(Y\) 也可以和 \(dX\) 的计算重叠。Korthikanti 等人的实验里正是靠这种重叠，让全重计算的额外开销低于预期。</li>
-        <li><strong>沿 batch 拆分。</strong>把一个 micro-batch 再拆成两半，一半在通信时另一半在计算。Playbook 引用的 Domino 就是在这个方向上，把 TP 的通信尽量藏到独立的计算后面。</li>
+        <li><strong>分块流水（collective matmul）。</strong>把 All-Gather + 矩阵乘拆成 \(t\) 段：先用本地已有的那段输入算一部分输出，同时去取下一段；Reduce-Scatter 同理，算完一段输出就立刻发出去，同时算下一段。这样通信和计算交错进行。Megatron-LM 和 Nanotron 都实现了 All-Gather 与 MLP 第一个全连接层（FC1）的部分重叠；在 TPU/JAX 的语境里，这种写法就叫 collective matmul。</li>
+        <li><strong>反向里和权重梯度重叠。</strong>列并行层反向时，\(dX\) 的 All-Reduce（或 SP 下的 Reduce-Scatter）可以和 \(dW = X^\top dY\) 的计算同时进行，因为后者不依赖前者。SP 下重新 All-Gather 输入 \(Y\) 也可以和 \(dX\) 的计算重叠。这种重叠在实测里看得出来：在一个 22B 模型上，全层重计算的额外开销是 39%，比按 FLOPs 估算的 33% 还高，原因是不重算的基线已经把反向里的 All-Reduce 和权重梯度计算重叠起来，自己先变快了。</li>
+        <li><strong>沿 batch 拆分。</strong>把一个 micro-batch 再拆成两半，一半在通信时另一半在计算。Domino 沿着这个方向做得更彻底：把输入沿 batch、权重沿列切成更小的独立块，让 TP 的通信尽量藏到其他块的计算后面。</li>
       </ul>
       <p>这些都需要通信和计算在 GPU 上并发执行，会互相抢 SM 和显存带宽，所以实际收益通常小于理论值。</p>
 
       <h2 id="fsdp-tp">TP 与 FSDP 混合：什么时候各用多少</h2>
-      <p>Scaling Book 用一句话概括两者的区别：<strong>FSDP 移动权重，TP 移动激活</strong>。FSDP 每层要 All-Gather 一次权重（\(\propto DF\)），TP 每层要 All-Gather / Reduce-Scatter 一次激活（\(\propto BD\)）。批次越小，激活越小，TP 越便宜；模型越宽，权重越大，FSDP 越贵。两者可以叠加在不同的设备轴上：\(X\) 个设备做 FSDP，\(Y\) 个做 TP，\(N = XY\)：</p>
+      <p>先用一句话说清两者的区别：<strong>FSDP 移动权重，TP 移动激活</strong>。FSDP 每层要 All-Gather 一次权重（\(\propto DF\)），TP 每层要 All-Gather / Reduce-Scatter 一次激活（\(\propto BD\)）。批次越小，激活越小，TP 越便宜；模型越宽，权重越大，FSDP 越贵。两者可以叠加在不同的设备轴上：\(X\) 个设备做 FSDP，\(Y\) 个做 TP，\(N = XY\)：</p>
       $$\mathrm{In}[B_X, D_Y]\cdot_D W_\text{in}[D_X, F_Y]\cdot_F W_\text{out}[F_Y, D_X]\to \mathrm{Out}[B_X, D_Y]$$
       <p>好处是相互的：激活沿 batch 切在 \(X\) 上，所以 TP 的 All-Gather 小了 \(X\) 倍；权重沿 \(F\) 切在 \(Y\) 上，所以 FSDP 的 All-Gather 小了 \(Y\) 倍。只看前向，通信时间分别是</p>
       $$T_\text{FSDP} = \frac{4DF}{Y\, W M_X},\qquad T_\text{TP} = \frac{4BD}{X\, W M_Y},\qquad T_\text{math} = \frac{4BDF}{N C}$$
@@ -543,8 +543,8 @@ class ReduceFromTP(torch.autograd.Function):    # g
       $$X_\text{opt} = \sqrt{\frac{B}{F}\frac{M_X}{M_Y}N}$$
       <p>代回去，计算受限的条件变成</p>
       $$\frac{B}{N} \gt \frac{\alpha^2}{M_X M_Y F},\qquad \alpha = C/W$$
-      <p>对比纯 FSDP 的条件 \(B/N \gt \alpha/M_X\)：混合以后，每卡需要的 token 数从和 \(\alpha\) 成正比变成和 \(\alpha^2/F\) 成正比。Scaling Book 在 TPU v5p（\(\alpha\approx 2550\)）、\(F=32768\)、\(M_XM_Y=2\) 下算出每卡约 100 个 token 就够，而纯 FSDP 需要约 850，小了约 8 倍。在他们的 LLaMA-3 70B 例子里（TPU v5p 全 pod 8960 芯片，400 万 token 的 batch），纯 FSDP 是通信受限的，而约 2048 路 FSDP + 4 路 TP 的组合可以保持计算受限。</p>
-      <p>这件事在 GPU 上的含义是：当集群很大、全局 batch 被分到每卡只剩几千个 token 时（Scaling Book 估计 H100 上纯 FSDP 需要每卡约 2500 token），加一点 TP 能把每卡需要的 batch 降下来，这是 TP 除了「省显存」之外的第二个用处。</p>
+      <p>对比纯 FSDP 的条件 \(B/N \gt \alpha/M_X\)：混合以后，每卡需要的 token 数从和 \(\alpha\) 成正比变成和 \(\alpha^2/F\) 成正比。代入一组数：TPU v5p 上 \(\alpha\approx 2550\)，取 \(F=32768\)、\(M_XM_Y=2\)，每芯片约 100 个 token 就够；纯 FSDP（三个网络维度全用上）需要约 850，混合后小了约 8 倍。具体例子：在一个 8960 芯片的 TPU v5p pod 上用 400 万 token 的 batch 训练 LLaMA-3 70B，每芯片只分到约 470 个 token，纯 FSDP 是通信受限的；改成约 2048 路 FSDP + 4 路 TP，就能保持计算受限。</p>
+      <p>这件事在 GPU 上的含义是：当集群很大、全局 batch 被分到每卡只剩几千个 token 时（H100 上跨节点做纯 FSDP，按 \(C/W\approx 2475\) 需要每卡约 2500 个 token），加一点 TP 能把每卡需要的 batch 降下来，这是 TP 除了「省显存」之外的第二个用处。</p>
 
       <h2 id="practice">实践清单</h2>
       <ul>
@@ -557,12 +557,13 @@ class ReduceFromTP(torch.autograd.Function):    # g
         <li>序列一长，TP 区域里的激活仍然是 \([b,s,F/t]\) 这样的完整序列长度，SP 帮不了，这时要上下文并行。</li>
       </ul>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Nanotron 团队，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#tensor-parallelism">The Ultra-Scale Playbook</a>：Tensor Parallelism、<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#sequence_parallelism">Sequence Parallelism</a> 两节，以及附录 A0（Ring AllReduce）与 A3（TP communication analysis）。</li>
-        <li>Austin et al., <a href="https://jax-ml.github.io/scaling-book/training/#tensor-parallelism">How to Scale Your Model</a>：Part 5 的 Tensor Parallelism 与 <a href="https://jax-ml.github.io/scaling-book/training/#combining-fsdp-and-tensor-parallelism">Combining FSDP and Tensor Parallelism</a>；<a href="https://jax-ml.github.io/scaling-book/gpus/">GPU 一章</a>的 H100 带宽与 TP 上界；<a href="https://jax-ml.github.io/scaling-book/applied-training/">Part 6</a> 的 LLaMA-3 70B 例子。</li>
+        <li>Nanotron 团队，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#tensor-parallelism">The Ultra-Scale Playbook</a>：Tensor Parallelism、<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#sequence_parallelism">Sequence Parallelism</a> 两节，以及附录 A0（Ring AllReduce）与 A3（TP communication analysis，单个线性层的重叠条件）。有 TP 吞吐随 TP 度变化的实测曲线和 picotron 的参考实现，想看实验细节推荐读这两节。</li>
+        <li>Austin et al., <a href="https://jax-ml.github.io/scaling-book/training/#tensor-parallelism">How to Scale Your Model</a>：Part 5 的 Tensor Parallelism 与 <a href="https://jax-ml.github.io/scaling-book/training/#combining-fsdp-and-tensor-parallelism">Combining FSDP and Tensor Parallelism</a>；<a href="https://jax-ml.github.io/scaling-book/gpus/">GPU 一章</a>的 H100 带宽实测（All-Reduce 约 370 GB/s）与 TP 上界 \(F/2475\)；<a href="https://jax-ml.github.io/scaling-book/applied-training/">Part 6</a> 的 LLaMA-3 70B 例子。</li>
         <li>Shoeybi et al., <a href="https://arxiv.org/abs/1909.08053">Megatron-LM: Training Multi-Billion Parameter Language Models Using Model Parallelism</a>（f/g 算子、词表并行与融合交叉熵、RNG 处理），2019。</li>
-        <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（序列并行、激活显存公式、选择性重计算），2022。</li>
+        <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（序列并行、激活显存公式 \(sbh(34+5as/h)\)、选择性重计算，以及 22B 模型上的单层计时），2022。</li>
+        <li>Wang et al., <a href="https://arxiv.org/abs/2409.15241">Domino: Eliminating Communication in LLM Training via Generic Tensor Slicing and Overlapping</a>（把 TP 通信藏到独立计算后面），2024。</li>
         <li>Llama Team, <a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>（模型结构参数与并行维度顺序），2024。</li>
       </ul>
     </article>

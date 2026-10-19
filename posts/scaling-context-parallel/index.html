@@ -68,7 +68,7 @@
 
     <article class="prose">
       <p><a href="/posts/scaling-tensor-parallel/">上一篇</a>的张量并行加序列并行，把一层里的激活要么沿 hidden 维切、要么沿序列维切，最大激活降到了 \(bsh/t\)。但它有一个边界：TP 区域内部，每张卡上的张量仍然是完整的序列长度，比如 \([b, s, F/t]\)；而 TP 度又被 NVLink 域卡在 8 左右。序列一长（128K、1M），这点切分就不够了。</p>
-      <p>上下文并行（Context Parallelism，CP）的做法是：把序列切开，并且在<strong>整个模型</strong>里都保持切开，包括注意力。MLP、LayerNorm 这些逐 token 的操作不受影响；唯一的麻烦是注意力，因为每个 query 要看到（因果情况下：之前的）所有 key 和 value。这篇讲怎么在不拼回完整序列的前提下精确地算注意力（online softmax 合并），怎么把 KV 在设备间转圈同时把通信藏在计算后面（Ring Attention），为什么因果掩码会让朴素切法浪费一半算力、以及怎么用 zig-zag 修好它，最后对比另一条路：按头切的 DeepSpeed-Ulysses。</p>
+      <p>上下文并行（Context Parallelism，CP）的做法是：把序列切开，并且在<strong>整个模型</strong>里都保持切开，包括注意力。MLP、LayerNorm 这些逐 token 的操作不受影响；唯一的麻烦是注意力，因为每个 query 要看到（因果情况下：之前的）所有 key 和 value。下面依次讲：怎么在不拼回完整序列的前提下精确地算注意力（online softmax 合并），怎么把 KV 在设备间转圈同时把通信藏在计算后面（Ring Attention），为什么因果掩码会让朴素切法浪费一半算力、以及怎么用 zig-zag 修好它，最后对比另一条路：按头切的 DeepSpeed-Ulysses。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -85,20 +85,20 @@
           <li><a href="#compare">通信量对比与选择</a></li>
           <li><a href="#demo-mem">演示：激活显存 vs 序列长度</a></li>
           <li><a href="#combine">和其他并行组合</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
       <h2 id="act">激活随序列长度增长</h2>
-      <p>先回顾激活显存从哪来。训练时，反向传播要用到前向的中间结果，所以每一层都要存下一批张量。Korthikanti 等人对 GPT 结构的一层逐项记账（bf16，不做重计算，\(a\) 为头数）：</p>
+      <p>先回顾激活显存从哪来。训练时，反向传播要用到前向的中间结果，所以每一层都要存下一批张量。对 GPT 结构的一层逐项记账（bf16，不做重计算，\(a\) 为头数），每层要存的字节数是：</p>
       $$m_\text{act}^{\text{层}} = sbh\left(34 + 5\frac{as}{h}\right)$$
-      <p>第一项正比于 \(s\)，来自线性层输入、LayerNorm 输入、MLP 中间激活等；第二项正比于 \(s^2\)，来自注意力分数矩阵 \(QK^\top\)、softmax 输出和它的 dropout mask，每个头都是一个 \(s\times s\) 的矩阵。Ultra-Scale Playbook 用这个公式画出了 Llama 系列在不同序列长度下的显存：几千 token 以下激活可以忽略，2K–4K 以后就开始占大头，并且随 \(s\) 增长得越来越快。</p>
+      <p>第一项正比于 \(s\)，来自线性层输入、LayerNorm 输入、MLP 中间激活等；第二项正比于 \(s^2\)，来自注意力分数矩阵 \(QK^\top\)、softmax 输出和它的 dropout mask，每个头都是一个 \(s\times s\) 的矩阵。拿 Llama 系列的尺寸代进去算一下：序列只有一两千 token 时，激活和模型状态比起来可以忽略；到 2K–4K 以后激活开始占大头，而且因为有 \(s^2\) 项，增长得越来越快。</p>
       <p>FlashAttention 不存 \(s\times s\) 的矩阵，只存 \(Q,K,V,O\) 和每行的 log-sum-exp，反向时分块重算分数矩阵。这样第二项就没了，激活变成和 \(s\) <strong>线性</strong>增长。线性听起来还好，但数字仍然很大。按 Llama 结构（RMSNorm、GQA、SwiGLU、FlashAttention）记账，每层每条序列存 \(12sbh + 4sb\,n_{kv}d_h + 6sbF\) 字节（推导见<a href="/posts/scaling-tensor-parallel/#memory">上一篇的显存账</a>）。拿 Llama-3 70B（\(h=8192\)，\(F=28672\)，8 个 KV 头）在 \(s=128\text{K}\)、TP=8 + SP 下算一下：</p>
       <ul>
         <li>每层：\(s\,(12h + 4n_{kv}d_h + 6F)/t\)，代入得 131072 × 34304 字节 ≈ 4.19 GiB，80 层合计约 335 GiB。</li>
         <li>就算做全层重计算，每层只存层输入 \(2sbh/t\)，80 层也要 20 GiB；反向重算某一层时还要临时放下这一层的 4.19 GiB；fp32 logits \(4sbV/t\) 再加 7.8 GiB。</li>
       </ul>
-      <p>而模型状态本身（706 亿参数，每卡 1/8 加上 ZeRO 切分）也要占几十 GB。这说明：长序列下，重计算只能把激活压到「和 \(s\) 线性、系数是 \(2h\cdot L\)」的水平，Playbook 也指出全重计算还会带来约 30% 的额外计算。剩下唯一的办法是把 \(s\) 本身分到更多卡上。</p>
+      <p>而模型状态本身（706 亿参数，每卡 1/8 加上 ZeRO 切分）也要占几十 GB。这说明：长序列下，重计算最多只能把激活压到「和 \(s\) 线性、系数是 \(2h\cdot L\)」的水平，而且全层重计算要把每层的前向再跑一遍，前向约占一步训练计算量的 1/3，所以总计算多出约 1/3。剩下唯一的办法是把 \(s\) 本身分到更多卡上。</p>
 
       <h2 id="idea">上下文并行的基本想法</h2>
       <p>CP 把输入序列沿 \(s\) 维切成 \(N\) 段（\(N\) 是 CP 度），第 \(i\) 张卡只处理第 \(i\) 段 token 的所有层。和 SP 的区别是：SP 只在 LayerNorm/Dropout 这些区域切序列，进入 TP 区域时要 All-Gather 回完整序列；CP 则从 embedding 到 loss 一直切着。</p>
@@ -125,11 +125,11 @@
       $$\boxed{\;o = e^{\mathrm{lse}_1-\mathrm{lse}}\,o_1 + e^{\mathrm{lse}_2-\mathrm{lse}}\,o_2,\qquad \mathrm{lse}=\log\left(e^{\mathrm{lse}_1}+e^{\mathrm{lse}_2}\right)\;}$$
       <p>两个权重 \(e^{\mathrm{lse}_b - \mathrm{lse}}\) 之和恰好是 1，可以理解成「这一块 key 在总 softmax 质量中所占的比例」。实际计算时用稳定的写法：\(\mathrm{lse} = M + \log(e^{\mathrm{lse}_1-M}+e^{\mathrm{lse}_2-M})\)，\(M=\max(\mathrm{lse}_1,\mathrm{lse}_2)\)，所有指数都不超过 0。几个性质让它适合分布式：</p>
       <ul>
-        <li><strong>可交换、可结合</strong>：多块就反复两两合并，顺序无关。Ring Attention 论文正是利用这一点：query 块和一组 key/value 块的注意力「可以按任意顺序计算，只要正确地合并每块的统计量」。</li>
+        <li><strong>可交换、可结合</strong>：多块就反复两两合并，顺序无关。Ring Attention 正是建立在这一点上：一个 query 块对一组 KV 块的注意力可以按任意顺序计算，只要正确合并每块的统计量。</li>
         <li><strong>每个 query 只需要多存一个标量</strong>（lse），而不是 \(s\) 个分数。</li>
         <li><strong>完全被掩码的块</strong>：所有 \(x_j=-\infty\)，\(\mathrm{lse}_b = -\infty\)，权重为 0，等价于跳过。所以因果掩码下上三角的整块可以直接不算。</li>
       </ul>
-      <p>FlashAttention 在单卡内部用的是同一个恒等式（在 SRAM 里按块扫过 K/V，边扫边更新 \(m\)、\(\ell\) 和未归一化的输出），只是把合并写成了增量形式。CP 把它搬到了卡与卡之间：每张卡用 FlashAttention 算出本地 Q 对某个 KV 块的 \((o_b, \mathrm{lse}_b)\)，再和之前的累积结果合并。Playbook 也特别指出了 CP 和 FlashAttention 共享 online softmax 这一点。</p>
+      <p>FlashAttention 在单卡内部用的是同一个恒等式（在 SRAM 里按块扫过 K/V，边扫边更新 \(m\)、\(\ell\) 和未归一化的输出），只是把合并写成了增量形式。CP 把它搬到了卡与卡之间：每张卡用 FlashAttention 算出本地 Q 对某个 KV 块的 \((o_b, \mathrm{lse}_b)\)，再和之前的累积结果合并。</p>
       <p><strong>反向</strong>同样只需要 lse。对一个 key \(j\)，softmax 概率是 \(p_j = e^{x_j - \mathrm{lse}}\)，用<em>全局</em>的 lse 就能在任何一块上单独重算出正确的 \(p_j\)，然后算 \(dv_j = \sum_q p_j\, do\)、\(dx_j = p_j(do\cdot v_j - D)\)，其中 \(D = do\cdot o\) 是每个 query 一个标量（也是全局的）。所以前向结束时每张卡把本地 query 的全局 \(o\) 和 lse 存下来，反向时再把 KV 块转一圈，每一步都能独立算出这一块对 \(dQ\)（累加在本地）以及对 \(dK, dV\) 的贡献。</p>
 
       <h2 id="ring">Ring Attention</h2>
@@ -183,13 +183,13 @@
       </figure>
 
       <h3>显存</h3>
-      <p>每张卡在注意力里只需要：本地 Q（和累积的 O、lse）、当前计算用的 K/V 块、正在接收的下一个 K/V 块（双缓冲）。所以额外开销是一个 KV 块的大小，与总序列长度无关。Ring Attention 论文按每个 host 存 6 个块（Q、当前 K/V、接收中的 K/V、输出）来估计，显存只和块大小线性相关。</p>
+      <p>每张卡在注意力里只需要：本地 Q（和累积的 O、lse）、当前计算用的 K/V 块、正在接收的下一个 K/V 块（双缓冲）。数一下一共是 6 个块：Q、当前的 K 和 V、正在接收的 K 和 V、输出 O。显存只和块大小线性相关，与总序列长度无关；序列再长，只要加卡让块大小不变，每卡的注意力显存就不变。</p>
       <h3>能否把通信藏住</h3>
       <p>每一步的计算是一个 \(c\times c\) 的注意力块（\(c = s/N\) 是每卡的 token 数），通信是一个 K/V 块。设单卡算力 \(C\)，单向带宽 \(W\)，按一个 micro-batch 算：</p>
       $$T_\text{math} = \frac{4\,b\,c^2 h}{C}\quad(QK^\top \text{ 和 } PV \text{ 各 } 2bc^2h),\qquad T_\text{comm} = \frac{2\cdot 2\,b\,c\,n_{kv}d_h}{W}\quad(K,V\text{，bf16})$$
       <p>要 \(T_\text{math}\ge T_\text{comm}\)：</p>
       $$c \;\ge\; \frac{C}{W}\cdot\frac{n_{kv}d_h}{h} = \frac{C}{W}\cdot\frac{n_{kv}}{n_h}$$
-      <p>多头注意力时（\(n_{kv}=n_h\)）就是 Ring Attention 论文里的条件：块大小要大于「FLOPs / 带宽」。几个数：H100 节点内 \(C/W\approx 990\times10^{12}/450\times10^9\approx 2200\)，MHA 需要每卡至少约 2200 个 token；GQA 8/64（Llama-3 70B）只要约 275。跨节点每卡约 50 GB/s，\(C/W\approx 19800\)，MHA 需要约 2 万 token，GQA 8/64 约 2500。因果掩码会让每步有用计算大约减半，要求再翻倍。这也解释了为什么 GQA 让 CP 变得容易：K/V 比 Q 小得多，要搬的东西少了 \(n_h/n_{kv}\) 倍。反向时每步要计算的量约为前向的 2 倍多，而要传的除了 K/V 还有累积的 \(dK, dV\)（也绕环走），通信也大约翻倍，比例差不多。</p>
+      <p>多头注意力时（\(n_{kv}=n_h\)）条件就是：每卡的块大小 \(c\) 要大于「算力 / 带宽」\(C/W\)。几个数：H100 节点内 \(C/W\approx 990\times10^{12}/450\times10^9\approx 2200\)，MHA 需要每卡至少约 2200 个 token；GQA 8/64（Llama-3 70B）只要约 275。跨节点每卡约 50 GB/s，\(C/W\approx 19800\)，MHA 需要约 2 万 token，GQA 8/64 约 2500。因果掩码会让每步有用计算大约减半，要求再翻倍。这也解释了为什么 GQA 让 CP 变得容易：K/V 比 Q 小得多，要搬的东西少了 \(n_h/n_{kv}\) 倍。反向时每步要计算的量约为前向的 2 倍多，而要传的除了 K/V 还有累积的 \(dK, dV\)（也绕环走），通信也大约翻倍，比例差不多。</p>
 
       <h2 id="causal">因果掩码带来的负载不均</h2>
       <p>语言模型用因果注意力：token \(p\) 只能看 \(\le p\) 的 key。把 \(s\times s\) 的分数矩阵画出来，只有下三角（含对角线）需要算。如果按顺序切（卡 \(i\) 拿第 \(i\) 段连续的 token），在 Ring Attention 的第 \(r\) 步，卡 \(i\) 处理的是 \(Q_i\) 和 \(K_{(i-r)\bmod N}\)：</p>
@@ -199,7 +199,7 @@
       </ul>
       <p>每一步的耗时取决于最慢的那张卡，所以第 1 到 \(N-1\) 步每步都要 \(c^2\) 的时间。总耗时约 \(c^2/2 + (N-1)c^2\)，而总的有用工作量约 \(N^2c^2/2\)，平摊到 \(N\) 张卡是 \(Nc^2/2\)。效率</p>
       $$\eta_\text{naive} \approx \frac{Nc^2/2}{(N-\tfrac12)c^2} = \frac{N}{2N-1}\;\to\;\frac12$$
-      <p>\(N=4\) 时约 57%，\(N=8\) 时约 53%：差不多一半的时间在空等。Playbook 用 attention 矩阵上色说明了同一件事：卡 1 一开始就能算完它的行，卡 2 要等到第二轮收到 1–4 号 token 才能完成，卡 1 的总工作量也远少于其他卡。（这和「谁先算完」无关紧要，关键是每一步都被最忙的那张卡拖住。）</p>
+      <p>\(N=4\) 时约 57%，\(N=8\) 时约 53%：差不多一半的时间在空等。把注意力矩阵按卡上色就能直观看到：卡 0 持有最前面的 token，第 0 步就算完了自己的全部行，之后一直闲着；编号越大的卡，要算的块越多，最后一张卡每一步都满载。问题不在于谁先算完，而在于每一步都要等最忙的那张卡。</p>
 
       <h2 id="zigzag">Zig-zag 与 Striped：重新分配 token</h2>
       <p>解决办法是不按连续段分配 token，让每张卡都拿到一些「早」的 token 和一些「晚」的 token。</p>
@@ -218,7 +218,7 @@
       <p>当 \(j\ne i\)（第 1 到 \(N-1\) 步）时，恰好有两个组合要全算、两个跳过，工作量是 \(2\times(c/2)^2 = c^2/2\)，<strong>每张卡、每一步都一样</strong>。当 \(j=i\)（第 0 步）时，一个全块加两个对角半块，也约是 \(c^2/2\)。总耗时约 \(Nc^2/2\)，正好等于理想值。相比朴素切法快了约 \(2-1/N\) 倍。</p>
       <p>表格还揭示了一个实现上的巧合：\(j\lt i\) 时要算的两个组合都用 key 块 \(j\)，即「全部 Q × KV 的前一半」；\(j\gt i\) 时都用 query 块 \(2N-1-i\)，即「Q 的后一半 × 全部 KV」。两种情况都是没有掩码的矩形，直接调一次不带 causal 的 FlashAttention 即可，只有第 0 步需要带掩码。开源实现 ring-flash-attention 的 zigzag 版本就是这样做的。</p>
       <h3>Striped</h3>
-      <p>Striped Attention（Brandon 等人）走得更彻底：token \(p\) 分给卡 \(p \bmod N\)，每张卡拿到均匀散布在整条序列上的一组 token。这样每一步每张卡面对的掩码都近似是一个「上三角掉一半」的块，各卡工作量只差对角线上的那几个元素。论文报告在 A100 和 TPUv4 上比 Ring Attention 端到端快了最多 1.45 倍（256K 序列）和 1.65 倍（16 块 TPUv4、786K 序列），并指出在块大小和设备数趋于无穷时理论加速趋近 2 倍。和 zig-zag 相比，Striped 的掩码在每一步都不是全满或全空的矩形，实现上需要带偏移的掩码；Playbook 提到两者的细微差别可以看 ring-flash-attention 的讨论。</p>
+      <p>Striped Attention（Brandon 等人）走得更彻底：token \(p\) 分给卡 \(p \bmod N\)，每张卡拿到均匀散布在整条序列上的一组 token。这样每一步每张卡面对的掩码都近似是一个「上三角掉一半」的块，各卡工作量只差对角线上的那几个元素。实测中，Striped 在 8 张 A100 上把 256K 序列的端到端训练吞吐提高到 Ring Attention 的最多 1.45 倍，在 16 块 TPUv4、786K 序列上是 1.65 倍；当块大小和设备数趋于无穷时，理论加速趋近 2 倍。和 zig-zag 相比，Striped 每一步的掩码都不是全满或全空的矩形，实现上需要一个带偏移的因果掩码。</p>
       <h3>重排 token 的代价</h3>
       <p>注意力对 token 顺序是「置换等变」的：只要掩码按 token 在原序列里的位置来判断，重排不影响结果。所以 zig-zag 或 striped 只需要在模型入口重排一次 token，整个前向和反向都保持这个布局。但要同时重排三样东西：输入 token id、位置编码用的 position id（RoPE 必须用原始位置），以及计算 loss 用的目标 token。逐 token 的模块本来就不关心顺序。</p>
 
@@ -265,7 +265,7 @@
       <p>切到「朴素连续」，按几下「下一步」：从第 1 步开始，编号小的卡整块空闲，编号大的卡整块满载。换成 Zig-zag，每一步每张卡的工作量都相同。Striped 下各卡只差几个对角元素。把 \(N\) 调到 8，朴素切法的效率接近 53%。</p>
 
       <h2 id="allgather">All-Gather 式 CP</h2>
-      <p>Ring 不是唯一的实现。另一种做法是：每层注意力之前，在 CP 组内对 K 和 V 做一次 All-Gather，每张卡拿到完整序列的 K/V，然后用本地的 Q 算注意力；反向时对 \(dK,dV\) 做 Reduce-Scatter。Playbook 把两者对比为：</p>
+      <p>Ring 不是唯一的实现。另一种做法是：每层注意力之前，在 CP 组内对 K 和 V 做一次 All-Gather，每张卡拿到完整序列的 K/V，然后用本地的 Q 算注意力；反向时对 \(dK,dV\) 做 Reduce-Scatter。两种实现各有取舍：</p>
       <ul>
         <li><strong>All-Gather 实现</strong>：一步完成，简单；但需要临时放下全部 K/V。</li>
         <li><strong>环形实现</strong>：每次只多存一个块，通信分散在 \(N\) 步里并与计算重叠；代价是多步通信带来的额外延迟和更复杂的调度。</li>
@@ -317,13 +317,13 @@
         <figcaption>4 卡、4 个头的 Ulysses。All-to-All 本质上是一次分布式转置：把切分维从序列换成头，再换回来。</figcaption>
       </figure>
 
-      <p><strong>通信量。</strong>All-to-All 里每张卡把本地张量的 \((P-1)/P\) 发出去。Ulysses 论文按「聚合消息大小 \(M\) 在 \(P\) 张卡上做 All-to-All，每条链路传 \(M/P\)」来算：QKV 的聚合大小 \(3Nh\)、输出 \(Nh\)（\(N\) 为序列长度），每条链路共 \(4Nh/P\)，所以序列长度和卡数同比例增长时通信量不变。论文对比的是 Megatron 的 SP：它的 All-Gather / Reduce-Scatter 每卡通信量是 \(O(N)\)，不随 \(P\) 下降。</p>
+      <p><strong>通信量。</strong>All-to-All 里每张卡把本地张量的 \((P-1)/P\) 发出去。在节点内 NVSwitch、节点间 fat-tree 这样的网络上，总大小为 \(M\) 的 All-to-All 在 \(P\) 张卡上每条链路只传 \(M/P\)。QKV 的总大小是 \(3Nh\)、输出是 \(Nh\)（\(N\) 为序列长度），每条链路共 \(4Nh/P\)，所以序列长度和卡数同比例增长时，每条链路的通信量不变。对比 Megatron 的 SP：它的 All-Gather / Reduce-Scatter 每卡通信量是 \(O(N)\)，不随 \(P\) 下降。</p>
       <p>上面的 \(3Nh\) 是 MHA。对 GQA，K/V 只有 \(n_{kv}d_h\) 宽，把每卡发送的字节数（bf16，单层前向）写准确一点：</p>
       $$\text{Ulysses：}\;\frac{P-1}{P}\cdot 2b\frac{s}{P}\,(2h + 2n_{kv}d_h)\qquad \text{Ring / All-Gather：}\;\frac{P-1}{P}\cdot 2b\,s\cdot 2n_{kv}d_h$$
       <p>两者之比是 \(\frac{h+n_{kv}d_h}{P\cdot n_{kv}d_h}\)。MHA 下是 \(2/P\)，Ulysses 在 \(P\ge 3\) 时就更省；但 GQA 8/64 下是 \(9/P\)，要 \(P\gt 9\) Ulysses 才更省。也就是说 GQA 越激进，环形或 All-Gather 式 CP 越占便宜：它们只搬 K/V，而 Ulysses 还要搬 Q 和 O。</p>
       <p><strong>限制。</strong></p>
       <ul>
-        <li>并行度受头数约束：\(P\) 要整除 \(n_h\)；对 GQA，\(P\gt n_{kv}\) 时 K/V 头不够分，只能复制，通信量随之增大。和 TP 叠加时更紧：TP 已经按头切了 \(t\) 份，剩下给 Ulysses 的只有 \(n_{kv}/t\)。Llama 3 这类 8 个 KV 头、TP=8 的配置，几乎没有给 Ulysses 留空间。Ring Attention 论文也把「受头数限制、并且要在每张卡上收集完整序列」列为 Ulysses 的局限。</li>
+        <li>并行度受头数约束：\(P\) 要整除 \(n_h\)；对 GQA，\(P\gt n_{kv}\) 时 K/V 头不够分，只能复制，通信量随之增大。和 TP 叠加时更紧：TP 已经按头切了 \(t\) 份，剩下给 Ulysses 的只有 \(n_{kv}/t\)。Llama 3 这类 8 个 KV 头、TP=8 的配置，几乎没有给 Ulysses 留空间。另外，注意力阶段每张卡要放下完整序列长度的 Q/K/V（只是头少了），序列极长时这本身就是负担。</li>
         <li>All-to-All 是阻塞的，不像 ring 那样自然地与注意力计算重叠；跨节点的 All-to-All 对网络拓扑也更敏感。</li>
         <li>好处是注意力 kernel 完全不用改：每张卡看到的是完整序列上的普通注意力，任意掩码、稀疏注意力都能直接用。</li>
       </ul>
@@ -347,7 +347,7 @@
       <p>大致的选择：KV 头少（GQA/MQA）且需要文档掩码，All-Gather 式最省事；序列极长、跨节点、想把通信完全藏住，用 Ring + zig-zag；头多、节点内带宽高、想复用现成的注意力 kernel，Ulysses 或 Ulysses + Ring 的混合。</p>
 
       <h2 id="demo-mem">演示：激活显存 vs 序列长度</h2>
-      <p>下面用和上一篇相同的记账模型（Llama 结构，FlashAttention，TP + SP），看每卡显存随序列长度怎么增长，以及 CP 能把能训练的最长序列推到多远。CP 下所有激活（包括 logits）都按 \(s/N\) 计；模型状态假设优化器状态用 ZeRO-1 在 DP×CP 上切（DP 取 8）。全重计算时，每层只存层输入，再加上反向时临时重算一层的激活。这是近似模型，真实框架里还有通信缓冲、碎片、CUDA context 等开销，实际能放下的长度会更短。</p>
+      <p>下面用和上一篇相同的记账模型（Llama 结构，FlashAttention，TP + SP），看每卡显存随序列长度怎么增长，以及 CP 能把能训练的最长序列推到多远。CP 下所有激活（包括 logits）都按 \(s/N\) 计；模型状态假设优化器状态用 ZeRO-1 在 DP×CP 上切（DP 取 8）。全重计算时，每层只存层输入，再加上反向时临时重算一层的激活。真实框架里还有通信缓冲、显存碎片、CUDA context 等开销，实际能放下的长度会再短一些。</p>
 
       <div class="demo" id="memdemo">
         <div class="demo-label">每卡显存 vs 序列长度</div>
@@ -384,16 +384,16 @@
       </ul>
       <p>回到全局：TP+SP 解决「单层太大」，CP 解决「序列太长」，二者在 NVLink 域内外的位置不同。下一篇是<a href="/posts/scaling-pipeline/">流水线并行</a>，解决「模型太深、一个节点放不下」。</p>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Nanotron 团队，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#context_parallelism">The Ultra-Scale Playbook</a>：Context Parallelism（Ring Attention、Zig-Zag Ring Attention、All-Gather 与 All-to-All 两种实现）以及 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#memory_usage_in_transformers">Memory usage in transformers</a>（激活显存公式与重计算）。</li>
-        <li>Liu, Zaharia, Abbeel, <a href="https://arxiv.org/abs/2310.01889">Ring Attention with Blockwise Transformers for Near-Infinite Context</a>（环形算法、块大小与带宽的条件、显存分析），2023。</li>
-        <li>Brandon et al., <a href="https://arxiv.org/abs/2311.09431">Striped Attention: Faster Ring Attention for Causal Transformers</a>，2023。</li>
-        <li>Jacobs et al., <a href="https://arxiv.org/abs/2309.14509">DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models</a>，2023。</li>
+        <li>Nanotron 团队，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#context_parallelism">The Ultra-Scale Playbook</a>：Context Parallelism（Ring Attention、Zig-Zag Ring Attention、All-Gather 与 All-to-All 两种实现，以及按卡上色的注意力矩阵示意图）以及 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#memory_usage_in_transformers">Memory usage in transformers</a>（激活显存公式与重计算）。</li>
+        <li>Liu, Zaharia, Abbeel, <a href="https://arxiv.org/abs/2310.01889">Ring Attention with Blockwise Transformers for Near-Infinite Context</a>（环形算法、块大小与带宽的条件、每卡 6 个块的显存分析），2023。</li>
+        <li>Brandon et al., <a href="https://arxiv.org/abs/2311.09431">Striped Attention: Faster Ring Attention for Causal Transformers</a>（A100 / TPUv4 上的加速实测），2023。</li>
+        <li>Jacobs et al., <a href="https://arxiv.org/abs/2309.14509">DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models</a>（按链路的 All-to-All 通信分析），2023。</li>
         <li>Fang, Zhao, <a href="https://arxiv.org/abs/2405.07719">USP: A Unified Sequence Parallelism Approach for Long Context Generative AI</a>，2024。</li>
         <li>Llama Team, <a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>，第 3.3.2 节（Context parallelism for long sequences），2024。</li>
         <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（激活显存记账），2022。</li>
-        <li>zhuzilin, <a href="https://github.com/zhuzilin/ring-flash-attention">ring-flash-attention</a>（ring / zigzag / stripe 的开源实现）。</li>
+        <li>zhuzilin, <a href="https://github.com/zhuzilin/ring-flash-attention">ring-flash-attention</a>（ring / zigzag / stripe 三种切法的开源实现，想看它们在代码里的差别可以直接读它）。</li>
       </ul>
     </article>
     <nav class="series-pager" data-series="scaling"></nav>
