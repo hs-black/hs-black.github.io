@@ -67,8 +67,8 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p><a href="/posts/scaling-tensor-parallel/">上一篇</a>的张量并行加序列并行，把一层里的激活要么沿 hidden 维切、要么沿序列维切，最大激活降到了 \(bsh/t\)。但它有一个边界：TP 区域内部，每张卡上的张量仍然是完整的序列长度，比如 \([b, s, F/t]\)；而 TP 度又被 NVLink 域卡在 8 左右。序列一长（128K、1M），这点切分就不够了。</p>
-      <p>上下文并行（Context Parallelism，CP）的做法是：把序列切开，并且在<strong>整个模型</strong>里都保持切开，包括注意力。MLP、LayerNorm 这些逐 token 的操作不受影响；唯一的麻烦是注意力，因为每个 query 要看到（因果情况下：之前的）所有 key 和 value。下面依次讲：怎么在不拼回完整序列的前提下精确地算注意力（online softmax 合并），怎么把 KV 在设备间转圈同时把通信藏在计算后面（Ring Attention），为什么因果掩码会让朴素切法浪费一半算力、以及怎么用 zig-zag 修好它，最后对比另一条路：按头切的 DeepSpeed-Ulysses。</p>
+      <p>把 Llama-3 70B 的训练序列拉到 128K，即便开了 TP=8 加序列并行，每张卡每层仍要存约 4.2 GiB 激活，80 层合计约 335 GiB。<a href="/posts/scaling-tensor-parallel/">张量并行加序列并行</a>把一层里的激活要么沿 hidden 维切、要么沿序列维切，最大激活降到了 \(bsh/t\)。但它有一个边界：TP 区域内部，每张卡上的张量仍然是完整的序列长度，比如 \([b, s, F/t]\)；而 TP 度又被 NVLink 域卡在 8 左右。序列一长（128K、1M），这点切分就不够了。</p>
+      <p>上下文并行（Context Parallelism，CP）的做法是：把序列切开，并且在<strong>整个模型</strong>里都保持切开，包括注意力。MLP、LayerNorm 这些逐 token 的操作不受影响；唯一的麻烦是注意力，因为每个 query 要看到（因果情况下：之前的）所有 key 和 value。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -90,10 +90,10 @@
       </div>
 
       <h2 id="act">激活随序列长度增长</h2>
-      <p>先回顾激活显存从哪来。训练时，反向传播要用到前向的中间结果，所以每一层都要存下一批张量。对 GPT 结构的一层逐项记账（bf16，不做重计算，\(a\) 为头数），每层要存的字节数是：</p>
+      <p>训练时，反向传播要用到前向的中间结果，所以每一层都要存下一批张量。对 GPT 结构的一层逐项记账（bf16，不做重计算，\(a\) 为头数），每层要存的字节数是：</p>
       $$m_\text{act}^{\text{层}} = sbh\left(34 + 5\frac{as}{h}\right)$$
       <p>第一项正比于 \(s\)，来自线性层输入、LayerNorm 输入、MLP 中间激活等；第二项正比于 \(s^2\)，来自注意力分数矩阵 \(QK^\top\)、softmax 输出和它的 dropout mask，每个头都是一个 \(s\times s\) 的矩阵。拿 Llama 系列的尺寸代进去算一下：序列只有一两千 token 时，激活和模型状态比起来可以忽略；到 2K–4K 以后激活开始占大头，而且因为有 \(s^2\) 项，增长得越来越快。</p>
-      <p>FlashAttention 不存 \(s\times s\) 的矩阵，只存 \(Q,K,V,O\) 和每行的 log-sum-exp，反向时分块重算分数矩阵。这样第二项就没了，激活变成和 \(s\) <strong>线性</strong>增长。线性听起来还好，但数字仍然很大。按 Llama 结构（RMSNorm、GQA、SwiGLU、FlashAttention）记账，每层每条序列存 \(12sbh + 4sb\,n_{kv}d_h + 6sbF\) 字节（推导见<a href="/posts/scaling-tensor-parallel/#memory">上一篇的显存账</a>）。拿 Llama-3 70B（\(h=8192\)，\(F=28672\)，8 个 KV 头）在 \(s=128\text{K}\)、TP=8 + SP 下算一下：</p>
+      <p>FlashAttention 不存 \(s\times s\) 的矩阵，只存 \(Q,K,V,O\) 和每行的 log-sum-exp，反向时分块重算分数矩阵。这样第二项就没了，激活变成和 \(s\) <strong>线性</strong>增长。线性听起来还好，但数字仍然很大。按 Llama 结构（RMSNorm、GQA、SwiGLU、FlashAttention）记账，每层每条序列存 \(12sbh + 4sb\,n_{kv}d_h + 6sbF\) 字节（推导见<a href="/posts/scaling-tensor-parallel/#memory">张量并行的显存账</a>）。拿 Llama-3 70B（\(h=8192\)，\(F=28672\)，8 个 KV 头）在 \(s=128\text{K}\)、TP=8 + SP 下算一下：</p>
       <ul>
         <li>每层：\(s\,(12h + 4n_{kv}d_h + 6F)/t\)，代入得 131072 × 34304 字节 ≈ 4.19 GiB，80 层合计约 335 GiB。</li>
         <li>就算做全层重计算，每层只存层输入 \(2sbh/t\)，80 层也要 20 GiB；反向重算某一层时还要临时放下这一层的 4.19 GiB；fp32 logits \(4sbV/t\) 再加 7.8 GiB。</li>
@@ -347,7 +347,7 @@
       <p>大致的选择：KV 头少（GQA/MQA）且需要文档掩码，All-Gather 式最省事；序列极长、跨节点、想把通信完全藏住，用 Ring + zig-zag；头多、节点内带宽高、想复用现成的注意力 kernel，Ulysses 或 Ulysses + Ring 的混合。</p>
 
       <h2 id="demo-mem">演示：激活显存 vs 序列长度</h2>
-      <p>下面用和上一篇相同的记账模型（Llama 结构，FlashAttention，TP + SP），看每卡显存随序列长度怎么增长，以及 CP 能把能训练的最长序列推到多远。CP 下所有激活（包括 logits）都按 \(s/N\) 计；模型状态假设优化器状态用 ZeRO-1 在 DP×CP 上切（DP 取 8）。全重计算时，每层只存层输入，再加上反向时临时重算一层的激活。真实框架里还有通信缓冲、显存碎片、CUDA context 等开销，实际能放下的长度会再短一些。</p>
+      <p>看每卡显存随序列长度怎么增长，以及 CP 能把能训练的最长序列推到多远。激活按 Llama 结构记账（FlashAttention，TP + SP）。CP 下所有激活（包括 logits）都按 \(s/N\) 计；模型状态假设优化器状态用 ZeRO-1 在 DP×CP 上切（DP 取 8）。全重计算时，每层只存层输入，再加上反向时临时重算一层的激活。真实框架里还有通信缓冲、显存碎片、CUDA context 等开销，实际能放下的长度会再短一些。</p>
 
       <div class="demo" id="memdemo">
         <div class="demo-label">每卡显存 vs 序列长度</div>
@@ -382,7 +382,7 @@
         <li><strong>CP × PP。</strong>流水线各级之间传的激活也是 \([b, s/N, h]\)，变小了，没有冲突。</li>
         <li><strong>变长与打包。</strong>把多篇文档打包进一条长序列时，CP 的切分是对打包后的整条序列做的；掩码按文档边界计算。All-Gather 式实现在这里最省心，这也是 Llama 3 给出的理由之一。</li>
       </ul>
-      <p>回到全局：TP+SP 解决「单层太大」，CP 解决「序列太长」，二者在 NVLink 域内外的位置不同。下一篇是<a href="/posts/scaling-pipeline/">流水线并行</a>，解决「模型太深、一个节点放不下」。</p>
+      <p>TP+SP 解决「单层太大」，CP 解决「序列太长」，二者在 NVLink 域内外的位置不同；「模型太深、一个节点放不下」则要靠<a href="/posts/scaling-pipeline/">流水线并行</a>。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <ul>

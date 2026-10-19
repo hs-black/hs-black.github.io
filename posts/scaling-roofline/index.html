@@ -86,8 +86,8 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p><a href="/posts/scaling-memory/">上一篇</a>算了一步训练要多少 FLOPs。但知道 FLOPs 还不够：同样是 \(10^{12}\) 次运算，一个矩阵乘法在 H100 上可能 1 毫秒就做完，一串逐元素运算却可能慢几十倍。差别在于数据要搬多少、从哪里搬。这一篇讲的 <strong>roofline 分析</strong>就是回答「一个运算的时间到底花在计算上，还是花在搬数据上」的工具，它是后面所有并行策略分析的地基。</p>
-      <p>后半篇讲硬件本身：TPU 和 GPU 的计算单元、存储层次和网络长什么样，规格数字是多少。这些数字是做 roofline 估算的原材料：知道了每条通道有多快，才能判断一个运算会卡在哪里。</p>
+      <p>同样是 \(10^{12}\) 次运算，一个矩阵乘法在 H100 上可能 1 毫秒就做完，一串逐元素运算却可能慢几十倍。只知道 <a href="/posts/scaling-memory/">FLOPs</a> 不够，差别在于数据要搬多少、从哪里搬。<strong>roofline 分析</strong>回答的就是「一个运算的时间到底花在计算上，还是花在搬数据上」，所有并行策略的分析都建立在它之上。</p>
+      <p>做 roofline 估算的原材料是硬件的规格数字：TPU 和 GPU 的计算单元有多快，存储层次和网络的每条通道有多宽，决定了一个运算会卡在哪里。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -173,7 +173,7 @@
       <p>把上面的关系画出来就是 <strong>roofline 图</strong>：横轴是算术强度，纵轴是可达到的吞吐（FLOP/s），两个轴都取对数。对强度为 \(I\) 的算法，能达到的吞吐是</p>
       $$\text{FLOP/s}_\text{achievable} = \min\big(\text{峰值 FLOP/s},\; I \times \text{带宽}\big)$$
       <p>图形像一个屋顶：左边是一条斜率为 1 的斜线（对数坐标下，斜线的高度由带宽决定），右边是一条水平线（峰值算力）。两线交点就是临界强度，也叫 ridge point。点落在斜线下方的区域是带宽受限，落在水平线下方是计算受限。提升性能只有两种方式：让算法的强度变大（点往右移），或者换更高的带宽（斜线往上移）。</p>
-      <p>下面这张图可以选芯片和运算，拖动参数看点怎么移动。除了 HBM 的屋顶，还画了芯片间网络的屋顶（虚线），和片上高速存储的屋顶（点线，有数据时才画）。</p>
+      <p>选芯片和运算，拖动参数看点怎么移动。除了 HBM 的屋顶，还画了芯片间网络的屋顶（虚线），和片上高速存储的屋顶（点线，有数据时才画）。</p>
 
       <div class="demo" id="rl-demo">
         <div class="demo-label">交互演示 · Roofline 图</div>
@@ -255,7 +255,7 @@
 
       <!-- ============================================================ -->
       <h2 id="s-calc">6. 交互：矩阵乘法耗时计算器</h2>
-      <p>下面把 \(T_\text{math}\)、\(T_\text{HBM}\) 和芯片间通信时间 \(T_\text{comm}\) 放在一起算。可以选择把矩阵乘法切到多块芯片上：</p>
+      <p>计算器把 \(T_\text{math}\)、\(T_\text{HBM}\) 和芯片间通信时间 \(T_\text{comm}\) 放在一起算，可以选择把矩阵乘法切到多块芯片上：</p>
       <ul>
         <li><strong>沿 \(D\) 切</strong>（缩并维）：每块芯片拿 \(X\) 的 \(D/n\) 列和 \(Y\) 的 \(D/n\) 行，算出完整形状 \([B,F]\) 的部分和，然后需要把部分和加起来（AllReduce）。</li>
         <li><strong>沿 \(F\) 切</strong>（输出维）：每块芯片拿完整的 \(X\) 和 \(Y\) 的 \(F/n\) 列，各算一部分输出，不需要通信（但 \(X\) 要在每块芯片上都有一份）。</li>
@@ -290,12 +290,12 @@
         <div class="tbars" id="mm-bars"></div>
         <div class="verdict" id="mm-verdict"></div>
         <div class="readout" id="mm-readout"></div>
-        <p class="note">计算时间按每块芯片的 \(2BDF/n\) 除以峰值；HBM 时间按每块芯片要读的输入、权重和要写的输出字节数除以 HBM 带宽；沿 \(D\) 切时，部分和 \([B,F]\) 用环形 AllReduce 汇总，按每块芯片发送约 \(2\cdot\tfrac{n-1}{n}\cdot\) 部分和字节数估算（\(n=2\) 时就是把自己的一份发给对方，即第 7 节的两芯片例子；AllReduce 的推导放在<a href="/posts/scaling-collectives/">下一篇</a>）。链路带宽：GPU 用每卡 NVLink 单向带宽（A100 300、H100/H200 450、B200 900 GB/s），TPU 用一条 ICI 链路的单向带宽（v5e 45、v5p/v6e 90 GB/s），都是理想值。部分和的加法（\(O(BF)\)）忽略不计。</p>
+        <p class="note">计算时间按每块芯片的 \(2BDF/n\) 除以峰值；HBM 时间按每块芯片要读的输入、权重和要写的输出字节数除以 HBM 带宽；沿 \(D\) 切时，部分和 \([B,F]\) 用环形 AllReduce 汇总，按每块芯片发送约 \(2\cdot\tfrac{n-1}{n}\cdot\) 部分和字节数估算（\(n=2\) 时就是把自己的一份发给对方，即第 7 节的两芯片例子；AllReduce 的推导见<a href="/posts/scaling-collectives/">集合通信</a>）。链路带宽：GPU 用每卡 NVLink 单向带宽（A100 300、H100/H200 450、B200 900 GB/s），TPU 用一条 ICI 链路的单向带宽（v5e 45、v5p/v6e 90 GB/s），都是理想值。部分和的加法（\(O(BF)\)）忽略不计。</p>
       </div>
 
       <!-- ============================================================ -->
       <h2 id="s-net">7. 网络的 roofline</h2>
-      <p>前面的屋顶都是芯片内的：分母是 HBM 带宽。但同样的推理对芯片间的通信完全适用，而且后面分析并行策略时，我们关心的几乎都是这一种。</p>
+      <p>前面的屋顶都是芯片内的：分母是 HBM 带宽。但同样的推理对芯片间的通信完全适用，而且分析并行策略时，关心的几乎都是这一种。</p>
       <p>看一个最简单的例子：\(X\sim\text{bf16}[B,D]\)、\(Y\sim\text{bf16}[D,F]\)，沿 \(D\) 均分到 2 块 TPU 上。每块芯片算一半：\(Z_0 = X[:, :D/2]\,Y[:D/2, :]\)，\(Z_1\) 同理，然后把部分和发给对方相加。设每个方向能传 \(4.5\times10^{10}\) 字节/秒，每块芯片算力 \(1.97\times10^{14}\)：</p>
       $$T_\text{math} = \frac{2BDF}{2\times 1.97\times10^{14}} = \frac{BDF}{1.97\times10^{14}},\qquad T_\text{comms} = \frac{2BF}{4.5\times10^{10}}$$
       <p>计算受限的条件是</p>
@@ -320,7 +320,7 @@
 
       <!-- ============================================================ -->
       <h2 id="s-tpu">8. TPU 是什么样的</h2>
-      <p>有了 roofline 的语言，再来看硬件。先看 TPU，因为它结构更简单。</p>
+      <p>TPU 的结构比 GPU 简单。</p>
       <figure class="fig">
         <svg viewBox="0 0 720 300" role="img" aria-label="TPU 芯片的结构：TensorCore 包含 MXU、VPU、VMEM、标量单元，旁边是 HBM">
           <rect class="box2" x="10" y="10" width="470" height="280" rx="12"/>
@@ -355,7 +355,7 @@
       </figure>
       <p>概括地说，TPU 基本就是一个专门做矩阵乘法的计算核心（<strong>TensorCore</strong>），挂在一堆高速显存（HBM）上。TensorCore 里有三个关键单元：</p>
       <ul>
-        <li><strong>MXU</strong>（Matrix Multiply Unit）：TensorCore 的核心。大多数代际里，它每 8 个周期完成一次 \(\text{bf16}[8,128]\,@\,\text{bf16}[128,128]\to\text{f32}[8,128]\) 的矩阵乘法，用的是<strong>脉动阵列</strong>（systolic array，下面细讲）。TPU v6e（Trillium）的 MXU 是 256×256，之前各代都是 128×128。一个 128×128 的 MXU 每周期做 16,384 次乘加，即 32,768 FLOPs；v5e 的 TensorCore 有 4 个 MXU，频率 1.5 GHz，合计 \(4\times 32768\times 1.5\times10^9\approx 2\times10^{14}\) BF16 FLOP/s。低精度更快：v5e 的 INT8 是 \(4\times10^{14}\) OP/s。</li>
+        <li><strong>MXU</strong>（Matrix Multiply Unit）：TensorCore 的核心。大多数代际里，它每 8 个周期完成一次 \(\text{bf16}[8,128]\,@\,\text{bf16}[128,128]\to\text{f32}[8,128]\) 的矩阵乘法，用的是<strong>脉动阵列</strong>（systolic array）。TPU v6e（Trillium）的 MXU 是 256×256，之前各代都是 128×128。一个 128×128 的 MXU 每周期做 16,384 次乘加，即 32,768 FLOPs；v5e 的 TensorCore 有 4 个 MXU，频率 1.5 GHz，合计 \(4\times 32768\times 1.5\times10^9\approx 2\times10^{14}\) BF16 FLOP/s。低精度更快：v5e 的 INT8 是 \(4\times10^{14}\) OP/s。</li>
         <li><strong>VPU</strong>（Vector Processing Unit）：做 ReLU、逐元素加乘、归约等一般数学运算。它是一个形状为 (8, 128) 的二维 SIMD 机器：128 那一维叫 lane，8 那一维叫 sublane，每个 (lane, sublane) 位置在 v5 上有 4 个独立的 ALU。于是 v5p 每核 VPU 约 \(8\times128\times4\times1.75\text{e}9 \approx 7\times10^{12}\) FLOP/s，大约是 MXU 的 1/30。沿 sublane 的归约便宜（有一个周期左右的 shuffle），跨 lane 的归约要经过专门的 XLU（cross-lane unit），又慢又贵。</li>
         <li><strong>VMEM</strong>（Vector Memory）：TensorCore 里的片上暂存，比 HBM 小得多（v5e 上 128 MiB），但到 MXU 的带宽高得多。它像 CPU 的 L1/L2 缓存，但大得多，而且由程序员/编译器显式管理。HBM 里的数据必须先拷到 VMEM 才能参与计算。</li>
       </ul>
@@ -367,7 +367,7 @@
 
       <h3>脉动阵列是怎么工作的</h3>
       <p>MXU 的核心是一个 128×128（=16,384 个）乘加单元组成的二维网格。权重（RHS，128×128）从上方预先装入，每个单元固定持有一个权重；输入（LHS，8×128）从左边斜着送进来，每个周期往右移一格；部分和从上往下流，每经过一个单元就加上「输入 × 该单元的权重」，从底部流出的就是结果。开始有一个装载权重和输入的流水线气泡，之后新输入可以连续送入，没有额外气泡。所以张量的维度至少要和 MXU 的边长一样大（128，v6e 上 256），否则要补零浪费算力；有多个 MXU 时，切块的维度要大于 128 × MXU 个数。</p>
-      <p>下面用一个 3×3 的小阵列把这个过程一步步走一遍（权重驻留型，weight-stationary）：</p>
+      <p>一个 3×3 的权重驻留型（weight-stationary）阵列，逐周期运行：</p>
 
       <div class="demo" id="sys-demo">
         <div class="demo-label">交互演示 · 脉动阵列计算 Y = X · W</div>
@@ -447,7 +447,7 @@
       <h3>SIMT、warp 与调度</h3>
       <p>GPU 的线程以 32 个为一组，叫 <strong>warp</strong>，同一 warp 的线程同时执行同一条指令，处理不同的数据。warp 再组成更大的线程块（block，例如 512 或 1,024 个线程），每个块分配给一个 SM。一个 SM 可以同时驻留多个块和最多 64 个 warp，但每个 warp scheduler 每个周期只执行一个 warp 的指令；它在活跃的 warp 之间切换，以此掩盖访存延迟。相比之下 TPU 基本是单线程的。</p>
       <p>CUDA core 比 TPU 的 VPU 灵活：它用 <strong>SIMT</strong>（single instruction, multiple threads）模型，每个线程有自己的指令指针，可以独立编程；而 VPU 是纯 SIMD。代价是：如果同一个 warp 里的线程走了不同的分支（<strong>warp divergence</strong>），硬件会把两条分支都执行一遍，把不该执行的线程屏蔽掉，性能悄悄下降。</p>
-      <p>在 GPU 上运行的程序叫<strong>内核</strong>（kernel），可以用 CUDA 或 Triton 写，编译成 PTX。写内核大致有四条路：纯 PyTorch（简单但慢）、<code>torch.compile</code>（简单、快、不够灵活）、Triton（更难、更快、更灵活）、CUDA（最难、最快、最灵活）。常见的优化有：<strong>访存合并</strong>（memory coalescing，让一个 warp 的 32 个线程访问连续地址，从而合并成一次 DRAM 突发读取）、<strong>分块</strong>（tiling，把数据搬进共享内存反复使用）、线程粗化和减少分支分歧。这些都是在给定内核里提高实际达到的带宽或算力，对应 roofline 上「离屋顶有多远」。内核细节放在系列后面的 <a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a>。</p>
+      <p>在 GPU 上运行的程序叫<strong>内核</strong>（kernel），可以用 CUDA 或 Triton 写，编译成 PTX。写内核大致有四条路：纯 PyTorch（简单但慢）、<code>torch.compile</code>（简单、快、不够灵活）、Triton（更难、更快、更灵活）、CUDA（最难、最快、最灵活）。常见的优化有：<strong>访存合并</strong>（memory coalescing，让一个 warp 的 32 个线程访问连续地址，从而合并成一次 DRAM 突发读取）、<strong>分块</strong>（tiling，把数据搬进共享内存反复使用）、线程粗化和减少分支分歧。这些都是在给定内核里提高实际达到的带宽或算力，对应 roofline 上「离屋顶有多远」。内核细节见 <a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a>。</p>
 
       <h3>存储层次</h3>
       <ul>
@@ -548,7 +548,7 @@
         <li>网络也有 roofline：沿缩并维切分的矩阵乘法，临界条件取决于每块芯片上的 \(D\) 而不是 \(B\)。越外层的网络临界强度越高（H100：HBM 约 300，NVLink 约 2,200，IB 约 2 万）。</li>
         <li>TPU = 少数大核心 + 大片上存储 + 只连邻居的 torus；GPU = 上百个小 SM + 小缓存 + 节点内全互联、节点间胖树。</li>
       </ul>
-      <p>有了每条链路的带宽，下一步就是算具体的通信操作（AllGather、ReduceScatter、AllReduce、AllToAll）各要多少时间，以及矩阵乘法被切分后需要哪些通信。这是<a href="/posts/scaling-collectives/">下一篇：集合通信与分片矩阵乘法</a>的内容。</p>
+      <p>有了每条链路的带宽，就能算具体的通信操作（AllGather、ReduceScatter、AllReduce、AllToAll）各要多少时间，以及矩阵乘法被切分后需要哪些通信：见<a href="/posts/scaling-collectives/">集合通信与分片矩阵乘法</a>。</p>
 
       <h2 id="s-ref">参考与延伸阅读</h2>
       <p>这一篇的 roofline 和硬件部分主要整理自 How to Scale Your Model 的第 1、2、12 章，GPU 内核优化的部分来自 Ultra-Scale Playbook。想动手练习，推荐把第 1 章和第 12 章末尾的习题做一遍；芯片规格以 NVIDIA 和 Google Cloud 的官方页面为准。</p>

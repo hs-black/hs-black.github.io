@@ -96,7 +96,7 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p>这是「大模型规模化训练」系列的第一篇。后面要讲的数据并行、ZeRO、张量并行、流水线并行，本质上都在回答同一个问题：<strong>一步训练要花多少显存、多少计算、多少通信，怎么在这三者之间做交换</strong>。所以先把账算清楚。这一篇只考虑一张卡，算三本账：</p>
+      <p>Llama 3 8B 只有 80 亿参数，可用 BF16 混合精度加 Adam 训练它，光权重、梯度和优化器状态就要约 128 GB，一张 80 GB 的 H100 放不下，激活值还没算。数据并行、ZeRO、张量并行、流水线并行，本质上都在回答同一个问题：<strong>一步训练要花多少显存、多少计算、多少通信，怎么在这三者之间做交换</strong>。哪怕只有一张卡，也有三本账要算：</p>
       <ul>
         <li><strong>显存账</strong>：权重、梯度、优化器状态、激活值各占多少字节，怎么推出来的；</li>
         <li><strong>计算账</strong>：一次前向和反向到底做了多少次浮点运算（FLOPs），著名的 \(6ND\) 从哪来，注意力的二次项什么时候才重要；</li>
@@ -127,13 +127,13 @@
 
       <!-- ============================================================ -->
       <h2 id="s-overview">1. 三个约束：显存、计算、通信</h2>
-      <p>在动手算之前，先给后面所有的规模化技术一个统一的框架。训练一个大模型，始终在和三个约束打交道：</p>
+      <p>训练一个大模型，始终在和三个约束打交道：</p>
       <ol>
         <li><strong>显存</strong>是硬约束。一步训练放不进显存，就根本跑不起来（OOM，out of memory）。</li>
         <li><strong>计算效率</strong>：希望硬件绝大部分时间在做计算，而不是在搬数据、等别的卡。</li>
         <li><strong>通信开销</strong>：卡与卡之间传数据时，计算单元常常在空等。要尽量用快的链路（机内）而少用慢的链路（机间），并且让通信和计算重叠。</li>
       </ol>
-      <p>几乎每一种技术都是在这三者之间做交换：激活重计算用计算换显存；张量并行用通信换显存；梯度累积用时间换显存。这一篇建立前两本账（显存和计算）；通信账从<a href="/posts/scaling-roofline/">下一篇 Roofline</a> 开始。</p>
+      <p>几乎每一种技术都是在这三者之间做交换：激活重计算用计算换显存；张量并行用通信换显存；梯度累积用时间换显存。单卡上只有前两个约束；通信要到多卡才出现，量化它的工具是 <a href="/posts/scaling-roofline/">Roofline</a>。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-step">2. 一步训练，和以 token 计的 batch size</h2>
@@ -241,7 +241,7 @@
           </tbody>
         </table>
       </div>
-      <p>后两行是为了对照：优化器状态的大小取决于优化器本身（带动量的 SGD 只存一个状态），而推理只需要权重。用 FP8 训练能进一步压低，但稳定性更难保证，系列后面的<a href="/posts/scaling-mixed-precision/">混合精度与 FP8</a> 一篇再细讲。</p>
+      <p>后两行是为了对照：优化器状态的大小取决于优化器本身（带动量的 SGD 只存一个状态），而推理只需要权重。用 FP8 训练能进一步压低，但稳定性更难保证（见<a href="/posts/scaling-mixed-precision/">混合精度与 FP8</a>）。</p>
       <p>按 16 和 20 字节/参数，几个常见规模的静态显存是：</p>
       <div class="table-wrap">
         <table>
@@ -265,7 +265,7 @@
       <p>第一个式子需要<strong>前向时的输入</strong> \(X\)。所以每个矩阵乘法都要把自己的输入留到反向。逐元素的非线性函数也一样：\(y = \sigma(x)\) 的反向 \(\partial\mathcal{L}/\partial x = \sigma'(x)\cdot \partial\mathcal{L}/\partial y\) 需要 \(x\)（或者 \(y\)，看函数）。这些在前向时产生、留到反向才用的张量，就是激活值。</p>
 
       <h3>GPT 结构的账：\(sbh(34 + 5as/h)\)</h3>
-      <p>知道了「每个矩阵乘法要留输入」这条规则，就可以对一层逐项记账。先算经典的 GPT 结构（带 dropout、朴素注意力），这也是 Korthikanti 等人（2022）给出的经典结果。设序列长 \(s\)、micro-batch 大小 \(b\)（一次前向里的样本数，下面第 9 节细讲），激活值用 2 字节存，dropout 的掩码用 1 字节存：</p>
+      <p>知道了「每个矩阵乘法要留输入」这条规则，就可以对一层逐项记账。先算经典的 GPT 结构（带 dropout、朴素注意力），这也是 Korthikanti 等人（2022）给出的经典结果。设序列长 \(s\)、micro-batch 大小 \(b\)（一次前向里的样本数），激活值用 2 字节存，dropout 的掩码用 1 字节存：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>位置</th><th>要存的张量</th><th class="num">字节</th></tr></thead>
@@ -288,7 +288,7 @@
       <p>两点要看清楚：（1）激活显存<strong>和 \(b\) 成线性、和 \(s\) 有二次项</strong>，来源是 \(s\times s\) 的注意力矩阵，每个头一份；（2）和权重不同，它跟着输入涨。把具体模型代进去就会发现：\(b=1\) 时，短序列的激活值几乎可以忽略，从 2k–4k token 开始变得显著，长序列时远远超过权重相关的部分（第 7 节计算器里的曲线图可以直接看到）。</p>
 
       <h3>换成现代模型：没有 dropout，有 FlashAttention、GQA 和 SwiGLU</h3>
-      <p>上面是 2022 年 GPT-3 风格模型的账。今天的 Llama 类模型有几处不同，我们按同样的方法重新记一遍：</p>
+      <p>上面是 2022 年 GPT-3 风格模型的账。今天的 Llama 类模型有四处不同：</p>
       <ul>
         <li><strong>没有 dropout</strong>：预训练大模型基本不用 dropout，掩码项全部消失。</li>
         <li><strong>FlashAttention</strong>：不把 \(s\times s\) 的注意力矩阵写回显存，反向时分块重算。它只需要存 Q、K、V、输出 O，以及每行 softmax 的 log-sum-exp（FP32，每个头每个位置一个数，\(4abs\) 字节，可忽略）。整个 \(as^2\) 项消失了。</li>
@@ -338,7 +338,7 @@
 
       <!-- ============================================================ -->
       <h2 id="s-calc">7. 交互：训练显存计算器</h2>
-      <p>把上面的公式都放进一个计算器里。选模型（或改配置）、序列长度、micro-batch、精度和重计算方式，看单卡显存的构成。这里假设整个模型放在一张卡上，没有任何并行切分；后面几篇引入 ZeRO、张量并行时，再看这些块怎么被切开。</p>
+      <p>选模型（或改配置）、序列长度、micro-batch、精度和重计算方式，看单卡显存的构成。计算器假设整个模型放在一张卡上，没有任何并行切分。</p>
 
       <div class="demo" id="mem-demo">
         <div class="demo-label">交互演示 · 训练显存计算器</div>
@@ -451,7 +451,7 @@
       <p>（这里 \(B\) 是 batch 大小。）多出来的就是注意力的两个 \(s^2\) 矩阵乘法在前向里再做一遍，二者之比约为 \(1 + s/(6h)\)。</p>
 
       <h3>FlashAttention 已经是选择性重算</h3>
-      <p>FlashAttention 在反向里本来就重算注意力分数和概率矩阵，而不是存下来。所以用 FlashAttention 的人，其实已经在做选择性重算了。另外，重算虽然增加了 FLOPs，却减少了对显存的读写；在显存带宽紧张的 GPU 上，总体常常反而更快——这一点下一篇讲 roofline 时会更清楚。DeepSeek-V3 走得更远：反向时重算所有的 RMSNorm 和 MLA（多头潜在注意力）的上投影，这些输出一律不存。</p>
+      <p>FlashAttention 在反向里本来就重算注意力分数和概率矩阵，而不是存下来。所以用 FlashAttention 的人，其实已经在做选择性重算了。另外，重算虽然增加了 FLOPs，却减少了对显存的读写；在显存带宽紧张的 GPU 上，总体常常反而更快。DeepSeek-V3 走得更远：反向时重算所有的 RMSNorm 和 MLA（多头潜在注意力）的上投影，这些输出一律不存。</p>
 
       <h3>其他策略</h3>
       <p>也可以从计算图的角度看这件事。如果什么都不重算，一层要存的中间节点大约有 20 个 \([B,T,D]\) 大小的张量（例如 \(f(x) = \exp(g(x))\) 的反向既要 \(g(x)\) 又要 \(\exp(g(x))\)）。举个例子：\(B\cdot T = 4\text{M}\) token、\(L=64\)、\(D=8192\)，BF16 下要存约 \(2\times 20\times BTDL\) ≈ 84 TB 的激活值。两种常用策略：</p>
@@ -465,14 +465,14 @@
         <summary>补充：为什么是 \(\sqrt{L}\) 个检查点</summary>
         <p>这是 Chen 等人 2016 年的经典分析（《Training Deep Nets with Sublinear Memory Cost》）。假设 \(L\) 层，每层激活大小相同记为 1。每隔 \(k\) 层存一个检查点，就要存 \(L/k\) 个检查点；反向重算一段时，这一段的 \(k\) 层激活同时在显存里。峰值约为 \(L/k + k\)，对 \(k\) 求最小得 \(k = \sqrt{L}\)，峰值 \(2\sqrt{L}\)，代价同样是多一次前向。Transformer 训练里更常见的是「每层一个检查点」，因为一层内部的激活远大于层输入，按层切天然合适。</p>
       </details>
-      <p>和测量效率有关的一点：重算让硬件实际做的 FLOPs 变多了。这就引出了 HFU 和 MFU 的区别，第 13 节再说。</p>
+      <p>重算还让硬件实际做的 FLOPs 变多了，所以衡量效率时要区分 HFU 和 MFU（第 13 节）。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-gradacc">9. 梯度累积</h2>
       <p>重计算压住了「每个样本」的激活值，但激活值仍和 batch size 成正比。<strong>梯度累积</strong>（gradient accumulation）解决这个问题：把一个大 batch 切成若干 <strong>micro-batch</strong>，依次对每个 micro-batch 做前向和反向，把梯度累加起来，最后才做一次优化器更新。</p>
       <p>记每次前向的 batch 为 micro-batch size \(mbs\)，两次优化器更新之间处理的总 batch 为 global batch size \(gbs\)：</p>
       $$gbs = mbs \times grad\_acc$$
-      <p>（之后引入数据并行，还会再乘上数据并行的副本数。）</p>
+      <p>（有数据并行时，还要再乘上数据并行的副本数。）</p>
       <pre><code>optimizer.zero_grad()
 for i, micro in enumerate(split(batch, grad_acc)):
     loss = model(micro).loss / grad_acc   # 取平均，结果与 grad_acc 无关
@@ -489,7 +489,7 @@ optimizer.step()</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="s-flops">10. 数 FLOPs：从 \(2mnk\) 开始</h2>
-      <p>显存账告一段落，换计算账。FLOP 指一次浮点运算（一次乘或一次加），FLOPs 是运算次数，FLOP/s 是每秒运算次数（硬件峰值用它衡量）。</p>
+      <p>FLOP 指一次浮点运算（一次乘或一次加），FLOPs 是运算次数，FLOP/s 是每秒运算次数（硬件峰值用它衡量）。</p>
 
       <h3>点积、矩阵向量积、矩阵乘法</h3>
       <ul>
@@ -498,7 +498,7 @@ optimizer.step()</code></pre>
         <li>\(A[N,P]\) 乘 \(B[P,M]\)：对 \(B\) 的每一列做一次矩阵向量积，<strong>\(2NPM\)</strong>。</li>
       </ul>
       <p>推广到一般情形：两个高维数组做缩并（einsum）时，FLOPs = 2 × 所有出现维度的乘积，其中<strong>缩并维</strong>（两边都有、输出里没有，被求和掉的）和<strong>批维</strong>（两边都有、输出里也有）只算一次。例如 \(C[G,H,I,J,K,L]\cdot D[G,H,M,N,K,L]\to[G,H,I,J,M,N]\)，\(G,H\) 是批维，\(K,L\) 是缩并维，FLOPs 为 \(2GHIJMNKL\)。没有缩并维时（纯逐元素乘）就没有那个 2。</p>
-      <p>值得记住的一点：矩阵乘法的计算量是 \(O(N^3)\)，而数据量只有 \(O(N^2)\)。矩阵越大，越容易让计算单元「吃饱」。这正是深度学习架构由矩阵乘法主导的原因，下一篇 roofline 会把这句话量化。</p>
+      <p>值得记住的一点：矩阵乘法的计算量是 \(O(N^3)\)，而数据量只有 \(O(N^2)\)。矩阵越大，越容易让计算单元「吃饱」。这正是深度学习架构由矩阵乘法主导的原因。</p>
 
       <h3>反向是前向的两倍</h3>
       <p>设 \(C = AB\)，\(A\) 是 \([N,P]\) 的输入激活，\(B\) 是 \([P,M]\) 的权重。反向需要两个梯度：</p>
@@ -596,7 +596,7 @@ optimizer.step()</code></pre>
       <h3>KV cache（推理时的显存账）</h3>
       <p>推理分为 prefill（处理整个提示）和逐 token 的生成。prefill 时把每层的 K、V 投影存下来，生成时复用，这就是 KV cache。每条序列的 KV cache 是一个 \([2, S, L, K, H]\) 的数组（2 代表 K 和 V），字节数为：</p>
       $$m_\text{KV} = 2\cdot S\cdot L\cdot K\cdot H \cdot \text{bytes}$$
-      <p>Llama 3 8B（\(L=32, K=8, H=128\)）用 BF16 存：每 token \(2\times 32\times 8\times 128\times 2\) 字节 = 128 KiB，一条 8k 序列约 1.07 GB。如果是 MHA（\(K = N = 32\)），会是 4 倍。这就是 GQA/MQA 的动机。推理的完整账放在系列最后一篇<a href="/posts/scaling-inference/">Transformer 推理的数学</a>。</p>
+      <p>Llama 3 8B（\(L=32, K=8, H=128\)）用 BF16 存：每 token \(2\times 32\times 8\times 128\times 2\) 字节 = 128 KiB，一条 8k 序列约 1.07 GB。如果是 MHA（\(K = N = 32\)），会是 4 倍。这就是 GQA/MQA 的动机。推理的完整账见<a href="/posts/scaling-inference/">Transformer 推理的数学</a>。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-mfu">13. MFU 与 HFU</h2>
@@ -679,7 +679,7 @@ optimizer.step()</code></pre>
           </tbody>
         </table>
       </div>
-      <p>回到开头的问题：Llama 3 8B 的 16 字节/参数就已经是 128 GB，激活值还会再加几十 GB——单卡装不下，这是必须多卡训练的直接原因。但在开始切模型之前，先要知道一件事：给定的一次运算，瓶颈到底在算力、显存带宽还是网络上。这就是<a href="/posts/scaling-roofline/">下一篇 Roofline</a> 要讲的。</p>
+      <p>回到开头的问题：Llama 3 8B 的 16 字节/参数就已经是 128 GB，激活值还会再加几十 GB——单卡装不下，这是必须多卡训练的直接原因。但切模型之前还有一个问题：给定的一次运算，瓶颈到底在算力、显存带宽还是网络上？<a href="/posts/scaling-roofline/">Roofline</a> 回答的就是这个。</p>
 
       <h2 id="s-ref">参考与延伸阅读</h2>
       <p>这一篇的显存部分主要整理自 Ultra-Scale Playbook 的前两章，FLOPs 部分主要整理自 How to Scale Your Model 的第 4 章。想看真实的显存 profiling 曲线和更多实验，推荐直接读 Playbook 的「First Steps: Training on One GPU」；第 4 章末尾的习题也很值得做一遍。</p>

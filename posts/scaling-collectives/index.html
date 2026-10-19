@@ -240,7 +240,7 @@ dist.reduce_scatter(out, inp, op=dist.ReduceOp.SUM)
       <svg class="dia prim" data-kind="alltoall" viewBox="0 0 1000 250"></svg>
       <div class="cols">
         <p class="small">每个 rank 有 N 块，第 j 块要送给 rank j；收完以后 rank j 拿着"所有人的第 j 块"。把 rank 当行、块当列，这就是一次矩阵转置。不做运算，也不复制数据。</p>
-        <p class="small">它不会自然出现在分片矩阵乘里，但在 MoE 里随处可见：每个 token 要送到它选中的 expert 所在的卡上（第 8 篇）。分片记号里它表示"把下标从一个维度挪到另一个维度"。</p>
+        <p class="small">它不会自然出现在分片矩阵乘里，但在 MoE 里随处可见：每个 token 要送到它选中的 expert 所在的卡上（见<a href="/posts/scaling-moe/">专家并行</a>）。分片记号里它表示"把下标从一个维度挪到另一个维度"。</p>
       </div>
     </section>
 
@@ -290,7 +290,7 @@ dist.barrier()
         <tr><td>AllToAll</td><td>\([x_r^0,\dots,x_r^{N-1}]\)</td><td>\([x_0^r,\dots,x_{N-1}^r]\)</td><td><code>all_to_all(outs, ins)</code></td></tr>
         <tr><td>Barrier</td><td>—</td><td>—（同步点）</td><td><code>barrier()</code></td></tr>
       </table>
-      <p class="small muted">下标 = 来自哪个 rank，上标 = 第几块。注意 AllReduce = ReduceScatter + AllGather，后面会证明这正是最省带宽的实现方式。</p>
+      <p class="small muted">下标 = 来自哪个 rank，上标 = 第几块。注意 AllReduce = ReduceScatter + AllGather，这也正是最省带宽的实现方式。</p>
     </section>
 
     <!-- 12 -->
@@ -300,8 +300,8 @@ dist.barrier()
       <ul>
         <li>PyTorch 支持三种后端：经典的 <span class="accent">MPI</span>、Meta 的 <span class="accent">Gloo</span>、NVIDIA 的 <span class="accent">NCCL</span>（读作 "nickel"）。接口相同，针对的硬件不同。</li>
         <li class="fragment">NCCL 专门优化 GPU 与 GPU 之间的通信（NVLink、InfiniBand、RoCE），MPI 和 Gloo 面向 CPU-CPU 或 CPU-GPU。经验法则：<b>GPU 训练用 NCCL，CPU 训练用 Gloo</b>。</li>
-        <li class="fragment">NCCL 内部会按消息大小和拓扑选择算法（ring、tree 等）和协议。下面的代价分析用的是"理论最优"模型，实测会低一些。</li>
-        <li class="fragment">集合通信在 GPU 上是<b>异步</b>的 kernel，跑在单独的 CUDA stream 上，所以能和计算重叠。重叠是后面所有并行策略的核心手段。</li>
+        <li class="fragment">NCCL 内部会按消息大小和拓扑选择算法（ring、tree 等）和协议。实测带宽会比"理论最优"模型低一些。</li>
+        <li class="fragment">集合通信在 GPU 上是<b>异步</b>的 kernel，跑在单独的 CUDA stream 上，所以能和计算重叠。重叠是所有并行策略的核心手段。</li>
       </ul>
     </section>
 
@@ -323,7 +323,7 @@ dist.barrier()
           <h3>单向 vs 双向</h3>
           <p class="small">一条全双工链路两个方向互不干扰，各有 \(W_\text{uni}\)。所谓"双向带宽" \(W_\text{bi} = 2W_\text{uni}\)。</p>
           <p class="small" style="margin-top: 8px">H100 每张卡 NVLink：18 条 × 25 GB/s = <b>450 GB/s</b> 每个方向。</p>
-          <p class="small" style="margin-top: 8px">后面 TPU 的公式用双向带宽 \(W_\text{bi}\)（环面上两个方向同时用），GPU 的公式用单向出口带宽 \(W\)，两者差 2 倍。</p>
+          <p class="small" style="margin-top: 8px">TPU 的公式用双向带宽 \(W_\text{bi}\)（环面上两个方向同时用），GPU 的公式用单向出口带宽 \(W\)，两者差 2 倍。</p>
         </div>
       </div>
     </section>
@@ -331,7 +331,7 @@ dist.barrier()
     <!-- 14 -->
     <section class="slide">
       <div class="kicker">II · 代价</div>
-      <h2>先看一个笨办法：全部发给 root</h2>
+      <h2>笨办法：全部发给 root</h2>
       <div class="cols">
         <div>
           <p class="small">AllReduce 一个 \(V\) 字节的张量：其余 N−1 个 rank 都把整份发给 root，root 求和，再把整份广播回去。</p>
@@ -475,7 +475,7 @@ dist.barrier()
           <h3>树形算法</h3>
           <p class="small">两两 AllReduce，再 4 个一组、8 个一组……只要 \(\log_2 N\) 轮而不是 \(N-1\) 轮，带宽总量不变，所以小消息、大 N 时更好。NCCL 会根据消息大小在 ring 和 tree 之间切换。</p>
           <h3 style="margin-top: 12px">交叉点</h3>
-          <p class="small">环形 AllReduce 中延迟项 = 带宽项时：\(2(N-1)\alpha = 2\frac{N-1}{N}\frac{V}{W}\)，即 \(V^\ast = N\alpha W\)。消息比 \(V^\ast\) 小就是延迟受限。这也是 DDP 要把梯度攒成"桶"再通信的原因（下一篇）。</p>
+          <p class="small">环形 AllReduce 中延迟项 = 带宽项时：\(2(N-1)\alpha = 2\frac{N-1}{N}\frac{V}{W}\)，即 \(V^\ast = N\alpha W\)。消息比 \(V^\ast\) 小就是延迟受限。这也是 DDP 要把梯度攒成"桶"再通信的原因（见<a href="/posts/scaling-data-parallel/">数据并行</a>）。</p>
         </div>
       </div>
     </section>
@@ -496,7 +496,7 @@ dist.barrier()
         <div>
           <p class="fragment">在 \(k\) 个 mesh 轴上同时做（例如 \(\text{AllGather}_{XY}\)），可用链路翻 \(k\) 倍：</p>
           <div class="fragment">$$T = \max\!\left[\frac{T_\text{min}\sum_i |X_i|}{2},\ \frac{V}{W_\text{bi}\, N_\text{axes}}\right]$$</div>
-          <p class="fragment">AllReduce 仍是 2 倍，ReduceScatter 与 AllGather 相同。<b>只要是带宽受限，耗时只取决于数组大小和链路带宽，与分片数无关</b>。这是这一部分最重要的结论。</p>
+          <p class="fragment">AllReduce 仍是 2 倍，ReduceScatter 与 AllGather 相同。<b>只要是带宽受限，耗时只取决于数组大小和链路带宽，与分片数无关</b>。</p>
           <p class="small muted fragment">注意：v5e 只有某个轴长为 16 时才有回绕链路；没有回绕就只能单向走满 N−1 跳。</p>
         </div>
       </div>
@@ -620,7 +620,7 @@ dist.barrier()
           </div>
         </div>
       </div>
-      <p class="hint">带宽项按前几页的公式计算，延迟项 = 环形算法的跳数 × α。α 默认 1 µs：TPU ICI 每跳约 1 µs；8×H100 节点内小消息 AllReduce 实测约 16 µs，摊到 14 跳也是约 1 µs。</p>
+      <p class="hint">带宽项按环形算法的公式计算，延迟项 = 环形算法的跳数 × α。α 默认 1 µs：TPU ICI 每跳约 1 µs；8×H100 节点内小消息 AllReduce 实测约 16 µs，摊到 14 跳也是约 1 µs。</p>
     </section>
 
     <!-- 26 -->
@@ -639,7 +639,7 @@ dist.barrier()
           <p class="small">\(V = 8\text{e}9 \times 2 = 16\) GB。</p>
           <p class="small">节点内 8 卡：\(2 \cdot \frac{7}{8} \cdot \frac{16\text{e}9}{450\text{e}9} \approx 62\) ms</p>
           <p class="small">跨节点（层级化，按节点出口 400 GB/s）：\(\approx 2 \times \frac{16\text{e}9}{400\text{e}9} = 80\) ms</p>
-          <p class="small muted">若只能跑到约 370 GB/s，节点内会变成约 76 ms。下一篇会把它和反向计算时间比，看能不能藏住。</p>
+          <p class="small muted">若只能跑到约 370 GB/s，节点内会变成约 76 ms。它能不能藏在反向计算后面，决定了数据并行的效率。</p>
         </div>
       </div>
       <div class="box fragment" style="margin-top: 4px">
@@ -807,7 +807,7 @@ dist.barrier()
         <div class="box fragment">
           <h3>另一种选择</h3>
           <p class="small">如果 B 在 X 上是复制的，可以把 B 本地切成 \(B[J_X, K]\)（免费，丢掉一部分即可），本地乘出部分和，再 AllReduce 输出（变成情形 3）。这样计算也被分摊了，但通信的是输出 \(C\) 而不是输入 \(A\)。</p>
-          <p class="small" style="margin-top: 8px">哪个更好取决于 \(|A|\) 和 \(|C|\) 谁大，后面有一页专门算。实际中 B 通常也已经被切了，所以这种情况不常见。</p>
+          <p class="small" style="margin-top: 8px">哪个更好取决于 \(|A|\) 和 \(|C|\) 谁大（见"怎么选"）。实际中 B 通常也已经被切了，所以这种情况不常见。</p>
         </div>
       </div>
     </section>
@@ -895,7 +895,7 @@ dist.barrier()
       <ul class="small">
         <li>AllReduce = RS + AG，最后的 AllGather 往往可以推迟甚至省掉：下一个算子要的本来就是切开的输入。</li>
         <li class="fragment">RS 必须选一个维度来"加下标"（这里选 K，也可以选 I），所以写成 \(\text{ReduceScatter}_{X,K}\)。通常由上下文决定。</li>
-        <li class="fragment">省一半通信：这正是 ZeRO-2 把数据并行里的梯度 AllReduce 换成 ReduceScatter，以及序列并行把张量并行里的 AllReduce 拆开的基础（后面几篇）。</li>
+        <li class="fragment">省一半通信：这正是 ZeRO-2 把数据并行里的梯度 AllReduce 换成 ReduceScatter，以及序列并行把张量并行里的 AllReduce 拆开的基础。</li>
       </ul>
     </section>
 
@@ -982,7 +982,7 @@ dist.barrier()
 
     <!-- 43 -->
     <section class="slide dense">
-      <div class="kicker">III · 预告</div>
+      <div class="kicker">III · 并行策略</div>
       <h2>并行策略 = 给几个矩阵选分片</h2>
       <p>把 Transformer 简化成一串 MLP：\(\text{In}[B, D] \cdot W_\text{in}[D, F] \cdot W_\text{out}[F, D]\)，\(B\) 是 token 数。</p>
       <table class="tbl">
@@ -991,7 +991,7 @@ dist.barrier()
         <tr><td>FSDP / ZeRO-3</td><td>\(\text{In}[B_X, D] \cdot W_\text{in}[D_X, F] \cdot W_\text{out}[F, D_X]\)</td><td>前向 AllGather 权重；反向 ReduceScatter 梯度（AG 的转置）</td></tr>
         <tr><td>张量并行</td><td>\(\text{In}[B, D_Y] \cdot W_\text{in}[D, F_Y] \cdot W_\text{out}[F_Y, D]\)</td><td>进块前 AllGather 激活，出块后 ReduceScatter 激活</td></tr>
       </table>
-      <p class="small">下一篇从这里出发：数据并行的 AllReduce 什么时候藏得住、ZeRO 怎么把 AllReduce 拆成 RS + AG 来省显存。</p>
+      <p class="small">数据并行的 AllReduce 什么时候藏得住、ZeRO 怎么把 AllReduce 拆成 RS + AG 来省显存，见<a href="/posts/scaling-data-parallel/">数据并行与 ZeRO</a>。</p>
     </section>
 
     <!-- 44 -->
