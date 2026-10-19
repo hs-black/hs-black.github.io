@@ -280,6 +280,7 @@
       range.value = String(Math.round((x / (tl.duration || 1)) * 1000));
       time.textContent = x.toFixed(1) + ' / ' + tl.duration.toFixed(1) + 's';
       btn.textContent = p.playing ? '❚❚' : '▶';
+      btn.setAttribute('aria-label', p.playing ? '暂停' : (x >= tl.duration ? '重新播放' : '播放'));
     });
     return bar;
   }
@@ -289,8 +290,11 @@
   // Otherwise the whole timeline plays when the slide is entered.
   function slide(slideEl, tl, o = {}) {
     const stops = tl.labels.map((l) => l.t);
+    if (!stops.length || stops[stops.length - 1] < tl.duration) stops.push(tl.duration);
+    let startTimer = 0;
     if (o.steps) {
-      for (let i = 0; i < stops.length; i++) {
+      // The first stop plays on entry; only later stops need a key press.
+      for (let i = 1; i < stops.length; i++) {
         const f = document.createElement('span');
         f.className = 'fragment anim-step';
         f.hidden = true;
@@ -300,12 +304,22 @@
     if (o.controls) controls(tl, o.controlsIn || slideEl);
     tl.player.loop = !!o.loop;
     tl.player.seek(0);
+    if (o.steps) tl.player.onupdate((time) => {
+      if (!slideEl.classList.contains('is-active') || tl.player.playing) return;
+      clearTimeout(startTimer);
+      const step = time >= tl.duration - 1e-3 ? stops.length - 1 :
+        Math.max(-1, stops.filter((t) => t <= time + 1e-3).length - 1);
+      document.dispatchEvent(new CustomEvent('animseek', { detail: { slide: slideEl, step } }));
+    });
     const stopFor = (step) => (o.steps ? (step < stops.length ? stops[step] : tl.duration) : tl.duration);
     document.addEventListener('slidechange', (e) => {
+      clearTimeout(startTimer);
       if (e.detail.slide !== slideEl) { tl.player.pause(); return; }
       const end = stopFor(e.detail.step);
       if (e.detail.step > 0 && o.steps) tl.player.seek(stops[e.detail.step - 1]); else tl.player.seek(0);
-      setTimeout(() => tl.player.playTo(end), o.delay ?? 300);
+      startTimer = setTimeout(() => {
+        if (slideEl.classList.contains('is-active')) tl.player.playTo(end);
+      }, o.delay ?? 300);
     });
     document.addEventListener('fragmentchange', (e) => {
       if (e.detail.slide !== slideEl || !o.steps) return;

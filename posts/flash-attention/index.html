@@ -1,0 +1,300 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FlashAttention 1、2、3：让数据少跑，让 GPU 忙起来 · Zunzhe Zhang</title>
+  <meta name="description" content="从 attention 的显存往返讲起，用可拖动动画理解分块计算、online softmax、反向重算、FlashAttention-2 的 split-Q，以及 FlashAttention-3 在 Hopper 上的异步流水线。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <style>
+    .slide.lesson { padding: 38px 64px 88px; gap: 15px; justify-content: flex-start; }
+    .slide.lesson h2 { font-size: 42px; }
+    .slide h1 { font-size: 76px; }
+    .slide .lead { max-width: 980px; color: var(--text-soft); font-size: 25px; }
+    .scene { width: 100%; height: 368px; flex: none; display: block; }
+    .scene text { font-family: var(--font-sans); }
+    .scene .mono { font-family: var(--font-mono); }
+    .captions { position: relative; height: 92px; flex: none; }
+    .captions p { position: absolute; inset: 0; opacity: 0; font-size: 24px; color: var(--text-soft); line-height: 1.5; }
+    .captions p:first-child { opacity: 1; }
+    .captions b { color: var(--text); font-weight: 650; }
+    .slide .note { font-size: 18px; color: var(--text-faint); }
+    .cards { display: grid; grid-template-columns: repeat(3, 1fr); gap: 22px; }
+    .card { background: var(--surface); border: 1px solid var(--border); border-radius: 18px; padding: 26px; }
+    .card h3 { font-size: 25px; margin: 0 0 14px; color: var(--accent); }
+    .card p { font-size: 23px; color: var(--text-soft); }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; }
+    .formula { padding: 20px 28px; border-radius: 16px; background: var(--surface); border: 1px solid var(--border); font-family: var(--font-mono); font-size: 27px; line-height: 1.75; }
+    .formula .definition { color: var(--text-soft); font-family: var(--font-sans); font-size: 21px; line-height: 1.5; }
+    .formula strong { color: var(--accent); font-weight: 600; }
+    .version-table { width: 100%; border-collapse: collapse; font-size: 25px; }
+    .version-table th, .version-table td { text-align: left; padding: 18px; border-bottom: 1px solid var(--border); }
+    .version-table th { color: var(--accent); }
+    .references { font-size: 23px; line-height: 1.55; }
+    .references li + li { margin-top: 16px; }
+    .title-tags { display: flex; gap: 18px; }
+    .title-tags span { padding: 10px 20px; font-size: 22px; background: var(--surface); border: 1px solid var(--border); border-radius: 999px; }
+    .slide .anim-bar { bottom: 22px; }
+  </style>
+</head>
+<body class="deck-page">
+<main class="deck"><div class="stage">
+  <section class="slide center">
+    <div class="kicker rise">动画图解 LLM 系统 · Attention kernel</div>
+    <h1 class="rise" style="--d:1">FlashAttention 1、2、3</h1>
+    <p class="lead rise" style="--d:2">矩阵乘法很快，数据来回搬却很慢。<br>把 attention 留在 GPU 的小工作台上，算完再搬出去。</p>
+    <div class="title-tags rise" style="--d:3"><span>1 · 少搬</span><span>2 · 分好工</span><span>3 · 重叠执行</span></div>
+    <p class="small muted rise" style="--d:4">→ 推进每一步 · 拖动时间轴回看 · F 全屏</p>
+  </section>
+
+  <section class="slide lesson" id="fa-naive">
+    <div class="kicker">问题 · HBM 往返</div><h2>中间那张 N × N 大表，搬了好几遍</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="朴素 attention 的三个 kernel：QK 转置生成分数 S 写入 HBM，softmax 读 S 写 P，最后读 P 和 V 生成 O"></svg>
+    <div class="captions">
+      <p>每个 query 和每个 key 打分：S = QKᵀ / √d。N 个 token，就得到一张 <b>N × N</b> 的分数表。</p>
+      <p>朴素实现先把 S 写进 HBM，再读回来做 softmax，得到概率 P，又写回 HBM。</p>
+      <p>最后读 P 和 V，算加权平均 O。<b>算完的中间结果，马上又得搬回来。</b></p>
+      <p>N = 16,384 时，一张 FP16 的 N × N 矩阵就有 <b>512 MiB / head</b>。序列翻倍，这张表变成四倍。</p>
+    </div>
+  </section>
+
+  <section class="slide lesson" id="fa-tiles">
+    <div class="kicker">FlashAttention-1 · 分块</div><h2>大仓库放原料，小工作台算一块</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="Q 块驻留片上，每次搬入一块 K 和 V，计算局部分数并更新输出；完整注意力矩阵不写入 HBM"></svg>
+    <div class="captions">
+      <p><b>HBM</b> 容量大；SM 里的 shared memory 和寄存器容量小、访问快。把 Q、K、V 切成能放上工作台的小块。</p>
+      <p>固定一块 Q，依次读入 K、V 块：算局部分数、更新 softmax 状态、累加输出。分数块用完就丢。</p>
+      <p>所有 K、V 块都走完，才得到这几行最终的 O。<b>完整的 S 和 P 从来不落 HBM。</b></p>
+    </div>
+  </section>
+
+  <section class="slide lesson">
+    <div class="kicker">Online softmax · 一边读，一边合并</div><h2>没见过后面的分数，怎么做 softmax？</h2>
+    <p class="lead">每行只随身带三个状态：最大值 m、指数和 ℓ、加权分子 o。新块来了，先统一尺度，再相加。</p>
+    <div class="two">
+      <div class="formula">
+        <div>m′ = max(m, max s<sub>j</sub>)</div>
+        <div><strong>α = exp(m − m′)</strong></div>
+        <div>p<sub>j</sub> = exp(s<sub>j</sub> − m′)</div>
+        <p class="definition">s 已包含 1/√d 缩放与 mask。减去最大值，让指数保持在安全范围。</p>
+      </div>
+      <div class="formula">
+        <div>ℓ′ = <strong>αℓ</strong> + Σ p<sub>j</sub></div>
+        <div>o′ = <strong>αo</strong> + Σ p<sub>j</sub>v<sub>j</sub></div>
+        <div>最后：O = o / ℓ</div>
+        <p class="definition">旧的分母和分子必须一起乘 α。o 是向量，每个输出维度都这样更新。</p>
+      </div>
+    </div>
+    <p class="note">初始 m = −∞、ℓ = 0、o = 0；第一个含有效 key 的块把 α 视为 0。全被 mask 的块跳过。以上写法把最终除法留到最后。</p>
+  </section>
+
+  <section class="slide lesson" id="fa-online">
+    <div class="kicker">Online softmax · 数字跟着走</div><h2>最大值变大了，旧结果一起缩小</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="分数 1、2、3、0 分两块处理，旧的指数权重乘以 e 的负一次方，最终输出与一次 softmax 完全一致"></svg>
+    <div class="captions">
+      <p>看一行、一个输出维度。第一块的分数是 [1, 2]，value 是 [2, 8]；m = 2，指数权重是 [e⁻¹, 1]。</p>
+      <p>第二块出现更大的分数 3。把基准从 2 改成 3：<b>旧的 ℓ 和 o 都乘 e⁻¹</b>，旧的相对贡献仍然保留。</p>
+      <p>新块的分数是 [3, 0]、value 是 [4, 10]，加上它的权重 [1, e⁻³]。最终 O ≈ <b>4.966</b>，与一次性算完整 softmax 相同。</p>
+    </div>
+  </section>
+
+  <section class="slide lesson" id="fa-backward">
+    <div class="kicker">训练 · 反向重算</div><h2>反向需要 P？到用它时再算</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="前向留下 Q K V O 和每行的 logsumexp，反向读取一块 Q K，重建 P，算梯度后释放临时块"></svg>
+    <div class="captions">
+      <p>训练时，保留 Q、K、V、O，并额外存每行一个 <b>L = m + log ℓ</b>。L 把整行 softmax 的归一化信息压成一个数。</p>
+      <p>反向读一块 Q、K，重新算 S；有了 L，就能恢复 <b>P = exp(S − L)</b>，接着计算这一块的梯度。</p>
+      <p>临时 P 块用完就释放。多算一些矩阵乘，换掉巨大中间矩阵的存储与搬运。<a href="/posts/gradient-checkpointing/">激活重算</a>也在做这笔交换。</p>
+    </div>
+  </section>
+
+  <section class="slide lesson" id="fa-grid">
+    <div class="kicker">FlashAttention-2 · SM 之间</div><h2>把长序列切成更多独立任务</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="只有 batch 和 head 维度并行时任务不足，增加 query block 维度后更多 SM 能同时工作"></svg>
+    <div class="captions">
+      <p>GPU 有很多 SM。只按 batch 和 head 派任务，小 batch、少 head 时，长序列也可能只让少数 SM 忙起来。</p>
+      <p>不同 query 行的最终输出彼此独立。FA2 把 <b>query block 也放进 grid</b>，每块自己遍历 K、V。</p>
+      <p>一条长序列变成更多任务，交给更多 SM 同时处理。片上仍然分块，显存里仍然不放 N × N 的中间矩阵。</p>
+    </div>
+  </section>
+
+  <section class="slide lesson" id="fa-warps">
+    <div class="kicker">FlashAttention-2 · 一个 block 内</div><h2>按 Q 分工：每个 warp 管自己的输出行</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="split-K 让不同 warp 产生同一输出的部分和，需要合并；split-Q 让各 warp 负责独立输出行，减少跨 warp 合并"></svg>
+    <div class="captions">
+      <p>FA1 的典型 warp 划分把 K、V 切给不同 warp。它们贡献到同一批输出行，最后还得经 shared memory 合并。</p>
+      <p>FA2 的 <b>split-Q</b>：把 Q 的行切给不同 warp，让它们读取共同的 K、V tile。每个 warp 都能完成自己负责的输出行。</p>
+      <p>少一次跨 warp 的部分输出合并，就少一次 shared-memory 往返与同步。再减少重复缩放、归一化等非矩阵乘操作，让 Tensor Core 少等。</p>
+    </div>
+  </section>
+
+  <section class="slide lesson" id="fa-pipeline">
+    <div class="kicker">FlashAttention-3 · Hopper 异步流水线</div><h2>下一块在搬，这一块在算</h2>
+    <svg class="scene" viewBox="0 0 1152 368" role="img" aria-label="producer 用 TMA 提前搬入 K V 块，consumer 用 WGMMA 进行异步矩阵乘，softmax 与后续矩阵乘重叠；同步点保证数据可用"></svg>
+    <div class="captions">
+      <p>Hopper 上，<b>TMA</b> 负责异步搬数据，<b>WGMMA</b> 发起异步矩阵乘。发出指令后，warp 不必一直守着等待。</p>
+      <p>producer warpgroup 提前搬下一块 K、V；consumer warpgroup 计算当前块。缓冲区与 barrier 保证读到完整数据、不会提前覆盖。</p>
+      <p>consumer 还把部分 softmax 与后续矩阵乘交错安排。<b>搬运、Tensor Core、普通计算单元</b>更少轮流空等。</p>
+    </div>
+  </section>
+
+  <section class="slide lesson">
+    <div class="kicker">FlashAttention-3 · 精度与硬件</div><h2>FP8 是一条额外的加速路径</h2>
+    <p class="lead">异步流水线对 FP16 / BF16 也有用。想继续提高矩阵乘吞吐，可以再选 FP8。</p>
+    <div class="cards">
+      <div class="card"><h3>先解决误差</h3><p>每块设置缩放因子，减少少数大值对整块精度的挤压。量化 Q、K、V 时，尺度也要带进计算。</p></div>
+      <div class="card"><h3>再分散异常值</h3><p>对 Q、K 使用匹配的正交变换，把突出的通道打散，同时保持 QKᵀ。论文称为 incoherent processing。</p></div>
+      <div class="card"><h3>保留关键精度</h3><p>softmax 的统计量与缩放仍使用 FP32。官方 Hopper 实现提供 FP16 / BF16 前后向与 FP8 前向路径。</p></div>
+    </div>
+    <p class="note">FA3 围绕 H100 / H800 等 Hopper GPU 设计。FP8 会引入额外量化误差；是否启用取决于模型精度要求、硬件与具体 kernel 支持。</p>
+  </section>
+
+  <section class="slide lesson">
+    <div class="kicker">三代演进</div><h2>同一个 attention，三层效率问题</h2>
+    <table class="version-table"><thead><tr><th>版本</th><th>最关心什么</th><th>关键做法</th></tr></thead><tbody>
+      <tr><td>FA1</td><td>数据搬得太多</td><td>分块 + online softmax + 反向重算</td></tr>
+      <tr><td>FA2</td><td>任务分得不够好</td><td>更多 query block 并行 + split-Q</td></tr>
+      <tr><td>FA3</td><td>不同单元轮流等待</td><td>TMA / WGMMA + 异步流水线</td></tr>
+    </tbody></table>
+    <p class="lead">密集 attention 仍需计算 O(N²d) 的匹配；省掉的是 N × N 中间矩阵的落盘。FP16 / BF16 路径保持同一数学结果，浮点运算顺序带来正常舍入差异。</p>
+    <p class="note">这里的大片矩阵主要对应训练与 prefill。decode 通常只有一行新 query，瓶颈更多来自读 KV cache，需要结合 <a href="/posts/kv-cache/">KV cache 管理</a>与专门的 decode kernel。</p>
+  </section>
+
+  <section class="slide lesson">
+    <div class="kicker">参考与延伸阅读</div><h2>论文与实现</h2>
+    <ul class="references">
+      <li>Dao et al.（2022），<a href="https://arxiv.org/abs/2205.14135">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</a>：分块、online softmax、IO 分析与反向重算。</li>
+      <li>Dao（2023），<a href="https://arxiv.org/abs/2307.08691">FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning</a>：query block 并行、split-Q 与减少非矩阵乘工作。</li>
+      <li>Shah et al.（2024），<a href="https://arxiv.org/abs/2407.08608">FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision</a>：Hopper 异步流水线、FP8 分块量化与 incoherent processing。</li>
+      <li><a href="https://github.com/Dao-AILab/flash-attention">Dao-AILab / flash-attention</a>：官方实现；FA3 的硬件与 dtype 支持见 README 和 <code>hopper/</code>。</li>
+    </ul>
+    <p class="note">动画中的块数、warp 数与时间长度用于解释数据依赖，不代表某个 kernel 的固定配置或实测耗时。</p>
+    <p class="small"><a href="/posts/rmsnorm-kernel/">继续：RMSNorm 与 GPU 算子优化</a> · <a href="/blog/">返回博客</a></p>
+  </section>
+</div></main>
+<script src="/assets/slides.js"></script>
+<script src="/assets/anim.js"></script>
+<script>
+(() => {
+  const NS = 'http://www.w3.org/2000/svg';
+  const C = { a: 'var(--accent)', b: 'var(--accent-2)', text: 'var(--text)', soft: 'var(--text-soft)', faint: 'var(--text-faint)', bg: 'var(--surface)', line: 'var(--border)', tint: 'var(--accent-soft)' };
+  function el(p, tag, a = {}, text) { const e = document.createElementNS(NS, tag); for (const [k,v] of Object.entries(a)) { if (['opacity','fill','stroke'].includes(k)) e.style.setProperty(k,v); else e.setAttribute(k,v); } if (text !== undefined) e.textContent = text; p.appendChild(e); return e; }
+  const g = (p,a) => el(p,'g',a);
+  const rect = (p,x,y,w,h,a = {}) => el(p,'rect',{x,y,width:w,height:h,rx:10,fill:C.bg,stroke:C.line,'stroke-width':1.5,...a});
+  const txt = (p,x,y,t,a = {}) => el(p,'text',{x,y,fill:C.text,'font-size':20,'text-anchor':'middle',...a},t);
+  const path = (p,d,a = {}) => el(p,'path',{d,fill:'none',stroke:C.line,'stroke-width':2,...a});
+  function box(p,x,y,w,h,t,color=C.a) { const q=g(p); rect(q,x,y,w,h,{stroke:color}); txt(q,x+w/2,y+h/2+7,t,{fill:color,'font-weight':600}); return q; }
+  function packet(p,x,y,t,color=C.a) { const q=g(p,{opacity:0}); rect(q,x,y,84,34,{fill:C.bg,stroke:color,'stroke-width':2}); txt(q,x+42,y+23,t,{'font-size':17,fill:color}); return q; }
+  function cap(tl,sl,i,at) { sl.querySelectorAll('.captions p').forEach((p,j)=>tl.to(p,{opacity:j===i?1:0},{at,dur:.25})); }
+  function scene(id,fn) { const sl=document.getElementById(id), svg=sl.querySelector('svg'), tl=Anim.timeline(); fn(tl,svg,sl); Anim.slide(sl,tl,{steps:true,controls:true}); }
+  function grid(p,x,y,rows,cols,size=25,a={}) { const cells=[]; for(let r=0;r<rows;r++) for(let c=0;c<cols;c++) cells.push(rect(p,x+c*(size+4),y+r*(size+4),size,size,{rx:4,...a})); return cells; }
+
+  scene('fa-naive',(tl,s,sl)=>{
+    rect(s,15,15,1122,110,{fill:C.tint}); txt(s,46,44,'HBM',{'text-anchor':'start',fill:C.a,'font-size':19,'font-weight':700});
+    box(s,145,48,180,52,'Q · K · V'); const sb=box(s,445,48,210,52,'S · N × N',C.b), pb=box(s,715,48,210,52,'P · N × N',C.b); const ob=box(s,980,48,125,52,'O');
+    const k1=box(s,145,225,220,68,'QKᵀ / √d'), k2=box(s,465,225,220,68,'softmax'), k3=box(s,785,225,220,68,'P × V');
+    txt(s,575,338,'SM · 三个独立 kernel', {fill:C.soft,'font-size':19});
+    [sb,pb,ob].forEach(q=>tl.set(q,{opacity:.25},{at:0}));
+    const q=packet(s,195,92,'Q、K'), st=packet(s,213,200,'S',C.b), sp=packet(s,508,91,'S',C.b), pp=packet(s,534,200,'P',C.b), pv=packet(s,775,92,'P、V',C.b), out=packet(s,855,200,'O');
+    tl.to(q,{opacity:1},{at:0,dur:.2}).to(q,{y:118},{at:.2,dur:.65}).to(q,{opacity:0},{at:.9,dur:.15});
+    tl.to(st,{opacity:1},{at:1,dur:.2}).to(st,{x:295,y:-108},{at:1.2,dur:.75}).to(st,{opacity:0},{at:2,dur:.15}).to(sb,{opacity:1},{at:2,dur:.25}).label('scores',2.3);
+    cap(tl,sl,1,2.4); tl.to(sp,{opacity:1},{at:2.4,dur:.1}).to(sp,{y:118},{at:2.6,dur:.65}).to(sp,{opacity:0},{at:3.3,dur:.1});
+    tl.to(pp,{opacity:1},{at:3.5,dur:.1}).to(pp,{x:230,y:-108},{at:3.6,dur:.75}).to(pp,{opacity:0},{at:4.4,dur:.1}).to(pb,{opacity:1},{at:4.4,dur:.25}).label('probability',4.8);
+    cap(tl,sl,2,4.9); tl.to(pv,{opacity:1},{at:4.9,dur:.1}).to(pv,{x:80,y:118},{at:5,dur:.75}).to(pv,{opacity:0},{at:5.8,dur:.1});
+    tl.to(out,{opacity:1},{at:6,dur:.1}).to(out,{x:147,y:-108},{at:6.1,dur:.75}).to(out,{opacity:0},{at:6.9,dur:.1}).to(ob,{opacity:1},{at:6.9,dur:.25}).label('output',7.3);
+    cap(tl,sl,3,7.4); tl.to([sb,pb],{scale:1.06},{at:7.4,dur:.5}).label('quadratic',8);
+  });
+
+  scene('fa-tiles',(tl,s,sl)=>{
+    rect(s,10,10,280,346); txt(s,150,42,'HBM · Q / K / V',{'font-weight':700,fill:C.a});
+    const tiles=[]; for(let i=0;i<4;i++) tiles.push(box(s,40,64+i*58,220,42,'K'+i+'、V'+i,C.b));
+    rect(s,350,10,790,346,{stroke:C.a,'stroke-width':2}); txt(s,745,42,'SM · shared memory + registers',{'font-weight':700,fill:C.a});
+    box(s,385,98,140,70,'Q tile'); const slot=box(s,565,98,170,70,'K / V tile',C.b); box(s,805,98,290,70,'局部分数 → softmax');
+    txt(s,745,210,'只保留每行状态 m、ℓ、o',{'font-size':22});
+    const acc=rect(s,405,250,0,40,{fill:C.a,stroke:'none'}); rect(s,405,250,640,40,{fill:'none'});
+    txt(s,725,321,'o 累加 → 最后除以 ℓ → 输出 O',{'font-size':20,fill:C.soft});
+    tl.label('working-set',.5); cap(tl,sl,1,.6);
+    for(let i=0;i<4;i++) { const at=.7+i*1.55,p=packet(s,100,70+i*58,'K'+i+' / V'+i,C.b); tl.to(tiles[i],{opacity:.35},{at,dur:.2}).to(p,{opacity:1},{at,dur:.2}).to(p,{x:500,y:42-i*58},{at:at+.2,dur:.65}).to(p,{opacity:0},{at:at+.9,dur:.15}).to(acc,{attr:{width:160*(i+1)}},{at:at+1,dur:.4}); if(i===1)tl.label('two-tiles',at+1.45); }
+    cap(tl,sl,2,7); const o=packet(s,1000,262,'O'); tl.to(o,{opacity:1},{at:7,dur:.2}).to(o,{x:-890,y:42},{at:7.2,dur:.8}).label('write-output',8.1);
+  });
+
+  scene('fa-online',(tl,s,sl)=>{
+    const scores=[1,2,3,0], values=[2,8,4,10], bars=[]; txt(s,260,32,'指数权重 exp(s − m)',{'font-weight':600});
+    path(s,'M45 250 H490',{stroke:C.soft});
+    for(let i=0;i<4;i++){ const x=75+i*105; bars.push(rect(s,x,250,62,0,{fill:i<2?C.a:C.b,stroke:'none',rx:5})); txt(s,x+31,282,'s = '+scores[i],{'font-size':19});txt(s,x+31,309,'v = '+values[i],{'font-size':19,fill:C.soft}); }
+    txt(s,155,350,'第一块', {fill:C.a});txt(s,365,350,'第二块',{fill:C.b});
+    rect(s,555,18,575,332); txt(s,585,55,'每行随身带的状态',{'text-anchor':'start','font-weight':700});
+    const mt=txt(s,590,112,'m = 2',{'text-anchor':'start','font-size':27}), lt=txt(s,590,164,'ℓ = 1.368',{'text-anchor':'start','font-size':27}), ot=txt(s,590,216,'o = 8.736',{'text-anchor':'start','font-size':27}), final=txt(s,590,283,'O = o / ℓ ≈ 6.386',{'text-anchor':'start','font-size':28,fill:C.a});
+    const e1=Math.exp(-1), e2=Math.exp(-2), e3=Math.exp(-3); const l1=1+e1,o1=8+2*e1,l2=e2+e1,o2=2*e2+8*e1;
+    const l3=l2+1+e3,o3=o2+4+10*e3;
+    function draw(weights,m,l,o) { bars.forEach((b,i)=>{b.setAttribute('y',250-weights[i]*180);b.setAttribute('height',weights[i]*180)}); mt.textContent='m = '+m;lt.textContent='ℓ = '+l.toFixed(3);ot.textContent='o = '+o.toFixed(3);final.textContent='O = o / ℓ ≈ '+(o/l).toFixed(3); }
+    tl.during((p,t)=>{ let w=[e1,1,0,0],m=2,l=l1,o=o1;
+      if(t>=1){const u=Math.min(1,(t-1)/1.6),a=1+(e1-1)*u;w=[e1*a,a,0,0];m=3;l=l1*a;o=o1*a;}
+      if(t>=3.3){const u=Math.min(1,(t-3.3)/1.6);w=[e2,e1,u,e3*u];m=3;l=l2+(1+e3)*u;o=o2+(4+10*e3)*u;}draw(w,m,l,o);
+    },{at:0,dur:5.1}).label('block-one',.5).label('rescale-old',2.8).label('merge-new',5.1);
+    cap(tl,sl,1,.9);cap(tl,sl,2,3.2);
+  });
+
+  scene('fa-backward',(tl,s,sl)=>{
+    rect(s,20,20,1110,108,{fill:C.tint}); txt(s,70,54,'HBM',{'text-anchor':'start',fill:C.a,'font-weight':700});
+    box(s,180,54,220,48,'Q、K、V');box(s,440,54,130,48,'O');box(s,610,54,250,48,'L · 每行一个数');box(s,930,54,150,48,'dO');
+    box(s,120,225,250,72,'重算 S = QKᵀ / √d');box(s,450,225,220,72,'P = exp(S − L)',C.b);const grad=box(s,755,225,300,72,'累加 dQ、dK、dV');
+    path(s,'M370 261 H450 M670 261 H755',{stroke:C.soft});txt(s,575,345,'片上临时块：只活到本块梯度算完',{'font-size':20,fill:C.soft});
+    tl.label('saved',.5);cap(tl,sl,1,.6);
+    const q=packet(s,235,95,'Q、K'), l=packet(s,692,95,'L'), p=packet(s,492,205,'P',C.b);
+    tl.to(q,{opacity:1},{at:.6,dur:.2}).to(q,{y:112},{at:.8,dur:.7}).to(q,{opacity:0},{at:1.6,dur:.1});
+    tl.to(l,{opacity:1},{at:1.2,dur:.2}).to(l,{x:-177,y:112},{at:1.4,dur:.7}).to(l,{opacity:0},{at:2.2,dur:.1});
+    tl.to(p,{opacity:1},{at:2.3,dur:.3}).label('rebuild',2.8);cap(tl,sl,2,2.9);
+    tl.to(p,{x:340},{at:2.9,dur:.7}).to(p,{opacity:0},{at:3.6,dur:.4}).to(grad,{scale:1.035},{at:3.5,dur:.3}).to(grad,{scale:1},{at:3.8,dur:.3}).label('release',4.2);
+  });
+
+  scene('fa-grid',(tl,s,sl)=>{
+    txt(s,220,35,'一组 batch / head · 8 个 Q tile',{'font-size':22,'font-weight':600});
+    const qs=[];for(let i=0;i<8;i++) qs.push(box(s,45+i%4*105,65+Math.floor(i/4)*70,88,48,'Q'+i));
+    txt(s,840,35,'GPU · 示意 8 个 SM',{'font-size':22,'font-weight':600});
+    const sms=[];for(let i=0;i<8;i++){ const x=605+i%4*130,y=80+Math.floor(i/4)*125; const sm=rect(s,x,y,108,90,{stroke:i===0?C.a:C.line,fill:i===0?C.tint:C.bg});sms.push(sm);txt(s,x+54,y+29,'SM '+i,{'font-size':17,fill:C.soft}); }
+    txt(s,230,270,'按 B × H 派一份长任务',{'font-size':22,fill:C.soft});
+    const label=txt(s,230,315,'→ 多数 SM 等待',{'font-size':24,fill:C.b});
+    tl.label('too-few',.6);cap(tl,sl,1,.7);
+    for(let i=0;i<8;i++){ const p=packet(s,47+i%4*105,72+Math.floor(i/4)*70,'Q'+i);tl.to(p,{opacity:1},{at:.8+i*.08,dur:.15}).to(p,{x:567+i%4*25,y:45+Math.floor(i/4)*55},{at:1+i*.08,dur:.85}).to(p,{opacity:0},{at:1.9+i*.08,dur:.1}).to(sms[i],{fill:C.tint,stroke:C.a},{at:1.85+i*.08,dur:.25}); }
+    tl.to(label,{opacity:0},{at:.8,dur:.2});const newlabel=txt(s,230,315,'→ B × H × Q blocks',{'font-size':24,fill:C.a,opacity:0});tl.to(newlabel,{opacity:1},{at:1.1,dur:.3}).label('query-parallel',2.9);cap(tl,sl,2,3);tl.wait(.4).label('keep-io',3.5);
+  });
+
+  scene('fa-warps',(tl,s,sl)=>{
+    txt(s,275,30,'split-K · 合作做同几行',{'font-size':23,'font-weight':600});txt(s,870,30,'split-Q · 各做各的行',{'font-size':23,'font-weight':600});
+    path(s,'M575 20 V350',{stroke:C.line});
+    const left=[],right=[];for(let i=0;i<4;i++){const x=35+i*132;left.push(box(s,x,85,115,65,'warp '+i,C.b));right.push(box(s,630+i*126,85,110,65,'warp '+i));txt(s,x+57,73,'K'+i+' / V'+i,{'font-size':17,fill:C.soft});txt(s,685+i*126,73,'Q rows '+i,{'font-size':17,fill:C.soft});}
+    box(s,112,240,330,60,'shared memory · 合并部分 O',C.b);
+    for(let i=0;i<4;i++) path(s,`M${92+i*132} 150 L${190+i*52} 240`,{stroke:C.b});
+    const outputs=[];for(let i=0;i<4;i++){outputs.push(box(s,630+i*126,240,110,60,'O rows '+i));path(s,`M${685+i*126} 150 V240`,{stroke:C.a});}
+    txt(s,870,342,'共同读 K / V tile，各自写 O',{'font-size':22,fill:C.soft});
+    tl.set(outputs,{opacity:.25},{at:0});
+    for(let i=0;i<4;i++){const p=packet(s,51+i*132,142,'partial',C.b);tl.to(p,{opacity:1},{at:.2,dur:.2}).to(p,{x:99-i*80,y:88},{at:.4,dur:.9}).to(p,{opacity:0},{at:1.4,dur:.15});}
+    tl.label('merge-partials',1.8);cap(tl,sl,1,1.9);
+    for(let i=0;i<4;i++){const p=packet(s,643+i*126,142,'rows '+i);tl.to(p,{opacity:1},{at:2,dur:.2}).to(p,{y:89},{at:2.2,dur:.8}).to(p,{opacity:0},{at:3.1,dur:.15}).to(outputs[i],{opacity:1},{at:3.1,dur:.3});}
+    tl.label('own-rows',3.6);cap(tl,sl,2,3.7);tl.wait(.4).label('less-sync',4.2);
+  });
+
+  scene('fa-pipeline',(tl,s,sl)=>{
+    txt(s,245,27,'时间 →（长度示意）',{'text-anchor':'start','font-size':18,fill:C.soft});
+    const rows=[['producer · TMA',65,C.b],['Tensor Core · WGMMA',145,C.a],['softmax · CUDA cores',225,C.soft]];
+    rows.forEach(([t,y,c])=>{txt(s,18,y+25,t,{'text-anchor':'start','font-size':17,fill:c});path(s,`M245 ${y+53} H1125`);});
+    const tasks=[
+      [0,0,1.0,'搬 K₀,V₀'],[0,1.0,1.0,'搬 K₁,V₁'],[0,2.0,1.0,'搬 K₂,V₂'],[0,3.5,1.0,'搬 K₃,V₃'],
+      [1,1.0,.75,'QK₀ᵀ'],[1,1.85,.75,'QK₁ᵀ'],[1,2.7,.75,'P₀V₀'],[1,3.55,.75,'QK₂ᵀ'],[1,4.4,.75,'P₁V₁'],[1,5.25,.75,'QK₃ᵀ'],[1,6.1,.75,'P₂V₂'],[1,7.0,.75,'P₃V₃'],
+      [2,1.75,.85,'softmax ₀'],[2,2.6,.85,'softmax ₁'],[2,4.3,.85,'softmax ₂'],[2,6.0,.85,'softmax ₃']
+    ];
+    const scale=106, visuals=[];tasks.forEach(([r,t,d,l])=>{const x=245+t*scale,y=rows[r][1];const w=d*scale-4;const q=g(s);rect(q,x,y,w,44,{fill:C.tint,stroke:rows[r][2],opacity:.2});const fill=rect(q,x,y,0,44,{fill:C.tint,stroke:rows[r][2]});const tx=txt(q,x+w/2,y+27,l,{'font-size':14,opacity:.25});visuals.push({t,d,fill,tx,w});});
+    const cursor=path(s,'M245 48 V290',{stroke:C.b,'stroke-width':2});
+    txt(s,650,333,'数据就绪才读 · 用完才复用缓冲区 · 两次矩阵乘之间做 softmax',{'font-size':21,fill:C.soft});
+    tl.during((p)=>{const now=p*8;visuals.forEach(v=>{const q=Math.max(0,Math.min(1,(now-v.t)/v.d));v.fill.setAttribute('width',q*v.w);v.tx.style.opacity=q>0?1:.25;});cursor.setAttribute('d',`M${245+now*scale} 48 V290`);},{at:0,dur:8}).label('first-load',1).label('overlap-load',3.45).label('overlap-compute',8);
+    cap(tl,sl,1,1.1);cap(tl,sl,2,3.55);
+  });
+})();
+</script>
+<script src="/assets/post-links.js"></script>
+<script src="/assets/posts.js"></script>
+</body>
+</html>

@@ -1,0 +1,491 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>投机解码：先草拟，再验证 · Zunzhe Zhang</title>
+<meta name="description" content="用动画讲清并行验证、贪心前缀接受、p/q 接受概率、残差重采样、KV 回滚与投机解码的时间账本。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson {padding:38px 64px 86px;gap:12px;justify-content:flex-start}
+.slide.lesson h2{font-size:42px;line-height:1.2}.slide.lesson .kicker{font-size:16px}
+.scene{width:100%;height:350px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:22px}.scene .small{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:16px;fill:var(--text-soft)}.scene .mono{font-family:var(--font-mono)}
+.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .accent{fill:var(--accent)}.scene .orange{fill:var(--accent-2)}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .dim{fill:var(--bg-soft);stroke:var(--border);stroke-width:1}.scene .ghost{opacity:0}
+.lesson .narration{font-size:24px;line-height:1.55;color:var(--text-soft);min-height:74px}.narration b{color:var(--text)}.lesson .note{font-size:16px;color:var(--text-faint);line-height:1.45}.lesson .formula{font-family:var(--font-mono);font-size:25px;color:var(--accent);padding:12px 18px;border-radius:12px;background:var(--accent-soft)}
+.lesson .reference-list{font-size:22px;line-height:1.6}.lesson .reference-list li+li{margin-top:12px}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.lesson .card{padding:24px;border:1px solid var(--border);background:var(--surface);border-radius:18px;font-size:24px}.lesson .card h3{font-size:28px;margin:0 0 14px}.lesson .card p+p{margin-top:16px}.lesson .mini{font-size:21px;line-height:1.55}.slide.center h1{font-size:76px}.slide.center .subtitle{font-size:30px;max-width:1000px;color:var(--text-soft)}
+
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">动画图解 LLM 系统 · 2026-10-20
+</div>
+<h1 class="rise" style="--d:1">投机解码
+</h1>
+<p class="subtitle rise" style="--d:2">先快速拟一小段，再让大模型一次检查
+</p>
+<p class="small muted rise" style="--d:3">按 → 推进 · 底部时间轴可拖动 · F 全屏
+</p>
+</section>
+<section class="slide lesson" id="serial">
+<div class="kicker">01 · 时间从哪里来
+</div>
+<h2>大模型每次只前进一步，等待就串起来了
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="大模型每次只前进一步，等待就串起来了">
+<text x="80" y="52" text-anchor="start" class="" >逐个生成</text>
+<text x="80" y="206" text-anchor="start" class="" >先草拟再检查</text>
+<g id="serial0" >
+<rect x="250" y="18" width="164" height="78" rx="12" class="box" />
+<text x="332.0" y="65.0" text-anchor="middle" class="" >大模型</text>
+</g>
+<g id="out0" class="ghost">
+<rect x="297" y="112" width="70" height="52" rx="12" class="accentbox" />
+<text x="332.0" y="146.0" text-anchor="middle" class="" >春</text>
+</g>
+<g id="draft0" class="ghost">
+<rect x="250" y="224" width="164" height="58" rx="12" class="accentbox" />
+<text x="332.0" y="261.0" text-anchor="middle" class="" >春</text>
+</g>
+<g id="serial1" >
+<rect x="450" y="18" width="164" height="78" rx="12" class="box" />
+<text x="532.0" y="65.0" text-anchor="middle" class="" >大模型</text>
+</g>
+<g id="out1" class="ghost">
+<rect x="497" y="112" width="70" height="52" rx="12" class="accentbox" />
+<text x="532.0" y="146.0" text-anchor="middle" class="" >风</text>
+</g>
+<g id="draft1" class="ghost">
+<rect x="450" y="224" width="164" height="58" rx="12" class="accentbox" />
+<text x="532.0" y="261.0" text-anchor="middle" class="" >风</text>
+</g>
+<g id="serial2" >
+<rect x="650" y="18" width="164" height="78" rx="12" class="box" />
+<text x="732.0" y="65.0" text-anchor="middle" class="" >大模型</text>
+</g>
+<g id="out2" class="ghost">
+<rect x="697" y="112" width="70" height="52" rx="12" class="accentbox" />
+<text x="732.0" y="146.0" text-anchor="middle" class="" >又</text>
+</g>
+<g id="draft2" class="ghost">
+<rect x="650" y="224" width="164" height="58" rx="12" class="accentbox" />
+<text x="732.0" y="261.0" text-anchor="middle" class="" >又</text>
+</g>
+<g id="serial3" >
+<rect x="850" y="18" width="164" height="78" rx="12" class="box" />
+<text x="932.0" y="65.0" text-anchor="middle" class="" >大模型</text>
+</g>
+<g id="out3" class="ghost">
+<rect x="897" y="112" width="70" height="52" rx="12" class="accentbox" />
+<text x="932.0" y="146.0" text-anchor="middle" class="" >绿</text>
+</g>
+<g id="draft3" class="ghost">
+<rect x="850" y="224" width="164" height="58" rx="12" class="accentbox" />
+<text x="932.0" y="261.0" text-anchor="middle" class="" >绿</text>
+</g>
+<rect x="236" y="300" width="790" height="34" rx="12" class="dim" />
+<text x="630" y="324" text-anchor="middle" class="small ghost" id="onepass" >大模型：同一轮检查整段</text>
+</svg>
+<p class="narration">生成一个 token，需要经过大模型的所有层。草稿先给出一段候选，<b>大模型就能把多个位置放进同一次前向</b>。
+</p>
+<p class="note">图中文字只是示意 token；真正的分词未必按汉字划分。
+</p>
+</section>
+<section class="slide lesson" id="cycle">
+<div class="kicker">02 · 一轮流程
+</div>
+<h2>小模型提出建议，大模型给每个位置打分
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="小模型提出建议，大模型给每个位置打分">
+<g >
+<rect x="35" y="122" width="200" height="100" rx="12" class="box" />
+<text x="135.0" y="180.0" text-anchor="middle" class="" >已确认的前缀</text>
+</g>
+<g >
+<rect x="345" y="25" width="260" height="88" rx="12" class="accentbox" />
+<text x="475.0" y="77.0" text-anchor="middle" class="" >小模型 / draft</text>
+</g>
+<g >
+<rect x="345" y="228" width="260" height="88" rx="12" class="box" />
+<text x="475.0" y="280.0" text-anchor="middle" class="" >大模型 / target</text>
+</g>
+<path d="M235 170 L345 68" class="wire" />
+<path d="M235 170 L345 270" class="wire" />
+<g id="candidate0" class="ghost">
+<rect x="690" y="44" width="80" height="60" rx="12" class="accentbox" />
+<text x="730.0" y="82.0" text-anchor="middle" class="" >E</text>
+</g>
+<g id="candidate1" class="ghost">
+<rect x="795" y="44" width="80" height="60" rx="12" class="accentbox" />
+<text x="835.0" y="82.0" text-anchor="middle" class="" >F</text>
+</g>
+<g id="candidate2" class="ghost">
+<rect x="900" y="44" width="80" height="60" rx="12" class="accentbox" />
+<text x="940.0" y="82.0" text-anchor="middle" class="" >G</text>
+</g>
+<g id="candidate3" class="ghost">
+<rect x="1005" y="44" width="80" height="60" rx="12" class="accentbox" />
+<text x="1045.0" y="82.0" text-anchor="middle" class="" >H</text>
+</g>
+<path d="M820 118 L820 210" class="wire" id="verify-path" />
+<g id="targets" class="ghost">
+<rect x="690" y="237" width="395" height="70" rx="12" class="accentbox" />
+<text x="887.5" y="280.0" text-anchor="middle" class="" >p₁、p₂、p₃、p₄、p₅</text>
+</g>
+</svg>
+<p class="narration">draft 给出候选及其概率 q。target 读入这些候选，算出每个位置的分布 p；最后再决定<b>哪些 token 可以写进正式答案</b>。
+</p>
+</section>
+<section class="slide lesson" id="causal">
+<div class="kicker">03 · 并行验证
+</div>
+<h2>候选已经写好，因果依赖就变成了一张掩码
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="候选已经写好，因果依赖就变成了一张掩码">
+<text x="240" y="35" text-anchor="middle" class="small" >输入位置</text>
+<text x="930" y="35" text-anchor="middle" class="small" >输出分布</text>
+<text x="135" y="94" text-anchor="end" class="" >前缀末尾</text>
+<rect x="190" y="55" width="98" height="52" rx="12" class="accentbox" id="m00" style="opacity: 0.18;"/>
+<rect x="310" y="55" width="98" height="52" rx="12" class="dim" id="m01" style="opacity: 0.18;"/>
+<rect x="430" y="55" width="98" height="52" rx="12" class="dim" id="m02" style="opacity: 0.18;"/>
+<rect x="550" y="55" width="98" height="52" rx="12" class="dim" id="m03" style="opacity: 0.18;"/>
+<g id="prob0" class="ghost">
+<rect x="770" y="55" width="300" height="52" rx="12" class="box" />
+<text x="920.0" y="89.0" text-anchor="middle" class="" >p(E | 前缀)</text>
+</g>
+<text x="135" y="162" text-anchor="end" class="" >E</text>
+<rect x="190" y="123" width="98" height="52" rx="12" class="accentbox" id="m10" style="opacity: 0.18;"/>
+<rect x="310" y="123" width="98" height="52" rx="12" class="accentbox" id="m11" style="opacity: 0.18;"/>
+<rect x="430" y="123" width="98" height="52" rx="12" class="dim" id="m12" style="opacity: 0.18;"/>
+<rect x="550" y="123" width="98" height="52" rx="12" class="dim" id="m13" style="opacity: 0.18;"/>
+<g id="prob1" class="ghost">
+<rect x="770" y="123" width="300" height="52" rx="12" class="box" />
+<text x="920.0" y="157.0" text-anchor="middle" class="" >p(F | 前缀,E)</text>
+</g>
+<text x="135" y="230" text-anchor="end" class="" >F</text>
+<rect x="190" y="191" width="98" height="52" rx="12" class="accentbox" id="m20" style="opacity: 0.18;"/>
+<rect x="310" y="191" width="98" height="52" rx="12" class="accentbox" id="m21" style="opacity: 0.18;"/>
+<rect x="430" y="191" width="98" height="52" rx="12" class="accentbox" id="m22" style="opacity: 0.18;"/>
+<rect x="550" y="191" width="98" height="52" rx="12" class="dim" id="m23" style="opacity: 0.18;"/>
+<g id="prob2" class="ghost">
+<rect x="770" y="191" width="300" height="52" rx="12" class="box" />
+<text x="920.0" y="225.0" text-anchor="middle" class="" >p(G | 前缀,E,F)</text>
+</g>
+<text x="135" y="298" text-anchor="end" class="" >G</text>
+<rect x="190" y="259" width="98" height="52" rx="12" class="accentbox" id="m30" style="opacity: 0.18;"/>
+<rect x="310" y="259" width="98" height="52" rx="12" class="accentbox" id="m31" style="opacity: 0.18;"/>
+<rect x="430" y="259" width="98" height="52" rx="12" class="accentbox" id="m32" style="opacity: 0.18;"/>
+<rect x="550" y="259" width="98" height="52" rx="12" class="accentbox" id="m33" style="opacity: 0.18;"/>
+<g id="prob3" class="ghost">
+<rect x="770" y="259" width="300" height="52" rx="12" class="box" />
+<text x="920.0" y="293.0" text-anchor="middle" class="" >p(H | 前缀,E,F,G)</text>
+</g>
+</svg>
+<p class="narration">同一轮可以计算所有行，每行仍然<b>只看左侧前缀</b>。如果 E 被拒绝，后面的分布基于错误前缀，后面的候选也就不能沿用。
+</p>
+</section>
+<section class="slide lesson" id="greedy">
+<div class="kicker">04 · 先理解贪心
+</div>
+<h2>连续接受 E、F，遇到 G 就停
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="连续接受 E、F，遇到 G 就停">
+<text x="100" y="52" text-anchor="start" class="" >draft</text>
+<text x="100" y="175" text-anchor="start" class="" >target 的贪心选择</text>
+<text x="100" y="299" text-anchor="start" class="" >正式输出</text>
+<g id="g0" >
+<rect x="380" y="14" width="124" height="65" rx="12" class="box" />
+<text x="442.0" y="54.5" text-anchor="middle" class="" >E</text>
+</g>
+<g id="g1" >
+<rect x="545" y="14" width="124" height="65" rx="12" class="box" />
+<text x="607.0" y="54.5" text-anchor="middle" class="" >F</text>
+</g>
+<g id="g2" >
+<rect x="710" y="14" width="124" height="65" rx="12" class="box" />
+<text x="772.0" y="54.5" text-anchor="middle" class="" >G</text>
+</g>
+<g id="g3" >
+<rect x="875" y="14" width="124" height="65" rx="12" class="box" />
+<text x="937.0" y="54.5" text-anchor="middle" class="" >H</text>
+</g>
+<g id="t0" class="ghost">
+<rect x="380" y="137" width="124" height="65" rx="12" class="accentbox" />
+<text x="442.0" y="177.5" text-anchor="middle" class="" >E</text>
+</g>
+<g id="t1" class="ghost">
+<rect x="545" y="137" width="124" height="65" rx="12" class="accentbox" />
+<text x="607.0" y="177.5" text-anchor="middle" class="" >F</text>
+</g>
+<g id="t2" class="ghost">
+<rect x="710" y="137" width="124" height="65" rx="12" class="accentbox" />
+<text x="772.0" y="177.5" text-anchor="middle" class="" >X</text>
+</g>
+<g id="t3" class="ghost">
+<rect x="875" y="137" width="124" height="65" rx="12" class="accentbox" />
+<text x="937.0" y="177.5" text-anchor="middle" class="" >…</text>
+</g>
+<g id="commit0" class="ghost">
+<rect x="380" y="260" width="124" height="65" rx="12" class="accentbox" />
+<text x="442.0" y="300.5" text-anchor="middle" class="" >E</text>
+</g>
+<g id="commit1" class="ghost">
+<rect x="545" y="260" width="124" height="65" rx="12" class="accentbox" />
+<text x="607.0" y="300.5" text-anchor="middle" class="" >F</text>
+</g>
+<g id="commit2" class="ghost">
+<rect x="710" y="260" width="124" height="65" rx="12" class="accentbox" />
+<text x="772.0" y="300.5" text-anchor="middle" class="" >X</text>
+</g>
+</svg>
+<p class="narration">贪心解码时，候选与 target 的 argmax 一致就接受。第三个位置要 X：<b>改成 X，丢掉 G、H</b>。如果整段都接受，还能从下一位置分布得到一个额外 token。
+</p>
+<p class="note">假设 argmax 与并列值处理规则相同；图中为玩具词表。
+</p>
+</section>
+<section class="slide lesson" id="sampling">
+<div class="kicker">05 · 随机采样
+</div>
+<h2>采样不能只检查“是不是最大概率”
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="采样不能只检查“是不是最大概率”">
+<text x="115" y="35" text-anchor="middle" class="small" >token</text>
+<text x="330" y="35" text-anchor="middle" class="small" >草稿 q</text>
+<text x="590" y="35" text-anchor="middle" class="small" >目标 p</text>
+<text x="895" y="35" text-anchor="middle" class="small" >接受概率 min(1, p/q)</text>
+<g >
+<rect x="65" y="70" width="100" height="58" rx="12" class="box" />
+<text x="115.0" y="107.0" text-anchor="middle" class="" >A</text>
+</g>
+<rect x="235" y="76" width="76.0" height="38" rx="12" class="accentbox" />
+<text x="445" y="106" text-anchor="middle" class="small" >0.2</text>
+<rect x="500" y="76" width="190.0" height="38" rx="12" class="accentbox" />
+<text x="720" y="106" text-anchor="middle" class="small" >0.5</text>
+<g id="a0" class="ghost">
+<rect x="815" y="70" width="175" height="58" rx="12" class="accentbox" />
+<text x="902.5" y="107.0" text-anchor="middle" class="" >1.00</text>
+</g>
+<g >
+<rect x="65" y="155" width="100" height="58" rx="12" class="box" />
+<text x="115.0" y="192.0" text-anchor="middle" class="" >B</text>
+</g>
+<rect x="235" y="161" width="190.0" height="38" rx="12" class="accentbox" />
+<text x="445" y="191" text-anchor="middle" class="small" >0.5</text>
+<rect x="500" y="161" width="114.0" height="38" rx="12" class="accentbox" />
+<text x="720" y="191" text-anchor="middle" class="small" >0.3</text>
+<g id="a1" class="ghost">
+<rect x="815" y="155" width="175" height="58" rx="12" class="accentbox" />
+<text x="902.5" y="192.0" text-anchor="middle" class="" >0.60</text>
+</g>
+<g >
+<rect x="65" y="240" width="100" height="58" rx="12" class="box" />
+<text x="115.0" y="277.0" text-anchor="middle" class="" >C</text>
+</g>
+<rect x="235" y="246" width="114.0" height="38" rx="12" class="accentbox" />
+<text x="445" y="276" text-anchor="middle" class="small" >0.3</text>
+<rect x="500" y="246" width="76.0" height="38" rx="12" class="accentbox" />
+<text x="720" y="276" text-anchor="middle" class="small" >0.2</text>
+<g id="a2" class="ghost">
+<rect x="815" y="240" width="175" height="58" rx="12" class="accentbox" />
+<text x="902.5" y="277.0" text-anchor="middle" class="" >0.67</text>
+</g>
+</svg>
+<p class="narration">候选 x 从 q 中抽出，再以 <b>min(1, p(x)/q(x))</b> 接受。q 给 B 分配得太多，就只留下其中 60%；q 给 A 分配得少，抽到的 A 全部留下。
+</p>
+<p class="note">示意分布；p、q 必须对应同一已接受前缀，并包含实际使用的 temperature / top-p 等采样变换。
+</p>
+</section>
+<section class="slide lesson" id="residual">
+<div class="kicker">06 · 拒绝之后
+</div>
+<h2>把被删掉的概率，补到 target 更想要的地方
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="把被删掉的概率，补到 target 更想要的地方">
+<text x="135" y="35" text-anchor="start" class="small" >候选被接受的概率质量</text>
+<text x="720" y="35" text-anchor="start" class="small" >最终输出分布</text>
+<text x="80" y="103" text-anchor="middle" class="" >A</text>
+<rect x="135" y="75" width="136.0" height="42" rx="12" class="accentbox" />
+<text x="420" y="104" text-anchor="middle" class="small" >0.2</text>
+<rect x="675" y="75" width="136.0" height="42" rx="12" class="accentbox" />
+<rect x="811.0" y="75" width="204.0" height="42" rx="12" class="accentbox ghost" id="residual0"  style="fill:var(--accent-2);stroke:var(--accent-2)"/>
+<text x="1060" y="104" text-anchor="middle" class="small ghost" id="final0" >0.5</text>
+<text x="80" y="181" text-anchor="middle" class="" >B</text>
+<rect x="135" y="153" width="204.0" height="42" rx="12" class="accentbox" />
+<text x="420" y="182" text-anchor="middle" class="small" >0.3</text>
+<rect x="675" y="153" width="204.0" height="42" rx="12" class="accentbox" />
+<rect x="879.0" y="153" width="0" height="42" rx="12" class="accentbox ghost" id="residual1"  style="fill:var(--accent-2);stroke:var(--accent-2)"/>
+<text x="1060" y="182" text-anchor="middle" class="small ghost" id="final1" >0.3</text>
+<text x="80" y="259" text-anchor="middle" class="" >C</text>
+<rect x="135" y="231" width="136.0" height="42" rx="12" class="accentbox" />
+<text x="420" y="260" text-anchor="middle" class="small" >0.2</text>
+<rect x="675" y="231" width="136.0" height="42" rx="12" class="accentbox" />
+<rect x="811.0" y="231" width="0" height="42" rx="12" class="accentbox ghost" id="residual2"  style="fill:var(--accent-2);stroke:var(--accent-2)"/>
+<text x="1060" y="260" text-anchor="middle" class="small ghost" id="final2" >0.2</text>
+<text x="566" y="331" text-anchor="middle" class="small" >拒绝的总质量 0.3 → residual = normalize(max(p − q, 0)) = [1, 0, 0]</text>
+</svg>
+<p class="narration">拒绝时从 <b>normalize(max(p − q, 0))</b> 重采样，而不是直接从 p 重抽。于是每个 token 的总质量是 min(p,q) + max(p−q,0) = p。
+</p>
+<p class="note">同一位置先接受或拒绝；发生拒绝后结束这一轮，丢弃其后的草稿。
+</p>
+</section>
+<section class="slide lesson" id="cache">
+<div class="kicker">07 · 显存也跟着回滚
+</div>
+<h2>接受的是前缀，保留下来的 KV 也是前缀
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="接受的是前缀，保留下来的 KV 也是前缀">
+<text x="130" y="32" text-anchor="start" class="" >KV cache</text>
+<text x="130" y="320" text-anchor="start" class=" ghost" id="next-round" >下轮从纠正后的 X 继续</text>
+<g id="kv0" >
+<rect x="130" y="90" width="130" height="105" rx="12" class="accentbox" />
+<text x="195.0" y="150.5" text-anchor="middle" class="" >历史</text>
+</g>
+<g id="kv1" >
+<rect x="282" y="90" width="130" height="105" rx="12" class="accentbox" />
+<text x="347.0" y="150.5" text-anchor="middle" class="" >历史</text>
+</g>
+<g id="kv2" >
+<rect x="434" y="90" width="130" height="105" rx="12" class="box" />
+<text x="499.0" y="150.5" text-anchor="middle" class="" >E</text>
+</g>
+<g id="kv3" >
+<rect x="586" y="90" width="130" height="105" rx="12" class="box" />
+<text x="651.0" y="150.5" text-anchor="middle" class="" >F</text>
+</g>
+<g id="kv4" >
+<rect x="738" y="90" width="130" height="105" rx="12" class="box" />
+<text x="803.0" y="150.5" text-anchor="middle" class="" >G</text>
+</g>
+<g id="kv5" >
+<rect x="890" y="90" width="130" height="105" rx="12" class="box" />
+<text x="955.0" y="150.5" text-anchor="middle" class="" >H</text>
+</g>
+<rect x="430" y="72" width="610" height="140" rx="12" class="dim" id="temporary" style="fill:none;stroke-dasharray:6 5"/>
+<text x="733" y="242" text-anchor="middle" class="small" >候选对应的临时 KV</text>
+<g id="corrected-kv" class="ghost">
+<rect x="738" y="90" width="130" height="105" rx="12" class="accentbox" />
+<text x="803.0" y="150.5" text-anchor="middle" class="" >X 的 KV</text>
+</g>
+</svg>
+<p class="narration">验证可以提前算出候选的 KV。E、F 被接受就保留；G、H 的位置被回收。<b>纠正的 X 在后续前向中补出 KV</b>，成为下一轮的起点。
+</p>
+</section>
+<section class="slide lesson" id="cost">
+<div class="kicker">08 · 速度账本
+</div>
+<h2>省下的串行等待，要大于多做的草拟与验证
+</h2>
+<svg class="scene" viewBox="0 0 1152 350" role="img" aria-label="省下的串行等待，要大于多做的草拟与验证">
+<text x="80" y="55" text-anchor="start" class="" >普通 decode</text>
+<text x="80" y="185" text-anchor="start" class="" >投机一轮</text>
+<g >
+<rect x="315" y="20" width="230" height="65" rx="12" class="box" />
+<text x="430.0" y="60.5" text-anchor="middle" class="" >10 ms → 1 token</text>
+</g>
+<g >
+<rect x="560" y="20" width="230" height="65" rx="12" class="box" />
+<text x="675.0" y="60.5" text-anchor="middle" class="" >10 ms → 1 token</text>
+</g>
+<g >
+<rect x="805" y="20" width="230" height="65" rx="12" class="box" />
+<text x="920.0" y="60.5" text-anchor="middle" class="" >10 ms → 1 token</text>
+</g>
+<g id="cost-draft" class="ghost">
+<rect x="315" y="150" width="120" height="65" rx="12" class="accentbox" />
+<text x="375.0" y="190.5" text-anchor="middle" class="" >draft 2</text>
+</g>
+<g id="cost-verify" class="ghost">
+<rect x="443" y="150" width="294" height="65" rx="12" class="accentbox" />
+<text x="590.0" y="190.5" text-anchor="middle" class="" >verify 12 ms</text>
+</g>
+<text x="810" y="195" text-anchor="middle" class=" ghost" id="cost-output" >→ 平均 3 token</text>
+<text x="570" y="304" text-anchor="middle" class="small" >每 token 时间 = (草拟耗时 + 验证耗时) / 平均输出数</text>
+</svg>
+<p class="narration">示意：普通生成 3 个 token 用 30 ms，投机一轮用 14 ms。实际收益由<b>接受长度、草拟开销、验证 batch 和系统负载</b>一起决定。
+</p>
+<p class="note">示例数字不是测量结果。平均输出数包含拒绝位置的纠正 token，或全部接受后的额外 token。
+</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">09 · 为什么要调长度
+</div>
+<h2>更长的草稿，不一定更快
+</h2>
+<div class="two-col">
+<div class="card">
+<h3>前缀越长，活到末尾越难
+</h3>
+<p>假设每个位置条件接受率都是 0.8。
+</p>
+<p class="formula">a₁ = 0.8<br>a₂ = 0.64<br>a₄ = 0.4096
+</p>
+<p>第 4 个 token 只有约 41% 的机会用得上。
+</p>
+</div>
+<div class="card">
+<h3>验证预算要花在有效位置
+</h3>
+<p>GPU 空闲时，多检查几个位置可能很便宜。
+</p>
+<p>很多用户同时生成时，被拒绝的后缀也占用 batch 容量。
+</p>
+<p>让 draft 更准，再按置信度与负载决定送验长度。
+</p>
+</div>
+</div>
+<p class="note">0.8 为示意；真实条件接受率会随位置、上下文和任务变化。
+</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">参考与延伸阅读
+</div>
+<h2>把原理接回真实系统
+</h2>
+<ul class="reference-list">
+<li>
+<a href="https://arxiv.org/abs/2211.17192" target="_blank" rel="noreferrer">Leviathan et al. · Fast Inference from Transformers via Speculative Decoding</a>
+<br>
+<span class="mini muted">接受率、残差重采样与输出分布保持。</span>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2302.01318" target="_blank" rel="noreferrer">Chen et al. · Accelerating Large Language Model Decoding with Speculative Sampling</a>
+<br>
+<span class="mini muted">批量验证与 speculative sampling。</span>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2607.05147" target="_blank" rel="noreferrer">DSpark · confidence-scheduled speculative decoding</a>
+<br>
+<span class="mini muted">草稿结构与服务负载下的验证长度选择。</span>
+</li>
+</ul>
+<p class="mini">继续：<a href="/posts/dspark/">DSpark</a> · <a href="/posts/continuous-batching/">Continuous batching</a> · <a href="/posts/kv-cache-compression/">KV cache 压缩</a>
+</p>
+</section>
+</div>
+</main>
+<script src="/assets/slides.js">
+</script>
+<script src="/assets/anim.js">
+</script>
+<script>(()=>{'use strict';
+function bind(id,make){const el=document.getElementById(id);const tl=Anim.timeline({root:el});make(tl);Anim.slide(el,tl,{steps:true,controls:true});}
+bind('serial',tl=>{[0,1,2,3].forEach(i=>tl.to('#serial'+i+' rect',{stroke:'var(--accent)'},{dur:.22}).to('#out'+i,{opacity:1,y:-8},{dur:.28}));tl.label('逐个输出');tl.to('[id^=draft]',{opacity:1},{dur:.4,stagger:.06}).to('#onepass',{opacity:1},{dur:.5}).label('整段验证');});
+bind('cycle',tl=>{tl.to('[id^=candidate]',{opacity:1},{dur:.3,stagger:.18}).label('草拟');tl.to('#verify-path',{draw:1},{dur:.5}).to('#targets',{opacity:1},{dur:.5}).label('验证');});
+bind('causal',tl=>{[0,1,2,3].forEach(r=>{tl.to('[id^=m'+r+']',{opacity:1},{dur:.4}).to('#prob'+r,{opacity:1},{at:'<',dur:.4}).label('位置'+r);});});
+bind('greedy',tl=>{tl.to('#t0,#t1',{opacity:1},{dur:.5,stagger:.15}).to('#g0 rect,#g1 rect',{stroke:'var(--accent)'},{dur:.3}).to('#commit0,#commit1',{opacity:1},{dur:.4}).label('接受前缀');tl.to('#t2',{opacity:1},{dur:.4}).to('#g2,#g3',{opacity:.2},{dur:.4}).to('#commit2',{opacity:1},{dur:.4}).label('纠正并停止');});
+bind('sampling',tl=>{[0,1,2].forEach(i=>tl.to('#a'+i,{opacity:1,x:-15},{dur:.55}).label('接受概率'+i));});
+bind('residual',tl=>{tl.to('#residual0',{opacity:1},{dur:.7}).label('残差补回');tl.to('[id^=final]',{opacity:1},{dur:.4,stagger:.12}).label('恢复目标分布');});
+bind('cache',tl=>{tl.to('#kv2 rect,#kv3 rect',{stroke:'var(--accent)'},{dur:.5}).label('提交前缀');tl.to('#kv4,#kv5',{y:55,opacity:0},{dur:.6,stagger:.1}).to('#temporary',{opacity:0},{dur:.3}).label('回收后缀');tl.to('#corrected-kv,#next-round',{opacity:1},{dur:.5}).label('继续生成');});
+bind('cost',tl=>{tl.to('#cost-draft',{opacity:1},{dur:.5}).label('草拟成本');tl.to('#cost-verify',{opacity:1},{dur:.65}).to('#cost-output',{opacity:1},{dur:.4}).label('每轮收益');});
+})();
+</script>
+<script src="/assets/post-links.js">
+</script>
+<script src="/assets/posts.js">
+</script>
+</body>
+</html>

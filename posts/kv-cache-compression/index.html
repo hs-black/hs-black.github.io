@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KV cache 压缩：把历史装得更小 · Zunzhe Zhang</title>
+<meta name="description" content="用动画区分 GQA/MQA、MLA latent、token 合并与淘汰、低位量化，计算容量收益并理解精度与带宽代价。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
+.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
+.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">动画图解 LLM 系统</div>
+<h1 class="rise" style="--d:1">KV cache 压缩：把历史装得更小</h1>
+<p class="muted rise" style="--d:2">同样一段历史，能不能用更少的字节记住？</p>
+<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
+</section>
+<section class="slide lesson" id="axes">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>先数清楚，缓存里有什么</h2>
+<p class="intro">一个标准 KV cache：层 × token × KV head × head dimension × 数值字节数。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="三维 KV 结构沿头数、token 数和每格表示大小逐步缩减">
+</svg>
+<div class="captions">
+<p>每个小格代表一份 KV。长上下文、更多并发、更多层，都会让这些格子继续堆起来。</p>
+<p>沿 head 轴做共享：GQA / MQA 减少每个 token 的 KV 头数。</p>
+<p>沿表示或 token 轴做压缩，再降低每个数的精度。不同方法省的是不同的一维。</p>
+</div>
+</section>
+<section class="slide lesson" id="gqa">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>GQA：几个 Q，共用一组 K、V</h2>
+<p class="intro">Q 的头数保持不变，K、V 的头数减少。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="八个 Q 头从各自 KV 改连到两组共享 KV，再连到一组 KV">
+</svg>
+<div class="captions">
+<p>左侧 8 个 query heads 原本各有一组 K、V，缓存需要保存 8 份。</p>
+<p>把 query heads 分成两组，每组 4 个 Q 共用一组 K、V。KV 头数从 8 变成 2。</p>
+<p>MQA 再走一步：所有 Q 共用一组 KV。不同 Q 仍会产生不同 attention 权重与输出。</p>
+</div>
+<p class="note">8 / 2 / 1 为结构示意；GQA / MQA 是模型结构选择，通常需要训练或 uptraining。</p>
+</section>
+<section class="slide lesson" id="mla">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>MLA：把多头 KV 存成低维 latent</h2>
+<p class="intro">多个头的内容可以先压进一小条联合表示 c，再用于 attention。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="展开的多头 KV 收缩为 latent，内容路径和单独的位置 key 一起供查询使用">
+</svg>
+<div class="captions">
+<p>标准多头缓存直接存展开的 K、V。MLA 为每个 token 缓存低维 latent c。</p>
+<p>内容路径由 c 提供多个头需要的 K、V 信息；推理中可通过矩阵乘法结合律，把部分上投影吸收到其他权重中。</p>
+<p>位置路径单独保存用于 RoPE 的 key。缓存由“内容 latent + 位置 key”组成；长度仍然随 token 数增长。</p>
+</div>
+<p class="note">示意结构来自 DeepSeek-V2 的 MLA；实际尺寸与权重吸收方式由架构决定。</p>
+</section>
+<section class="slide lesson" id="tokens">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>少存 token：合并，或淘汰</h2>
+<p class="intro">头数和维度都不变时，还能减少历史位置的数量。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="八个历史位置的一组被压成摘要，另一路淘汰低优先级位置">
+</svg>
+<div class="captions">
+<p>一开始保存每个位置。越靠右越新，旧位置仍占着完整的 KV 空间。</p>
+<p>合并：把一组 token 表示汇成一个摘要。位置变少，但摘要要承载这组内容。</p>
+<p>淘汰：只保留被选中的 KV，例如重要历史加最近窗口；未来若要用到被丢弃的细节，就无法直接读取它。</p>
+</div>
+<p class="note">动画只展示两种操作；实际策略可能按层、头、query 或累积 attention 得分选择。</p>
+</section>
+<section class="slide lesson" id="quant">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>量化：位置都留着，每个数更短</h2>
+<p class="intro">用低位整数和少量 scale 元数据近似原来的 K、V。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="16 位宽的数据条缩成 4 位编码，同时保留 scale 元数据并重建近似浮点值">
+</svg>
+<div class="captions">
+<p>BF16 的每个数占 16 bit。降低位宽，就能让同一段历史少搬一些字节。</p>
+<p>按组量化：x 大致表示为 s × (q − z)。把浮点数映射到有限整数等级，并保存 scale 等元数据。</p>
+<p>attention kernel 读取后反量化，或使用支持低位数据的计算路径。压缩比例还要扣除元数据、残差区和对齐开销。</p>
+</div>
+<p class="note">4 bit 为示意；KIVI 对 K 按通道、对 V 按 token 分组，以适应不同的离群值分布。</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>同一份缓存，四个节省杠杆</h2>
+<table>
+<thead>
+<tr>
+<th>方法</th>
+<th>减少什么</th>
+<th>保留什么</th>
+<th>主要代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GQA / MQA</td>
+<td>KV heads</td>
+<td>每个历史位置</td>
+<td>结构与训练要配合</td>
+</tr>
+<tr>
+<td>MLA</td>
+<td>每个 token 的表示</td>
+<td>每个历史位置</td>
+<td>投影、kernel 与布局</td>
+</tr>
+<tr>
+<td>合并 / 淘汰</td>
+<td>历史位置数</td>
+<td>摘要 / 被选中位置</td>
+<td>细粒度检索能力</td>
+</tr>
+<tr>
+<td>KV 量化</td>
+<td>每个数的 bit 数</td>
+<td>位置与张量形状</td>
+<td>误差与反量化开销</td>
+</tr>
+</tbody>
+</table>
+<p class="note">PagedAttention 管理缓存的物理分块；prefix caching 复用相同前缀。这两者不属于数值或语义压缩。</p>
+</section>
+<section class="slide lesson" id="budget">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>把节省落实到字节数</h2>
+<p class="intro">以一个假想模型为例：32 层、8192 token、32 个 KV 头、head dim 128。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="KV 内存柱先因 GQA 缩为四分之一，再因四位量化缩为四分之一">
+</svg>
+<div class="captions">
+<p>BF16 缓存：2 × 32 × 8192 × 32 × 128 × 2 = <b>4 GiB</b>，每条序列一份。</p>
+<p>换成 8 个 KV 头的 GQA，其他维度不变：4 GiB ÷ 4 = <b>1 GiB</b>。</p>
+<p>再把数值编码从 16 bit 降到 4 bit：纯载荷降至 <b>0.25 GiB</b>。实际占用还要加量化元数据等开销。</p>
+</div>
+<p class="note">算术示例；模型需匹配相应的 GQA 结构与量化方案。</p>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>怎么判断压得是否值得？</h2>
+<div class="two-col">
+<div class="card">
+<h3>先量准确性</h3>
+<p>在自己的长上下文、代码、检索任务上比较输出。尤其检查远距离细节、多轮对话和罕见实体。</p>
+</div>
+<div class="card">
+<h3>再量系统收益</h3>
+<p>看峰值 KV 占用、可用并发、prefill 延迟和 decode 延迟。压得更小不自动等于端到端更快。</p>
+</div>
+<div class="card">
+<h3>定位误差来源</h3>
+<p>头共享改变模型容量；位置压缩改变可见细节；低位量化改变数值。分别做消融，才知道瓶颈在哪。</p>
+</div>
+<div class="card">
+<h3>让 kernel 接住收益</h3>
+<p>紧凑布局、融合反量化、合适的 block 大小，才能把字节减少兑现成带宽节省。</p>
+</div>
+</div>
+</section>
+<section class="slide lesson">
+<div class="kicker">参考资料</div>
+<h2>参考与延伸阅读</h2>
+<ul class="reference-list">
+<li>
+<a href="https://arxiv.org/abs/2305.13245" target="_blank" rel="noopener noreferrer">GQA · Ainslie et al.：头共享与 uptraining</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener noreferrer">DeepSeek-V2：Multi-head Latent Attention</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2402.02750" target="_blank" rel="noopener noreferrer">KIVI：KV cache 的非对称低位量化</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2306.14048" target="_blank" rel="noopener noreferrer">H₂O：保留重要历史与最近 token</a>
+</li>
+</ul>
+<p class="related">继续看：<a href="/posts/kv-cache/">KV cache</a> · <a href="/posts/sparse-attention/">Sparse attention</a> · <a href="/posts/llm-quantization/">LLM 量化</a>
+</p>
+</section>
+</div>
+</main><script src="/assets/slides.js"></script><script src="/assets/anim.js"></script><script>
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
+const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
+const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
+const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
+const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
+function scene(id,svg,steps){
+ const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
+ const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
+ steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
+ const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
+ Anim.slide(el,tl,{steps:true,controls:true});
+}
+const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
+
+
+let axes=T(230,35,'token 轴','label')+T(550,35,'head 轴','label')+T(880,35,'每个表示','label');for(let r=0;r<5;r++)for(let c=0;c<5;c++)axes+=R('cell'+r+c,120+c*90,65+r*48,76,34,'accentbox');axes+=B('payload',760,100,270,130,'16 bit × dim');scene('axes',axes,[{name:'减少 KV 头',run:(tl,t)=>{for(let r=0;r<5;r++)for(let c=2;c<5;c++)a(tl,t,'#cell'+r+c,{opacity:.12,x:-c*10},c*.08)}},{name:'缩短历史或表示',run:(tl,t)=>{for(let r=3;r<5;r++)for(let c=0;c<2;c++)a(tl,t,'#cell'+r+c,{opacity:.12,y:-35},r*.07);a(tl,t,'#payload',{scale:.65})}}]);
+let gqa=T(160,25,'Query heads','label')+T(550,25,'MHA：8 份 KV','label')+T(930,25,'共享后的 KV','label');for(let i=0;i<8;i++){gqa+=B('q'+i,100,48+i*34,120,29,'Q'+(i+1),'accentbox')+B('kv'+i,470,48+i*34,150,29,'KV'+(i+1))+L('oldwire'+i,230,62+i*34,460,62+i*34,'wire');gqa+=L('groupwire'+i,230,62+i*34,840,i<4?110:240,'hotwire ghost')+L('singlewire'+i,230,62+i*34,840,175,'hotwire ghost')}gqa+=B('group0',850,80,160,60,'KV 组 1','greenbox ghost')+B('group1',850,210,160,60,'KV 组 2','greenbox ghost')+B('single',850,145,160,60,'共享 KV','greenbox ghost');scene('gqa',gqa,[{name:'8 Q → 2 KV',run:(tl,t)=>{a(tl,t,'[id^=kv], [id^=oldwire]',{opacity:.08});a(tl,t,'[id^=group]',{opacity:1})}},{name:'8 Q → 1 KV',run:(tl,t)=>{a(tl,t,'[id^=group]',{opacity:0});a(tl,t,'#single, [id^=singlewire]',{opacity:1})}}]);
+let mla=T(200,30,'当前 token 的 hidden state','label')+B('hidden',80,75,240,160,'h')+L('compress',335,155,470,155,'wire')+B('latent',490,105,180,100,'内容 c','accentbox')+B('pos',490,250,180,50,'位置 key','greenbox ghost')+B('heads',820,55,240,200,'多头内容 K、V')+L('expand',685,155,805,155,'wire')+B('query',820,270,240,50,'当前 Q + 位置','accentbox ghost');scene('mla',mla,[{name:'缓存低维内容',run:(tl,t)=>{a(tl,t,'#heads',{scale:.55,opacity:.25});a(tl,t,'#latent',{scale:1.1});a(tl,t,'#expand',{stroke:'var(--accent)'})}},{name:'补上位置路径',run:(tl,t)=>{a(tl,t,'#pos, #query',{opacity:1});a(tl,t,'#latent',{y:-10});a(tl,t,'#pos',{y:-10})}}]);
+let toks=T(130,62,'合并','label')+T(130,222,'淘汰','label');for(let i=0;i<8;i++){toks+=B('merge'+i,240+i*95,30,80,62,'t'+(i+1),'accentbox')+B('evict'+i,240+i*95,190,80,62,'t'+(i+1),'greenbox')}toks+=B('summary',335,115,180,50,'摘要 c₁…₄','accentbox ghost');scene('tokens',toks,[{name:'四个位置合成摘要',run:(tl,t)=>{for(let i=0;i<4;i++)a(tl,t,'#merge'+i,{x:(1.5-i)*95,y:65,scale:.35,opacity:0},i*.08);a(tl,t,'#summary',{opacity:1},.55)}},{name:'保留重要与最近位置',run:(tl,t)=>{[1,2,4].forEach((i,j)=>a(tl,t,'#evict'+i,{y:45,opacity:.1},j*.12));[0,3,5,6,7].forEach(i=>a(tl,t,'#evict'+i,{scale:1.07}))}}]);
+scene('quant',T(215,35,'原始数据','label')+T(560,35,'压缩编码','label')+T(925,35,'读取时恢复','label')+B('float',65,85,300,90,'x = 0.73')+B('integer',450,85,220,90,'q = 7','accentbox ghost')+B('scale',450,220,220,60,'s = 0.1, z = 0','greenbox ghost')+B('approx',805,85,250,90,'x̂ = 0.7','ghost box')+L('encode',380,130,435,130)+L('decode',685,130,790,130)+R('bits',65,240,300,30,'accentbox'),[{name:'编码并保留 scale',run:(tl,t)=>{a(tl,t,'#integer, #scale',{opacity:1});a(tl,t,'#bits',{attr:{width:75}});a(tl,t,'#float',{scale:.85})}},{name:'读取近似值',run:(tl,t)=>{a(tl,t,'#integer',{x:30});a(tl,t,'#approx',{opacity:1});a(tl,t,'#scale',{y:-30})}}]);
+scene('budget',T(210,75,'单序列 KV 容量','label')+R('bar',130,120,860,100,'accentbox')+'<text id="gib" class="value" x="560" y="285" text-anchor="middle">4.00 GiB</text>',[{name:'GQA：32 → 8 头',run:(tl,t)=>{a(tl,t,'#bar',{attr:{width:215}});a(tl,t,'#gib',{text:1,fmt:v=>v.toFixed(2)+' GiB'})}},{name:'16 → 4 bit 载荷',run:(tl,t)=>{a(tl,t,'#bar',{attr:{width:53.75}});a(tl,t,'#gib',{text:.25,fmt:v=>v.toFixed(2)+' GiB + 元数据'})}}]);
+</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>

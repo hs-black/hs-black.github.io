@@ -125,6 +125,21 @@ body.deck-page {
 }
 .deck-bar a { pointer-events: auto; color: var(--text-faint); }
 .deck-bar a:hover { color: var(--text); text-decoration: none; }
+.deck-navigation { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
+.deck-navigation button, .deck-jump {
+  color: var(--text-soft); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 8px; font: inherit; min-height: 36px;
+}
+.deck-navigation button { min-width: 36px; cursor: pointer; font-size: 18px; }
+.deck-jump { max-width: 280px; padding: 4px 8px; }
+.deck-count { white-space: nowrap; font-variant-numeric: tabular-nums; }
+.deck-navigation :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+@media (max-width: 700px) {
+  .deck-hint { display: none; }
+  .deck-bar { padding: 8px; }
+  .deck-navigation { gap: 6px; }
+  .deck-jump { max-width: clamp(70px, calc(100vw - 250px), 140px); }
+}
 .deck-hint { opacity: 0.8; }
 @media (hover: none) { .deck-hint { display: none; } }
 

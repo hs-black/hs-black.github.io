@@ -83,6 +83,7 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
+      <div class="callout"><a href="/posts/linear-attention/">线性注意力动画幻灯片</a>：先看历史信息怎样累积成一个状态，再看门控和 delta 更新怎样修改这个状态。</div>
       <p>3 层线性注意力配 1 层全注意力，在同样的训练配方（1.4T token）下，短上下文、长上下文和 RL 三种设定都胜过了全注意力的基线；同时 KV cache 最多减少 75%，1M 上下文下 decode 吞吐最多提高约 6 倍。这是 Moonshot AI 2025 年 10 月发布的混合注意力架构 Kimi Linear。它的核心是一个新的线性注意力模块 <strong>KDA（Kimi Delta Attention）</strong>：在 Gated DeltaNet 的基础上，把“每个头一个标量”的遗忘门换成“每个通道一个”的细粒度门，并为这个结构设计了专门的分块并行算法。</p>
       <p>KDA 处在线性注意力一条清晰的演化线上：加性记忆 → 遗忘门 → delta 规则 → Gated DeltaNet → 通道级门。这套架构后来成了 Kimi K3 的骨架，见<a href="/posts/kimi-k3/">K3 那篇</a>。</p>
 

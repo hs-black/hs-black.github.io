@@ -76,6 +76,7 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
+      <div class="callout"><a href="/posts/distributed-inference/">分布式推理动画幻灯片</a>：把权重、KV cache 和中间结果放进每张 GPU，看清计算与通信发生在哪里。</div>
       <p>训练时我们只关心一件事：每秒每张卡处理多少 token。推理多了一个维度——<strong>延迟</strong>。用户在等第一个字出来，在等后面的字一个个往外冒。好在推理可以拆成能算的东西：每一步要从显存里搬多少字节、做多少 FLOPs、什么时候受带宽限制、什么时候受算力限制。KV cache 压缩、张量并行、预填充/解码分离、continuous batching、PagedAttention、前缀缓存、投机解码和量化，解决的都是这本账里的某一项。</p>
       <p>算例主要用 TPU v5e：它的规格简单、每美元算力高，数字也好算；需要时同时给出 H100 的对应数字。算术强度、硬件强度这两个概念来自 <a href="/posts/scaling-roofline/">Roofline</a>。</p>
 

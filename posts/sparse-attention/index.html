@@ -1,0 +1,182 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sparse attention：只看需要的历史 · Zunzhe Zhang</title>
+<meta name="description" content="动画讲解 causal mask、滑动窗口、全局 token、内容选择与 block sparse，理解少读哪些 KV、选择成本，以及稀疏访问和缓存压缩的区别。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css">
+<link rel="stylesheet" href="/assets/slides.css">
+<style>
+.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
+.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
+.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
+.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+</style>
+</head>
+<body class="deck-page">
+<main class="deck">
+<div class="stage">
+<section class="slide center">
+<div class="kicker rise">动画图解 LLM 系统</div>
+<h1 class="rise" style="--d:1">Sparse attention：只看需要的历史</h1>
+<p class="muted rise" style="--d:2">上下文很长，当前 token 一定要翻遍每一页吗？</p>
+<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
+</section>
+<section class="slide lesson" id="dense">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>Full attention：每个 Q 都看全部可见历史</h2>
+<p class="intro">训练与 prefill 中，attention 的配对数随序列长度近似平方增长。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="因果下三角按行亮起，然后只保留每行一部分允许访问的格子">
+</svg>
+<div class="captions">
+<p>每个格子是一对 Q 与 K。因果模型只使用下三角：位置 i 能读取 1…i。</p>
+<p>从第 1 行扫到第 8 行，读取次数是 1 + 2 + … + 8 = 36。未来位置始终不可见。</p>
+<p>稀疏化是在这个可见区域里再选一部分位置。只要 mask 允许，选中的位置照常做点积、softmax 和加权求和。</p>
+</div>
+</section>
+<section class="slide lesson" id="window">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>滑动窗口：只看最近的 w 个 token</h2>
+<p class="intro">很多局部关系发生在附近，例如短语、语法和刚刚出现的实体。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="查询窗口从 token 6 滑到 token 7，近邻高亮前移并展示跨层间接传播">
+</svg>
+<div class="captions">
+<p>把窗口宽度设为 3：位置 6 只读取 4、5、6。更早的 token 本层不直接读取。</p>
+<p>当新 token 到来，窗口向前滑一格。读取量由全部历史变为固定的 3 份 KV。</p>
+<p>堆叠多层后，信息可以逐层传播到更远处；单层直接可见范围仍然由窗口决定。</p>
+</div>
+<p class="note">窗口宽度 3 为演示值；计算成本按每个 query 访问的 key 数量计算。</p>
+</section>
+<section class="slide lesson" id="global">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>局部之外，再留少量远程入口</h2>
+<p class="intro">固定稀疏模式可以组合局部窗口与全局位置。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="当前查询同时连接局部窗口和一个较早全局位置，未来全局位置被因果掩码挡住">
+</svg>
+<div class="captions">
+<p>橙色位置是最近窗口。紫色位置是允许额外访问的全局 token，例如某些结构性标记。</p>
+<p>当前 Q 同时读取两类位置：近处保细节，远程入口传递更早的信息。</p>
+<p>用于自回归生成时，全局位置也受因果约束：任何一行都不能看见未来。</p>
+</div>
+<p class="note">Longformer 的原始设置包含双向任务；这里画的是保持 causal mask 的自回归示意。</p>
+</section>
+<section class="slide lesson" id="select">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>动态稀疏：让内容决定读取哪里</h2>
+<p class="intro">“最近”不等于“相关”。重要答案也许在几千个 token 之前。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="选择器对八个历史位置打分，返回三个索引，只有选中的 KV 流向 attention">
+</svg>
+<div class="captions">
+<p>查询是“订单号是什么？” 当前 Q 先经过选择器，找出更值得读取的历史位置。</p>
+<p>选择器输出位置索引，例如 2、5、7。attention kernel 只对这些位置的完整 K、V 做计算。</p>
+<p>选择也有成本：若选择器先扫描所有完整 K，仍会搬大量数据。轻量索引或压缩表示能减少这一步的开销。</p>
+</div>
+<p class="note">分数与选中位置为示意；最终集合还可以加入局部窗口和必要的保留位置。</p>
+</section>
+<section class="slide lesson" id="blocks">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>GPU 更喜欢整块读取</h2>
+<p class="intro">零散地省算术，不一定省时间；内存访问和矩阵乘法都需要规律。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="零散选择聚合成连续 token block，被选中的完整块流向 GPU">
+</svg>
+<div class="captions">
+<p>逐 token 选择可能产生许多零碎地址。GPU 要反复 gather，计算块也不容易填满。</p>
+<p>把相邻 token 组织成 block，再按 block 选择。一次搬一整块，方便连续读取与 tiled kernel。</p>
+<p>块越大，调度更规整，也会多读一些不太相关的 token。块大小需要与选择粒度一起权衡。</p>
+</div>
+</section>
+<section class="slide lesson" id="cost">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>少读多少？先看 k 与 n</h2>
+<p class="intro">序列长 n；每个 query 最多读取 k 个位置；head dimension 是 d。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="长度增长使全量读取条加长，稀疏读取保持 k 并额外展示选择开销">
+</svg>
+<div class="captions">
+<p>Full causal attention 的 prefill 配对数约 n²/2；decode 的新 Q 读取 n 个位置。</p>
+<p>若每个 Q 只读 k 个位置，attention 核心约为 prefill O(nkd)、decode O(kd)。</p>
+<p>总时间还包括选择、索引、数据搬运与其他网络层。只有这些成本也划算，稀疏化才会带来端到端收益。</p>
+</div>
+<p class="note">示意 n = 16、k = 4；复杂度忽略层数与头数，且不计选择器。</p>
+</section>
+<section class="slide lesson" id="different">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>少读历史，与压小历史，是两件事</h2>
+<p class="intro">可以让同一模型同时使用稀疏访问和压缩后的 KV 表示。</p>
+<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="左侧查询跳读原始位置，右侧多个位置汇成一个压缩摘要">
+</svg>
+<div class="captions">
+<p>左边保留原始位置，但当前 Q 只选择一部分来读。没有被选中的位置仍可能留在 cache。</p>
+<p>右边把四个位置变成一个摘要；即使读取这个摘要，也不是逐个读取原来的四份细节。</p>
+<p>组合时，先决定“历史怎么存”，再决定“当前读哪些”。是否释放旧 KV，要看未来查询还会不会需要它。</p>
+</div>
+</section>
+<section class="slide lesson">
+<div class="kicker">动画图解 LLM 系统</div>
+<h2>从任务出发选择稀疏模式</h2>
+<div class="two-col">
+<div class="card">
+<h3>局部模式</h3>
+<p>规则简单、访问连续、kernel 好实现。适合大量依赖近邻的层，也可以和 full attention 层交替使用。</p>
+</div>
+<div class="card">
+<h3>内容选择</h3>
+<p>能找回远处的相关位置。需要训练或设计选择器，并控制漏选与选择开销。</p>
+</div>
+<div class="card">
+<h3>块级模式</h3>
+<p>更容易把理论节省变成 GPU 吞吐。要检查块大小、gather 开销与稀疏 kernel 的利用率。</p>
+</div>
+<div class="card">
+<h3>评估真正的难题</h3>
+<p>长距离检索、跨段推理、多处信息组合；同时记录延迟、吞吐和缓存占用。</p>
+</div>
+</div>
+</section>
+<section class="slide lesson">
+<div class="kicker">参考资料</div>
+<h2>参考与延伸阅读</h2>
+<ul class="reference-list">
+<li>
+<a href="https://arxiv.org/abs/2004.05150" target="_blank" rel="noopener noreferrer">Longformer：局部窗口与全局 attention</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2007.14062" target="_blank" rel="noopener noreferrer">Big Bird：局部、全局与随机连接</a>
+</li>
+<li>
+<a href="https://arxiv.org/abs/2502.11089" target="_blank" rel="noopener noreferrer">Native Sparse Attention：硬件友好的可训练稀疏 attention</a>
+</li>
+<li>
+<a href="https://github.com/deepseek-ai/DeepSeek-V3.2-Exp" target="_blank" rel="noopener noreferrer">DeepSeek-V3.2-Exp：DeepSeek Sparse Attention 与索引器</a>
+</li>
+</ul>
+<p class="related">继续看：<a href="/posts/kv-cache/">KV cache</a> · <a href="/posts/kv-cache-compression/">KV 压缩</a> · <a href="/posts/linear-attention/">Linear attention</a>
+</p>
+</section>
+</div>
+</main><script src="/assets/slides.js"></script><script src="/assets/anim.js"></script><script>
+const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
+const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
+const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
+const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
+const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
+function scene(id,svg,steps){
+ const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
+ const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
+ steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
+ const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
+ Anim.slide(el,tl,{steps:true,controls:true});
+}
+const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
+
+
+let dense=T(505,25,'Key 位置','label')+T(165,180,'Query','label');for(let r=0;r<8;r++)for(let c=0;c<8;c++)dense+=R('cell'+r+c,310+c*44,45+r*34,37,27,c<=r?'box':'box soft');dense+=B('count',790,115,240,80,'0 对 QK','accentbox');scene('dense',dense,[{name:'扫过所有可见位置',run:(tl,t)=>{for(let r=0;r<8;r++)for(let c=0;c<=r;c++)a(tl,t,'#cell'+r+c,{fill:'var(--accent)'},r*.08);a(tl,t,'#count text',{text:36,fmt:v=>Math.round(v)+' 对 QK'})}},{name:'只计算选中位置',run:(tl,t)=>{for(let r=0;r<8;r++)for(let c=0;c<=r;c++)if(c<r-1&&c!==0)a(tl,t,'#cell'+r+c,{opacity:.15});a(tl,t,'#count text',{text:21,fmt:v=>Math.round(v)+' 对 QK'})}}]);
+let win=T(540,35,'历史位置','label');for(let i=0;i<8;i++)win+=B('token'+i,90+i*120,65,98,65,'t'+(i+1),i>=3&&i<=5?'accentbox':'box soft');win+=R('frame',438,55,354,85,'wire')+B('query',690,230,160,60,'Q₆','accentbox')+L('flow',770,220,745,145,'wire')+T(350,275,'多层：信息逐层向右传递','label');scene('window',win,[{name:'窗口跟着查询滑动',run:(tl,t)=>{a(tl,t,'#frame',{x:120});a(tl,t,'#token3',{opacity:.23});a(tl,t,'#token6',{opacity:1});a(tl,t,'#query',{x:120});a(tl,t,'#query text',{text:7,fmt:()=> 'Q₇'});a(tl,t,'#flow',{x:120})}},{name:'跨层传播更远信息',run:(tl,t)=>{a(tl,t,'#token2',{opacity:.65});a(tl,t,'#token2',{x:120,y:90},.1);a(tl,t,'#token4',{y:90},.3);a(tl,t,'#token6',{y:90},.5)}}]);
+let glo=T(560,35,'t₈ 正在发起查询；t₉、t₁₀ 尚未生成','label');for(let i=0;i<10;i++)glo+=B('tok'+i,35+i*106,75,90,60,'t'+(i+1),(i===0||i===8)?'accentbox':i>=5&&i<=7?'greenbox':'box soft');glo+=B('q',660,245,170,60,'Q₈','accentbox');[0,5,6,7].forEach(i=>glo+=L('link'+i,745,235,80+i*106,145,'hotwire ghost'));glo+=B('blocked',890,220,180,70,'未来：禁止','box ghost');scene('global',glo,[{name:'合并局部与远程入口',run:(tl,t)=>{a(tl,t,'[id^=link]',{opacity:1});a(tl,t,'#tok0, #tok5, #tok6, #tok7',{y:15})}},{name:'仍然遵守 causal mask',run:(tl,t)=>{a(tl,t,'#tok8, #tok9',{opacity:.16});a(tl,t,'#blocked',{opacity:1})}}]);
+let sel=B('query',40,125,230,75,'订单号是什么？','accentbox')+B('selector',350,125,220,75,'轻量选择器')+L('qin',280,163,335,163)+T(840,30,'历史 KV','label');for(let i=0;i<8;i++)sel+=B('kv'+i,650+i%4*110,60+Math.floor(i/4)*110,95,65,'t'+(i+1),'box')+T(697+i%4*110,145+Math.floor(i/4)*110,['.1','.9','.2','.1','.8','.3','.7','.1'][i],'ghost score');sel+=B('ids',350,250,220,55,'索引 [2,5,7]','greenbox ghost')+B('attn',770,280,240,50,'attention','accentbox ghost');scene('select',sel,[{name:'选出位置索引',run:(tl,t)=>{a(tl,t,'.score,#ids',{opacity:1});[1,4,6].forEach(i=>a(tl,t,'#kv'+i+' rect',{fill:'var(--accent-soft)',stroke:'var(--accent)'}));[0,2,3,5,7].forEach(i=>a(tl,t,'#kv'+i,{opacity:.2}))}},{name:'只读取被选中的 KV',run:(tl,t)=>{a(tl,t,'#attn',{opacity:1});a(tl,t,'.score',{opacity:0});[1,4,6].forEach((i,j)=>a(tl,t,'#kv'+i,{x:740+j*105-(650+i%4*110),y:220-(60+Math.floor(i/4)*110),scale:.7},j*.14));a(tl,t,'#selector',{scale:1.06})}}]);
+let blk=T(190,40,'零散 token','label')+T(190,180,'连续 block','label');for(let i=0;i<16;i++)blk+=R('dot'+i,350+i*39,20,30,40,[0,3,6,7,10,12].includes(i)?'accentbox':'box soft');for(let i=0;i<4;i++){blk+=B('block'+i,350+i*160,145,145,70,'block '+i,i===0||i===2?'accentbox':'box soft')}blk+=B('gpu',730,270,270,55,'GPU tile','greenbox ghost');scene('blocks',blk,[{name:'按连续块组织',run:(tl,t)=>{a(tl,t,'[id^=dot]',{opacity:.15});a(tl,t,'#block0,#block2',{y:15,scale:1.04})}},{name:'块进入 tiled kernel',run:(tl,t)=>{a(tl,t,'#gpu',{opacity:1});a(tl,t,'#block0',{x:340,y:90,scale:.6});a(tl,t,'#block2',{x:80,y:90,scale:.6},.25)}}]);
+scene('cost',T(190,83,'full：n = 16','label')+T(190,183,'sparse：k = 4','label')+T(190,283,'额外的选择工作','label')+R('full',360,50,400,55,'accentbox')+R('sparse',360,150,100,55,'greenbox')+R('overhead',360,250,0,55,'box')+T(925,84,'历史长度增长','label'),[{name:'历史翻倍，full 翻倍',run:(tl,t)=>{a(tl,t,'#full',{attr:{width:640}})}},{name:'核心节省加上选择成本',run:(tl,t)=>{a(tl,t,'#sparse',{scale:1.06});a(tl,t,'#overhead',{attr:{width:140}})}}]);
+let dif=T(280,30,'稀疏访问：位置仍然分开存','label')+T(840,30,'压缩表示：多个位置汇成摘要','label');for(let i=0;i<4;i++)dif+=B('left'+i,60+i*125,85,105,65,'t'+(i+1),'box')+B('right'+i,625+i*115,85,95,65,'t'+(i+1),'box');dif+=B('q',210,250,170,60,'Q','accentbox')+B('summary',755,250,200,60,'摘要 c','greenbox ghost')+L('r0',295,240,112,160,'hotwire ghost')+L('r3',295,240,487,160,'hotwire ghost');scene('different',dif,[{name:'跳读原始位置',run:(tl,t)=>{a(tl,t,'#r0,#r3',{opacity:1});a(tl,t,'#left1,#left2',{opacity:.22})}},{name:'把位置压成摘要',run:(tl,t)=>{for(let i=0;i<4;i++)a(tl,t,'#right'+i,{x:(1.5-i)*115,y:145,scale:.4,opacity:0},i*.08);a(tl,t,'#summary',{opacity:1},.65)}}]);
+</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
