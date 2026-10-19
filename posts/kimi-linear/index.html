@@ -66,8 +66,8 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
-      <p>Kimi Linear 是 Moonshot AI 在 2025 年 10 月发布的一个混合注意力架构。它的核心是一个新的线性注意力模块 <strong>KDA（Kimi Delta Attention）</strong>：在 Gated DeltaNet 的基础上，把“每个头一个标量”的遗忘门换成“每个通道一个”的细粒度门，并为这个结构设计了专门的分块并行算法。3 层 KDA 配 1 层 MLA 的混合模型，在同样的训练配方（1.4T token）下，在短上下文、长上下文和 RL 三种设定下都胜过了全注意力的基线；同时 KV cache 最多减少 75%，1M 上下文下 decode 吞吐最多提高约 6 倍。</p>
-      <p>要看懂 KDA 改了什么，得先知道它是从哪里一步步演化来的。所以我们从线性注意力最基本的形式开始，依次加上门控、delta 规则，得到 Gated DeltaNet，再推导 KDA 的分块算法，最后讲混合架构、NoPE 和实验。文中有两个交互演示：通道级门控与标量门控对状态矩阵的影响，以及 KV cache 与 decode 吞吐的计算器。这套架构后来成了 Kimi K3 的骨架，见<a href="/posts/kimi-k3/">K3 那篇</a>。</p>
+      <p>3 层线性注意力配 1 层全注意力，在同样的训练配方（1.4T token）下，短上下文、长上下文和 RL 三种设定都胜过了全注意力的基线；同时 KV cache 最多减少 75%，1M 上下文下 decode 吞吐最多提高约 6 倍。这是 Moonshot AI 2025 年 10 月发布的混合注意力架构 Kimi Linear。它的核心是一个新的线性注意力模块 <strong>KDA（Kimi Delta Attention）</strong>：在 Gated DeltaNet 的基础上，把“每个头一个标量”的遗忘门换成“每个通道一个”的细粒度门，并为这个结构设计了专门的分块并行算法。</p>
+      <p>KDA 处在线性注意力一条清晰的演化线上：加性记忆 → 遗忘门 → delta 规则 → Gated DeltaNet → 通道级门。这套架构后来成了 Kimi K3 的骨架，见<a href="/posts/kimi-k3/">K3 那篇</a>。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -112,7 +112,7 @@
       $$O_{[t]} = Q_{[t]}S_{[t]} + \big(Q_{[t]}K_{[t]}^\top\odot M\big)V_{[t]},\qquad S_{[t+1]} = S_{[t]} + K_{[t]}^\top V_{[t]} .$$
       <p>第一项是“之前所有块的贡献”（inter-chunk），第二项是“块内的贡献”（intra-chunk）。总计算量约 \(O(TCd + Td^2)\)，对 \(T\) 线性。后面 KDA 的算法就是这个框架加上衰减和 delta 规则之后的推广。</p>
       <h3>2.3 在线学习的视角</h3>
-      <p>为了比较后面各种变体，有一个很好用的统一视角：把状态 \(S\) 看成一个“快权重”（fast weight），即一个把 key 映射到 value 的联想记忆（用 \(S^\top k\) 读出 key \(k\) 对应的值）；每来一个 token，就对某个损失做一步梯度下降。不同的线性注意力，区别只在损失函数。普通线性注意力对应的损失是</p>
+      <p>比较各种线性注意力变体，有一个很好用的统一视角：把状态 \(S\) 看成一个“快权重”（fast weight），即一个把 key 映射到 value 的联想记忆（用 \(S^\top k\) 读出 key \(k\) 对应的值）；每来一个 token，就对某个损失做一步梯度下降。不同的线性注意力，区别只在损失函数。普通线性注意力对应的损失是</p>
       $$\mathcal L_t(S) = -\langle S^\top k_t,\ v_t\rangle,\qquad \nabla_S\mathcal L_t = -k_tv_t^\top \ \Rightarrow\ S_t = S_{t-1} + k_tv_t^\top .$$
       <p>这是一个无界的相关性目标：只会不断强化最近的 key–value 对，没有任何“该忘掉什么”的准则，状态无限累积，长序列下不同记忆相互干扰。状态只有 \(d_k\times d_v\) 这么大（KDA 里是 128×128），能互不干扰地存下的 key 最多 \(d_k\) 个（彼此正交的 key），这是线性注意力的根本容量限制。既然存不下全部，就必须有办法决定忘掉什么、覆盖什么，这正是接下来两节的内容。</p>
 
@@ -180,7 +180,7 @@
       <p>输出门让每个通道可以按当前输入决定输出多少，也能缓解 attention sink（模型把大量注意力堆在少数几个 token 上的现象）。它和 \(\alpha\) 一样用低秩投影，这样和基线比较时参数量对得上，效果与全秩相当。门的激活用 sigmoid 而不是 GDN 用的 swish，消融显示 swish 门明显更差。</p>
 
       <h3>6.3 演示：标量门与通道门</h3>
-      <p>下面在一个 16×16 的小状态上真实地跑 KDA 递推。序列里每隔 10 个 token 有一个“事实”token，它的 key 落在前 8 个通道（“慢通道”）；其余是“噪声”token，key 落在后 8 个通道。通道门模式下慢通道保留率为 \(\alpha_{\text{slow}}\)、快通道为 \(\alpha_{\text{fast}}\)；标量门模式下所有通道用同一个 \(\alpha\)，取两者的几何平均（总的遗忘量相同，只是分配方式不同）。最后用每个事实的 key 去查询状态，看读出的值和原值的余弦相似度。</p>
+      <p>演示在一个 16×16 的小状态上真实地跑 KDA 递推。序列里每隔 10 个 token 有一个“事实”token，它的 key 落在前 8 个通道（“慢通道”）；其余是“噪声”token，key 落在后 8 个通道。通道门模式下慢通道保留率为 \(\alpha_{\text{slow}}\)、快通道为 \(\alpha_{\text{fast}}\)；标量门模式下所有通道用同一个 \(\alpha\)，取两者的几何平均（总的遗忘量相同，只是分配方式不同）。最后用每个事实的 key 去查询状态，看读出的值和原值的余弦相似度。</p>
       <p>这里人为地把事实和噪声分到不同通道，是为了模拟训练好的模型会做的事（把需要长期保存的信息写进慢通道）。真实模型里这种分工是学出来的。可以切换“delta 规则”和“纯加法（无 delta）”看两者的差别。</p>
 
       <div class="demo" id="gate-demo">
@@ -212,7 +212,7 @@
       <p>可以观察到：标量门要在“记得久”和“清噪声”之间二选一——\(\alpha\) 大则噪声堆积干扰事实，\(\alpha\) 小则事实很快被遗忘；通道门可以两者兼得。关掉 delta 规则后，同一通道子空间里多个事实相互叠加，召回明显变差，这就是 DeltaNet 相对普通线性注意力的优势。</p>
 
       <h2 id="chunk">7. KDA 的分块并行算法</h2>
-      <p>递推形式适合 decode，但训练时逐 token 串行太慢。这一节推导 KDA 怎样像第 2.2 节那样分块并行：块内用矩阵乘，块间传状态。难点在于转移矩阵 \(A_t\) 不再是单位阵，块内的状态变换要连乘一串矩阵。记一个块内的位置 \(r=1,\dots,C\)，块的初始状态为 \(S^0\)。定义</p>
+      <p>递推形式适合 decode，但训练时逐 token 串行太慢。KDA 同样可以像第 2.2 节那样分块并行：块内用矩阵乘，块间传状态。难点在于转移矩阵 \(A_t\) 不再是单位阵，块内的状态变换要连乘一串矩阵。记一个块内的位置 \(r=1,\dots,C\)，块的初始状态为 \(S^0\)。定义</p>
       $$A_r = \big(I-\beta_rk_rk_r^\top\big)D_r,\quad D_r=\operatorname{Diag}(\alpha_r),\qquad \gamma^r = \prod_{j=1}^{r}\alpha_j\ (\text{逐元素}),\qquad \Gamma^{i\to r} = \operatorname{Diag}\!\big(\gamma^r/\gamma^i\big)=D_r\cdots D_{i+1}.$$
       <p>\(\gamma^r\) 是从块开头到位置 \(r\) 的累积衰减，\(\Gamma^{i\to r}\) 是从位置 \(i\) 之后到 \(r\) 的累积衰减，\(\Gamma^{r\to r}=I\)。</p>
       <h3>7.1 展开递推</h3>
@@ -313,7 +313,7 @@
 
       <h2 id="exp">10. 实验</h2>
       <h3>10.1 合成任务</h3>
-      <p>先用合成任务单独考察记忆机制。模型是 2 层、2 头、头维 128 的小模型，最多训练 20000 步，学习率在 {5e-5, 1e-4, 5e-4, 1e-3} 里网格搜索。三个任务：</p>
+      <p>合成任务用来单独考察记忆机制。模型是 2 层、2 头、头维 128 的小模型，最多训练 20000 步，学习率在 {5e-5, 1e-4, 5e-4, 1e-3} 里网格搜索。三个任务：</p>
       <ul>
         <li><strong>Palindrome</strong>：把一串随机 token 倒序输出。需要从固定大小的状态里精确取回全部历史，对线性注意力很难。</li>
         <li><strong>MQAR</strong>（多查询联想召回）：上下文里有若干 key–value 对，最后给出多个 key，要回答对应的 value。已知它和语言建模能力高度相关。</li>
@@ -321,7 +321,7 @@
       </ul>
       <p>结果：长度从 256 增加到 2048，三个任务上 KDA 的准确率都最高；在 Palindrome 和 MQAR 上 KDA 比 GDN 收敛快得多。只有乘性衰减、没有 delta 规则的 Mamba2 在这个设定下三个任务都失败。</p>
       <h3>10.2 消融</h3>
-      <p>再看各个设计选择各自的贡献。以缩放律实验中最小的配置（16 头 16 层）为基准，同 FLOPs、同超参：</p>
+      <p>消融以缩放律实验中最小的配置（16 头 16 层）为基准，同 FLOPs、同超参：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>变体</th><th class="num">训练 PPL</th><th class="num">验证 PPL</th></tr></thead>
@@ -373,13 +373,13 @@
       <p>发布的 checkpoint 按同样流程训练到 5.7T token（与 Moonlight 相同），支持 1M 上下文。和 Moonlight（同样 3B 激活，但 16B 总参）比，基座 MMLU-Pro 54.8 vs 42.4、MATH 58.5 vs 45.3；指令版 RULER@128K 95.4、RULER@1M 94.8，AIME 2025 58.6，LiveCodeBench v6 45.7（Moonlight-Instruct 11.9）。这个比较里总参数和稀疏度也变了（MoE 稀疏度是 Moonlight 的 3 倍左右），所以它不是纯粹的注意力对照，同配方的对照还是看上面 1.4T 的结果。</p>
 
       <h2 id="eff">11. 效率：KV cache、prefill 与 decode</h2>
-      <p>最后看速度和显存。下面是实测数据，三个模型都是 48B 配置、相同层数与头数：</p>
+      <p>实测数据（三个模型都是 48B 配置、相同层数与头数）：</p>
       <ul>
         <li><strong>KV cache</strong>：只有 1/4 的层（MLA）需要随长度增长的 cache，最多减少 75%。</li>
         <li><strong>prefill</strong>：4K–16K 与 MLA 相当；128K 起明显更快；512K 时 2.3 倍，1M 时 2.9 倍。细粒度衰减相对 GDN-H 几乎没有额外延迟。</li>
         <li><strong>decode</strong>：要分两种情况看。batch 固定为 1 时，1M 上下文下每输出 token 时间（TPOT）约快 2.2 倍（512K 约 1.8 倍）。这时时间主要花在读 KV cache 上，而混合模型只有 7/27 的层有 cache，加速比的上限就是这个 cache 压缩比（约 3.9 倍），读权重等固定开销让实际值更低。如果把省下的显存用来放更大的 batch，1M 上下文下平均 TPOT 为 1.84 ms，MLA 为 11.48 ms，约 6.3 倍。</li>
       </ul>
-      <p>为什么放大 batch 能把 2 倍多变成 6 倍？下面的计算器按 Kimi-Linear-48B 的结构估算每条序列的缓存大小，并用一个简单的带宽模型估算 decode：每一步要从显存读一遍被激活的权重和所有序列的缓存，时间 ≈ 字节数 / HBM 带宽；在给定的缓存显存预算内 batch 取最大。</p>
+      <p>为什么放大 batch 能把 2 倍多变成 6 倍？计算器按 Kimi-Linear-48B 的结构估算每条序列的缓存大小，并用一个简单的带宽模型估算 decode：每一步要从显存读一遍被激活的权重和所有序列的缓存，时间 ≈ 字节数 / HBM 带宽；在给定的缓存显存预算内 batch 取最大。</p>
 
       <div class="demo" id="kv-demo">
         <div class="demo-label">交互演示 · KV cache 与 decode 吞吐（全 MLA vs 3:1 混合）</div>

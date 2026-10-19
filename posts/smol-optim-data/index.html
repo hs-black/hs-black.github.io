@@ -66,7 +66,7 @@
     <nav class="series" data-series="smol"></nav>
 
     <article class="prose">
-      <p><a href="/posts/smol-architecture/">上一篇</a>定下了网络结构，这一篇处理开训前剩下的三件事：<strong>分词器</strong>、<strong>优化器与训练超参</strong>，以及<strong>数据配比</strong>。可以这样理解它们的分工：分词器决定模型看到的基本单元是什么；架构决定模型<em>怎么</em>学，数据决定它学<em>什么</em>；超参则决定这个学习过程能不能稳定、高效地走完。</p>
+      <p>SmolLM3 试过 Muon，最后用的还是 AdamW，超参和 Llama 1 那一组几乎一样；第一阶段数学数据只占 3%，因为可用的数学语料只有 54B token，再多就要重复 5 遍以上。网络结构（见<a href="/posts/smol-architecture/">架构篇</a>）之外，开训前还有三件事要定：<strong>分词器</strong>、<strong>优化器与训练超参</strong>，以及<strong>数据配比</strong>。分词器决定模型看到的基本单元是什么；架构决定模型<em>怎么</em>学，数据决定它学<em>什么</em>；超参则决定这个学习过程能不能稳定、高效地走完。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -94,7 +94,7 @@
       </ul>
 
       <h3>词表大小</h3>
-      <p>词表越大，压缩越好（同样的文本 token 更少），但 embedding 矩阵也越大：输入 embedding \(V\times h\)、输出层再一个 \(V\times h\)。对小模型这是不小的参数比例（上一篇的 1B baseline 里共享后的 embedding 也占两成多），模型越大相对代价越小。经验上：只做英文约 50k 就够；多语言通常要 100k 以上；Llama 3 这类模型用了 128k 以上。同一家族的小模型用 embedding 共享来压低占比，同时享受大词表。</p>
+      <p>词表越大，压缩越好（同样的文本 token 更少），但 embedding 矩阵也越大：输入 embedding \(V\times h\)、输出层再一个 \(V\times h\)。对小模型这是不小的参数比例（1B 消融 baseline 里共享后的 embedding 也占两成多），模型越大相对代价越小。经验上：只做英文约 50k 就够；多语言通常要 100k 以上；Llama 3 这类模型用了 128k 以上。同一家族的小模型用 embedding 共享来压低占比，同时享受大词表。</p>
       <p><a href="https://arxiv.org/abs/2402.01035">Dagan et al.</a> 从三个角度分析了词表大小：压缩率的收益随词表增大指数下降，所以存在一个最优大小；推理时，大模型更受益于大词表，因为 token 变少省下的前向计算超过了 softmax 多出来的开销；显存方面，最优大小取决于序列长度和 batch——上下文越长、batch 越大，大词表通过减少 token 数省下的 KV cache 越多。还有一个工程细节：<strong>把词表大小设成 128 的倍数</strong>（比如 50,304 而不是 50,000），GPU 上矩阵维度能被 2 的高次幂整除时内存对齐更好、吞吐更高。</p>
 
       <h3>BPE 算法</h3>
@@ -105,7 +105,7 @@
         <li>统计所有相邻符号对在语料中的出现次数（按词频加权），把最频繁的一对合并成新符号，加入词表，记下这条合并规则；</li>
         <li>重复第 3 步，直到词表达到目标大小。</li>
       </ol>
-      <p>编码新文本时，按学到的合并规则的顺序依次应用。下面用 Sennrich 论文里的经典小例子（low、lower、newest、widest，<code>_</code> 表示词尾）一步一步跑，也可以换成你自己的文本：</p>
+      <p>编码新文本时，按学到的合并规则的顺序依次应用。拿 Sennrich 论文里的经典小例子（low、lower、newest、widest，<code>_</code> 表示词尾）一步一步跑，也可以换成你自己的文本：</p>
 
       <div class="demo" id="bpe">
         <div class="demo-label">BPE 逐步合并</div>
@@ -119,7 +119,7 @@
         </div>
         <div class="toks" id="bpe-toks"></div>
         <div class="merges" id="bpe-merges"></div>
-        <p class="note-small">按空白分词、每个词末尾加 <code>_</code>；频次相同的符号对按字典序取第一个。橙色的 token 是最近一步合并出来的。右边的「token / 词」就是下面要讲的 fertility。</p>
+        <p class="note-small">按空白分词、每个词末尾加 <code>_</code>；频次相同的符号对按字典序取第一个。橙色的 token 是最近一步合并出来的。右边的「token / 词」就是 fertility。</p>
       </div>
 
       <h3>怎么衡量分词器好坏</h3>
@@ -147,7 +147,7 @@
 
       <h3>用现成的还是自己训</h3>
       <p>很多新模型从 GPT-4 的分词器出发、补充多语言 token。如果你的语言和领域和上面这些分词器的覆盖吻合，直接用它们——久经考验。SmolLM3 选了 Llama 3 的分词器：在目标语言（英、法、西、葡、德、意）上质量有竞争力，128k 的词表对 3B 模型也不算太大；更大的模型里 embedding 占比小，Gemma 3 的效率优势就更有吸引力。低资源语言或独特的数据配比则可能需要自己训。这有个先有鸡还是先有蛋的问题：做数据消融需要分词器，训分词器又需要知道最终配比。办法是先用一个凑合的分词器做数据消融，正式开训前按确定的配比重训分词器，再确认下游效果提升、fertility 仍然好。</p>
-      <p>另外两个和分词器有关的提醒：换了分词器，loss 就不能直接比（<a href="/posts/smol-decisions/#eval">第一篇</a>讲过）；50k 的英文分词器干不了严肃的多语言，但如果你不覆盖那么多语言，也不需要 256k 的词表。</p>
+      <p>另外两个和分词器有关的提醒：换了分词器，loss 就不能直接比（见<a href="/posts/smol-decisions/#eval">评测</a>）；50k 的英文分词器干不了严肃的多语言，但如果你不覆盖那么多语言，也不需要 256k 的词表。</p>
 
       <h2 id="adamw">AdamW：为什么所有人都还在用它</h2>
       <p>优化器决定每个参数每一步实际怎么更新，同时它也很吃显存和算力，会影响需要多少卡、训多快。看看近年公开的大模型：除了 Kimi K2、GLM-4.5 用 Muon，几乎所有人都用 AdamW。为什么？一方面 AdamW 长期在各个规模上都好用；另一方面换掉这么核心的组件很吓人，在很长的训练里验证一个新优化器又很贵。</p>
@@ -168,7 +168,7 @@
       <ol>
         <li><strong>矩阵几何而非逐参数</strong>：AdamW 对每个参数单独做（对角）预条件；Muon 把权重矩阵当成一个对象，沿 \(UV^\top\) 更新，捕捉的是行、列子空间的结构。</li>
         <li><strong>正交化带来各向同性的步长</strong>：SVD 把 \(G=U\Sigma V^\top\) 分成大小（\(\Sigma\)）和方向（\(U,V\)）。换成 \(UV^\top\) 就丢掉了奇异值，让步长在活跃子空间里各向同性。乍看是丢了信息，但它减少了偏向少数主方向的倾向，让那些奇异值很小、本来会被压制的方向也得到探索。这种探索会不会给模型带来 loss 看不出的能力差异，还是开放问题。</li>
-        <li><strong>经验上更能容忍大 batch</strong>：这可能是采用 Muon 的关键动机（下面讲 batch size 时会说为什么大 batch 重要）。</li>
+        <li><strong>经验上更能容忍大 batch</strong>：这可能是采用 Muon 的关键动机（大 batch 为什么重要，见 <a href="#bs">Batch size</a>）。</li>
       </ol>
       <h3>为什么是 \(UV^\top\)：谱范数下的最速下降</h3>
       <p>为什么偏偏是 \(UV^\top\)？一个干净的解释（<a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein</a>）是把它看成某种范数下的最速下降。线性化 loss，一步更新 \(\Delta W\) 带来的变化是 \(\langle G,\Delta W\rangle=\operatorname{tr}(G^\top\Delta W)\)。如果限制更新的<strong>谱范数</strong>（最大奇异值，衡量矩阵对任意输入向量的最大放大倍数）不超过 \(\eta\)：</p>
@@ -179,7 +179,7 @@
       $$X_{k+1}=aX_k+b\,(X_kX_k^\top)X_k+c\,(X_kX_k^\top)^2X_k$$
       <p>的迭代都<strong>不改变奇异向量</strong>，只把每个奇异值独立地映射为 \(\varphi(\sigma)=a\sigma+b\sigma^3+c\sigma^5\)。要得到 \(UV^\top\)，只需让 \(\varphi\) 反复作用后把 \([0,1]\) 里的每个数都推到 1 附近。先把 \(X_0=G/\|G\|_F\) 归一化，保证所有奇异值 \(\le1\)。经典的三次版本 \(\varphi(\sigma)=\tfrac32\sigma-\tfrac12\sigma^3\) 能精确收敛到 1，但对很小的奇异值，每步只放大 1.5 倍，太慢。<a href="https://kellerjordan.github.io/posts/muon/">Keller Jordan</a> 的做法是把系数调成</p>
       $$(a,b,c)=(3.4445,\ -4.7750,\ 2.0315),$$
-      <p>让 \(\varphi'(0)=a\) 尽量大（小奇异值增长最快），代价是不再精确收敛到 1，而是在大约 \([0.7,1.3]\) 之间振荡——他发现这个误差不影响训练 loss。5 步就够。实际代码里还在 BF16 下做迭代，矩阵行多于列时先转置（让 \(XX^\top\) 是较小的那个方阵）。下面用一个 2×2 矩阵看这个过程：它把单位圆映成椭圆，椭圆的两个半轴就是两个奇异值；正交化就是把椭圆变回圆。</p>
+      <p>让 \(\varphi'(0)=a\) 尽量大（小奇异值增长最快），代价是不再精确收敛到 1，而是在大约 \([0.7,1.3]\) 之间振荡——他发现这个误差不影响训练 loss。5 步就够。实际代码里还在 BF16 下做迭代，矩阵行多于列时先转置（让 \(XX^\top\) 是较小的那个方阵）。拿一个 2×2 矩阵看这个过程最直观：它把单位圆映成椭圆，椭圆的两个半轴就是两个奇异值；正交化就是把椭圆变回圆。</p>
 
       <div class="demo" id="ns">
         <div class="demo-label">Newton–Schulz 迭代：2×2 矩阵的奇异值</div>
@@ -315,9 +315,9 @@
       <p><strong>μP</strong>：调超参还有另一条路。μP（Maximal Update Parametrization）通过按宽度缩放初始化方差和每层学习率，让最优超参在模型变宽时基本不变，于是可以在小模型上调好直接迁移到大模型，和上面「拟合超参随 C 的幂律」是两种思路。Cohere 的 Command A 用了 μP；怎么把它用到 MoE 上，目前还是开放问题。</p>
 
       <h2 id="smolhp">SmolLM3 的选择与守则</h2>
-      <p>优化器：在 1B、100B token 上比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但对学习率敏感、容易发散；AdEMAMix 的 loss 和 Muon 相近，敏感度更低；AdamW 最稳，但最终 loss 高于调好的两个。扩到 3B 后，Muon 和 AdEMAMix 发散更频繁。原因可能是后来才发现的一个并行 bug（训练马拉松篇会讲），但这一点没有再验证。最终选了非常「香草」的设置：AdamW（\(\beta_1=0.9,\beta_2=0.95\)），权重衰减 0.1，梯度裁剪 1。</p>
+      <p>优化器：在 1B、100B token 上比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但对学习率敏感、容易发散；AdEMAMix 的 loss 和 Muon 相近，敏感度更低；AdamW 最稳，但最终 loss 高于调好的两个。扩到 3B 后，Muon 和 AdEMAMix 发散更频繁。原因可能是后来才发现的一个并行 bug，但这一点没有再验证。最终选了非常「香草」的设置：AdamW（\(\beta_1=0.9,\beta_2=0.95\)），权重衰减 0.1，梯度裁剪 1。</p>
       <p>调度：WSD。SmolLM2 就用过它，HF 团队认为这是他们做过的最好的决定之一：易用，训练总长可以灵活调整，还能做中途的衰减实验。学习率扫描后定为 2e-4。全局 batch 试了 2M 到 4M token，对 loss 和下游影响很小，于是选了吞吐最好的 2.36M token。</p>
-      <p>这部分的经验可以概括为：<strong>平衡探索与执行，完成胜过完美</strong>。</p>
+      <p>优化器和超参上的经验可以概括为：<strong>平衡探索与执行，完成胜过完美</strong>。</p>
       <ul>
         <li><strong>合理分配时间</strong>。花几周打磨一个新方法的小改进，不如把同样的算力投到更好的数据或更彻底的结构消融上。也许会让结构爱好者失望，但最大的提升通常来自数据。</li>
         <li><strong>拿不准时选灵活和稳定</strong>。两种方法效果相当，选更灵活、实现更成熟稳定的那个：能延长训练、能做中途实验的 WSD，比一个收敛也许略好但僵硬的调度更有价值。</li>
@@ -368,14 +368,14 @@
       <p><strong>自动找配比的方法</strong>：<a href="https://arxiv.org/abs/2305.10429">DoReMi</a> 用一个小代理模型学习各领域的权重，以最小化验证 loss；<a href="https://arxiv.org/abs/2206.07137">RHO-LOSS</a> 按 holdout loss 挑单个训练样本，优先选「可学、值得学、还没学会」的；<a href="https://arxiv.org/abs/2407.01492">RegMix</a> 把配比当回归问题，用正则化回归在多个评测目标和数据域之间平衡。HF 在以前的项目里试过 DoReMi 和 RHO-LOSS，发现它们倾向于收敛到大致等于各数据集自然大小比例的分布——基本是在说「哪个多就多用哪个」，没有胜过仔细的手动消融。近期的 SOTA 模型仍靠系统消融和退火实验手动调配比，SmolLM3 也是。</p>
 
       <h2 id="smoldata">SmolLM3 的数据配比</h2>
-      <p>目标：英文和多语言都能处理，数学和代码要强。方法对低资源语言或金融、医疗等特定领域同样适用：找候选数据集、做消融、设计平衡所有目标领域的配比。这里不讲怎么造高质量数据集（见 FineWeb、FineWeb2、Stack-Edu 和 FineMath 的报告），只讲怎么把现有数据集组合起来。起点是 SmolLM2 在 1.7B 上已经验证过的英文网页配方，以及当时能拿到的最好的数学和代码数据。</p>
+      <p>目标：英文和多语言都能处理，数学和代码要强。方法对低资源语言或金融、医疗等特定领域同样适用：找候选数据集、做消融、设计平衡所有目标领域的配比。高质量数据集本身怎么造，FineWeb、FineWeb2、Stack-Edu 和 FineMath 的报告里有详细记录；配比要做的是把这些现有数据集组合起来。起点是 SmolLM2 在 1.7B 上已经验证过的英文网页配方，以及当时能拿到的最好的数学和代码数据。</p>
       <ul>
         <li><strong>英文网页</strong>：FineWeb-Edu 和 DCLM 是当时最强的开放英文网页数据，合计 5.1T token。FineWeb-Edu 帮教育和 STEM 类基准，DCLM 帮常识推理。在 3B、100B token 上扫了 20/80、40/60、50/50、60/40、80/20，60/40 或 50/50 最平衡（和 SmolLM2 的发现一致），stage 1 用 50/50。另加了 pes2o、Wikipedia & Wikibooks、StackExchange，对表现没影响，为了多样性。</li>
         <li><strong>多语言网页</strong>：主攻法、西、德、意、葡五种语言，取自 FineWeb2-HQ，共 628B token；另有中文、阿拉伯语、俄语等 10 种语言以小比例加入，不是为了 SOTA，而是方便别人在这些语言上继续预训练（FineWeb2-HQ 不支持的语言用 FineWeb2）。关键问题是非英文占多少：在 3B 上消融发现 <strong>12% 多语言</strong>（约占网页部分的 14%）最平衡，多语言提升、英文不掉。只有 628B 非英文对 5.1T 英文，再高就得更多重复多语言数据。</li>
         <li><strong>代码</strong>：stage 1 来自 StarCoder2 / The Stack v2 语料：The Stack v2（16 种语言，按 StarCoder2Data 过滤）、GitHub pull request（真实的代码评审推理）、Jupyter 和 Kaggle notebook（可执行的分步工作流）、GitHub issue 和 StackExchange 讨论。<a href="https://arxiv.org/abs/2408.10914">Aryabumi et al.</a> 发现代码能提升代码之外的能力（自然语言推理、世界知识），建议 25% 代码。SmolLM3 从 25% 开始消融，英文基准（HellaSwag、ARC-C、MMLU）明显下降；降到 10% 后，相比 0% 代码英文基准没有提升，但因为代码生成本身很重要，还是保留了。教育过滤的 Stack-Edu 推迟到后期阶段加入（高质量数据留到后期）。</li>
         <li><strong>数学</strong>：早期用较大、较通用的 FineMath3+ 和 InfiWebMath3+；后期上采样 FineMath4+、InfiWebMath4+，并引入 <a href="https://arxiv.org/abs/2504.02807">MegaMath</a> 和 OpenMathInstruct、OpenMathReasoning 等指令与推理数据。stage 1 只用 3% 数学（两者各半）：可用的只有 54B token，而 stage 1 规划为 8T–9T token（最终训了 8T），再多就要超过 5 个 epoch。</li>
       </ul>
-      <p>合起来，stage 1 的领域比例是英文网页 / 多语言 / 代码 / 数学 = 75 / 12 / 10 / 3。后续两个阶段的配比在训练马拉松篇里。</p>
+      <p>合起来，stage 1 的领域比例是英文网页 / 多语言 / 代码 / 数学 = 75 / 12 / 10 / 3。后续阶段再上采样 Stack-Edu、FineMath4+ 这类高质量的代码和数学数据。</p>
 
       <div class="demo" id="mix">
         <div class="demo-label">数据配比计算器：每个来源过几遍</div>
@@ -400,7 +400,7 @@
 
       <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>：本文的主要来源，对应 Designing the Model Architecture → The Tokenizer；Optimizer and Training Hyperparameters（Optimizers: AdamW and Beyond、Learning Rate、Batch Size、Scaling Laws for Hyperparameters、SmolLM3、Rules of Engagement）；The Art of Data Curation 全章。各组消融的完整曲线推荐直接去读原书。</li>
+        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>：主要来源，对应 Designing the Model Architecture → The Tokenizer；Optimizer and Training Hyperparameters（Optimizers: AdamW and Beyond、Learning Rate、Batch Size、Scaling Laws for Hyperparameters、SmolLM3、Rules of Engagement）；The Art of Data Curation 全章。各组消融的完整曲线推荐直接去读原书。</li>
         <li>分词器：<a href="https://arxiv.org/abs/1508.07909">Sennrich et al.（BPE）</a>；<a href="https://arxiv.org/abs/2402.01035">Dagan et al.</a>；<a href="https://arxiv.org/abs/2506.20920">FineWeb2（fertility、PCW）</a>。</li>
         <li>优化器：<a href="https://arxiv.org/abs/1412.6980">Adam</a>；<a href="https://arxiv.org/abs/1711.05101">AdamW（Decoupled Weight Decay）</a>；<a href="https://kellerjordan.github.io/posts/muon/">Keller Jordan, Muon</a>（Newton–Schulz 系数、基线 (2, −1.5, 0.5)、[0.7, 1.3] 的目标区间、embedding/输出层用 AdamW）；<a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein, Deriving Muon</a>；<a href="https://arxiv.org/abs/2502.16982">Liu et al., Muon is Scalable for LLM Training</a>（更新 RMS 匹配 0.2√max(A,B)）；<a href="https://arxiv.org/abs/2509.02046">Wen et al., Fantastic Pretraining Optimizers</a>。</li>
         <li>学习率：<a href="https://arxiv.org/abs/1608.03983">SGDR</a>；<a href="https://arxiv.org/abs/2404.06395">MiniCPM（WSD）</a>；<a href="https://arxiv.org/abs/2405.18392">Hägele et al.（1−sqrt 冷却）</a>；<a href="https://arxiv.org/abs/2401.02954">DeepSeek LLM（multi-step 80/10/10、31.6%/10%、超参 scaling law 0.3118·C<sup>−0.125</sup> 与 0.2920·C<sup>0.3271</sup>、0.25% 近似最优）</a>。</li>

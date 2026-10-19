@@ -75,8 +75,8 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
-      <p>DeepSeek 在 2026 年 4 月放出了 V4 的预览版和一份 58 页的技术报告《DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence》（arXiv 2606.19348）。这份报告的主线很清楚：<strong>让一百万 token 的上下文变得便宜到可以日常使用</strong>。为此它几乎把 V3 的注意力推倒重来（CSA + HCA 混合注意力），换了残差连接（mHC），换了优化器（Muon），又在训练、推理、后训练三套基础设施上做了一大堆配套工作。</p>
-      <p>下面按报告的顺序走一遍。每遇到一个新部件，先把它所依赖的旧东西（MLA、DeepSeekMoE、MTP、DSA）讲清楚，再讲 V4 改了什么、为什么这样改、张量形状是什么。</p>
+      <p>在一百万 token 的上下文下，DeepSeek-V4-Pro 每生成一个 token 的推理 FLOPs 只有 V3.2 的 27%，KV cache 只有 10%；小一号的 V4-Flash 分别是 10% 和 7%。这是 DeepSeek 2026 年 4 月随 V4 预览版发布的 58 页技术报告《DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence》（arXiv 2606.19348）开篇给的数字，报告的主线就是<strong>让一百万 token 的上下文变得便宜到可以日常使用</strong>。</p>
+      <p>为什么做得到？答案大部分在注意力里：V4 几乎把 V3 的注意力推倒重来，换成 CSA + HCA 混合注意力。此外它换了残差连接（mHC），换了优化器（Muon），又在训练、推理、后训练三套基础设施上做了一大堆配套工作。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -105,9 +105,9 @@
         <li><strong>DeepSeek-V4-Flash</strong>：总参数 284B，激活 13B，预训练 32T token。</li>
       </ul>
       <p>每个模型又有三档「推理强度」：Non-think、Think High、Think Max。报告里最常出现的 <em>V4-Pro-Max</em> 就是 Pro 在 Think Max 档。</p>
-      <p>报告开篇给了两个效率数字（第 4 节会用一个计算器把它们算出来）：在 1M 上下文下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV cache 只有 10%；V4-Flash 分别是 10% 和 7%。</p>
+      <p>开头那几个效率数字都能从超参数直接算出来，<a href="#cost">第 4 节</a>有一个计算器。</p>
 
-      <p>先看一张改动清单，后面每一行都会展开：</p>
+      <p>和 V3、V3.2 逐项对比：</p>
       <div class="table-wrap">
       <table class="tight">
         <thead><tr><th>部件</th><th>V3（2024.12）</th><th>V3.2（2025.12）</th><th>V4（2026.04）</th></tr></thead>
@@ -167,7 +167,7 @@
 
       <!-- ============================================================ -->
       <h2 id="baseline">2. 先复习基线：MLA、DeepSeekMoE、MTP、DSA</h2>
-      <p>V4 的每个新部件都是在这四样东西上改出来的，所以先把它们过一遍。记号：\(d\) 是隐藏维度，\(\mathbf h_t\in\mathbb R^d\) 是第 \(t\) 个 token 进入某层时的隐藏状态，\(n_h\) 是注意力头数。</p>
+      <p>V4 的每个新部件都是在这四样东西上改出来的。记号：\(d\) 是隐藏维度，\(\mathbf h_t\in\mathbb R^d\) 是第 \(t\) 个 token 进入某层时的隐藏状态，\(n_h\) 是注意力头数。</p>
 
       <h3>2.1 MLA：把 KV 压成一个潜向量</h3>
       <p>标准多头注意力（MHA）在每层为每个 token 缓存 \(n_h\) 个 key 和 \(n_h\) 个 value。以 V3 的尺寸（\(n_h=128\)，每头 128 维）算，每 token 每层要存 \(2\times128\times128=32768\) 个数。解码时每生成一个 token 都要把整个 KV cache 从显存读一遍，所以 cache 越大越慢、能并发的请求越少。</p>
@@ -200,7 +200,7 @@
         <li><strong>CSA</strong>（Compressed Sparse Attention，压缩稀疏注意力）：先把每 \(m=4\) 个 token 的 KV 压成 1 个条目，再在压缩后的条目上做 DSA，只挑 top-\(k\) 个参加注意力；</li>
         <li><strong>HCA</strong>（Heavily Compressed Attention，重度压缩注意力）：把每 \(m'=128\) 个 token 压成 1 个条目，压完之后条目已经很少，直接做稠密注意力，不再挑选。</li>
       </ul>
-      <p>两者都额外带一个 128 token 的滑动窗口分支，用来看最近的、尚未凑满一个压缩块的 token。下面逐个拆开。</p>
+      <p>两者都额外带一个 128 token 的滑动窗口分支，用来看最近的、尚未凑满一个压缩块的 token。</p>
 
       <h3>3.1 Token 级压缩器</h3>
       <p>设一段输入隐藏状态 \(H\in\mathbb R^{n\times d}\)，\(n\) 是序列长度，\(c\) 是注意力的头维度（V4 里 \(c=512\)）。CSA 的压缩器先算两套「原始 KV」和两套「压缩权重」：</p>
@@ -286,7 +286,7 @@
       <p>为什么要两种层交替？报告没有为此做消融，只说这种混合结构显著改善了长上下文效率。从结构上看，两者是分工：HCA 以极低成本给每一层提供「全局但模糊」的视图，CSA 提供「按需取回、分辨率 4 倍」的细节，滑窗分支补最近的精确信息。</p>
 
       <h3>3.5 其他细节</h3>
-      <p><strong>Query 与 KV 条目的 RMSNorm。</strong>在核心注意力之前，对每个 query 头和唯一的那个 KV 头各做一次 RMSNorm。这样 \(\mathbf q\cdot\mathbf k\) 的量级被锁住，注意力 logit 不会爆炸。后面 Muon 一节会看到，正因为有这一步，V4 不需要 Kimi K2 用的 QK-Clip。</p>
+      <p><strong>Query 与 KV 条目的 RMSNorm。</strong>在核心注意力之前，对每个 query 头和唯一的那个 KV 头各做一次 RMSNorm。这样 \(\mathbf q\cdot\mathbf k\) 的量级被锁住，注意力 logit 不会爆炸。正因为有这一步，V4 用 Muon 时不需要 Kimi K2 的 QK-Clip（<a href="#muon">第 7 节</a>）。</p>
       <p><strong>部分 RoPE + 输出的反向旋转。</strong>每个 query 和 KV 条目只在最后 64 维施加 RoPE。问题来了：K 和 V 是同一个向量，于是 value 也带着绝对位置 \(s\) 的旋转。设 \(R(\theta_s)\) 是位置 \(s\) 的旋转矩阵，注意力输出的 RoPE 部分是</p>
       $$\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}\,R(\theta_s)\,\mathbf x_s .$$
       <p>V4 的处理是在输出上再乘一次位置 \(-t\) 的旋转：\(R(-\theta_t)\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}R(\theta_{s-t})\mathbf x_s\)。旋转矩阵满足 \(R(a)R(b)=R(a+b)\)，所以每个条目对输出的贡献只依赖相对距离 \(s-t\)。实现上就是对输出的最后 64 维再调用一次 <code>apply_rotary_emb(..., inverse=True)</code>。</p>
@@ -483,7 +483,7 @@
 
       <!-- ============================================================ -->
       <h2 id="infra">8. 训练与推理基础设施</h2>
-      <p>报告第 3 节和第 5.2 节有大量工程内容，这里按「训练/推理通用 → 训练框架 → 推理框架」的顺序整理。具体的并行度（TP/PP/EP/DP 各多少）报告没有公开。</p>
+      <p>这部分来自报告第 3 节和第 5.2 节。具体的并行度（TP/PP/EP/DP 各多少）报告没有公开。</p>
 
       <h3>8.1 细粒度专家并行：把通信藏进计算</h3>
       <p>专家并行（EP）把不同专家放在不同 GPU 上，每层 MoE 要做两次 all-to-all：<strong>Dispatch</strong>（把 token 发给专家所在的卡）和 <strong>Combine</strong>（把结果收回来）。一层 MoE 因此分成四个阶段：Dispatch（通信）、Linear-1（gate/up 投影，计算）、Linear-2（down 投影，计算）、Combine（通信）。DeepSeek 的 profiling 发现单层里通信总时间小于计算总时间，所以只要排得好，通信可以完全藏住。</p>
@@ -817,7 +817,7 @@
 
       <!-- ============================================================ -->
       <h2 id="summary">12. 小结与我的看法</h2>
-      <p>把新东西按「从 V3/V3.2 出发改了什么」列一遍：</p>
+      <p>从 V3/V3.2 出发，V4 改动的全部清单：</p>
       <ol>
         <li><strong>注意力</strong>：MLA 的潜向量 → 512 维 shared-KV（K=V）MQA；在序列维度上压缩（CSA 4 倍重叠压缩、HCA 128 倍）；DSA 从选 token 变成选压缩块，top-k 变小；加滑窗分支、attention sink、Q/KV RMSNorm、部分 RoPE + 输出反旋转、分组输出投影。</li>
         <li><strong>残差</strong>：mHC，4 路残差流 + Sinkhorn 投影到双随机矩阵。</li>
@@ -838,7 +838,7 @@
       <!-- ============================================================ -->
       <h2 id="refs">13. 参考与延伸阅读</h2>
       <ul>
-        <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2606.19348">DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence</a>, arXiv 2606.19348, 2026。本文结构对应其 §2（架构：§2.1 继承部分、§2.2 mHC、§2.3 CSA/HCA、§2.4 Muon）、§3（基础设施）、§4（预训练）、§5（后训练与评测）。</li>
+        <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2606.19348">DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence</a>, arXiv 2606.19348, 2026。架构在 §2（§2.1 继承部分、§2.2 mHC、§2.3 CSA/HCA、§2.4 Muon），基础设施在 §3，预训练在 §4，后训练与评测在 §5。</li>
         <li>模型卡、config 与推理代码（层排布、RoPE 配置、Hadamard 旋转、量化等实现细节见这里）：<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">huggingface.co/deepseek-ai/DeepSeek-V4-Pro</a>（<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/inference">inference/</a>）、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash</a>。</li>
         <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2512.02556">DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models</a>, 2025（DSA §2.1，GRPO 的改进 §3.1）。</li>
         <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>, 2024（MLA、DeepSeekMoE、无辅助损失均衡、MTP）；<a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>（MLA 的提出）。</li>

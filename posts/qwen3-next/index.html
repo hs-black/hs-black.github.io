@@ -88,9 +88,8 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
-      <p>Qwen3-Next-80B-A3B 是 Qwen 团队 2025 年 9 月发布的模型：总参数约 80B，每个 token 只激活约 3B。它在架构上一口气改了好几处：混合注意力（Gated DeltaNet 加 Gated Attention，比例 3:1）、512 个 expert 的高稀疏 MoE、零中心且带权重衰减的 LayerNorm、归一化的 router 初始化、多 token 预测（MTP）。每一项背后都有一两篇论文，单看名字很难知道它们解决什么问题。</p>
-      <p>这篇把这些东西从头推一遍：先从 softmax 注意力推到线性注意力，再推 Delta 规则和 Gated DeltaNet 的递推式与分块并行算法，然后讲门控注意力为什么能消掉 attention sink，最后算清楚 3:1 混合与 512 个 expert 在显存和计算上到底省了多少。参数量、KV cache 大小和 FLOPs 都是按模型的配置逐项算出来的。</p>
-      <p>这套架构后来没有停在 Qwen3-Next：Qwen3-Coder-Next、Qwen3.5、Qwen3.6、Qwen3.8 都沿用了它，最后一节整理了一张对照表。</p>
+      <p>总参数约 80B，每个 token 只激活约 3B；训练花的 GPU 时不到 Qwen3-32B 的十分之一，32K 以上的推理吞吐却是它的 10 倍多。这是 Qwen 团队 2025 年 9 月发布的 Qwen3-Next-80B-A3B。它在架构上一口气改了好几处：混合注意力（Gated DeltaNet 加 Gated Attention，比例 3:1）、512 个 expert 的高稀疏 MoE、零中心且带权重衰减的 LayerNorm、归一化的 router 初始化、多 token 预测（MTP）。每一项背后都有一两篇论文，单看名字很难知道它们解决什么问题。</p>
+      <p>这套架构后来没有停在 Qwen3-Next：Qwen3-Coder-Next、Qwen3.5、Qwen3.6、Qwen3.8 都沿用了它（<a href="#later">对照表</a>）。</p>
 
       <nav class="toc" aria-label="目录">
         <b>目录</b>
@@ -246,7 +245,7 @@
         <li>\(\beta_t\in(0,1)\) 时是部分改写：\(S_tk_t=(1-\beta_t)S_{t-1}k_t+\beta_tv_t\)，在旧值和新值之间插值。\(\beta_t\) 由网络根据当前 token 决定（Qwen3-Next 里是 \(\sigma(W_bx_t)\)），相当于一个数据依赖的学习率。</li>
         <li>转移矩阵 \(I-\beta_tk_tk_t^\top\) 是广义 Householder 矩阵。当 \(\lVert k_t\rVert=1\)、\(0\le\beta_t\le 2\) 时，它的特征值是 \(1-\beta_t\)（在 \(k_t\) 方向）和 1（其它方向），谱范数不超过 1，递推不会爆炸。这也是为什么 Gated DeltaNet 要对 \(k\) 做 L2 归一化。</li>
       </ul>
-      <p>下面这个演示用 \(d_k=d_v=4\) 的玩具状态，逐个 token 写入键值对，左边用加性更新（线性注意力），右边用（门控）Delta 规则，并实时显示每个已写入键的检索误差 \(\lVert S k_i - v_i^{\text{最新}}\rVert\)。键和值由固定随机种子生成（示意）。</p>
+      <p>演示 1 用 \(d_k=d_v=4\) 的玩具状态逐个 token 写入键值对：左边用加性更新（线性注意力），右边用（门控）Delta 规则，并实时显示每个已写入键的检索误差 \(\lVert S k_i - v_i^{\text{最新}}\rVert\)。键和值由固定随机种子生成（示意）。</p>
 
       <div class="demo" id="dr-demo">
         <div class="demo-label">演示 1 · Delta 规则 vs 加性更新（d = 4）</div>
@@ -321,7 +320,7 @@ o_t = S.T @ q_t</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="chunk">5. 分块并行算法：训练时怎么算得快</h2>
-      <p>门控 Delta 规则的转移矩阵 \(\alpha_t(I-\beta_tk_tk_t^\top)\) 依赖于状态本身的投影，不再是简单的加法，所以 2.4 节那种「块内并行、块间加」的写法不能直接用。解决办法是用 WY 表示和 UT 变换，把一串 Householder 乘积压缩成低秩形式。下面先推没有门控的情况，再加上门控。</p>
+      <p>门控 Delta 规则的转移矩阵 \(\alpha_t(I-\beta_tk_tk_t^\top)\) 依赖于状态本身的投影，不再是简单的加法，所以 2.4 节那种「块内并行、块间加」的写法不能直接用。解决办法是用 WY 表示和 UT 变换，把一串 Householder 乘积压缩成低秩形式。</p>
 
       <h3>5.1 块内展开</h3>
       <p>考虑一个长度为 \(C\) 的块，块开始时的状态为 \(S_0\)，块内位置记为 \(r=1,\dots,C\)。定义块内累积衰减</p>
@@ -357,7 +356,7 @@ o_t = S.T @ q_t</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="gdn-layer">6. Qwen3-Next 里的 Gated DeltaNet 层</h2>
-      <p>上面讲的是「核心递推」。一个完整的 Gated DeltaNet 层在它前后还包了一圈东西。我们按数据流逐步走一遍（\(x_t\in\mathbb R^{2048}\) 是 RMSNorm 之后的输入）：</p>
+      <p>核心递推之外，一个完整的 Gated DeltaNet 层前后还包了一圈东西。按数据流依次是（\(x_t\in\mathbb R^{2048}\) 是 RMSNorm 之后的输入）：</p>
 
       <figure class="fig scroll">
         <svg viewBox="0 0 720 300" role="img" aria-label="Gated DeltaNet 层的数据流">
@@ -403,7 +402,7 @@ o_t = S.T @ q_t</code></pre>
         <li>每头维度从 128 提到 256；</li>
         <li>保留 Qwen3 的 QK-Norm（对每个头的 \(q,k\) 做 RMSNorm 后再算点积）；</li>
         <li><strong>部分 RoPE</strong>：<code>partial_rotary_factor = 0.25</code>，只对 256 维里的前 64 维施加旋转位置编码，剩下 192 维不带位置信息；<code>rope_theta = 10,000,000</code>。目的是改善向更长序列的外推；</li>
-        <li><strong>输出门</strong>：下面细说。</li>
+        <li><strong>输出门</strong>：SDPA 的输出逐元素乘一个 sigmoid 门。</li>
       </ul>
 
       <h3>7.2 门的位置和形式</h3>
@@ -470,10 +469,10 @@ o_t = S.T @ q_t</code></pre>
       </figure>
 
       <h3>8.2 算账：KV cache 与 FLOPs</h3>
-      <p>现在来算 decode 时的缓存和计算。记 \(L\) 为上下文长度。</p>
+      <p>decode 时的缓存和计算如下，记 \(L\) 为上下文长度。</p>
       <p><strong>KV cache。</strong>每个全注意力层每 token 存 \(2\times n_{kv}\times d_h=2\times2\times256=1024\) 个数，12 层共 12,288 个，bf16 下 24 KiB/token。256K（262,144）token 时是 6 GiB。如果 48 层全是同样的注意力层，就是 96 KiB/token、256K 时 24 GiB。作为参照，Qwen3-32B（64 层、8 个 KV 头、头维 128）是 256 KiB/token，256K 时 64 GiB。</p>
       <p><strong>每 token decode FLOPs。</strong>一个注意力层读 \(L\) 个 KV 的核心计算是 \(QK^\top\) 和 \(AV\) 各 \(2n_hd_hL\)，共 \(4n_hd_hL=16384L\)。一个 Gated DeltaNet 层的核心递推每头约 \(7d_kd_v\)（衰减、预测、外积写入、读出），32 头共约 3.7 MFLOPs，与 \(L\) 无关。其余（所有线性投影、MoE、输出头）按 \(2\times\) 激活参数计。</p>
-      <p>下面的计算器把这些式子都写进去了。「全注意力版」是一个假想的对照：48 层都用 Qwen3-Next 的 Gated Attention 层，其它不变。</p>
+      <p>演示 2 的计算器用的就是这些式子。「全注意力版」是一个假想的对照：48 层都用 Qwen3-Next 的 Gated Attention 层，其它不变。</p>
 
       <div class="demo" id="ctx-demo">
         <div class="demo-label">演示 2 · 上下文长度 vs 显存与计算</div>
@@ -505,7 +504,7 @@ o_t = S.T @ q_t</code></pre>
       <ul>
         <li><strong>短上下文时差别不大。</strong>4K token 时，混合版和全注意力版的 decode FLOPs 都被 MoE 和投影主导，注意力核心只占一小部分。这时候 Qwen3-Next 的优势主要来自 MoE 的稀疏（与 Qwen3-32B 相比）。</li>
         <li><strong>长上下文时缓存成了主角。</strong>256K 时混合版每序列 6 GiB KV + 72 MiB 状态，全注意力版 24 GiB。decode 是访存受限的：每生成一个 token，都要把这条序列的整份 KV cache 从显存读一遍。缓存小 4 倍，同样显存能并发的序列数就多约 4 倍，每步读的字节也少 4 倍。</li>
-        <li><strong>即便是混合版，到三四万 token 时，12 层注意力核心的 decode FLOPs 就和模型其余部分（MoE、投影、输出头）相当了；256K 时占到近九成。</strong>这也是为什么后来的 Qwen3.8-Flash-Next 进一步把这 12 层换成了稀疏注意力（见最后一节）。</li>
+        <li><strong>即便是混合版，到三四万 token 时，12 层注意力核心的 decode FLOPs 就和模型其余部分（MoE、投影、输出头）相当了；256K 时占到近九成。</strong>这也是为什么后来的 Qwen3.8-Flash-Next 进一步把这 12 层换成了稀疏注意力（见<a href="#later">第 14 节</a>）。</li>
       </ul>
 
       <!-- ============================================================ -->
@@ -643,7 +642,6 @@ o_t = S.T @ q_t</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="results">12. 训练效率与长上下文的实测结果</h2>
-      <p>前面算的都是理论账，这一节看 Qwen 团队公布的实际结果。</p>
       <h3>12.1 预训练</h3>
       <ul>
         <li>训练数据：从 Qwen3 的 36T token 预训练语料中均匀采样的 15T token 子集。</li>
@@ -682,7 +680,7 @@ o_t = S.T @ q_t</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="config">13. 完整配置表</h2>
-      <p>下面是 Qwen3-Next-80B-A3B 的 <code>config.json</code> 里的主要字段（Instruct 与 Thinking 两个版本相同）。</p>
+      <p>Qwen3-Next-80B-A3B 的 <code>config.json</code> 主要字段（Instruct 与 Thinking 两个版本相同）：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>字段</th><th>值</th><th>含义</th></tr></thead>

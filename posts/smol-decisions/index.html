@@ -59,8 +59,8 @@
     <nav class="series" data-series="smol"></nav>
 
     <article class="prose">
-      <p>训练一个大模型之前，要做的决定比想象中多得多：该不该训？训多大？用什么结构、什么数据？每个选择又怎么知道是对的？这一篇讲的就是做决定的方法：先想清楚为什么要训，把目标翻译成具体的选项，然后用小规模实验（消融）一个一个地验证。贯穿全文的例子是 Hugging Face 的 <a href="https://huggingface.co/HuggingFaceTB/SmolLM3-3B">SmolLM3</a>：一个 3B 参数、在 11T token 上训练的多语言推理模型。</p>
-      <p>这一篇几乎不涉及具体的网络结构。听起来像管理学，但每一步背后都有可以算的东西：参数量怎么对齐、评测分数的噪声有多大、一轮消融要烧多少 GPU 小时、给定算力该训多大的模型。下面会把这些都算出来。</p>
+      <p>训练一个大模型之前，要做的决定比想象中多得多：该不该训？训多大？用什么结构、什么数据？每个选择又怎么知道是对的？Hugging Face 训 <a href="https://huggingface.co/HuggingFaceTB/SmolLM3-3B">SmolLM3</a>（3B 参数、11T token 的多语言推理模型）时，消融和调试花掉的 GPU 小时超过了正式训练的一半。这些算力花在一件事上：先想清楚为什么要训，把目标翻译成具体的选项，再用小规模实验（消融）一个一个地验证。</p>
+      <p>这听起来像管理学，但每一步背后都有可以算的东西：参数量怎么对齐、评测分数的噪声有多大、一轮消融要烧多少 GPU 小时、给定算力该训多大的模型。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -116,7 +116,7 @@
         <figcaption>训练罗盘：每一段的答案都约束下一段。</figcaption>
       </figure>
 
-      <p>这三段是有方向的：Why 的答案决定 What 的取值范围，What 的选择又决定 How 的难度。比如「要在手机上跑」（Why）直接把模型大小卡在几 B 以内、把 MoE 排除在外（What），进而决定你用一台 8 卡机器就能做大部分消融（How）。这部分是战略层面的讨论，不涉及技术细节，但它决定了后面所有技术工作的方向。</p>
+      <p>这三段是有方向的：Why 的答案决定 What 的取值范围，What 的选择又决定 How 的难度。比如「要在手机上跑」（Why）直接把模型大小卡在几 B 以内、把 MoE 排除在外（What），进而决定你用一台 8 卡机器就能做大部分消融（How）。这些是战略层面的问题，不涉及技术细节，却决定了后面所有技术工作的方向。</p>
 
       <h2 id="why">Why：先问该不该训</h2>
       <h3>四个不算理由的理由</h3>
@@ -201,7 +201,7 @@
       <p>除了用例驱动的选择，还有一类选择是为了让训练本身更好：更稳定、样本效率更高、更快。这类选择没有那么一目了然。整个决策过程可以分成两阶段：</p>
       <ul>
         <li><strong>规划（Planning）</strong>：做实验之前，把每条约束映射到要决定的组件上。部署环境决定模型大小的上限；时间线决定能承担哪些结构风险；目标能力决定数据需求。</li>
-        <li><strong>验证（Validation）</strong>：有了起点和一张「可能的修改」清单之后，系统地测试。测试很贵，所以只测那些可能对你的用例或训练效率有实质帮助的修改。这就是后面讲的消融。</li>
+        <li><strong>验证（Validation）</strong>：有了起点和一张「可能的修改」清单之后，系统地测试。测试很贵，所以只测那些可能对你的用例或训练效率有实质帮助的修改。这一步就是消融。</li>
       </ul>
       <div class="callout"><p><strong>要学会判断什么值得测，而不只是会测。</strong>在无关紧要的选项上做完美的消融，和在重要选项上做粗糙的消融，浪费的算力一样多。</p></div>
 
@@ -217,7 +217,7 @@
         <li><strong>快</strong>：跑得越快，能测的假设越多；</li>
         <li><strong>可靠</strong>：要有足够的区分度。如果看的指标在早期分不清不同设置，消融就说明不了什么；如果指标很嘈杂，我们就是在追逐噪声。</li>
       </ol>
-      <p>这两个要求互相拉扯：越小越快，但越小越可能不准、不可外推。后面整篇的技术内容，都是在这两者之间找平衡。</p>
+      <p>这两个要求互相拉扯：越小越快，但越小越可能不准、不可外推。搭消融的大部分技巧，都是在这两者之间找平衡。</p>
 
       <h2 id="baseline">选 baseline 与「去风险」</h2>
       <h3>从一个被验证过的起点出发</h3>
@@ -280,7 +280,7 @@
             <text class="tf" x="300" y="152" text-anchor="middle" font-size="13">顺序：先测久经考验的改动，再测新改动（SmolLM3 的实际顺序）</text>
           </g>
         </svg>
-        <figcaption>SmolLM3 的结构改动就是按这个顺序逐个验证的。每个改动在<a href="/posts/smol-architecture/">下一篇</a>详细讲。</figcaption>
+        <figcaption>SmolLM3 的结构改动就是按这个顺序逐个验证的。每个改动的细节见<a href="/posts/smol-architecture/">架构篇</a>。</figcaption>
       </figure>
 
       <p>算力允许的话，也可以对每个改动单独测试，再做 leave-one-out 分析（全部改动都加上，每次去掉一个，看去掉哪个损失最大），<a href="https://arxiv.org/abs/2510.13786">ScaleRL</a> 论文就是这种方法的一个好范例。不要掉进对每个超参做穷举网格搜索、或测试每个新出的结构变体的陷阱。测任何改动之前先问两个问题：</p>
@@ -364,7 +364,7 @@ tokens:
       </ul>
       $$N = L\big(2h^2 + 2h\,n_{kv}d + 3hI + 2h\big) + h + (1\ \text{或}\ 2)\,Vh.$$
       <p>代入 baseline（\(h{=}2048\)、\(L{=}16\)、\(n_h{=}32\)、\(n_{kv}{=}8\)、\(d{=}64\)、\(I{=}8192\)、\(V{=}128256\)，共享 embedding）：每层注意力 \(2\cdot2048^2+2\cdot2048\cdot512 = 10.49\text{M}\)，MLP \(3\cdot2048\cdot8192=50.33\text{M}\)，16 层约 973M；embedding \(128256\times2048\approx262.7\text{M}\)；合计约 <strong>1.24B</strong>。embedding 占了两成多——这就是为什么小模型几乎都共享 embedding。</p>
-      <p>实践中也可以直接用 <code>transformers</code> 的 <code>LlamaConfig</code> 实例化一个模型再数参数。下面的计算器用的就是上面的公式（门控 MLP、标准头维度、每层两个 norm、无 bias）：</p>
+      <p>实践中也可以直接用 <code>transformers</code> 的 <code>LlamaConfig</code> 实例化一个模型再数参数。下面的计算器按上面的公式算（门控 MLP、标准头维度、每层两个 norm、无 bias）：</p>
 
       <div class="demo" id="pc">
         <div class="demo-label">参数量计算器（Llama 式 dense Transformer）</div>
@@ -418,7 +418,7 @@ tokens:
           </tbody>
         </table>
       </div>
-      <p>Spearman 秩相关 \(\rho_s\) 只看排名，所以分数非线性增长也能被识别为单调；Kendall τ 数的是「两两顺序一致的对数 − 不一致的对数」占总对数的比例。SNR 这一条下一节会用模拟器展开——它直接决定你多大概率选错赢家。</p>
+      <p>Spearman 秩相关 \(\rho_s\) 只看排名，所以分数非线性增长也能被识别为单调；Kendall τ 数的是「两两顺序一致的对数 − 不一致的对数」占总对数的比例。SNR 这一条最要紧：它直接决定你多大概率选错赢家。</p>
 
       <h3>题目怎么问：MCF、CF、FG</h3>
       <p>任务质量还取决于<strong>题目形式</strong>（怎么问模型）和<strong>打分方式</strong>（怎么算分）。三种常见形式：</p>
@@ -465,7 +465,7 @@ tokens:
         <li><strong>完形格式（CF）</strong>：选项不出现在 prompt 里，分别计算每个选项文本接在问题后面的似然，看哪个最大。</li>
         <li><strong>自由生成（FG）</strong>：看贪心生成的答案对不对。它要求模型有大量潜在知识，对短的预训练消融通常太难，信号很弱。</li>
       </ul>
-      <p>所以小消融用 MCF 或 CF。进一步，研究表明模型在训练早期很难做 MCF（<a href="https://arxiv.org/abs/2406.08446">OLMES</a>、<a href="https://arxiv.org/abs/2403.15796">Du et al.</a>、<a href="https://arxiv.org/abs/2406.11794">DataComp-LM</a>），所以 CF 更适合早期信号。HF 的做法：小消融全部用 CF，正式训练里再加入 MCF（训练后期它信号更好）。对后训练模型，FG 才是主要形式，那是后面后训练篇的话题。</p>
+      <p>所以小消融用 MCF 或 CF。进一步，研究表明模型在训练早期很难做 MCF（<a href="https://arxiv.org/abs/2406.08446">OLMES</a>、<a href="https://arxiv.org/abs/2403.15796">Du et al.</a>、<a href="https://arxiv.org/abs/2406.11794">DataComp-LM</a>），所以 CF 更适合早期信号。HF 的做法：小消融全部用 CF，正式训练里再加入 MCF（训练后期它信号更好）。对后训练模型，FG 才是主要形式。</p>
       <p>MCF 为什么早期会停在随机水平？因为它要求模型额外学会一个「格式技能」：把选项内容和字母对应起来，再在字母上输出正确的概率。这个技能来得很晚：OLMES 发现 7B 模型在 MMLU 的 MCF 上要到约 500B token 才明显高于随机，SmolLM2 的 1.7B 模型要到 6T token。Du et al. 认为本质上是预训练 loss 要降到某个阈值以下，这个能力才会出现。</p>
 
       <h3>CF 怎么打分：长度归一化</h3>
@@ -494,7 +494,7 @@ tokens:
           </tbody>
         </table>
       </div>
-      <p><strong>消融用什么数据？</strong>结构消融用一个固定的高质量混合（FineWeb-Edu 英文、FineMath 数学、Stack-Edu-Python 代码），因为结构上的结论应能外推到别的数据（包括多语言），数据保持简单即可。数据消融则反过来：固定结构，系统地改变数据配比。另外，差距很小时，算力允许就换几个种子重跑同一个消融，看结果波动多大。下一节就来定量地看这件事。</p>
+      <p><strong>消融用什么数据？</strong>结构消融用一个固定的高质量混合（FineWeb-Edu 英文、FineMath 数学、Stack-Edu-Python 代码），因为结构上的结论应能外推到别的数据（包括多语言），数据保持简单即可。数据消融则反过来：固定结构，系统地改变数据配比。另外，差距很小时，算力允许就换几个种子重跑同一个消融，看结果波动多大。</p>
 
       <h2 id="noise">评测噪声：你选对赢家的概率有多大</h2>
       <p>设想两个配置 A 和 B，B 在「真实」能力上比 A 高 \(\Delta\) 个百分点。你各训一次、在一个 \(n\) 题的基准上评一次，B 的分数高于 A 吗？不一定。分数里至少有两种噪声：</p>
@@ -532,7 +532,7 @@ tokens:
 
       <p>拖一拖就能看出几件事：</p>
       <ul>
-        <li>只评 1000 题、\(p\approx0.55\)、\(\rho=0.5\) 时，题目噪声一项的标准差约 \(\sqrt{2\cdot0.2475\cdot0.5/1000}\approx1.6\) 个点。真实差距 1 个点时，就算种子噪声为零，选对的概率也只有七成多。这就是前面说的「每个基准只评 1000 题，代价是多一点噪声」。</li>
+        <li>只评 1000 题、\(p\approx0.55\)、\(\rho=0.5\) 时，题目噪声一项的标准差约 \(\sqrt{2\cdot0.2475\cdot0.5/1000}\approx1.6\) 个点。真实差距 1 个点时，就算种子噪声为零，选对的概率也只有七成多。「每个基准只评 1000 题」付出的噪声代价就在这里。</li>
         <li>题目噪声和种子噪声的地位不同：多训种子降不了题目噪声，多加题目降不了种子噪声。看「方差比」读数判断哪个是瓶颈，再决定钱花在哪。</li>
         <li>把多个基准平均（比如同时看六个基准）是最便宜的降噪方式，但前提是它们的误差不完全相关、而且改动在多个基准上方向一致。</li>
       </ul>
@@ -541,7 +541,7 @@ tokens:
       <p>扎实的消融还有另一层价值：正式训练出问题时（一定会出问题），你需要对每个决定都有把握，并能迅速找到哪些组件没测过。扎实的消融能节省调试时间。</p>
 
       <h2 id="cost">消融的成本</h2>
-      <p>消融很香，但要花 GPU 时间。来看 SmolLM3 预训练阶段的完整算力账：</p>
+      <p>消融很香，但要花 GPU 时间。SmolLM3 预训练阶段的完整算力账如下：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>阶段</th><th class="num">GPU</th><th class="num">天数</th><th class="num">GPU 小时</th></tr></thead>
@@ -588,7 +588,7 @@ tokens:
       </div>
 
       <h2 id="scaling">Scaling law：多大的模型，训多少 token</h2>
-      <p>最后回到「What」里最核心的两个数：参数量 \(N\) 和训练 token 数 \(D\)。给定算力，钱该花在更大的模型上，还是更多的数据上？</p>
+      <p>「What」里最核心的是两个数：参数量 \(N\) 和训练 token 数 \(D\)。给定算力，钱该花在更大的模型上，还是更多的数据上？</p>
       <h3>从 Kaplan 到 Chinchilla</h3>
       <p>深度学习早期，训练并不太受算力约束：挑硬件能装下的最大模型和 batch，训到过拟合或数据用完为止。即便如此，人们已感觉到规模有用，比如 <a href="https://arxiv.org/abs/1712.00409">Hestness et al. 2017</a> 就系统地展示了更大的模型训更久能带来可预测的收益。</p>
       <p>LLM 时代我们<strong>总是</strong>受算力约束。<a href="https://arxiv.org/abs/2001.08361">Kaplan et al. 2020</a> 证明语言模型的表现在多个数量级上都高度可预测，于是规模竞赛开始了。算力受限时最重要的问题是：钱花在更大的模型上，还是更多的数据上？Kaplan 的 scaling law 建议把多得多的算力给模型规模，这促成了「175B 参数、只训 300B token」的 GPT-3。</p>
@@ -621,7 +621,7 @@ tokens:
       <p>黄金原则：一旦有了好的设置，<em>没有任何改动可以不经测试</em>。否则你会花好几天调查一个神秘的性能下降，最后发现是几天前某个无关依赖的更新导致的。</p>
 
       <h2 id="smollm3">SmolLM3 的答案</h2>
-      <p>把这一篇的框架套到 SmolLM3 上，从目标到决策的链条是这样的：</p>
+      <p>套到 SmolLM3 上，从目标到决策的链条是这样的：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>目标 / 约束</th><th>推出的决策</th><th>详见</th></tr></thead>
@@ -631,15 +631,15 @@ tokens:
             <tr><td>多语言（6 种欧洲语言为主）</td><td>Llama 3 的 128k 词表分词器；约 12% 多语言数据</td><td><a href="/posts/smol-optim-data/">第三篇</a></td></tr>
             <tr><td>长上下文（目标 128k）</td><td>从一开始就用 NoPE 混合与文档内 mask</td><td><a href="/posts/smol-architecture/">架构篇</a></td></tr>
             <tr><td>可延长训练、方便做中途实验</td><td>WSD 学习率调度</td><td><a href="/posts/smol-optim-data/">第三篇</a></td></tr>
-            <tr><td>384 张 H100 约一个月</td><td>11T token（大幅过度训练）</td><td>本篇</td></tr>
+            <tr><td>384 张 H100 约一个月</td><td>11T token（大幅过度训练）</td><td><a href="#scaling">Scaling law</a></td></tr>
           </tbody>
         </table>
       </div>
-      <p>其中「长上下文」那一行最能说明为什么要先想 why：SmolLM2 在预训练末尾扩上下文时遇到了困难，所以 SmolLM3 从训练开始就做了有利于长上下文的结构选择，回头看这一步做对了。具体是哪些选择、为什么有用，是下一篇的内容。</p>
+      <p>其中「长上下文」那一行最能说明为什么要先想 why：SmolLM2 在预训练末尾扩上下文时遇到了困难，所以 SmolLM3 从训练开始就做了有利于长上下文的结构选择，回头看这一步做对了。具体是哪些选择（NoPE 混合、文档内 mask），见<a href="/posts/smol-architecture/">架构篇</a>。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Loubna Ben Allal et al., <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>（2025）。本文的主要来源，对应其 Introduction、Training Compass: Why → What → How、Every Big Model Starts with a Small Ablation、Scaling Laws: How Many Parameters, How Much Data? 几节，以及 Infrastructure 章中 How Many GPUs Do We Need? 的算例。想看每组消融的原始曲线和更多实验细节，推荐直接读这几章。</li>
+        <li>Loubna Ben Allal et al., <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>（2025）。主要依据其中 Introduction、Training Compass: Why → What → How、Every Big Model Starts with a Small Ablation、Scaling Laws: How Many Parameters, How Much Data? 几节，以及 Infrastructure 章中 How Many GPUs Do We Need? 的算例。想看每组消融的原始曲线和更多实验细节，推荐直接读这几章。</li>
         <li>HF, <a href="https://huggingface.co/spaces/HuggingFaceFW/blogpost-fine-tasks">FineTasks</a>（评测任务的四条标准、SNR、Kendall τ、acc_char/acc_token/acc_pmi 的定义）；Penedo et al., <a href="https://arxiv.org/abs/2506.20920">FineWeb2</a>（2025）。</li>
         <li>Gu et al., <a href="https://arxiv.org/abs/2406.08446">OLMES: A Standard for Language Model Evaluations</a>（2024）。</li>
         <li>Kaplan et al., <a href="https://arxiv.org/abs/2001.08361">Scaling Laws for Neural Language Models</a>（2020）；Hoffmann et al., <a href="https://arxiv.org/abs/2203.15556">Training Compute-Optimal Large Language Models</a>（2022）；Hestness et al., <a href="https://arxiv.org/abs/1712.00409">Deep Learning Scaling is Predictable, Empirically</a>（2017）；Sardana et al., <a href="https://arxiv.org/abs/2401.00448">Beyond Chinchilla-Optimal</a>（2024）。</li>
