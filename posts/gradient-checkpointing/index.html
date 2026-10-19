@@ -1,0 +1,1295 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Gradient checkpointing · Zunzhe Zhang</title>
+  <meta name="description" content="用动画讲激活重算：激活为什么要存、显存锯齿、逐层 checkpoint 与 √n 策略、选择性重算、FlashAttention、CPU offload、与流水线并行和 FSDP 的配合，以及 torch.utils.checkpoint 的用法和一个可拖动的显存/算力权衡。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    /* Literal rgba (not color-mix) so anim.js can tween these colors. */
+    :root { --c3: #0f9d8a; --c3-soft: rgba(15, 157, 138, 0.18); --grad: #d6336c; --idle: rgba(138, 138, 147, 0.26); }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --c3: #34d1b8; --c3-soft: rgba(52, 209, 184, 0.2); --grad: #ff6b9a; --idle: rgba(150, 150, 165, 0.24); } }
+    :root[data-theme="dark"] { --c3: #34d1b8; --c3-soft: rgba(52, 209, 184, 0.2); --grad: #ff6b9a; --idle: rgba(150, 150, 165, 0.24); }
+
+    .slide.an { padding: 34px 64px 92px; gap: 10px; justify-content: flex-start; }
+    .slide.an h2 { font-size: 40px; }
+    .slide svg.fig { width: 100%; height: auto; display: block; overflow: visible; }
+    .slide svg text { font-family: var(--font-sans); }
+    .slide svg .mono { font-family: var(--font-mono); }
+    .caps { position: relative; height: 72px; flex: none; }
+    .caps > p { position: absolute; left: 0; right: 0; top: 0; opacity: 0; font-size: 23px; line-height: 1.45; color: var(--text-soft); }
+    .caps > p:first-child { opacity: 1; }
+    .caps b { color: var(--text); font-weight: 600; }
+    .slide .note { font-size: 17px; color: var(--text-faint); }
+    .slide .tight li + li { margin-top: 0.25em; }
+    .slide .s22 { font-size: 22px; }
+    .slide .s24 { font-size: 24px; }
+    .slide code { font-family: var(--font-mono); font-size: 0.86em; }
+    .split { display: flex; gap: 24px; align-items: flex-start; }
+    .code { position: relative; flex: none; border-radius: 12px; background: var(--code-bg); }
+    .code pre { margin: 0; padding: 12px 16px; font-family: var(--font-mono); font-size: 15px; line-height: 22px; white-space: pre; overflow: hidden; position: relative; }
+    .code .hl { position: absolute; left: 0; right: 0; top: 12px; height: calc(var(--h, 22) * 1px); background: var(--accent-soft); border-left: 3px solid var(--accent); opacity: 0; }
+    .code .cm { color: var(--text-faint); }
+    .code .kw { color: var(--accent); }
+    .deriv { flex: 1; min-width: 0; font-size: 19px; line-height: 1.45; }
+    .deriv > div + div { margin-top: 6px; }
+    .deriv > div { opacity: 0; }
+    .deriv .katex-display { margin: 6px 0; }
+    .widget.tw { display: grid; grid-template-columns: 380px 1fr; gap: 22px; padding: 16px 20px; font-size: 18px; }
+    .tw label { display: grid; grid-template-columns: 6.6em 1fr 3.4em; gap: 10px; align-items: center; color: var(--text-soft); margin-bottom: 6px; }
+    .tw input[type="range"] { width: 100% !important; }
+    .tw output { font-family: var(--font-mono); color: var(--text); text-align: right; }
+    .tw .rd { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 8px; }
+    .tw .rd > div { padding: 7px 12px; border-radius: 10px; background: var(--bg-soft); font-size: 14px; color: var(--text-faint); }
+    .tw .rd b { display: block; font-family: var(--font-mono); font-size: 21px; color: var(--text); }
+    .tw .verdict { margin-top: 10px; font-size: 17px; color: var(--accent-2); font-weight: 600; min-height: 2.6em; }
+    .series-pager { margin-top: 0; font-size: 20px; width: 860px; }
+    .toc { columns: 2; column-gap: 56px; margin: 0; padding-left: 1.2em; font-size: 25px; }
+    .toc li { break-inside: avoid; }
+  </style>
+</head>
+<body class="deck-page">
+  <main class="deck"><div class="stage">
+
+    <!-- 1 -->
+    <section class="slide center">
+      <div class="kicker rise">动画图解 LLM 系统 · 激活重算</div>
+      <h1 class="rise" style="--d: 1">Gradient checkpointing</h1>
+      <p class="muted rise" style="--d: 2">训练时，用多算一遍前向，换回被激活值占满的显存</p>
+      <p class="small muted rise" style="--d: 4">按 → 或点击推进动画 · 页面底部的进度条可以拖动回看</p>
+    </section>
+
+    <!-- 2 -->
+    <section class="slide">
+      <div class="kicker">目录</div>
+      <h2>目录</h2>
+      <ol class="toc tight">
+        <li>反向为什么需要激活值</li>
+        <li>显存锯齿：前向堆、反向拆</li>
+        <li>一层 Transformer 存了多少字节</li>
+        <li>checkpoint 的思路与逐层重算</li>
+        <li>代价：多一次前向 ≈ +33%</li>
+        <li>分段与 √n 策略（Chen et al. 2016）</li>
+        <li>交互：每 k 层一个 checkpoint</li>
+        <li>选择性重算：只重算 attention core</li>
+        <li>FlashAttention：kernel 里的重算</li>
+        <li>CPU offload</li>
+        <li>与流水线并行、FSDP 的配合</li>
+        <li><code>torch.utils.checkpoint</code> 与按算子选择的策略</li>
+      </ol>
+    </section>
+
+    <!-- 3 -->
+    <section class="slide an" id="s-why">
+      <div class="kicker">动机</div>
+      <h2>反向要用前向的输入</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="线性层前向时把输入 x 存下，反向时用它计算权重梯度"></svg>
+      <div class="caps">
+        <p>一个线性层 \(y = Wx\)。前向算完 \(y\) 就往下传，但 \(x\) 不能扔：它被存进 autograd 的"保存区"。</p>
+        <p>反向时 \(dy\) 回来：\(dx = W^\top dy\) 只要权重；\(dW = dy\,x^\top\) 却必须用到前向的 \(x\)。</p>
+        <p>非线性也一样：GeLU、softmax、归一化的导数都依赖它们的输入或输出。这些在前向产生、留给反向用的张量，就叫<b>激活（activations）</b>。</p>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="slide an" id="s-stack">
+      <div class="kicker">显存锯齿</div>
+      <h2>前向一层层堆，反向一层层拆</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="前向时每层把激活压到显存栈上，反向时按相反顺序弹出，显存曲线呈锯齿形"></svg>
+      <div class="caps">
+        <p>前向经过每一层，都把这一层的激活压进显存（右侧的栈），左边的曲线是显存随时间的变化。</p>
+        <p>反向从最后一层往回走，用完一层的激活就释放一层：后进先出。反向每层的计算量约是前向的 2 倍，所以下降段更长。</p>
+        <p>每个训练 step 重复一次：显存曲线是<b>锯齿形</b>，峰值出现在前向刚结束时，等于所有层的激活之和。</p>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="slide an" id="s-size">
+      <div class="kicker">账本</div>
+      <h2>一层 Transformer 存了多少</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="一层 Transformer 激活的组成条形图，以及 GPT-3 175B 形状下 96 层的总量"></svg>
+      <div class="caps">
+        <p>按算子数一遍（16 位激活，\(s\) 序列长、\(b\) micro-batch、\(h\) 隐藏维、\(a\) 头数）：每层 \(sbh\,(34 + 5as/h)\) 字节。图中按 GPT-3 175B 的形状画（\(a=96,\ s=2048,\ h=12288\)，\(5as/h = 80\)）。</p>
+        <p>\(b=1\) 时一层约 <b>2.87 GB</b>，96 层就是 <b>275 GB</b>：远超一张 80 GB 的卡，而这还没算权重和优化器状态。</p>
+        <p>和 \(s^2\) 成正比的那一块（softmax 输出、dropout mask 与输出）占了 70%。FlashAttention 不存这个 \(s \times s\) 矩阵，剩下 \(34\,sbh\)：一层 0.86 GB，96 层仍有 82 GB。</p>
+      </div>
+    </section>
+
+    <!-- 6 -->
+    <section class="slide an" id="s-idea">
+      <div class="kicker">思路</div>
+      <h2>只存层的输入，反向前重算一遍</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="一层内部各算子的激活：正常时全部保存；checkpoint 时只存输入，反向前重新计算"></svg>
+      <div class="caps">
+        <p>正常训练：一层里的每个算子都留下激活，全部要等到反向才释放。</p>
+        <p>checkpoint：只把这一层的<b>输入</b>存下来（青色）；层内的中间结果算完下一步就丢，前向时显存几乎不涨。</p>
+        <p>轮到这一层反向时，先拿存好的输入<b>把这层的前向重跑一遍</b>，恢复全部激活，再照常反向、用完释放。</p>
+      </div>
+    </section>
+
+    <!-- 7 -->
+    <section class="slide an" id="s-full">
+      <div class="kicker">逐层重算</div>
+      <h2>每层一个 checkpoint</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="每层只存输入，反向时逐层重算，显存峰值变成很小的平台加一层的尖峰"></svg>
+      <div class="caps">
+        <p>前向：每层只留一个输入（青色细条），层内激活即用即丢。虚线是不重算时的显存曲线。</p>
+        <p>反向：每到一层，先重算它（橙色），再反向释放。任何时刻最多只有<b>一层</b>的完整激活。</p>
+        <p>峰值 ≈ \(L\) 个层输入 + 1 层完整激活。GPT-3 175B 形状下：\(96 \times 2sbh \approx 4.8\) GB，加一层约 2.9 GB，从 275 GB 降到不到 8 GB。代价是时间变长了。</p>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="slide an" id="s-cost">
+      <div class="kicker">代价</div>
+      <h2>多一次前向：约 +33%</h2>
+      <svg class="fig" viewBox="0 0 1152 360" aria-label="不重算与逐层重算的时间线对比"></svg>
+      <div class="caps">
+        <p>一层的反向要算 \(dx\) 和 \(dW\) 两个矩阵乘，约是前向的 2 倍。不重算时，一个 step 的计算量是 1 + 2 = 3 份。</p>
+        <p>全部重算后，每层反向前多一次前向：4 份，计算量 <b>+33%</b>。实测常常更多（36%–39%），因为重算还会打乱原本和计算重叠的通信。</p>
+      </div>
+    </section>
+
+    <!-- 9 -->
+    <section class="slide an" id="s-sqrt">
+      <div class="kicker">分段</div>
+      <h2>每 k 层存一次：显存 n/k + k</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="16 层分成 4 段，只存段边界，反向时一次重算一整段"></svg>
+      <div class="caps">
+        <p>16 层分成 4 段，每段 \(k = 4\) 层。前向只在<b>段的入口</b>存 checkpoint，整段内部都不存。</p>
+        <p>反向时一次重算一整段，段内 \(k\) 层的激活同时在显存里，再逐层反向释放。重算总量仍然是一次完整的前向。</p>
+        <p>峰值 ≈ \(n/k\) 个 checkpoint + \(k\) 层激活：\(k\) 太小，checkpoint 多；\(k\) 太大，重算的段大。中间有一个最优。</p>
+      </div>
+    </section>
+
+    <!-- 10 -->
+    <section class="slide an" id="s-deriv">
+      <div class="kicker">推导</div>
+      <h2>√n 从哪里来</h2>
+      <div class="split">
+        <svg class="fig" viewBox="0 0 640 400" style="width:560px" aria-label="n/k、k 与二者之和随 k 变化的曲线，最小值在 k 等于根号 n"></svg>
+        <div class="deriv">
+          <div>设每层激活与 checkpoint 一样大（都记 1 份）：$$M(k) = \frac{n}{k} + k$$</div>
+          <div>$$M'(k) = 1-\frac{n}{k^2} = 0 \;\Rightarrow\; k = \sqrt n$$ 此时 \(M_{\min} = 2\sqrt n\)。</div>
+          <div>额外计算仍是一次前向，显存从 \(O(n)\) 变成 \(O(\sqrt n)\)。递归地把每段再分段，可以降到 \(O(\log n)\)，代价是更多次重算。</div>
+          <div>Transformer 里 checkpoint 只是层的输入 \(c = 2sbh\)，远小于一层激活 \(A = 34sbh\)：$$M = \frac{n}{k}c + kA,\quad k^* = \sqrt{nc/A}$$ \(n = 96\) 时 \(k^* \approx 2.4\)，所以实践中基本是<b>每层</b>（或每两层）一个 checkpoint。</div>
+        </div>
+      </div>
+      <div class="caps">
+        <p>蓝线是 checkpoint 的份数 \(n/k\)，橙线是重算一段时的 \(k\) 层激活，黑线是两者之和（\(n = 16\)）。</p>
+        <p>最小值在 \(k = \sqrt n\)。这个策略来自 Chen et al. 2016：1000 层的 ResNet 显存从 48 GB 降到 7 GB，耗时增加约 30%。</p>
+      </div>
+    </section>
+
+    <!-- 11 -->
+    <section class="slide an" id="s-tw">
+      <div class="kicker">交互</div>
+      <h2>显存与时间的权衡</h2>
+      <div class="widget tw" data-interactive>
+        <div>
+          <label>层数 L <input type="range" id="tw-l" min="8" max="96" step="8" value="96"><output id="tw-lo"></output></label>
+          <label>重算层数 N <input type="range" id="tw-n" min="0" max="96" step="1" value="96"><output id="tw-no"></output></label>
+          <label>每段 k 层 <input type="range" id="tw-k" min="1" max="24" step="1" value="1"><output id="tw-ko"></output></label>
+          <div class="rd">
+            <div>激活峰值<b id="tw-pk"></b></div>
+            <div>不重算时<b id="tw-pb"></b></div>
+            <div>额外计算<b id="tw-ex"></b></div>
+            <div>显存节省<b id="tw-sv"></b></div>
+          </div>
+        </div>
+        <svg id="tw-svg" viewBox="0 0 640 320" style="width:100%" aria-label="一个训练 step 内的激活显存曲线"></svg>
+      </div>
+      <p class="note">示意模型：GPT-3 175B 形状、\(b=1\)、FlashAttention、单卡不切 TP，每层激活 \(34sbh \approx 0.86\) GB，checkpoint \(2sbh \approx 0.05\) GB；前 N 层每 k 层存一个 checkpoint，其余层不重算。前向 1 份时间、重算 1 份、反向 2 份；不计重算时一层的临时工作区。灰色虚线是不重算的曲线。</p>
+    </section>
+
+    <!-- 12 -->
+    <section class="slide an" id="s-sel">
+      <div class="kicker">选择性重算</div>
+      <h2>只重算最占显存、最便宜的那部分</h2>
+      <svg class="fig" viewBox="0 0 1152 390" aria-label="一层激活的组成中 attention core 部分被丢弃后显存降低 70%，计算只增加 2.7%"></svg>
+      <div class="caps">
+        <p>同一层里，不同激活"每字节的重算代价"差别很大。\(QK^\top\)、softmax、dropout、乘 \(V\) 这几步（attention core）产生的激活和 \(s^2\) 成正比，FLOPs 却很少。</p>
+        <p>只把这几步重算，其余照存：每层激活从 \(sbh(34 + 5as/h)\) 降到 \(34\,sbh\)。GPT-3 省 70%，MT-NLG 省 65%。</p>
+        <p>代价只有 2.7%（GPT-3）和 1.6%（MT-NLG）的额外 FLOPs，远低于整层重算的 33%。再配合序列并行，把剩下的 \(34\,sbh\) 也按张量并行度 \(t\) 切开。</p>
+      </div>
+    </section>
+
+    <!-- 13 -->
+    <section class="slide an" id="s-meas">
+      <div class="kicker">实测</div>
+      <h2>一层的前向 + 反向时间（22B 模型）</h2>
+      <svg class="fig" viewBox="0 0 1152 380" aria-label="22B 模型单层前向反向时间：基线、整层重算、选择性重算、选择性加序列并行"></svg>
+      <div class="caps">
+        <p>22B 模型一层的实测：整层重算让反向从 11.9 ms 涨到 19.5 ms，总时间 +39%。</p>
+        <p>选择性重算只多 7%；再加序列并行（LayerNorm、dropout 也按 \(t\) 切开），总开销只剩 4%。模型越大越明显：530B 和 1T 上从 36% 降到 2%，530B 的 MFU 从 42.1% 提到 54.2%。</p>
+      </div>
+    </section>
+
+    <!-- 14 -->
+    <section class="slide an" id="s-flash">
+      <div class="kicker">FlashAttention</div>
+      <h2>重算已经藏在 attention kernel 里</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="FlashAttention 前向逐块计算注意力分数后丢弃，只保存输出和每行的 logsumexp，反向时再逐块重算"></svg>
+      <div class="caps">
+        <p>标准实现把 \(s\times s\) 的注意力概率 \(P\) 整个写进显存留给反向。FlashAttention 按块算：每块分数算完、累加进输出就丢，只存输出 \(O\) 和每行一个 logsumexp。</p>
+        <p>反向时用 \(Q, K, V\) 和 logsumexp 把每块 \(P\) <b>重算</b>出来。这正是选择性重算，只是做在一个 kernel 里，不用读写 HBM 上的 \(P\)，往往比不重算还快。</p>
+      </div>
+    </section>
+
+    <!-- 15 -->
+    <section class="slide an" id="s-off">
+      <div class="kicker">CPU offload</div>
+      <h2>另一条路：把激活搬到 CPU 内存</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="前向时激活经 PCIe 拷到 CPU，反向前再拷回；拷贝比计算慢时出现等待"></svg>
+      <div class="caps">
+        <p>不重算，而是在前向时把激活经 PCIe 异步拷到主机内存（D2H），反向前再提前拷回（H2D），拷贝走单独的 stream，和计算重叠。</p>
+        <p>问题在带宽：H100 的 HBM 是 3.35 TB/s，PCIe Gen5 x16 单向约 64 GB/s，差 50 倍。拷贝比计算慢时，反向就得停下来等（红色）。一台机器 8 张卡还要共享主机的内存带宽。</p>
+        <p>PyTorch 里一行就能试：<code>with torch.autograd.graph.save_on_cpu(pin_memory=True):</code> 包住前向。实践中常只 offload 一部分层，或与重算混用。图中时间为示意（拷贝取计算的 1.6 倍）。</p>
+      </div>
+    </section>
+
+    <!-- 16 -->
+    <section class="slide an" id="s-offw">
+      <div class="kicker">交互</div>
+      <h2>拷贝能不能藏在计算后面</h2>
+      <div class="widget tw" data-interactive>
+        <div>
+          <label>隐藏维 h <input type="range" id="ow-h" min="0" max="5" step="1" value="1"><output id="ow-ho"></output></label>
+          <label>序列长 s <input type="range" id="ow-s" min="0" max="5" step="1" value="2"><output id="ow-so"></output></label>
+          <div class="rd">
+            <div>一层激活（b=1）<b id="ow-act"></b></div>
+            <div>一层前向耗时<b id="ow-tc"></b></div>
+            <div>D2H 拷贝耗时<b id="ow-to"></b></div>
+            <div>拷贝 / 计算<b id="ow-r"></b></div>
+          </div>
+          <div class="verdict" id="ow-v"></div>
+        </div>
+        <svg id="ow-svg" viewBox="0 0 640 300" style="width:100%" aria-label="一层前向计算与激活拷贝的时间条"></svg>
+      </div>
+      <p class="note">示意估算：激活 \(34\,sbh\) 字节，前向 FLOPs \(24\,sbh^2 + 4\,bs^2h\)，按 989 TFLOPS 的 50% 算；拷贝按 50 GB/s 算。两者都和 \(b\) 成正比，比值只取决于 \(h\) 和 \(s\)：模型越宽，每字节激活背后的计算越多，越容易藏住。</p>
+    </section>
+
+    <!-- 17 -->
+    <section class="slide an" id="s-pp">
+      <div class="kicker">流水线并行</div>
+      <h2>1F1B：第一级要扛 p 个 micro-batch 的激活</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="4 级 1F1B 流水线时间线，以及每级同时在途的激活；加上重算后在途激活变细、反向变长"></svg>
+      <div class="caps">
+        <p>4 级流水线、8 个 micro-batch 的 1F1B 调度。第 \(i\) 级在稳态时同时持有 \(p - i\) 个 micro-batch 的激活：<b>第一级最多</b>。</p>
+        <p>第一级有 \(L/p\) 层、持有 \(p\) 份，合起来正好是 \(L\) 层的激活，和 \(p\) 无关：流水线切得再细，第一级的激活也不减少。</p>
+        <p>加上重算：每份在途激活只剩层输入，变得很细；反向块里多出一段重算（橙色），整条流水线变长。也可以只对放不下的那几个 micro-batch 重算。</p>
+      </div>
+    </section>
+
+    <!-- 18 -->
+    <section class="slide an" id="s-fsdp">
+      <div class="kicker">FSDP</div>
+      <h2>重算发生在参数已经 gather 好的时候</h2>
+      <svg class="fig" viewBox="0 0 1152 360" aria-label="FSDP 的通信与计算时间线：反向时先 all-gather 参数，再在同一窗口内重算和反向，最后 reduce-scatter 梯度"></svg>
+      <div class="caps">
+        <p>FSDP 每层的参数平时是分片的：前向前 all-gather，用完释放；反向前再 all-gather 一次，算完梯度 reduce-scatter。</p>
+        <p>把 checkpoint 的边界对齐 FSDP 的单元（每个 block 先包 checkpoint，再 <code>fully_shard</code>），重算就落在反向本来就要做的那次 all-gather 之后，<b>不需要额外通信</b>。</p>
+        <p>FSDP 切的是参数、梯度和优化器状态，<b>不切激活</b>：每张卡的激活只取决于它自己的 micro-batch。能压激活的是重算、offload、序列 / 上下文并行。</p>
+      </div>
+    </section>
+
+    <!-- 19 -->
+    <section class="slide an" id="s-code">
+      <div class="kicker">PyTorch</div>
+      <h2><code>torch.utils.checkpoint</code></h2>
+      <div class="split">
+        <div class="code" style="width:740px"><div class="hl"></div><pre><span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> checkpoint
+
+class Model(nn.Module):
+    def forward(self, x):
+        for blk in self.blocks:
+            if self.training:
+                <span class="cm"># 只存 blk 的输入，反向前重跑 blk.forward</span>
+                x = checkpoint(blk, x, use_reentrant=False)
+            else:
+                x = blk(x)
+        return self.head(self.norm(x))
+
+<span class="cm"># 或者按段：每段若干 block，只存段边界</span>
+<span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> checkpoint_sequential
+y = checkpoint_sequential(nn.Sequential(*blocks), 4, x,
+                          use_reentrant=False)</pre></div>
+        <svg class="fig" viewBox="0 0 380 380" style="width:388px" aria-label="普通前向与 checkpoint 前向时 autograd 保存的张量数量对比"></svg>
+      </div>
+      <div class="caps">
+        <p>右边是 autograd 保存的张量：普通前向每个 block 留下一堆；包上 <code>checkpoint</code> 后每个 block 只留输入。</p>
+        <p>务必显式写 <code>use_reentrant=False</code>（新版本不写会报警告）。非 reentrant 版本支持 <code>torch.autograd.grad</code>、不要求输入 <code>requires_grad</code>、能处理嵌套结构里的张量，重算到所需激活就提前停下。</p>
+        <p>dropout 的随机数默认会被保存并在重算时恢复（<code>preserve_rng_state=True</code>），两次前向结果一致。</p>
+      </div>
+    </section>
+
+    <!-- 20 -->
+    <section class="slide an" id="s-sac">
+      <div class="kicker">按算子选择</div>
+      <h2>选择性 checkpoint：存矩阵乘，重算逐元素算子</h2>
+      <div class="split">
+        <div class="code" style="width:740px"><div class="hl"></div><pre><span class="kw">import</span> functools, torch
+<span class="kw">from</span> torch.utils.checkpoint <span class="kw">import</span> (checkpoint,
+    create_selective_checkpoint_contexts, CheckpointPolicy)
+
+ops_to_save = {
+    torch.ops.aten.mm.default,
+    torch.ops.aten._scaled_dot_product_flash_attention.default,
+}
+
+def policy(ctx, op, *args, **kwargs):
+    if op in ops_to_save:
+        return CheckpointPolicy.MUST_SAVE      <span class="cm"># 贵：存</span>
+    return CheckpointPolicy.PREFER_RECOMPUTE   <span class="cm"># 便宜：重算</span>
+
+ctx_fn = functools.partial(create_selective_checkpoint_contexts, policy)
+y = checkpoint(blk, x, use_reentrant=False, context_fn=ctx_fn)</pre></div>
+        <svg class="fig" viewBox="0 0 380 400" style="width:388px" aria-label="block 内各算子被标记为保存或重算"></svg>
+      </div>
+      <div class="caps">
+        <p>整层重算是"全有或全无"。更细的做法是逐个算子决定：policy 函数拿到每个 aten 算子，返回存还是重算。</p>
+        <p>矩阵乘和 attention 计算量大，结果存下；norm、激活函数、逐元素乘这些便宜的算子在反向前重算。反向时只需重跑便宜的那部分。</p>
+      </div>
+    </section>
+
+    <!-- 21 -->
+    <section class="slide an" id="s-map">
+      <div class="kicker">全景</div>
+      <h2>各种做法在显存 / 计算平面上的位置</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="各种激活节省方法在激活显存与额外计算二维平面上的位置"></svg>
+      <div class="caps">
+        <p>横轴是额外计算，纵轴是剩下的激活显存（以不重算为 100%；按 GPT-3 175B 形状、标准 attention 估算）。左下角最好。</p>
+        <p>先拿便宜的：FlashAttention 和选择性重算几乎不花算力就省掉七成；剩下的再用部分层重算、逐层重算或 offload 补，按显存缺口决定重算多少层。</p>
+      </div>
+    </section>
+
+    <!-- 22 -->
+    <section class="slide">
+      <div class="kicker">小结</div>
+      <h2>小结</h2>
+      <ul class="s24 tight">
+        <li>激活是前向产生、反向要用的张量；显存曲线是锯齿形，峰值在前向结束时，等于所有层激活之和。</li>
+        <li>每层 \(sbh(34 + 5as/h)\) 字节：GPT-3 175B 形状下 96 层约 275 GB。</li>
+        <li>checkpoint：只存层输入，反向前重算；逐层重算后峰值 ≈ \(L\) 个输入 + 1 层，计算 +33%。</li>
+        <li>分段的最优段长 \(k^*=\sqrt{nc/A}\)；checkpoint 和一层一样大时就是 √n，Transformer 里接近每层一个。</li>
+        <li>选择性重算 attention core：省 65%–70%，只多 1.6%–2.7% FLOPs；FlashAttention 在 kernel 内做了同样的事。</li>
+        <li>offload 不花算力但受 PCIe 带宽限制；模型越宽越容易藏住。</li>
+        <li>1F1B 的第一级要存 \(L\) 层的激活；FSDP 不切激活，重算要和 FSDP 单元对齐；PyTorch 里用 <code>use_reentrant=False</code>，需要时再按算子选。</li>
+      </ul>
+    </section>
+
+    <!-- 23 -->
+    <section class="slide">
+      <div class="kicker">参考</div>
+      <h2>参考与延伸阅读</h2>
+      <ul class="s22 tight">
+        <li>Chen et al., <a href="https://arxiv.org/abs/1604.06174">Training Deep Nets with Sublinear Memory Cost</a>（2016）：√n 与 \(O(\log n)\) 策略，1000 层 ResNet 48 GB → 7 GB</li>
+        <li>Griewank &amp; Walther, <a href="https://doi.org/10.1145/347837.347846">Algorithm 799: revolve</a>（2000）：自动微分里的最优 checkpoint 调度</li>
+        <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（2022）：激活公式、选择性重算、序列并行与实测</li>
+        <li>Huang et al., <a href="https://arxiv.org/abs/1811.06965">GPipe</a>（2019）：流水线里的 re-materialization</li>
+        <li>Dao et al., <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a>（2022）：分块计算与反向重算</li>
+        <li>PyTorch 文档：<a href="https://docs.pytorch.org/docs/stable/checkpoint.html">torch.utils.checkpoint</a>（含选择性 checkpoint），<a href="https://docs.pytorch.org/docs/stable/autograd.html#torch.autograd.graph.save_on_cpu">save_on_cpu</a></li>
+        <li><a href="https://github.com/pytorch/torchtitan">torchtitan</a>：逐层 / 选择性重算与 FSDP2 的组合方式</li>
+        <li>本系列相关：<a href="/posts/scaling-memory/">训练的账本：显存、FLOPs 与 MFU</a>，<a href="/posts/scaling-pipeline/">流水线并行</a>，<a href="/posts/scaling-data-parallel/">数据并行、ZeRO 与 FSDP</a></li>
+      </ul>
+    </section>
+
+    <!-- 24 -->
+    <section class="slide center">
+      <div class="kicker rise">系列 · 动画图解 LLM 系统</div>
+      <h2 class="rise" style="--d: 1">继续阅读</h2>
+      <p class="muted rise" style="--d: 2">训练省显存的另一半是优化器状态和并行切分，见系列里的相邻篇目</p>
+      <nav class="series-pager rise" style="--d: 3" data-series="systems"></nav>
+      <p class="small muted rise" style="--d: 4"><a href="/blog/">← 回到博客</a></p>
+    </section>
+
+  </div></main>
+
+  <script src="/assets/slides.js"></script>
+  <script src="/assets/anim.js"></script>
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const $ = (s, r = document) => r.querySelector(s);
+    const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+    function S(p, tag, a = {}) {
+      const e = document.createElementNS(NS, tag);
+      for (const [k, v] of Object.entries(a)) {
+        if (k === 'text') e.textContent = v;
+        else if (k === 'fill' || k === 'stroke' || k === 'opacity') e.style.setProperty(k, v);
+        else e.setAttribute(k, v);
+      }
+      if (p) p.appendChild(e);
+      return e;
+    }
+    const G = (p, a = {}) => S(p, 'g', a);
+    const R = (p, x, y, w, h, a = {}) => S(p, 'rect', { x, y, width: w, height: h, rx: 5, ...a });
+    const T = (p, x, y, s, a = {}) => S(p, 'text', { x, y, 'text-anchor': 'middle', 'font-size': 16, fill: 'var(--text)', ...a, text: s });
+    const P = (p, d, a = {}) => S(p, 'path', { d, fill: 'none', stroke: 'var(--text-faint)', 'stroke-width': 2, ...a });
+    const C = (p, cx, cy, r, a = {}) => S(p, 'circle', { cx, cy, r, ...a });
+    const box = (p, x, y, w, h, label, a = {}) => {
+      const g = G(p);
+      const r = R(g, x, y, w, h, { rx: 10, fill: 'var(--surface)', stroke: 'var(--border)', 'stroke-width': 2, ...a });
+      const t = label ? T(g, x + w / 2, y + h / 2 + 6, label, { 'font-size': a.fs || 17, 'font-weight': 600 }) : null;
+      return { g, r, t };
+    };
+    function pkt(p, x, y, color, w = 22, h = 14, a = {}) {
+      const g = G(p, { opacity: 0, ...a });
+      R(g, x - w / 2, y - h / 2, w, h, { rx: 4, fill: color });
+      return g;
+    }
+    function cap(tl, sl, i, at) {
+      const ps = $$('.caps > p', sl);
+      ps.forEach((p, j) => { if (j !== i) tl.to(p, { opacity: 0 }, { dur: 0.3, at }); });
+      tl.to(ps[i], { opacity: 1 }, { dur: 0.45, at: at + 0.2 });
+    }
+    function scene(id, build, o = {}) {
+      const sl = document.getElementById(id);
+      const svg = $('svg.fig', sl);
+      const tl = Anim.timeline();
+      build(tl, svg, sl);
+      Anim.slide(sl, tl, { steps: true, controls: true, ...o });
+    }
+    const flash = (tl, el, color, at, back = 'var(--border)', dur = 0.25) => {
+      tl.to(el, { stroke: color }, { at, dur }).to(el, { stroke: back }, { at: at + 0.5, dur: 0.4 });
+    };
+
+    // -------- generic memory-stack scene (forward / recompute / backward) --------
+    function memEvents(n, k) {
+      const ev = [];
+      for (let i = 0; i < n; i++) ev.push(k ? { t: 'f', i, push: i % k === 0 ? 'c' : null, dur: 1 } : { t: 'f', i, push: 'A', dur: 1 });
+      if (!k) for (let i = n - 1; i >= 0; i--) ev.push({ t: 'b', i, pop: 1, dur: 2 });
+      else {
+        for (let s = Math.floor((n - 1) / k) * k; s >= 0; s -= k) {
+          const e = Math.min(n, s + k) - 1;
+          for (let i = s; i <= e; i++) ev.push({ t: 'r', i, push: 'A', dur: 1 });
+          for (let i = e; i >= s; i--) ev.push({ t: 'b', i, pop: i === s ? 2 : 1, dur: 2 });
+        }
+      }
+      return ev;
+    }
+    function memScene(tl, svg, o) {
+      const { n, k = 0, A, c = 6, u = 0.3, t0 = 0.3, iters = 1, base = 392, cx0 = 60, cx1 = 900, ghost = false, units: U } = o;
+      const LW = Math.min(104, 900 / n);
+      const LX = (i) => 40 + i * LW + (LW - 8) / 2;
+      const layers = [];
+      for (let i = 0; i < n; i++) layers.push(box(svg, 40 + i * LW, 20, LW - 8, 44, 'L' + (i + 1), { fs: n > 10 ? 13 : 16 }));
+      const SX = 960, SW = 150;
+      R(svg, SX - 8, 110, SW + 16, base - 108, { rx: 10, fill: 'none', stroke: 'var(--border)', 'stroke-dasharray': '6 5' });
+      T(svg, SX + SW / 2, 100, '激活显存', { 'font-size': 15, 'font-weight': 600, fill: 'var(--text-soft)' });
+      P(svg, `M${cx0} ${base} L${cx1} ${base}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M${cx0} ${base} L${cx0} 110`, { stroke: 'var(--text-soft)' });
+      T(svg, cx1, base + 18, '时间 →', { 'text-anchor': 'end', 'font-size': 13, fill: 'var(--text-faint)' });
+      T(svg, cx0 + 6, 118, '显存', { 'text-anchor': 'start', 'font-size': 13, fill: 'var(--text-faint)' });
+      const ev = memEvents(n, k);
+      const units = U || ev.reduce((a, e) => a + e.dur, 0) * iters;
+      const pxu = (cx1 - cx0) / units;
+      if (ghost) {
+        let x = cx0, m = 0, d = `M${cx0} ${base}`;
+        for (const e of memEvents(n, 0)) { m += e.push ? A : -A; x += e.dur * pxu; d += ` L${x.toFixed(1)} ${base - m}`; }
+        P(svg, d, { stroke: 'var(--text-faint)', 'stroke-dasharray': '5 5', 'stroke-width': 1.5, opacity: 0.8 });
+      }
+      const size = { A, c };
+      const color = { f: 'var(--accent)', r: 'var(--accent-2)' };
+      const marks = [];
+      let x = cx0, mem = 0, t = t0;
+      const stack = [];
+      const pk = { f: pkt(svg, LX(0), 42, 'var(--accent)', 18, 12), r: pkt(svg, LX(0), 42, 'var(--accent-2)', 18, 12), b: pkt(svg, LX(n - 1), 42, 'var(--grad)', 18, 12) };
+      for (let it = 0; it < iters; it++) {
+        let last = null;
+        for (const e of ev) {
+          const d = e.dur * u;
+          const p = pk[e.t];
+          if (last !== e.t) {
+            Object.values(pk).forEach((q) => tl.to(q, { opacity: q === p ? 1 : 0 }, { at: t, dur: 0.12 }));
+            tl.set(p, { x: LX(e.i) - (e.t === 'b' ? LX(n - 1) : LX(0)) }, { at: t });
+            last = e.t;
+          }
+          tl.to(p, { x: LX(e.i) - (e.t === 'b' ? LX(n - 1) : LX(0)) }, { at: t, dur: Math.min(d, 0.25) });
+          flash(tl, layers[e.i].r, e.t === 'b' ? 'var(--grad)' : color[e.t], t, 'var(--border)', 0.15);
+          const m0 = mem;
+          if (e.t !== 'b') {
+            if (e.t === 'f' && k) {
+              const tr = R(svg, LX(e.i) - (LW - 20) / 2, 72, LW - 20, A, { rx: 3, fill: 'var(--accent)', opacity: 0 });
+              tl.to(tr, { opacity: 0.7 }, { at: t + 0.05, dur: d * 0.3 }).to(tr, { opacity: 0 }, { at: t + d * 0.5, dur: d * 0.4 });
+            }
+            if (e.push) {
+              const h = size[e.push];
+              const col = e.push === 'c' ? 'var(--c3)' : color[e.t];
+              const r = R(svg, LX(e.i) - (LW - 20) / 2, 72, LW - 20, h, { rx: 3, fill: col, opacity: 0, stroke: 'var(--surface)', 'stroke-width': 1 });
+              tl.to(r, { opacity: 1 }, { at: t, dur: 0.1 });
+              tl.to(r, { attr: { x: SX, y: base - mem - h, width: SW } }, { at: t + 0.05, dur: d * 0.85 });
+              stack.push({ r, h, i: e.i });
+              mem += h;
+            }
+          } else {
+            for (let q = 0; q < e.pop; q++) {
+              const top = stack.pop();
+              mem -= top.h;
+              tl.to(top.r, { attr: { x: LX(e.i) - (LW - 20) / 2, y: 72, width: LW - 20 } }, { at: t + q * 0.15, dur: d * 0.7 });
+              tl.to(top.r, { opacity: 0 }, { at: t + d * 0.6 + q * 0.15, dur: d * 0.3 });
+            }
+          }
+          const seg = P(svg, `M${x.toFixed(1)} ${base - m0} L${(x + e.dur * pxu).toFixed(1)} ${base - mem}`, { stroke: 'var(--accent)', 'stroke-width': 3 });
+          tl.to(seg, { draw: 1 }, { at: t, dur: d, ease: 'linear' });
+          x += e.dur * pxu;
+          t += d;
+          if (e.t === 'f' && e.i === n - 1) marks.push({ fwd: t });
+        }
+        marks[it].end = t;
+        Object.values(pk).forEach((q) => tl.to(q, { opacity: 0 }, { at: t, dur: 0.2 }));
+        t += 0.2;
+      }
+      return marks;
+    }
+
+    // ---------------- 3. why ----------------
+    scene('s-why', (tl, svg, sl) => {
+      const W = box(svg, 470, 120, 200, 110, '');
+      T(svg, 570, 168, 'W', { 'font-size': 34, 'font-weight': 700, fill: 'var(--text-soft)' });
+      T(svg, 570, 205, '线性层', { 'font-size': 15, fill: 'var(--text-faint)' });
+      P(svg, 'M120 175 L470 175'); P(svg, 'M670 175 L1040 175');
+      T(svg, 110, 181, 'x', { 'text-anchor': 'end', 'font-size': 24, 'font-weight': 700, fill: 'var(--accent)' });
+      T(svg, 1060, 181, 'y', { 'text-anchor': 'start', 'font-size': 24, 'font-weight': 700, fill: 'var(--accent-2)' });
+      const tray = R(svg, 220, 300, 260, 70, { rx: 12, fill: 'var(--bg-soft)', stroke: 'var(--border)', 'stroke-dasharray': '6 5' });
+      T(svg, 350, 392, '为反向保存的张量', { 'font-size': 15, fill: 'var(--text-soft)' });
+      const x = pkt(svg, 140, 175, 'var(--accent)', 40, 26);
+      const xs = pkt(svg, 140, 175, 'var(--accent)', 40, 26);
+      const y = pkt(svg, 670, 175, 'var(--accent-2)', 40, 26);
+      tl.to([x, xs], { opacity: 1 }, { at: 0.2, dur: 0.3 });
+      tl.to(x, { x: 380 }, { at: 0.6, dur: 0.9 }).to(x, { opacity: 0 }, { at: 1.5, dur: 0.2 });
+      tl.to(xs, { x: 210, y: 160 }, { at: 1.0, dur: 1.0, ease: 'out' });
+      tl.to(W.r, { stroke: 'var(--accent)' }, { at: 1.4, dur: 0.3 });
+      tl.to(y, { opacity: 1 }, { at: 1.6, dur: 0.2 }).to(y, { x: 370 }, { at: 1.6, dur: 0.9 }).to(y, { opacity: 0 }, { at: 2.5, dur: 0.3 });
+      const xl = T(svg, 350, 340, 'x', { 'font-size': 18, 'font-weight': 700, fill: 'var(--bg)', opacity: 0 });
+      tl.to(xl, { opacity: 1 }, { at: 2.0, dur: 0.3 });
+      tl.label('a', 2.9);
+      cap(tl, sl, 1, 3.0);
+      const dy = pkt(svg, 1040, 175, 'var(--grad)', 40, 26);
+      T(svg, 1060, 220, 'dy', { 'text-anchor': 'start', 'font-size': 20, 'font-weight': 700, fill: 'var(--grad)', opacity: 0, class: 'dyl' });
+      tl.to([dy, $('.dyl', svg)], { opacity: 1 }, { at: 3.1, dur: 0.3 });
+      tl.to(dy, { x: -370 }, { at: 3.3, dur: 0.9 });
+      tl.to(W.r, { stroke: 'var(--grad)' }, { at: 4.1, dur: 0.3 });
+      const dx = pkt(svg, 470, 175, 'var(--grad)', 40, 26);
+      tl.to(dy, { opacity: 0 }, { at: 4.2, dur: 0.2 }).to(dx, { opacity: 1 }, { at: 4.2, dur: 0.2 }).to(dx, { x: -330 }, { at: 4.3, dur: 0.9 });
+      const dxl = T(svg, 300, 150, 'dx = Wᵀ dy', { 'font-size': 19, 'font-weight': 700, fill: 'var(--grad)', class: 'mono', opacity: 0 });
+      tl.to(dxl, { opacity: 1 }, { at: 4.6, dur: 0.4 });
+      const dW = R(svg, 760, 290, 230, 90, { rx: 12, fill: 'var(--surface)', stroke: 'var(--grad)', 'stroke-width': 2, opacity: 0 });
+      const dWl = T(svg, 875, 345, 'dW = dy · xᵀ', { 'font-size': 21, 'font-weight': 700, fill: 'var(--grad)', class: 'mono', opacity: 0 });
+      tl.to([dW, dWl], { opacity: 1 }, { at: 5.0, dur: 0.4 });
+      tl.to(xs, { x: 735, y: 160 }, { at: 5.4, dur: 1.0 });
+      tl.to(xl, { opacity: 0 }, { at: 5.4, dur: 0.2 });
+      tl.to(tray, { stroke: 'var(--grad)' }, { at: 5.4, dur: 0.3 });
+      tl.to(xs, { opacity: 0 }, { at: 6.5, dur: 0.3 });
+      tl.label('b', 7.0);
+      cap(tl, sl, 2, 7.1);
+    });
+
+    // ---------------- 4. stack sawtooth ----------------
+    scene('s-stack', (tl, svg, sl) => {
+      const m = memScene(tl, svg, { n: 8, A: 30, u: 0.32, iters: 2, t0: 0.3 });
+      tl.label('a', m[0].fwd);
+      cap(tl, sl, 1, m[0].fwd + 0.05);
+      tl.label('b', m[0].end);
+      cap(tl, sl, 2, m[0].end + 0.05);
+    });
+
+    // ---------------- 5. activation size ----------------
+    const PARTS = [
+      ['LN', 2], ['QKV 输入', 2], ['Q, K', 4], ['softmax 输出', 32, 1], ['dropout mask', 16, 1], ['dropout 输出', 32, 1],
+      ['V', 2], ['proj 输入', 2], ['mask', 1], ['LN', 2], ['fc1 输入', 2], ['GeLU 输入', 8], ['fc2 输入', 8], ['mask', 1],
+    ];
+    function layerBar(svg, X0, Y, sc, H = 54) {
+      let x = X0;
+      return PARTS.map(([l, v, core], i) => {
+        const g = G(svg);
+        const r = R(g, x, Y, 0, H, { rx: 3, fill: core ? 'var(--accent-2)' : i < 9 ? 'var(--accent)' : 'var(--c3)', stroke: 'var(--surface)', 'stroke-width': 1.5 });
+        const t = v >= 8 ? T(g, x + v * sc / 2, Y + H / 2 + 5, l, { 'font-size': 13, 'font-weight': 600, fill: 'var(--bg)', opacity: 0 }) : null;
+        const o = { g, r, t, x, w: v * sc, v, core };
+        x += v * sc;
+        return o;
+      });
+    }
+    scene('s-size', (tl, svg, sl) => {
+      const X0 = 100, sc = 8;
+      T(svg, X0, 26, '一层的激活（单位 sbh 字节）', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 600, fill: 'var(--text-soft)' });
+      const segs = layerBar(svg, X0, 40, sc);
+      const lg = [['attention', 'var(--accent)'], ['attention core（∝ s²）', 'var(--accent-2)'], ['MLP + LN₂', 'var(--c3)']];
+      lg.forEach(([l, c], i) => { R(svg, X0 + i * 230, 112, 14, 14, { rx: 3, fill: c }); T(svg, X0 + 22 + i * 230, 124, l, { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' }); });
+      const tot = T(svg, X0 + 114 * sc + 12, 74, '0', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono' });
+      let acc = 0;
+      segs.forEach((s, i) => {
+        const at = 0.3 + i * 0.22;
+        tl.to(s.r, { attr: { width: s.w } }, { at, dur: 0.3, ease: 'out' });
+        if (s.t) tl.to(s.t, { opacity: 1 }, { at: at + 0.2, dur: 0.2 });
+        acc += s.v;
+        tl.to(tot, { text: acc, fmt: (v) => Math.round(v) + ' sbh' }, { at, dur: 0.3 });
+      });
+      tl.label('a', 3.7);
+      cap(tl, sl, 1, 3.8);
+      // per-layer GB and x96
+      const gb = T(svg, X0, 178, '0', { 'text-anchor': 'start', 'font-size': 20, 'font-weight': 700, fill: 'var(--text)', opacity: 0 });
+      tl.to(gb, { opacity: 1 }, { at: 3.9, dur: 0.2 });
+      tl.to(gb, { text: 2.87, fmt: (v) => 'sbh = 2048 × 1 × 12288 ≈ 25.2 M　→　一层 ' + v.toFixed(2) + ' GB' }, { at: 3.9, dur: 0.8 });
+      const SC = 3.3, BY = 230;
+      const g80 = G(svg, { opacity: 0 });
+      P(g80, `M${X0 + 80 * SC} ${BY - 12} L${X0 + 80 * SC} ${BY + 120}`, { stroke: 'var(--text)', 'stroke-dasharray': '5 5' });
+      T(g80, X0 + 80 * SC, BY + 140, '一张卡 80 GB', { 'font-size': 14, fill: 'var(--text-soft)' });
+      tl.to(g80, { opacity: 1 }, { at: 4.4, dur: 0.4 });
+      T(svg, X0 - 10, BY + 26, '96 层', { 'text-anchor': 'end', 'font-size': 15, fill: 'var(--text-soft)' });
+      const cols = [];
+      for (let l = 0; l < 96; l++) {
+        const w = 2.87 * SC;
+        const r = R(svg, X0 + l * w, BY, w, 40, { rx: 0, fill: 'var(--accent)', opacity: 0, stroke: 'var(--surface)', 'stroke-width': 0.4 });
+        cols.push(r);
+        tl.to(r, { opacity: 1 }, { at: 4.8 + l * 0.02, dur: 0.1 });
+      }
+      const big = T(svg, X0 + 275.4 * SC + 10, BY + 27, '0', { 'text-anchor': 'start', 'font-size': 20, 'font-weight': 700, class: 'mono', fill: 'var(--accent)', opacity: 0 });
+      tl.to(big, { opacity: 1 }, { at: 4.8, dur: 0.2 });
+      tl.to(big, { text: 275, fmt: (v) => Math.round(v) + ' GB' }, { at: 4.8, dur: 1.9, ease: 'linear' });
+      tl.label('b', 7.1);
+      cap(tl, sl, 2, 7.2);
+      segs.filter((s) => s.core).forEach((s) => tl.to(s.r, { opacity: 0.15 }, { at: 7.3, dur: 0.5 }).to(s.t, { opacity: 0.3 }, { at: 7.3, dur: 0.5 }));
+      const fa = R(svg, X0, BY + 60, 0, 40, { rx: 0, fill: 'var(--c3)' });
+      T(svg, X0 - 10, BY + 86, 'FlashAttn', { 'text-anchor': 'end', 'font-size': 15, fill: 'var(--text-soft)' });
+      const fat = T(svg, X0 + 82.1 * SC + 10, BY + 87, '0', { 'text-anchor': 'start', 'font-size': 20, 'font-weight': 700, class: 'mono', fill: 'var(--c3)', opacity: 0 });
+      tl.to(fa, { attr: { width: 82.1 * SC } }, { at: 7.8, dur: 1.2, ease: 'out' });
+      tl.to(fat, { opacity: 1 }, { at: 7.8, dur: 0.2 }).to(fat, { text: 82, fmt: (v) => Math.round(v) + ' GB（34 sbh × 96）' }, { at: 7.8, dur: 1.2, ease: 'out' });
+    });
+
+    // ---------------- 6. idea (one layer zoom) ----------------
+    scene('s-idea', (tl, svg, sl) => {
+      const ops = ['LN', 'QKV', 'QKᵀ', 'softmax', '× V', 'proj', 'LN', 'fc1', 'GeLU', 'fc2'];
+      const sz = [2, 2, 4, 34, 4, 2, 2, 2, 8, 8].map((v) => 14 + v * 1.6);
+      const OX = (i) => 150 + i * 86;
+      R(svg, 120, 20, 880, 300, { rx: 18, fill: 'none', stroke: 'var(--border)', 'stroke-dasharray': '8 6' });
+      T(svg, 140, 44, '一层 Transformer', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const ob = ops.map((o, i) => box(svg, OX(i), 70, 74, 40, o, { fs: 14 }));
+      for (let i = 0; i < 9; i++) P(svg, `M${OX(i) + 74} 90 L${OX(i + 1)} 90`, { 'stroke-width': 1.5 });
+      P(svg, 'M40 90 L150 90'); P(svg, `M${OX(9) + 74} 90 L1110 90`);
+      const inp = R(svg, 40, 140, 60, 14, { rx: 3, fill: 'var(--c3)', opacity: 0 });
+      T(svg, 70, 176, '层输入', { 'font-size': 13, fill: 'var(--c3)', opacity: 0, class: 'inl' });
+      const meterBg = R(svg, 1050, 140, 40, 220, { rx: 6, fill: 'var(--bg-soft)', stroke: 'var(--border)' });
+      T(svg, 1070, 384, '显存', { 'font-size': 14, fill: 'var(--text-soft)' });
+      const meter = R(svg, 1052, 358, 36, 0, { rx: 5, fill: 'var(--accent)' });
+      const total = sz.reduce((a, b) => a + b);
+      const msc = 210 / (total + 20);
+      const mk = (color) => ops.map((o, i) => R(svg, OX(i) + 7, 130, 60, sz[i], { rx: 3, fill: color, opacity: 0 }));
+      const A1 = mk('var(--accent)'), A2 = mk('var(--accent)'), A3 = mk('var(--accent-2)');
+      const p = pkt(svg, 60, 90, 'var(--accent)', 20, 14);
+      const pass = (blocks, at, keep, color, meterFrom) => {
+        tl.set(p, { x: 0 }, { at });
+        tl.to(p, { opacity: 1 }, { at, dur: 0.1 });
+        let m = meterFrom;
+        blocks.forEach((b, i) => {
+          const tt = at + 0.2 + i * 0.32;
+          tl.to(p, { x: OX(i) + 37 - 60 }, { at: tt - 0.12, dur: 0.2 });
+          flash(tl, ob[i].r, color, tt, 'var(--border)', 0.12);
+          tl.to(b, { opacity: 1 }, { at: tt, dur: 0.15 });
+          if (keep) { m += sz[i]; tl.to(meter, { attr: { height: m * msc, y: 358 - m * msc } }, { at: tt, dur: 0.2 }); }
+          else { tl.to(b, { opacity: 0 }, { at: tt + 0.3, dur: 0.25 }); }
+        });
+        tl.to(p, { opacity: 0 }, { at: at + 0.2 + blocks.length * 0.32, dur: 0.2 });
+        return at + 0.4 + blocks.length * 0.32;
+      };
+      let t = pass(A1, 0.3, true, 'var(--accent)', 0);
+      tl.label('a', t);
+      cap(tl, sl, 1, t + 0.05);
+      t += 0.2;
+      tl.to(A1, { opacity: 0 }, { at: t, dur: 0.4 });
+      tl.to(meter, { attr: { height: 0, y: 358 } }, { at: t, dur: 0.4 });
+      tl.to([inp, $('.inl', svg)], { opacity: 1 }, { at: t + 0.4, dur: 0.3 });
+      tl.to(meter, { attr: { height: 20 * msc, y: 358 - 20 * msc }, fill: 'var(--c3)' }, { at: t + 0.4, dur: 0.3 });
+      t = pass(A2, t + 0.7, false, 'var(--accent)', 0);
+      tl.label('b', t);
+      cap(tl, sl, 2, t + 0.05);
+      t += 0.2;
+      tl.to(meter, { fill: 'var(--accent-2)' }, { at: t, dur: 0.2 });
+      let m = 20;
+      A3.forEach((b, i) => {
+        const tt = t + 0.2 + i * 0.25;
+        tl.to(b, { opacity: 1 }, { at: tt, dur: 0.15 });
+        flash(tl, ob[i].r, 'var(--accent-2)', tt, 'var(--border)', 0.12);
+        m += sz[i];
+        tl.to(meter, { attr: { height: m * msc, y: 358 - m * msc } }, { at: tt, dur: 0.2 });
+      });
+      t += 0.4 + 10 * 0.25;
+      const g = pkt(svg, 1110, 90, 'var(--grad)', 20, 14);
+      tl.to(g, { opacity: 1 }, { at: t, dur: 0.1 });
+      for (let i = 9; i >= 0; i--) {
+        const tt = t + 0.2 + (9 - i) * 0.4;
+        tl.to(g, { x: OX(i) + 37 - 1110 }, { at: tt - 0.2, dur: 0.25 });
+        flash(tl, ob[i].r, 'var(--grad)', tt, 'var(--border)', 0.12);
+        tl.to(A3[i], { opacity: 0, y: -40 }, { at: tt, dur: 0.3 });
+        m -= sz[i];
+        tl.to(meter, { attr: { height: m * msc, y: 358 - m * msc } }, { at: tt, dur: 0.25 });
+      }
+      const tt2 = t + 0.4 + 10 * 0.4;
+      tl.to([g, inp], { opacity: 0 }, { at: tt2, dur: 0.3 });
+      tl.to(meter, { attr: { height: 0, y: 358 } }, { at: tt2, dur: 0.3 });
+    });
+
+    // ---------------- 7. full checkpointing ----------------
+    scene('s-full', (tl, svg, sl) => {
+      const m = memScene(tl, svg, { n: 8, k: 1, A: 30, c: 5, u: 0.3, ghost: true, units: 32 + 4 });
+      tl.label('a', m[0].fwd);
+      cap(tl, sl, 1, m[0].fwd + 0.05);
+      tl.label('b', m[0].end);
+      cap(tl, sl, 2, m[0].end + 0.05);
+    });
+
+    // ---------------- 8. cost ----------------
+    scene('s-cost', (tl, svg, sl) => {
+      const U = 54, X0 = 170, n = 4;
+      const rowY = [60, 200];
+      T(svg, X0 - 16, rowY[0] + 34, '不重算', { 'text-anchor': 'end', 'font-size': 18, 'font-weight': 700 });
+      T(svg, X0 - 16, rowY[1] + 34, '逐层重算', { 'text-anchor': 'end', 'font-size': 18, 'font-weight': 700 });
+      const blk = (row, x, w, color, label, at) => {
+        const r = R(svg, x, rowY[row], 0, 52, { rx: 6, fill: color, stroke: 'var(--surface)', 'stroke-width': 2 });
+        const t = T(svg, x + w / 2, rowY[row] + 32, label, { 'font-size': 15, 'font-weight': 700, fill: 'var(--bg)', opacity: 0 });
+        tl.to(r, { attr: { width: w } }, { at, dur: 0.3, ease: 'linear' });
+        tl.to(t, { opacity: 1 }, { at: at + 0.2, dur: 0.15 });
+      };
+      let x = X0, t = 0.3;
+      for (let i = 0; i < n; i++) { blk(0, x, U, 'var(--accent)', 'F' + (i + 1), t); x += U; t += 0.3; }
+      for (let i = n; i >= 1; i--) { blk(0, x, 2 * U, 'var(--grad)', 'B' + i, t); x += 2 * U; t += 0.4; }
+      const e0 = x;
+      const lab0 = T(svg, e0 + 12, rowY[0] + 33, '3 份', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono', opacity: 0 });
+      tl.to(lab0, { opacity: 1 }, { at: t, dur: 0.3 });
+      tl.label('a', t + 0.4);
+      cap(tl, sl, 1, t + 0.5);
+      x = X0; t += 0.6;
+      for (let i = 0; i < n; i++) { blk(1, x, U, 'var(--accent)', 'F' + (i + 1), t); x += U; t += 0.3; }
+      for (let i = n; i >= 1; i--) { blk(1, x, U, 'var(--accent-2)', "F'" + i, t); x += U; t += 0.3; blk(1, x, 2 * U, 'var(--grad)', 'B' + i, t); x += 2 * U; t += 0.4; }
+      const lab1 = T(svg, x + 12, rowY[1] + 33, '4 份', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono', opacity: 0 });
+      tl.to(lab1, { opacity: 1 }, { at: t, dur: 0.3 });
+      const br = P(svg, `M${e0} ${rowY[1] + 70} L${e0} ${rowY[1] + 82} L${x} ${rowY[1] + 82} L${x} ${rowY[1] + 70}`, { stroke: 'var(--accent-2)', 'stroke-width': 2.5 });
+      const bt = T(svg, (e0 + x) / 2, rowY[1] + 110, '+33%', { 'font-size': 24, 'font-weight': 800, fill: 'var(--accent-2)', opacity: 0 });
+      P(svg, `M${e0} ${rowY[0] + 60} L${e0} ${rowY[1] + 82}`, { stroke: 'var(--text-faint)', 'stroke-dasharray': '4 5', 'stroke-width': 1.5 });
+      tl.to(br, { draw: 1 }, { at: t + 0.2, dur: 0.6 }).to(bt, { opacity: 1, scale: 1.1 }, { at: t + 0.6, dur: 0.4 });
+    });
+
+    // ---------------- 9. sqrt n segments ----------------
+    scene('s-sqrt', (tl, svg, sl) => {
+      const m = memScene(tl, svg, { n: 16, k: 4, A: 14, c: 6, u: 0.18, ghost: true, units: 64 + 4 });
+      tl.label('a', m[0].fwd);
+      cap(tl, sl, 1, m[0].fwd + 0.05);
+      tl.label('b', m[0].end);
+      cap(tl, sl, 2, m[0].end + 0.05);
+    });
+
+    // ---------------- 10. derivation ----------------
+    scene('s-deriv', (tl, svg, sl) => {
+      const n = 16;
+      const X = (k) => 70 + (k - 1) / 15 * 540, Y = (f) => 360 - f / 18 * 320;
+      P(svg, `M${X(1)} ${Y(0)} L${X(16)} ${Y(0)}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M${X(1)} ${Y(0)} L${X(1)} ${Y(18)}`, { stroke: 'var(--text-soft)' });
+      [1, 4, 8, 12, 16].forEach((k) => T(svg, X(k), 382, String(k), { 'font-size': 13, fill: 'var(--text-faint)', class: 'mono' }));
+      [0, 4, 8, 12, 16].forEach((f) => T(svg, 60, Y(f) + 4, String(f), { 'text-anchor': 'end', 'font-size': 13, fill: 'var(--text-faint)', class: 'mono' }));
+      T(svg, X(16), 400, 'k（每段层数）', { 'text-anchor': 'end', 'font-size': 13, fill: 'var(--text-soft)' });
+      const curve = (f) => { let d = ''; for (let k = 1; k <= 16; k += 0.25) d += (d ? 'L' : 'M') + X(k).toFixed(1) + ' ' + Math.max(Y(18), Y(f(k))).toFixed(1); return d; };
+      const c1 = P(svg, curve((k) => n / k), { stroke: 'var(--accent)', 'stroke-width': 3 });
+      const c2 = P(svg, curve((k) => k), { stroke: 'var(--accent-2)', 'stroke-width': 3 });
+      const c3 = P(svg, curve((k) => n / k + k), { stroke: 'var(--text)', 'stroke-width': 3.5 });
+      const l1 = T(svg, X(1.6), Y(13), 'n/k', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--accent)', opacity: 0 });
+      const l2 = T(svg, X(14), Y(14) + 24, 'k', { 'font-size': 16, 'font-weight': 700, fill: 'var(--accent-2)', opacity: 0 });
+      const l3 = T(svg, X(13), Y(14.2) - 12, 'n/k + k', { 'font-size': 16, 'font-weight': 700, fill: 'var(--text)', opacity: 0 });
+      tl.to(c1, { draw: 1 }, { at: 0.2, dur: 1.0 }).to(l1, { opacity: 1 }, { at: 0.8, dur: 0.3 });
+      tl.to(c2, { draw: 1 }, { at: 0.8, dur: 1.0 }).to(l2, { opacity: 1 }, { at: 1.4, dur: 0.3 });
+      tl.to(c3, { draw: 1 }, { at: 1.6, dur: 1.2 }).to(l3, { opacity: 1 }, { at: 2.4, dur: 0.3 });
+      const ds = $$('.deriv > div', sl);
+      tl.to(ds[0], { opacity: 1 }, { at: 0.4, dur: 0.4 });
+      const dot = G(svg, { opacity: 0 });
+      C(dot, X(4), Y(8), 9, { fill: 'var(--accent-2)', stroke: 'var(--surface)', 'stroke-width': 2 });
+      T(dot, X(4) + 14, Y(8) + 26, 'k = √n = 4，M = 8', { 'text-anchor': 'start', 'font-size': 15, 'font-weight': 700, fill: 'var(--accent-2)' });
+      const vl = P(svg, `M${X(4)} ${Y(8)} L${X(4)} ${Y(0)}`, { stroke: 'var(--accent-2)', 'stroke-dasharray': '4 4' });
+      tl.label('a', 3.0);
+      cap(tl, sl, 1, 3.1);
+      tl.to(ds[1], { opacity: 1 }, { at: 3.2, dur: 0.4 });
+      tl.to(dot, { opacity: 1, scale: 1 }, { at: 3.4, dur: 0.4 }).to(vl, { draw: 1 }, { at: 3.6, dur: 0.5 });
+      tl.label('b', 4.3);
+      tl.to(ds[2], { opacity: 1 }, { at: 4.4, dur: 0.4 });
+      tl.label('c', 5.0);
+      tl.to(ds[3], { opacity: 1 }, { at: 5.1, dur: 0.4 });
+    });
+
+    // ---------------- 11. trade-off widget ----------------
+    (() => {
+      const svg = $('#tw-svg'), lI = $('#tw-l'), nI = $('#tw-n'), kI = $('#tw-k');
+      const A = 0.856, c = 0.050;
+      function sim(L, N, k) {
+        const pts = [[0, 0]];
+        let t = 0, m = 0, peak = 0;
+        const step = (dt, dm) => { t += dt; m += dm; peak = Math.max(peak, m); pts.push([t, m]); };
+        for (let i = 0; i < L; i++) step(1, i < N ? (i % k === 0 ? c : 0) : A);
+        for (let i = L - 1; i >= N; i--) step(2, -A);
+        for (let s = Math.floor((N - 1) / k) * k; s >= 0 && N > 0; s -= k) {
+          const e = Math.min(N, s + k) - 1;
+          for (let i = s; i <= e; i++) step(1, A);
+          for (let i = e; i >= s; i--) step(2, -A - (i === s ? c : 0));
+        }
+        return { pts, peak, T: t };
+      }
+      const X0 = 50, X1 = 620, Y0 = 280, Y1 = 20;
+      P(svg, `M${X0} ${Y0} L${X1} ${Y0}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M${X0} ${Y0} L${X0} ${Y1}`, { stroke: 'var(--text-soft)' });
+      T(svg, X1, 300, '时间（一个 step）', { 'text-anchor': 'end', 'font-size': 12, fill: 'var(--text-soft)' });
+      T(svg, X0 + 6, Y1 + 4, '激活 GB', { 'text-anchor': 'start', 'font-size': 12, fill: 'var(--text-soft)' });
+      const yt = [0, 1, 2, 3, 4].map(() => T(svg, X0 - 6, 0, '', { 'text-anchor': 'end', 'font-size': 11, fill: 'var(--text-faint)', class: 'mono' }));
+      const gb = P(svg, '', { stroke: 'var(--text-faint)', 'stroke-dasharray': '5 4', 'stroke-width': 1.5 });
+      const gc = P(svg, '', { stroke: 'var(--accent)', 'stroke-width': 2.5 });
+      const pkL = P(svg, '', { stroke: 'var(--accent-2)', 'stroke-dasharray': '3 4', 'stroke-width': 1.5 });
+      const pkT = T(svg, 0, 0, '', { 'text-anchor': 'end', 'font-size': 12, 'font-weight': 700, fill: 'var(--accent-2)' });
+      function upd() {
+        const L = +lI.value;
+        nI.max = L; kI.max = Math.max(1, Math.min(24, L));
+        const N = Math.min(+nI.value, L), k = Math.min(+kI.value, Math.max(1, N || 1));
+        $('#tw-lo').textContent = L; $('#tw-no').textContent = N; $('#tw-ko').textContent = k;
+        const b = sim(L, 0, 1), r = sim(L, N, k);
+        const tmax = Math.max(b.T, r.T), mmax = b.peak * 1.05;
+        const X = (t) => X0 + t / tmax * (X1 - X0), Y = (m) => Y0 - m / mmax * (Y0 - Y1);
+        const path = (pts) => pts.map(([t, m], i) => (i ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(m).toFixed(1)).join('');
+        gb.setAttribute('d', path(b.pts)); gc.setAttribute('d', path(r.pts));
+        pkL.setAttribute('d', `M${X0} ${Y(r.peak)} L${X1} ${Y(r.peak)}`);
+        pkT.setAttribute('x', X1); pkT.setAttribute('y', Y(r.peak) - 5); pkT.textContent = '峰值 ' + r.peak.toFixed(1) + ' GB';
+        yt.forEach((t, i) => { const v = mmax * i / 4; t.setAttribute('y', Y(v) + 4); t.setAttribute('x', X0 - 6); t.textContent = v.toFixed(0); });
+        $('#tw-pk').textContent = r.peak.toFixed(1) + ' GB';
+        $('#tw-pb').textContent = b.peak.toFixed(1) + ' GB';
+        $('#tw-ex').textContent = '+' + (N / (3 * L) * 100).toFixed(1) + '%';
+        $('#tw-sv').textContent = (b.peak / r.peak).toFixed(1) + '×';
+      }
+      [lI, nI, kI].forEach((e) => e.addEventListener('input', upd));
+      upd();
+    })();
+
+    // ---------------- 12. selective ----------------
+    scene('s-sel', (tl, svg, sl) => {
+      const X0 = 100, sc = 8;
+      T(svg, X0, 26, '一层的激活（GPT-3 175B 形状，单位 sbh 字节）', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 600, fill: 'var(--text-soft)' });
+      const segs = layerBar(svg, X0, 40, sc, 60);
+      segs.forEach((s, i) => { tl.to(s.r, { attr: { width: s.w } }, { at: 0.2 + i * 0.05, dur: 0.4 }); if (s.t) tl.to(s.t, { opacity: 1 }, { at: 0.6, dur: 0.3 }); });
+      const tot = T(svg, X0 + 114 * sc + 12, 76, '114 sbh', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono', opacity: 0 });
+      tl.to(tot, { opacity: 1 }, { at: 0.8, dur: 0.3 });
+      const core = segs.filter((s) => s.core);
+      const brace = P(svg, `M${core[0].x} 112 L${core[0].x} 122 L${core[2].x + core[2].w} 122 L${core[2].x + core[2].w} 112`, { stroke: 'var(--accent-2)', 'stroke-width': 2.5 });
+      const bt = T(svg, (core[0].x + core[2].x + core[2].w) / 2, 146, 'attention core：80 sbh，FLOPs 很少', { 'font-size': 16, 'font-weight': 700, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(brace, { draw: 1 }, { at: 1.2, dur: 0.6 }).to(bt, { opacity: 1 }, { at: 1.6, dur: 0.4 });
+      tl.label('a', 2.3);
+      cap(tl, sl, 1, 2.4);
+      core.forEach((s, i) => tl.to(s.g, { y: -40, opacity: 0 }, { at: 2.5 + i * 0.1, dur: 0.6 }));
+      tl.to([brace, bt], { opacity: 0 }, { at: 2.5, dur: 0.4 });
+      let shift = 0;
+      segs.forEach((s) => { if (s.core) shift += s.w; else if (shift) tl.to(s.g, { x: -shift }, { at: 3.2, dur: 0.7 }); });
+      tl.to(tot, { x: -80 * sc, text: 34, fmt: (v) => Math.round(v) + ' sbh  (−70%)' }, { at: 3.2, dur: 0.7 });
+      // bars: memory & flops
+      const bars = (y, label, from, to, color, unit, at, tail) => {
+        T(svg, X0 + 150, y + 26, label, { 'text-anchor': 'end', 'font-size': 17, fill: 'var(--text-soft)' });
+        const r = R(svg, X0 + 170, y, 0, 38, { rx: 6, fill: color });
+        const v = T(svg, X0 + 180, y + 26, '', { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 700, class: 'mono', opacity: 0 });
+        return { r, v };
+      };
+      const mBase = bars(190, '激活：整层存', 0, 0, 'var(--text-faint)');
+      const mSel = bars(235, '选择性重算', 0, 0, 'var(--accent)');
+      const fBase = bars(295, 'FLOPs：不重算', 0, 0, 'var(--text-faint)');
+      const fSel = bars(340, '选择性重算', 0, 0, 'var(--accent-2)');
+      const W = 600;
+      const grow = (b, w, txt, at) => { tl.to(b.r, { attr: { width: w } }, { at, dur: 0.8, ease: 'out' }); tl.to(b.v, { opacity: 1, x: w }, { at, dur: 0.8, ease: 'out' }); b.v.textContent = txt; };
+      tl.label('b', 4.1);
+      cap(tl, sl, 2, 4.2);
+      grow(mBase, W, '100%', 4.3); grow(mSel, W * 0.30, '30%', 4.5);
+      grow(fBase, W / 1.027, '100%', 4.9); grow(fSel, W, '102.7%', 5.1);
+    });
+
+    // ---------------- 13. measured ----------------
+    scene('s-meas', (tl, svg, sl) => {
+      const rows = [['基线（不重算）', 7.7, 11.9], ['整层重算', 7.7, 19.5, '+39%'], ['选择性重算', 7.7, 13.2, '+7%'], ['选择性 + 序列并行', 7.2, 13.1, '+4%']];
+      const X0 = 300, sc = 26;
+      R(svg, X0, 8, 14, 14, { rx: 3, fill: 'var(--accent)' }); T(svg, X0 + 20, 20, '前向', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
+      R(svg, X0 + 80, 8, 14, 14, { rx: 3, fill: 'var(--grad)' }); T(svg, X0 + 100, 20, '反向（含重算）', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
+      P(svg, `M${X0 + 19.6 * sc} 36 L${X0 + 19.6 * sc} 340`, { stroke: 'var(--text-faint)', 'stroke-dasharray': '5 5' });
+      rows.forEach(([l, f, b, o], i) => {
+        const y = 44 + i * 74, at = 0.3 + i * 0.6;
+        T(svg, X0 - 16, y + 30, l, { 'text-anchor': 'end', 'font-size': 18 });
+        const rf = R(svg, X0, y, 0, 46, { rx: 5, fill: 'var(--accent)', stroke: 'var(--surface)', 'stroke-width': 2 });
+        const rb = R(svg, X0 + f * sc, y, 0, 46, { rx: 5, fill: 'var(--grad)', stroke: 'var(--surface)', 'stroke-width': 2 });
+        tl.to(rf, { attr: { width: f * sc } }, { at, dur: 0.4, ease: 'linear' });
+        tl.to(rb, { attr: { width: b * sc } }, { at: at + 0.4, dur: 0.5, ease: 'out' });
+        const tt = T(svg, X0 + (f + b) * sc + 12, y + 30, (f + b).toFixed(1) + ' ms' + (o ? '  ' + o : ''), { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono', fill: i === 1 ? 'var(--grad)' : 'var(--text)', opacity: 0 });
+        tl.to(tt, { opacity: 1 }, { at: at + 0.8, dur: 0.3 });
+      });
+      tl.label('a', 3.2);
+      cap(tl, sl, 1, 3.3);
+      const mfu = G(svg, { opacity: 0 });
+      T(mfu, 576, 370, '530B：重算开销 36% → 2%，MFU 42.1% → 54.2%', { 'font-size': 19, 'font-weight': 700, fill: 'var(--accent)' });
+      tl.to(mfu, { opacity: 1, y: 0 }, { at: 3.5, dur: 0.5 });
+    });
+
+    // ---------------- 14. FlashAttention ----------------
+    scene('s-flash', (tl, svg, sl) => {
+      const N = 8, cs = 38, GX = 140, GY = 40;
+      T(svg, GX + N * cs / 2, 26, 'P = softmax(QKᵀ)：s × s', { 'font-size': 15, fill: 'var(--text-soft)' });
+      T(svg, GX - 14, GY + N * cs / 2, 'Q 块', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-soft)' });
+      const tiles = [];
+      for (let i = 0; i < N; i++) for (let j = 0; j < N; j++) tiles.push(R(svg, GX + j * cs, GY + i * cs, cs - 3, cs - 3, { rx: 3, fill: 'var(--idle)' }));
+      const OXp = GX + N * cs + 30;
+      T(svg, OXp + 20, 26, 'O', { 'font-size': 15, 'font-weight': 700, fill: 'var(--accent-2)' });
+      T(svg, OXp + 64, 26, 'lse', { 'font-size': 14, 'font-weight': 700, fill: 'var(--c3)' });
+      const orow = [], lrow = [];
+      for (let i = 0; i < N; i++) { orow.push(R(svg, OXp, GY + i * cs, 40, cs - 3, { rx: 3, fill: 'var(--accent-2)', opacity: 0.1 })); lrow.push(R(svg, OXp + 56, GY + i * cs, 16, cs - 3, { rx: 3, fill: 'var(--c3)', opacity: 0.1 })); }
+      // memory comparison
+      const MX = 720;
+      T(svg, MX, 70, '反向要保存的', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 600, fill: 'var(--text-soft)' });
+      T(svg, MX, 120, '标准实现：P（∝ s²）', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const mStd = R(svg, MX, 130, 0, 30, { rx: 5, fill: 'var(--text-faint)' });
+      T(svg, MX, 200, 'FlashAttention：O + lse（∝ s）', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const mFa = R(svg, MX, 210, 0, 30, { rx: 5, fill: 'var(--c3)' });
+      const ph1 = T(svg, MX, 300, '前向：算完一块，累加进 O，丢掉', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, fill: 'var(--accent)', opacity: 0 });
+      const ph2 = T(svg, MX, 300, '反向：用 Q、K、lse 逐块重算 P', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(ph1, { opacity: 1 }, { at: 0.2, dur: 0.3 });
+      let t = 0.4;
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+          const r = tiles[i * N + j];
+          tl.to(r, { fill: 'var(--accent)' }, { at: t, dur: 0.06 }).to(r, { fill: 'var(--idle)' }, { at: t + 0.12, dur: 0.15 });
+          t += 0.045;
+        }
+        tl.to(orow[i], { opacity: 1 }, { at: t, dur: 0.2 }).to(lrow[i], { opacity: 1 }, { at: t, dur: 0.2 });
+      }
+      tl.to(mStd, { attr: { width: 380 } }, { at: 0.4, dur: t - 0.4, ease: 'in' });
+      tl.to(mFa, { attr: { width: 48 } }, { at: 0.4, dur: t - 0.4, ease: 'linear' });
+      tl.label('a', t + 0.2);
+      cap(tl, sl, 1, t + 0.3);
+      t += 0.4;
+      tl.to(ph1, { opacity: 0 }, { at: t, dur: 0.3 }).to(ph2, { opacity: 1 }, { at: t + 0.2, dur: 0.3 });
+      t += 0.4;
+      for (let i = 0; i < N; i++) {
+        for (let j = 0; j < N; j++) {
+          const r = tiles[i * N + j];
+          tl.to(r, { fill: 'var(--accent-2)' }, { at: t, dur: 0.06 }).to(r, { fill: 'var(--idle)' }, { at: t + 0.12, dur: 0.15 });
+          t += 0.03;
+        }
+      }
+    });
+
+    // ---------------- 15. offload ----------------
+    scene('s-off', (tl, svg, sl) => {
+      const gpu = box(svg, 40, 14, 420, 120, '');
+      T(svg, 60, 40, 'GPU · HBM 3.35 TB/s', { 'text-anchor': 'start', 'font-size': 15, 'font-weight': 700 });
+      const cpu = box(svg, 690, 14, 420, 120, '');
+      T(svg, 710, 40, 'CPU · 主机内存', { 'text-anchor': 'start', 'font-size': 15, 'font-weight': 700 });
+      P(svg, 'M460 74 L690 74', { stroke: 'var(--text-faint)', 'stroke-width': 6 });
+      T(svg, 575, 62, 'PCIe Gen5 x16', { 'font-size': 14, 'font-weight': 600, fill: 'var(--text-soft)' });
+      T(svg, 575, 100, '≈ 64 GB/s 单向', { 'font-size': 14, fill: 'var(--text-soft)' });
+      const slotG = (i) => [60 + i * 64, 60], slotC = (i) => [710 + i * 64, 60];
+      // timeline
+      const TX = 130, pu = 44, ly = [180, 236, 292];
+      ['计算', 'D2H', 'H2D'].forEach((l, i) => T(svg, TX - 14, ly[i] + 26, l, { 'text-anchor': 'end', 'font-size': 15, 'font-weight': 600, fill: 'var(--text-soft)' }));
+      const bar = (lane, s, d, color, label, at, dur = 0.35) => {
+        const r = R(svg, TX + s * pu, ly[lane], 0, 40, { rx: 5, fill: color, stroke: 'var(--surface)', 'stroke-width': 1.5 });
+        const t = T(svg, TX + (s + d / 2) * pu, ly[lane] + 26, label, { 'font-size': 13, 'font-weight': 700, fill: 'var(--bg)', opacity: 0 });
+        tl.to(r, { attr: { width: d * pu } }, { at, dur, ease: 'linear' });
+        tl.to(t, { opacity: 1 }, { at: at + dur * 0.6, dur: 0.15 });
+      };
+      const CP = 1.6, sp = 0.4;
+      let cEnd = 0;
+      const cEnds = [];
+      const acts = [];
+      for (let i = 0; i < 6; i++) {
+        bar(0, i, 1, 'var(--accent)', 'F' + (i + 1), 0.3 + i * sp);
+        const [gx, gy] = slotG(i);
+        const a = R(svg, gx, gy, 52, 60, { rx: 4, fill: 'var(--accent)', opacity: 0 });
+        tl.to(a, { opacity: 1 }, { at: 0.3 + (i + 1) * sp, dur: 0.15 });
+        acts.push(a);
+        if (i < 5) {
+          const s = Math.max(i + 1, cEnd); cEnd = s + CP; cEnds.push(cEnd);
+          const at = 0.3 + s * sp;
+          bar(1, s, CP, 'var(--c3)', 'C' + (i + 1), at, CP * sp);
+          const [cx] = slotC(i);
+          tl.to(a, { attr: { x: cx } }, { at, dur: CP * sp }).to(a, { fill: 'var(--c3)' }, { at, dur: CP * sp });
+        }
+      }
+      const tFwd = 0.3 + cEnds[4] * sp + 0.2;
+      tl.label('a', tFwd);
+      cap(tl, sl, 1, tFwd + 0.05);
+      // backward
+      let t0 = tFwd + 0.3, bEnd = 6, pEnd = 6;
+      bar(0, 6, 2, 'var(--grad)', 'B6', t0, 2 * sp);
+      tl.to(acts[5], { opacity: 0 }, { at: t0 + 2 * sp, dur: 0.2 });
+      bEnd = 8;
+      for (let i = 4; i >= 0; i--) {
+        const ps = Math.max(pEnd, cEnds[i], 6); pEnd = ps + CP;
+        bar(2, ps, CP, 'var(--c3)', 'P' + (i + 1), t0 + (ps - 6) * sp, CP * sp);
+        const [gx] = slotG(i);
+        tl.to(acts[i], { attr: { x: gx }, fill: 'var(--accent)' }, { at: t0 + (ps - 6) * sp, dur: CP * sp });
+        const bs = Math.max(bEnd, pEnd);
+        if (bs > bEnd) {
+          const st = R(svg, TX + bEnd * pu, ly[0] + 4, 0, 32, { rx: 4, fill: 'none', stroke: 'var(--grad)', 'stroke-width': 2, 'stroke-dasharray': '4 3' });
+          tl.to(st, { attr: { width: (bs - bEnd) * pu } }, { at: t0 + (bEnd - 6) * sp, dur: (bs - bEnd) * sp, ease: 'linear' });
+        }
+        bar(0, bs, 2, 'var(--grad)', 'B' + (i + 1), t0 + (bs - 6) * sp, 2 * sp);
+        tl.to(acts[i], { opacity: 0 }, { at: t0 + (bs + 2 - 6) * sp, dur: 0.2 });
+        bEnd = bs + 2;
+      }
+      const base = P(svg, `M${TX + 18 * pu} ${ly[0] - 8} L${TX + 18 * pu} ${ly[2] + 50}`, { stroke: 'var(--text-faint)', 'stroke-dasharray': '4 4', opacity: 0 });
+      const bl = T(svg, TX + 18 * pu, ly[2] + 68, '不 offload 时的结束点', { 'font-size': 13, fill: 'var(--text-faint)', opacity: 0 });
+      const tEnd = t0 + (bEnd - 6) * sp;
+      tl.to([base, bl], { opacity: 1 }, { at: tEnd, dur: 0.4 });
+      tl.label('b', tEnd + 0.5);
+      cap(tl, sl, 2, tEnd + 0.55);
+    });
+
+    // ---------------- 16. offload widget ----------------
+    (() => {
+      const hI = $('#ow-h'), sI = $('#ow-s'), svg = $('#ow-svg');
+      const Hs = [2048, 4096, 5120, 8192, 12288, 16384], Ss = [1024, 2048, 4096, 8192, 16384, 32768];
+      const F = 989e12 * 0.5, BW = 50e9;
+      T(svg, 20, 60, '一层前向', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      T(svg, 20, 160, '激活 D2H', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const bc = R(svg, 20, 70, 0, 44, { rx: 6, fill: 'var(--accent)' });
+      const bo = R(svg, 20, 170, 0, 44, { rx: 6, fill: 'var(--c3)' });
+      const st = R(svg, 20, 170, 0, 44, { rx: 6, fill: 'none', stroke: 'var(--grad)', 'stroke-width': 2, 'stroke-dasharray': '5 4' });
+      const fmtT = (s) => (s < 1e-3 ? (s * 1e6).toFixed(0) + ' µs' : (s * 1e3).toFixed(1) + ' ms');
+      function upd() {
+        const h = Hs[+hI.value], s = Ss[+sI.value];
+        $('#ow-ho').textContent = h; $('#ow-so').textContent = s;
+        const bytes = 34 * s * h, fl = 24 * s * h * h + 4 * s * s * h;
+        const tc = fl / F, to = bytes / BW, r = to / tc;
+        const mx = Math.max(tc, to), W = 600;
+        bc.setAttribute('width', tc / mx * W); bo.setAttribute('width', Math.min(to, tc) / mx * W);
+        st.setAttribute('x', 20 + tc / mx * W); st.setAttribute('width', Math.max(0, to - tc) / mx * W);
+        $('#ow-act').textContent = (bytes / 1e9).toFixed(2) + ' GB';
+        $('#ow-tc').textContent = fmtT(tc); $('#ow-to').textContent = fmtT(to);
+        $('#ow-r').textContent = r.toFixed(2) + '×';
+        $('#ow-v').textContent = r <= 1 ? '拷贝比计算快：理论上可以完全藏在计算后面。' : '拷贝比计算慢 ' + r.toFixed(1) + ' 倍：只能 offload 一部分层，否则要停下来等（虚线框）。';
+      }
+      hI.addEventListener('input', upd); sI.addEventListener('input', upd);
+      upd();
+    })();
+
+    // ---------------- 17. pipeline 1F1B ----------------
+    scene('s-pp', (tl, svg, sl) => {
+      const p = 4, m = 8;
+      function sched(tf, tb) {
+        const seq = [];
+        for (let i = 0; i < p; i++) {
+          const w = Math.min(p - i - 1, m), s = [];
+          for (let j = 0; j < w; j++) s.push(['F', j]);
+          let f = w, b = 0;
+          while (b < m) { if (f < m) s.push(['F', f++]); s.push(['B', b++]); }
+          seq.push(s);
+        }
+        const end = {}, ptr = Array(p).fill(0), free = Array(p).fill(0), out = [];
+        let progress = true;
+        while (progress) {
+          progress = false;
+          for (let i = 0; i < p; i++) {
+            if (ptr[i] >= seq[i].length) continue;
+            const [ty, j] = seq[i][ptr[i]];
+            const dep = ty === 'F' ? (i ? end['F' + (i - 1) + '_' + j] : 0) : (i < p - 1 ? end['B' + (i + 1) + '_' + j] : end['F' + i + '_' + j]);
+            if (dep === undefined) continue;
+            const s = Math.max(free[i], dep), d = ty === 'F' ? tf : tb;
+            end[ty + i + '_' + j] = s + d; free[i] = s + d; ptr[i]++; progress = true;
+            out.push({ ty, i, j, s, d });
+          }
+        }
+        return out;
+      }
+      const A = sched(1, 2), B = sched(1, 3);
+      const key = (o) => o.ty + o.i + '_' + o.j;
+      const Bm = Object.fromEntries(B.map((o) => [key(o), o]));
+      const X0 = 110, pu = 22, Y = (i) => 20 + i * 46;
+      for (let i = 0; i < p; i++) T(svg, X0 - 12, Y(i) + 25, 'stage ' + i, { 'text-anchor': 'end', 'font-size': 14, 'font-weight': 600, fill: 'var(--text-soft)' });
+      const els = [];
+      A.sort((a, b) => a.s - b.s).forEach((o) => {
+        const g = G(svg, { opacity: 0 });
+        const r = R(g, X0 + o.s * pu, Y(o.i), o.d * pu - 2, 38, { rx: 4, fill: o.ty === 'F' ? 'var(--accent)' : 'var(--grad)' });
+        const rc = o.ty === 'B' ? R(g, X0 + o.s * pu, Y(o.i), 0, 38, { rx: 4, fill: 'var(--accent-2)' }) : null;
+        const t = T(g, X0 + (o.s + o.d / 2) * pu - 1, Y(o.i) + 24, String(o.j + 1), { 'font-size': 12, 'font-weight': 700, fill: 'var(--bg)' });
+        els.push({ o, g, r, rc, t });
+        tl.to(g, { opacity: 1 }, { at: 0.3 + o.s * 0.09, dur: 0.15 });
+      });
+      // in-flight meters
+      const MY = 220;
+      T(svg, X0, MY - 8, '每级同时在途的激活（stage 内 L/p 层 × 在途 micro-batch 数）', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
+      const blocks = [];
+      for (let i = 0; i < p; i++) {
+        T(svg, X0 - 12, MY + 22 + i * 44, 'stage ' + i, { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-soft)' });
+        for (let q = 0; q < p - i; q++) {
+          const r = R(svg, X0 + q * 120, MY + 4 + i * 44, 112, 32, { rx: 5, fill: 'var(--accent)', opacity: 0 });
+          blocks.push(r);
+          tl.to(r, { opacity: 1 }, { at: 0.3 + (q + i) * 0.09 * 2 + 0.5, dur: 0.2 });
+        }
+      }
+      const tA = 0.3 + 33 * 0.09 + 0.3;
+      tl.label('a', tA);
+      cap(tl, sl, 1, tA + 0.05);
+      const s0 = $$('rect', svg).filter((r) => blocks.includes(r) && +r.getAttribute('y') === MY + 4);
+      tl.to(s0, { fill: 'var(--accent-2)' }, { at: tA + 0.3, dur: 0.4, stagger: 0.1 });
+      const lt = T(svg, X0 + 4 * 120 + 10, MY + 26, '= p × L/p = L 层', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(lt, { opacity: 1 }, { at: tA + 0.8, dur: 0.4 });
+      tl.label('b', tA + 1.5);
+      cap(tl, sl, 2, tA + 1.55);
+      const t2 = tA + 1.7;
+      els.forEach(({ o, r, rc, t }) => {
+        const n = Bm[key(o)];
+        tl.to(r, { attr: { x: X0 + n.s * pu, width: n.d * pu - 2 } }, { at: t2, dur: 1.2 });
+        tl.to(t, { attr: { x: X0 + (n.s + n.d / 2) * pu - 1 } }, { at: t2, dur: 1.2 });
+        if (rc) tl.to(rc, { attr: { x: X0 + n.s * pu, width: pu - 1 } }, { at: t2, dur: 1.2 });
+      });
+      tl.to(blocks, { attr: { width: 112 / 17 + 2 }, fill: 'var(--c3)' }, { at: t2 + 1.3, dur: 0.8 });
+      tl.to(lt, { opacity: 0 }, { at: t2 + 1.3, dur: 0.3 });
+      const ck = T(svg, X0 + 4 * 120 + 10, MY + 26, '只剩层输入：约 1/17', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--c3)', opacity: 0 });
+      tl.to(ck, { opacity: 1 }, { at: t2 + 1.8, dur: 0.4 });
+    });
+
+    // ---------------- 18. FSDP ----------------
+    scene('s-fsdp', (tl, svg, sl) => {
+      const X0 = 120, pu = 70, ly = [60, 130];
+      T(svg, X0 - 14, ly[0] + 27, '通信', { 'text-anchor': 'end', 'font-size': 16, 'font-weight': 600, fill: 'var(--text-soft)' });
+      T(svg, X0 - 14, ly[1] + 27, '计算', { 'text-anchor': 'end', 'font-size': 16, 'font-weight': 600, fill: 'var(--text-soft)' });
+      const ops = [
+        [0, 0, 0.8, 'AG1', 'c3'], [1, 0.8, 1, 'F1', 'accent'], [0, 0.8, 0.8, 'AG2', 'c3'], [1, 1.8, 1, 'F2', 'accent'], [0, 1.6, 0.8, 'AG3', 'c3'], [1, 2.8, 1, 'F3', 'accent'],
+        [0, 3.8, 0.8, 'AG3', 'c3'], [1, 4.6, 1, "F'3", 'accent-2'], [1, 5.6, 2, 'B3', 'grad'], [0, 5.6, 0.8, 'AG2', 'c3'], [0, 7.6, 0.8, 'RS3', 'text-soft'],
+        [1, 7.6, 1, "F'2", 'accent-2'], [1, 8.6, 2, 'B2', 'grad'], [0, 8.6, 0.8, 'AG1', 'c3'], [0, 10.6, 0.8, 'RS2', 'text-soft'],
+        [1, 10.6, 1, "F'1", 'accent-2'], [1, 11.6, 2, 'B1', 'grad'], [0, 13.6, 0.8, 'RS1', 'text-soft'],
+      ];
+      const sp = 0.35;
+      ops.forEach(([lane, s, d, l, c]) => {
+        const r = R(svg, X0 + s * pu, ly[lane], 0, 44, { rx: 6, fill: `var(--${c})`, stroke: 'var(--surface)', 'stroke-width': 1.5 });
+        const t = T(svg, X0 + (s + d / 2) * pu, ly[lane] + 28, l, { 'font-size': 14, 'font-weight': 700, fill: 'var(--bg)', opacity: 0 });
+        const at = 0.3 + s * sp;
+        tl.to(r, { attr: { width: d * pu } }, { at, dur: d * sp, ease: 'linear' });
+        tl.to(t, { opacity: 1 }, { at: at + d * sp * 0.5, dur: 0.15 });
+      });
+      const fwdEnd = 0.3 + 3.8 * sp;
+      const lg = [['all-gather 参数', 'c3'], ['reduce-scatter 梯度', 'text-soft'], ['前向', 'accent'], ['重算', 'accent-2'], ['反向', 'grad']];
+      lg.forEach(([l, c], i) => { R(svg, X0 + i * 190, 16, 14, 14, { rx: 3, fill: `var(--${c})` }); T(svg, X0 + 20 + i * 190, 28, l, { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' }); });
+      tl.label('a', fwdEnd + 0.2);
+      cap(tl, sl, 1, fwdEnd + 0.25);
+      const win = (s, e, at, label) => {
+        const g = G(svg, { opacity: 0 });
+        P(g, `M${X0 + s * pu} 196 L${X0 + s * pu} 206 L${X0 + e * pu} 206 L${X0 + e * pu} 196`, { stroke: 'var(--c3)', 'stroke-width': 2.5 });
+        T(g, X0 + (s + e) / 2 * pu, 230, label, { 'font-size': 14, 'font-weight': 600, fill: 'var(--c3)' });
+        tl.to(g, { opacity: 1 }, { at, dur: 0.4 });
+      };
+      win(4.6, 7.6, 0.3 + 7.6 * sp, '第 3 层参数在显存里');
+      win(7.6, 10.6, 0.3 + 10.6 * sp, '第 2 层参数在显存里');
+      win(10.6, 13.6, 0.3 + 13.6 * sp, '第 1 层参数在显存里');
+      const end = 0.3 + 14.4 * sp;
+      const note = T(svg, 576, 290, '重算 F′ 用的正是反向那次 all-gather 来的参数：零额外通信', { 'font-size': 19, 'font-weight': 700, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(note, { opacity: 1 }, { at: end, dur: 0.4 });
+      tl.label('b', end + 0.6);
+      cap(tl, sl, 2, end + 0.65);
+      const n2 = T(svg, 576, 330, '激活：每卡各管各的 micro-batch，FSDP 不切', { 'font-size': 17, fill: 'var(--text-soft)', opacity: 0 });
+      tl.to(n2, { opacity: 1 }, { at: end + 0.8, dur: 0.4 });
+    });
+
+    // ---------------- 19. checkpoint code ----------------
+    scene('s-code', (tl, svg, sl) => {
+      const hl = $('.hl', sl);
+      hl.style.setProperty('--h', '22');
+      const hi = (line, h, at) => tl.to(hl, { opacity: 1, y: line * 22, style: { '--h': h * 22 } }, { at, dur: 0.4 });
+      T(svg, 95, 24, '普通前向', { 'font-size': 15, 'font-weight': 700 });
+      T(svg, 285, 24, 'checkpoint', { 'font-size': 15, 'font-weight': 700, fill: 'var(--c3)' });
+      T(svg, 190, 372, 'autograd 保存的张量', { 'font-size': 14, fill: 'var(--text-soft)' });
+      P(svg, 'M20 350 L360 350', { stroke: 'var(--text-soft)' });
+      hi(4, 1, 0.2);
+      let y1 = 350, y2 = 350;
+      for (let b = 0; b < 4; b++) {
+        const at = 0.5 + b * 0.8;
+        for (let q = 0; q < 6; q++) {
+          const r = R(svg, 40, y1 - 12, 110, 10, { rx: 2, fill: 'var(--accent)', opacity: 0 });
+          y1 -= 12;
+          tl.to(r, { opacity: 1 }, { at: at + q * 0.08, dur: 0.1 });
+        }
+        const r2 = R(svg, 230, y2 - 12, 110, 10, { rx: 2, fill: 'var(--c3)', opacity: 0 });
+        y2 -= 12;
+        tl.to(r2, { opacity: 1 }, { at: at, dur: 0.1 });
+        const lb = T(svg, 285, y2 + 8, 'blk' + b + ' 输入', { 'font-size': 9, fill: 'var(--bg)', 'font-weight': 700, opacity: 0 });
+        tl.to(lb, { opacity: 1 }, { at, dur: 0.1 });
+      }
+      hi(7, 1, 1.4);
+      tl.label('a', 3.9);
+      cap(tl, sl, 1, 4.0);
+      hi(7, 1, 4.1);
+      const kw = T(svg, 285, 285, 'use_reentrant=False', { 'font-size': 15, 'font-weight': 700, fill: 'var(--accent)', class: 'mono', opacity: 0 });
+      tl.to(kw, { opacity: 1, scale: 1.08 }, { at: 4.3, dur: 0.4 });
+      tl.label('b', 5.0);
+      cap(tl, sl, 2, 5.1);
+      hi(13, 3, 5.2);
+    });
+
+    // ---------------- 20. selective AC policy ----------------
+    scene('s-sac', (tl, svg, sl) => {
+      const hl = $('.hl', sl);
+      hl.style.setProperty('--h', '22');
+      const hi = (line, h, at) => tl.to(hl, { opacity: 1, y: line * 22, style: { '--h': h * 22 } }, { at, dur: 0.4 });
+      const ops = [['norm', 0], ['mm  (QKV)', 1], ['flash attn', 1], ['mm  (out)', 1], ['add', 0], ['norm', 0], ['mm  (gate, up)', 1], ['silu', 0], ['mul', 0], ['mm  (down)', 1]];
+      const items = ops.map(([l, save], i) => {
+        const y = 14 + i * 36;
+        const r = R(svg, 20, y, 210, 30, { rx: 6, fill: 'var(--surface)', stroke: 'var(--border)', 'stroke-width': 1.5 });
+        T(svg, 34, y + 20, l, { 'text-anchor': 'start', 'font-size': 14, class: 'mono' });
+        const tag = T(svg, 250, y + 20, save ? '存' : '重算', { 'text-anchor': 'start', 'font-size': 15, 'font-weight': 700, fill: save ? 'var(--c3)' : 'var(--accent-2)', opacity: 0 });
+        return { r, tag, save };
+      });
+      hi(4, 4, 0.3);
+      tl.label('a', 1.0);
+      cap(tl, sl, 1, 1.1);
+      hi(9, 4, 1.2);
+      items.forEach((it, i) => {
+        const at = 1.6 + i * 0.25;
+        tl.to(it.r, { stroke: it.save ? 'var(--c3)' : 'var(--accent-2)', fill: it.save ? 'var(--c3-soft)' : 'var(--surface)' }, { at, dur: 0.25 });
+        tl.to(it.tag, { opacity: 1, x: 0 }, { at, dur: 0.25 });
+      });
+      hi(14, 2, 4.4);
+      const sum = T(svg, 190, 392, '反向前只重跑 norm / silu / mul / add', { 'font-size': 14, 'font-weight': 600, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(sum, { opacity: 1 }, { at: 4.6, dur: 0.4 });
+    });
+
+    // ---------------- 21. map ----------------
+    scene('s-map', (tl, svg, sl) => {
+      const X = (c) => 110 + c / 40 * 700, Y = (m) => 360 - m / 100 * 320;
+      P(svg, `M${X(0)} ${Y(0)} L${X(40)} ${Y(0)}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M${X(0)} ${Y(0)} L${X(0)} ${Y(100)}`, { stroke: 'var(--text-soft)' });
+      [0, 10, 20, 30, 40].forEach((c) => T(svg, X(c), 382, c + '%', { 'font-size': 13, fill: 'var(--text-faint)', class: 'mono' }));
+      [0, 25, 50, 75, 100].forEach((m) => T(svg, X(0) - 8, Y(m) + 4, m + '%', { 'text-anchor': 'end', 'font-size': 13, fill: 'var(--text-faint)', class: 'mono' }));
+      T(svg, X(40), 402, '额外计算 →', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-soft)' });
+      T(svg, X(0) - 40, Y(100) - 18, '激活显存', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
+      const pts = [
+        [0, 100, '不重算', 'var(--text-soft)'],
+        [1, 30, 'FlashAttention（kernel 内重算）', 'var(--c3)'],
+        [2.7, 30, '选择性重算', 'var(--accent)'],
+        [16.7, 51, '一半的层整层重算', 'var(--accent-2)'],
+        [33.3, 2.8, '逐层重算', 'var(--accent-2)'],
+        [33.3, 10.6, '每 10 层（√n）', 'var(--text-soft)'],
+      ];
+      pts.forEach(([c, m, l, col], i) => {
+        const g = G(svg, { opacity: 0 });
+        C(g, X(c), Y(m), 9, { fill: col, stroke: 'var(--surface)', 'stroke-width': 2 });
+        const right = true;
+        T(g, X(c) + (right ? 16 : -16), Y(m) + (i === 2 ? 24 : i === 1 ? -10 : 5), l, { 'text-anchor': right ? 'start' : 'end', 'font-size': 15, 'font-weight': 600, fill: col });
+        tl.set(g, { y: -40 }, { at: 0 });
+        tl.to(g, { opacity: 1, y: 0 }, { at: 0.3 + i * 0.35, dur: 0.6, ease: 'back' });
+      });
+      const off = G(svg, { opacity: 0 });
+      P(off, `M${X(0)} ${Y(8)} L${X(25)} ${Y(8)}`, { stroke: 'var(--c3)', 'stroke-width': 3, 'stroke-dasharray': '6 5' });
+      T(off, X(0.5), Y(8) - 10, 'offload：不算，但可能要等 PCIe', { 'text-anchor': 'start', 'font-size': 15, 'font-weight': 600, fill: 'var(--c3)' });
+      tl.to(off, { opacity: 1 }, { at: 2.6, dur: 0.5 });
+      tl.label('a', 3.3);
+      cap(tl, sl, 1, 3.4);
+      const ar = P(svg, `M${X(0) + 12} ${Y(95)} L${X(2.2)} ${Y(36)}`, { stroke: 'var(--accent)', 'stroke-width': 3 });
+      const ar2 = P(svg, `M${X(8)} ${Y(23)} L${X(31)} ${Y(5)}`, { stroke: 'var(--accent-2)', 'stroke-width': 3, 'stroke-dasharray': '7 5' });
+      tl.to(ar, { draw: 1 }, { at: 3.5, dur: 0.7 }).to(ar2, { draw: 1 }, { at: 4.2, dur: 0.9 });
+    });
+  })();
+  </script>
+</body>
+</html>

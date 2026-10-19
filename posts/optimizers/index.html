@@ -1,0 +1,1986 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>优化器：从 SGD 到 Muon · Zunzhe Zhang</title>
+  <meta name="description" content="一套动画幻灯片：把 GD、动量、Nesterov、AdaGrad、RMSProp、Adam、AdamW、Lion、Adafactor、Shampoo 和 Muon 放到同一片 loss 地形上实际跑一遍，附可交互的优化器游乐场。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    /* Optimizer colours (one per update rule), light and dark. */
+    :root {
+      --c-gd: #71717a; --c-sgd: #0891b2; --c-mom: #0f9d8a; --c-nag: #15803d;
+      --c-ada: #b45309; --c-rms: #db2777; --c-adam: var(--accent); --c-lion: #4d7c0f; --c-full: var(--accent-2);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --c-gd: #a1a1aa; --c-sgd: #22d3ee; --c-mom: #34d1b8; --c-nag: #4ade80;
+        --c-ada: #fbbf24; --c-rms: #f472b6; --c-lion: #a3e635;
+      }
+    }
+    :root[data-theme="dark"] {
+      --c-gd: #a1a1aa; --c-sgd: #22d3ee; --c-mom: #34d1b8; --c-nag: #4ade80;
+      --c-ada: #fbbf24; --c-rms: #f472b6; --c-lion: #a3e635;
+    }
+
+    .slide.tight { padding: 36px 72px 0; gap: 12px; justify-content: flex-start; }
+    .slide.tight h2 { font-size: 40px; }
+    .slide svg.fig { width: 1136px; height: 410px; display: block; overflow: visible; }
+    .slide svg text { font-family: var(--font-sans); fill: var(--text); }
+    .slide .mono { font-family: var(--font-mono); }
+    .slide .note { font-size: 17px; color: var(--text-faint); }
+
+    /* Captions that cross-fade per animation step. */
+    .caps { position: relative; height: 70px; font-size: 21px; line-height: 1.55; color: var(--text-soft); }
+    .cap { position: absolute; inset: 0; opacity: 0; }
+    .cap b { color: var(--text); font-weight: 600; }
+
+    /* Landscape pieces (classes on generated SVG). */
+    .land-bg { fill: var(--surface); stroke: var(--border); }
+    .ct { fill: none; stroke: var(--text-faint); stroke-width: 1.2; }
+    .minmk path { stroke: var(--text); stroke-width: 2.4; stroke-linecap: round; fill: none; }
+    .lp-bg { fill: var(--bg-soft); stroke: none; }
+    .lp-grid { stroke: var(--border); stroke-width: 1; }
+    .slide svg .lp-t, .slide svg .t-s { font-size: 16px; fill: var(--text-soft); }
+    .slide svg .lp-ax { font-size: 13px; fill: var(--text-faint); font-family: var(--font-mono); }
+    .slide svg .lp-n { font-size: 17px; fill: var(--text); }
+    .slide svg .lp-v { font-size: 16px; fill: var(--text-soft); font-family: var(--font-mono); }
+    .slide svg .t-h { font-size: 20px; font-weight: 600; }
+    .slide svg .t-m { font-size: 18px; fill: var(--text-soft); }
+    .slide svg .t-f { font-size: 15px; fill: var(--text-faint); }
+    .slide svg .t-math { font-family: "KaTeX_Main", "Times New Roman", serif; font-style: italic; }
+    .slide svg .t-big { font-size: 30px; font-weight: 600; }
+
+    /* title background */
+    .title-bg { position: absolute; inset: 0; width: 1280px; height: 720px; opacity: 0.28; pointer-events: none; }
+    #s-title > :not(.title-bg) { position: relative; }
+
+    /* table of contents */
+    .toc2 { display: grid; grid-template-columns: 1fr 1fr; grid-template-rows: repeat(5, auto); grid-auto-flow: column; gap: 0 56px; font-size: 25px; margin: 0; padding-left: 1.3em; }
+    .toc2 li + li { margin-top: 0.35em; }
+    .toc2 li::marker { color: var(--accent); font-weight: 600; }
+    .toc2 small { display: block; font-size: 17px; color: var(--text-faint); }
+
+    /* Adam assembly */
+    .merge { position: relative; height: 150px; }
+    .mcard { position: absolute; top: 10px; width: 400px; padding: 18px 22px; border-radius: 16px; border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow); font-size: 20px; color: var(--text-soft); }
+    .mcard b { display: block; font-size: 26px; color: var(--text); margin-bottom: 4px; }
+    #mc-m { left: 40px; border-left: 5px solid var(--c-mom); }
+    #mc-v { left: 696px; border-left: 5px solid var(--c-rms); }
+    #mc-a { left: 368px; opacity: 0; border: 2px solid var(--accent); text-align: center; }
+    #mc-a b { color: var(--accent); font-size: 34px; }
+    .eqs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 40px; font-size: 26px; padding: 6px 40px; }
+    .eqr { opacity: 0; }
+    .eqr .lab { display: block; font-size: 16px; color: var(--text-faint); margin-bottom: 2px; }
+
+    /* summary / refs */
+    .sum { margin: 0; padding-left: 1.1em; font-size: 22px; }
+    .sum li + li { margin-top: 0.45em; }
+    .refs { columns: 2; column-gap: 40px; font-size: 16px; line-height: 1.5; margin: 0; padding-left: 1.1em; }
+    .refs li { break-inside: avoid; margin-bottom: 6px; }
+    .refs .grp { list-style: none; margin-left: -1.1em; font-weight: 600; color: var(--accent); font-size: 15px; letter-spacing: 0.06em; margin-top: 8px; }
+    .series-pager { margin-top: 0; font-size: 20px; width: 860px; }
+
+    /* playground */
+    .play { display: grid; grid-template-columns: 700px 1fr; gap: 20px; padding: 16px 18px !important; font-size: 17px !important; }
+    .play svg { width: 700px; height: 430px; display: block; cursor: crosshair; }
+    .play .side { display: flex; flex-direction: column; gap: 10px; }
+    .play .grp-l { font-size: 14px; color: var(--text-faint); margin-bottom: 4px; }
+    .play .seg button { font-size: 15px !important; padding: 3px 10px !important; }
+    .play .seg button i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; margin-right: 5px; vertical-align: 1px; }
+    .play .rowc { display: grid; grid-template-columns: 70px 1fr 72px; gap: 8px; align-items: center; }
+    .play .rowc input[type="range"] { width: 100% !important; height: 24px !important; }
+    .play .rowc output { font-family: var(--font-mono); text-align: right; font-size: 15px; }
+    .play .btns { display: flex; gap: 8px; }
+    .play .btn { font-size: 16px !important; padding: 6px 16px !important; }
+    .play .readout { margin-top: 0; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+    .play .readout .v { font-size: 17px; }
+    .play .hint2 { font-size: 13px; color: var(--text-faint); line-height: 1.45; }
+  </style>
+</head>
+<body class="deck-page">
+  <main class="deck"><div class="stage">
+
+    <!-- 1 -->
+    <section class="slide center" id="s-title">
+      <svg class="title-bg" viewBox="0 0 1280 720" aria-hidden="true"></svg>
+      <div class="kicker rise">动画图解 LLM 系统 · 优化器</div>
+      <h1 class="rise" style="--d: 1">优化器：从 SGD 到 Muon</h1>
+      <p class="muted rise" style="--d: 2">同一片 loss 地形，十几条更新规则：动量、自适应步长、解耦权重衰减、<br>学习率调度，一直到把整个矩阵正交化</p>
+      <p class="small muted rise" style="--d: 4">按 → 或点击翻页 · 每按一次推进一拍动画 · 底部进度条可以拖动回放</p>
+    </section>
+
+    <!-- 2 -->
+    <section class="slide">
+      <div class="kicker">目录</div>
+      <h2>目录</h2>
+      <ol class="toc2">
+        <li class="rise" style="--d: 1">梯度下降与学习率<small>步长、条件数、窄谷</small></li>
+        <li class="rise" style="--d: 2">SGD<small>mini-batch 噪声与鞍点</small></li>
+        <li class="rise" style="--d: 3">动量与 Nesterov</li>
+        <li class="rise" style="--d: 4">AdaGrad 与 RMSProp</li>
+        <li class="rise" style="--d: 5">Adam<small>一阶矩、二阶矩、偏差修正</small></li>
+        <li class="rise" style="--d: 6">AdamW<small>解耦的权重衰减</small></li>
+        <li class="rise" style="--d: 7">Warmup 与学习率调度<small>余弦、WSD</small></li>
+        <li class="rise" style="--d: 8">Lion、Adafactor、Shampoo / SOAP</li>
+        <li class="rise" style="--d: 9">Muon<small>Newton–Schulz、隐藏层矩阵、更新 RMS 对齐</small></li>
+        <li class="rise" style="--d: 10">优化器状态的显存账 · 优化器游乐场</li>
+      </ol>
+    </section>
+
+    <!-- 3 -->
+    <section class="slide tight" id="s-intro">
+      <div class="kicker">梯度下降</div>
+      <h2>训练就是在 loss 地形上往下走</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="二维 loss 等高线上的梯度下降"></svg>
+      <div class="caps">
+        <p class="cap">参数 \(\theta\) 是地形上的一个点，高度是 loss。两个参数时可以画成等高线；真实模型有几十亿维，但每一步用的局部规则是一样的。</p>
+        <p class="cap">梯度 \(\nabla L\) 指向上坡最陡的方向，垂直于等高线。往反方向走一小步，步子多大由学习率 \(\eta\) 决定。</p>
+        <p class="cap">\(\theta \leftarrow \theta - \eta\,\nabla L(\theta)\)，重复。后面所有的优化器都在改这一行：<b>往哪个方向</b>、<b>走多远</b>。</p>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="slide tight" id="s-1d">
+      <div class="kicker">梯度下降 · 学习率</div>
+      <h2>学习率：在一维抛物线上看最清楚</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="四个学习率下小球在抛物线上的跳跃"></svg>
+      <div class="caps">
+        <p class="cap">\(L=\tfrac12\lambda x^2\)，梯度是 \(\lambda x\)，一步之后 \(x \leftarrow (1-\eta\lambda)\,x\)。\(\eta\lambda=0.3\)：每步只缩掉 30%，单调地往下爬。</p>
+        <p class="cap">\(\eta\lambda=1\)：一步到底。\(\lambda\) 是曲率，\(\eta=1/\lambda\) 正好是二次函数上的牛顿步。</p>
+        <p class="cap">\(1<\eta\lambda<2\)：每步都越过谷底，左右来回跳，但幅度在缩小，仍然收敛。</p>
+        <p class="cap">\(\eta\lambda>2\)：\(|1-\eta\lambda|>1\)，越跳越远，发散。稳定的条件是 \(\eta<2/\lambda\)。</p>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="slide tight" id="s-valley">
+      <div class="kicker">梯度下降 · 条件数</div>
+      <h2>窄谷：一个 η 要同时伺候两个方向</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="窄谷上三种学习率的梯度下降轨迹与 loss 曲线"></svg>
+      <div class="caps">
+        <p class="cap">\(L=\tfrac12(x^2+25y^2)\)：y 方向曲率 25，x 方向曲率 1。最大与最小曲率之比叫<b>条件数</b> \(\kappa\)，这里是 25。</p>
+        <p class="cap">\(\eta\) 被最陡的方向卡住：必须 \(\eta<2/25=0.08\)。\(\eta=0.01\) 时，缓的 x 方向每步只缩 1%，爬得很慢。</p>
+        <p class="cap">\(\eta=0.075\) 贴着上限：y 方向来回震，x 方向快了。即使选最好的 \(\eta\)，收敛所需的步数也和 \(\kappa\) 成正比。</p>
+        <p class="cap">\(\eta=0.082\) 越过 \(2/\lambda_{\max}\)：陡方向发散。真实网络的 \(\kappa\) 比 25 大得多，这就是需要更聪明的优化器的原因。</p>
+      </div>
+    </section>
+
+    <!-- 6 -->
+    <section class="slide tight" id="s-sgd">
+      <div class="kicker">SGD</div>
+      <h2>Mini-batch：用带噪声的梯度走路</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="全量梯度下降与两种 batch size 的 SGD 轨迹"></svg>
+      <div class="caps">
+        <p class="cap">全量梯度（GD）：每一步都要过一遍整个数据集。路径光滑，直奔谷底。</p>
+        <p class="cap">SGD：每步只用一个 mini-batch 的梯度。它是全量梯度的无偏估计，但带噪声：路径抖动，到了谷底也停不下来。</p>
+        <p class="cap">batch 大 16 倍，梯度噪声的标准差小 4 倍（方差 \(\propto 1/B\)），谷底的徘徊范围也随之缩小。（噪声大小是示意值。）</p>
+      </div>
+    </section>
+
+    <!-- 7 -->
+    <section class="slide tight" id="s-saddle">
+      <div class="kicker">SGD · 鞍点</div>
+      <h2>鞍点：梯度为零，但不是谷底</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="鞍点地形上 GD 与 SGD 的轨迹"></svg>
+      <div class="caps">
+        <p class="cap">\(L=\tfrac12x^2+\tfrac14y^4-\tfrac12y^2\)：原点沿 x 是谷底，沿 y 是山脊。两个真正的最小值在 \((0,\pm1)\)。</p>
+        <p class="cap">从山脊上出发（y 只偏离 \(10^{-6}\)）：GD 滑到鞍点附近，y 方向的偏离每步只放大 \(1+\eta\) 倍，要一百多步才离开。</p>
+        <p class="cap">SGD 的噪声几步就把它踢下山脊。高维的非凸地形里，大部分临界点是鞍点而不是局部最小值，梯度噪声在这里帮了忙。</p>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="slide tight" id="s-heavy">
+      <div class="kicker">动量</div>
+      <h2>动量：把过去的梯度累加起来</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="同一串梯度下 GD 与动量的每一步"></svg>
+      <div class="caps">
+        <p class="cap">一串梯度（示意）：x 分量一直是 0.5，y 分量正负交替。GD 每步都跟着摆，x 方向只前进一点。</p>
+        <p class="cap">动量 \(v\leftarrow\beta v+g,\ \theta\leftarrow\theta-\eta v\)（\(\beta=0.9\)）：y 分量在 \(v\) 里互相抵消，x 分量同号，越积越大。</p>
+        <p class="cap">一直同号的方向上，\(v\) 趋于 \(g/(1-\beta)\)：等效学习率放大到 \(\eta/(1-\beta)\)，\(\beta=0.9\) 时是 10 倍；来回摆的方向被平均掉。</p>
+      </div>
+    </section>
+
+    <!-- 9 -->
+    <section class="slide tight" id="s-mom">
+      <div class="kicker">动量</div>
+      <h2>同一个窄谷，加上动量</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="窄谷上 GD 与动量的轨迹"></svg>
+      <div class="caps">
+        <p class="cap">同样 \(\eta=0.01\)：GD 还在缓坡上爬，动量（\(\beta=0.9\)）已经到了谷底。陡方向的来回摆动被惯性带着慢慢衰减。</p>
+        <p class="cap">\(\beta=0.99\)：惯性太大，冲过谷底再绕回来，150 步后还没停稳。\(\beta\) 和 \(\eta\) 要一起调。</p>
+      </div>
+    </section>
+
+    <!-- 10 -->
+    <section class="slide tight" id="s-nag">
+      <div class="kicker">Nesterov</div>
+      <h2>Nesterov：先顺着惯性走，再看坡度</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="heavy ball 与 Nesterov 一步的分解"></svg>
+      <div class="caps">
+        <p class="cap">放大到窄谷的一小块。两者都先顺着惯性走 \(-\eta\beta v\)（虚线），这一步已经越过谷底。</p>
+        <p class="cap">Heavy ball 用的是出发点的梯度；Nesterov 用的是惯性落点（前瞻点）的梯度，那里的坡已经朝回指。</p>
+        <p class="cap">结果：Nesterov 在冲过头之前就开始回拉，落点更靠近谷底。实现上只是把求梯度的位置换成 \(\theta-\eta\beta v\)。</p>
+      </div>
+    </section>
+
+    <!-- 11 -->
+    <section class="slide tight" id="s-rosen">
+      <div class="kicker">动量 · Rosenbrock</div>
+      <h2>弯曲的窄谷：Rosenbrock</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="Rosenbrock 函数上 GD、动量、Nesterov 的轨迹"></svg>
+      <div class="caps">
+        <p class="cap">\(L=(1-x)^2+100\,(y-x^2)^2\)：一条弯成香蕉形的窄谷，最小值在 \((1,1)\)。谷壁很陡，谷底很平。</p>
+        <p class="cap">三者都用 \(\eta=0.001\)。GD 很快掉进谷底，然后沿着几乎平的谷底一步一步挪。</p>
+        <p class="cap">动量沿谷底积累速度，绕过弯到达终点；Nesterov 在拐弯处少冲一点，更稳。</p>
+      </div>
+    </section>
+
+    <!-- 12 -->
+    <section class="slide tight" id="s-ada">
+      <div class="kicker">AdaGrad · RMSProp</div>
+      <h2>按坐标自适应：每个参数有自己的步长</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="AdaGrad 与 RMSProp 的轨迹和有效步长"></svg>
+      <div class="caps">
+        <p class="cap">AdaGrad：每个坐标累加梯度平方 \(s\leftarrow s+g^2\)，步长变成 \(\eta/\sqrt{s}\)。陡的 y 方向梯度大，步子自动变小；缓的 x 方向步子大。</p>
+        <p class="cap">但 \(s\) 只增不减，有效步长一路衰减（右上的条），后半程越走越慢。RMSProp 改成滑动平均 \(s\leftarrow\rho s+(1-\rho)g^2\)（\(\rho=0.9\)），只记最近的梯度大小。</p>
+        <p class="cap">到了谷底，RMSProp 的步长不再缩小，在最小值附近小幅抖动：收尾要靠学习率衰减。</p>
+      </div>
+    </section>
+
+    <!-- 13 -->
+    <section class="slide tight" id="s-adam">
+      <div class="kicker">Adam</div>
+      <h2>Adam = 动量 + RMSProp + 偏差修正</h2>
+      <div class="merge">
+        <div class="mcard" id="mc-m"><b>动量</b>一阶矩 \(m\)：梯度的滑动平均，决定方向</div>
+        <div class="mcard" id="mc-v"><b>RMSProp</b>二阶矩 \(v\)：梯度平方的滑动平均，决定每个坐标的尺度</div>
+        <div class="mcard" id="mc-a"><b>Adam</b>方向 ÷ 尺度</div>
+      </div>
+      <div class="eqs">
+        <div class="eqr"><span class="lab">一阶矩</span>\(m_t=\beta_1 m_{t-1}+(1-\beta_1)\,g_t\)</div>
+        <div class="eqr"><span class="lab">二阶矩</span>\(v_t=\beta_2 v_{t-1}+(1-\beta_2)\,g_t^2\)</div>
+        <div class="eqr"><span class="lab">偏差修正</span>\(\hat m_t=\dfrac{m_t}{1-\beta_1^t},\quad \hat v_t=\dfrac{v_t}{1-\beta_2^t}\)</div>
+        <div class="eqr"><span class="lab">更新</span>\(\theta_t=\theta_{t-1}-\eta\,\dfrac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}\)</div>
+      </div>
+      <div class="caps">
+        <p class="cap">动量给出平滑的方向；RMSProp 给出每个坐标的梯度尺度。</p>
+        <p class="cap">Adam 把两者放在一起：用 \(m\) 的方向，除以 \(\sqrt v\) 的尺度。两个都是指数滑动平均，都从 0 开始。</p>
+        <p class="cap">从 0 开始会让早期的估计偏小，偏差修正把它补回来。默认 \(\beta_1=0.9,\ \beta_2=0.999,\ \epsilon=10^{-8}\)；LLM 预训练常用 \(\beta_2=0.95\)。</p>
+      </div>
+    </section>
+
+    <!-- 14 -->
+    <section class="slide tight" id="s-moments">
+      <div class="kicker">Adam · 矩估计</div>
+      <h2>m 和 v：两条滑动平均，和它们的偏差修正</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="一串带噪声的梯度及其一阶、二阶矩估计"></svg>
+      <div class="caps">
+        <p class="cap">一串带噪声的梯度（点，均值 0.8，示意）。\(m\)（虚线，\(\beta_1=0.9\)）把噪声平滑掉，但它从 \(m_0=0\) 出发，开头被拉向 0。</p>
+        <p class="cap">除以 \(1-\beta_1^t\) 就把这部分补回来：第 1 步 \(\hat m_1=g_1\)，十几步后修正项趋于 1，\(\hat m\) 和 \(m\) 重合。</p>
+        <p class="cap">\(v\) 用 \(\beta_2=0.999\)，要记约 1000 步。60 步时 \(1-\beta_2^t\approx0.058\)：不修正的 \(\sqrt v\) 只有真实值的约四分之一，步长会被放大约 4 倍。</p>
+      </div>
+    </section>
+
+    <!-- 15 -->
+    <section class="slide tight" id="s-adam-race">
+      <div class="kicker">Adam</div>
+      <h2>回到鞍点：Adam 不怕梯度小</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="鞍点上 GD、动量与 Adam 的轨迹"></svg>
+      <div class="caps">
+        <p class="cap">同一个鞍点，都从山脊上出发：GD 和动量都在鞍点附近停留很久，Adam 几步就离开了。</p>
+        <p class="cap">原因在 \(\hat m/\sqrt{\hat v}\)：y 方向的梯度只有 \(10^{-6}\) 量级，除以同样量级的 \(\sqrt{\hat v}\) 后仍是 1 左右，每步照样走约 \(\eta\)。</p>
+        <p class="cap">反过来说，Adam 每个坐标的步长约为 \(\eta\)，和梯度的尺度无关。它只沿坐标轴缩放：谷斜着放时就帮不上忙（见 Shampoo 一页）。</p>
+      </div>
+    </section>
+
+    <!-- 16 -->
+    <section class="slide tight" id="s-decouple">
+      <div class="kicker">AdamW</div>
+      <h2>权重衰减放在哪：L2 正则 vs 解耦</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="Adam 加 L2 与 AdamW 中权重衰减项的流向"></svg>
+      <div class="caps">
+        <p class="cap">L2 正则把 \(\lambda\theta\) 加进梯度：它和 \(g\) 一起被 \(\sqrt{\hat v}\) 除。梯度一直很大的参数 \(\sqrt{\hat v}\) 也大，衰减就被压小了。</p>
+        <p class="cap">AdamW 把衰减从梯度里拿出来，在自适应缩放之后单独加：\(\theta\leftarrow\theta-\eta\big(\hat m/(\sqrt{\hat v}+\epsilon)+\lambda\theta\big)\)。</p>
+        <p class="cap">对 SGD 两者等价（差一个 \(\eta\) 的缩放）；对 Adam 不等价。LLM 预训练的常见配置（如 Llama 2）：AdamW，\(\beta=(0.9,0.95)\)，\(\lambda=0.1\)，梯度裁剪 1.0。</p>
+      </div>
+    </section>
+
+    <!-- 17 -->
+    <section class="slide tight" id="s-adamw">
+      <div class="kicker">AdamW</div>
+      <h2>同样的 λ，两种衰减的效果</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="两个参数在 Adam+L2 与 AdamW 下的衰减曲线"></svg>
+      <div class="caps">
+        <p class="cap">两个参数都从 1 开始，梯度只有噪声：\(w_1\) 的噪声大，\(w_2\) 的很小（示意）。Adam + L2：\(w_1\) 几乎不衰减，\(w_2\) 却被很快压到 0。</p>
+        <p class="cap">AdamW：两个参数都按同一比例 \(1-\eta\lambda\) 每步缩小（虚线是 \(e^{-\eta\lambda t}\)），只是 \(w_1\) 带着噪声的抖动。</p>
+        <p class="cap">所以 AdamW 的 \(\lambda\) 是真正的「每步按比例缩小」：衰减强度和梯度统计无关，也更容易和学习率分开调。</p>
+      </div>
+    </section>
+
+    <!-- 18 -->
+    <section class="slide tight" id="s-sched">
+      <div class="kicker">学习率调度</div>
+      <h2>Warmup、余弦与 WSD</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="学习率随训练进度变化的三条曲线"></svg>
+      <div class="caps">
+        <p class="cap">Warmup：开头线性升到峰值。刚初始化时梯度和 Adam 的二阶矩估计都不稳定，一上来就用峰值 \(\eta\) 容易发散。之后按余弦降到峰值的 10%。</p>
+        <p class="cap">WSD（warmup–stable–decay）：大部分时间保持峰值，最后一小段（常见 10–20%）快速降下来。</p>
+        <p class="cap">余弦要预先定总步数；WSD 的稳定段可以随时分叉出一段衰减，得到一个可用的中间模型，主线接着训。</p>
+      </div>
+    </section>
+
+    <!-- 19 -->
+    <section class="slide tight" id="s-cloud">
+      <div class="kicker">学习率调度</div>
+      <h2>为什么要把学习率降下来</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="三种学习率调度下 40 个 SGD 粒子的分布与平均 loss"></svg>
+      <div class="caps">
+        <p class="cap">每块面板 40 个粒子，各跑一条 SGD（噪声为示意值）。粒子云的大小就是噪声造成的抖动：谷底附近 loss 的平台高度和 \(\eta\) 成正比。</p>
+        <p class="cap">常数 \(\eta\)：很快到谷底，loss 停在平台上。余弦：随 \(\eta\) 降低，云慢慢收紧。WSD：前面一直宽，最后一段 \(\eta\) 降下来时 loss 一口气下降。</p>
+        <p class="cap">最终 loss 取决于末尾的 \(\eta\) 有多小、在小 \(\eta\) 下走了多久。这也是为什么 WSD 的衰减段不能太短。</p>
+      </div>
+    </section>
+
+    <!-- 20 -->
+    <section class="slide tight" id="s-lion">
+      <div class="kicker">Lion</div>
+      <h2>Lion：只要符号</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="Lion 的符号更新与窄谷上的轨迹"></svg>
+      <div class="caps">
+        <p class="cap">Lion 只取更新的符号：每个坐标走 \(+\eta\) 或 \(-\eta\)，更新永远落在正方形的角上，不管梯度多大多小。</p>
+        <p class="cap">方向由 \(c=\beta_1 m+(1-\beta_1)g\) 决定，之后才更新动量 \(m\leftarrow\beta_2 m+(1-\beta_2)g\)，默认 \(\beta_1=0.9,\ \beta_2=0.99\)。只存一个 \(m\)，状态是 Adam 的一半。</p>
+        <p class="cap">每个坐标都走满 \(\eta\)，更新的 RMS 比 Adam 大，所以 \(\eta\) 通常取 AdamW 的 1/10–1/3，\(\lambda\) 相应放大 3–10 倍。\(\beta_2\) 记忆长，冲过谷底后要一阵才掉头。</p>
+      </div>
+    </section>
+
+    <!-- 21 -->
+    <section class="slide tight" id="s-adafactor">
+      <div class="kicker">Adafactor</div>
+      <h2>Adafactor：二阶矩只存行和与列和</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="把二阶矩矩阵分解为行和与列和再重建"></svg>
+      <div class="caps">
+        <p class="cap">Adam 给每个参数存一个 \(v\)：一个 \(n\times m\) 的权重矩阵，就有一个同样大小的 \(v\) 矩阵（颜色深浅表示数值，示意）。</p>
+        <p class="cap">Adafactor 只存每一行的和 \(R\)……</p>
+        <p class="cap">……和每一列的和 \(C\)。</p>
+        <p class="cap">用 \(\hat V=RC^\top/\textstyle\sum_i R_i\) 重建：一个秩 1 近似（对非负矩阵按 I-散度最优）。\(nm\) 个数变成 \(n+m\) 个；再去掉一阶矩（\(\beta_1=0\)），状态几乎为零。T5 就是用它训的。</p>
+      </div>
+    </section>
+
+    <!-- 22 -->
+    <section class="slide tight" id="s-shampoo">
+      <div class="kicker">Shampoo · SOAP</div>
+      <h2>斜着的谷：按坐标缩放不够，需要矩阵预条件</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="斜谷上 GD、Adam 与全矩阵预条件的轨迹"></svg>
+      <div class="caps">
+        <p class="cap">把窄谷转 40°（\(\kappa=100\)）：Adam 只能沿坐标轴分别缩放，对斜谷无能为力，甚至比 GD 还慢。</p>
+        <p class="cap">理想的预条件是一个完整的矩阵：用 \((\mathbb E[gg^\top])^{-1/2}\) 把坐标系拉伸、旋转，斜椭圆变成圆，负梯度直指中心。</p>
+        <p class="cap">2 维时可以直接算这个 2×2 矩阵（橙线：全矩阵版的 Adam），它几乎直线走到谷底。</p>
+        <p class="cap">\(m\times n\) 的权重矩阵，完整的预条件矩阵是 \(mn\times mn\)，存不下。Shampoo 用两个小矩阵近似：\(L=\sum GG^\top,\ R=\sum G^\top G\)，更新 \(L^{-1/4}GR^{-1/4}\)。SOAP 在 Shampoo 的特征基里跑 Adam，更稳定，超参更少。</p>
+      </div>
+    </section>
+
+    <!-- 23 -->
+    <section class="slide tight" id="s-muon">
+      <div class="kicker">Muon</div>
+      <h2>Muon：把动量矩阵正交化</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="Newton–Schulz 迭代把椭圆变成接近圆"></svg>
+      <div class="caps">
+        <p class="cap">Muon 的对象是整个权重矩阵的动量 \(B\)。把它看成线性映射：单位圆（虚线）被映成椭圆，两条半轴就是奇异值，\(\sigma_1\gg\sigma_2\)（示意）。</p>
+        <p class="cap">先除以 Frobenius 范数：\(X_0=B/\|B\|_F\)，保证所有奇异值都不超过 1。</p>
+        <p class="cap">Newton–Schulz：\(X\leftarrow aX+b(XX^\top)X+c(XX^\top)^2X\)，\((a,b,c)=(3.4445,-4.7750,2.0315)\)。只用矩阵乘法；奇异向量不变，奇异值被推向 1。</p>
+        <p class="cap">5 步后 \(O\approx UV^\top\)：保留方向，抹平长度。原来很弱的方向和主方向拿到差不多大的步子。更新是 \(W\leftarrow W-\eta\,O\)，动量 \(\beta=0.95\)。</p>
+      </div>
+    </section>
+
+    <!-- 24 -->
+    <section class="slide tight" id="s-ns">
+      <div class="kicker">Muon · Newton–Schulz</div>
+      <h2>每次迭代：每个奇异值代入同一个多项式</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="三次与五次 Newton–Schulz 多项式下奇异值的变化"></svg>
+      <div class="caps">
+        <p class="cap">20 个奇异值，从 0.01 到 1（示意）。\(X\) 的每次迭代，相当于把每个奇异值 \(\sigma\) 换成 \(\varphi(\sigma)\)。</p>
+        <p class="cap">三次 \(\varphi=1.5\sigma-0.5\sigma^3\) 能精确收敛到 1，但小奇异值每步只放大 1.5 倍；五次多项式在 0 附近斜率是 3.4445，5 步就把它们拉上来。</p>
+        <p class="cap" id="ns-cap3">代价是不精确收敛：5 步后落在大约 [0.69, 1.13] 之间。对优化够用了：每个方向拿到的步长相近。</p>
+      </div>
+    </section>
+
+    <!-- 25 -->
+    <section class="slide tight" id="s-muon-why">
+      <div class="kicker">Muon · 用在哪</div>
+      <h2>只给隐藏层的二维矩阵用</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="Transformer 参数分到 Muon 与 AdamW，以及正交化前后的奇异值"></svg>
+      <div class="caps">
+        <p class="cap">一个 Transformer 的参数：大部分是隐藏层的二维矩阵（注意力的 Q、K、V、O，MLP 的三个投影），另有 embedding、输出头和 norm 的增益向量。</p>
+        <p class="cap">Muon 只管隐藏层的二维矩阵；embedding、LM head、norm 增益和 bias 仍用 AdamW。embedding 是按 token 查表，每行只在 token 出现时更新；输出头经验上也是 AdamW 更好。</p>
+        <p class="cap">隐藏层矩阵把激活映射成激活，谱范数衡量一次更新最多让输出变多少。动量矩阵的奇异值往往集中在少数方向（近似低秩），正交化后各方向步长一致（右，示意）。</p>
+      </div>
+    </section>
+
+    <!-- 26 -->
+    <section class="slide tight" id="s-rms">
+      <div class="kicker">Muon · 更新尺度</div>
+      <h2>更新 RMS 对齐：让 Muon 复用 AdamW 的超参</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="三种形状矩阵的更新 RMS 缩放前后"></svg>
+      <div class="caps">
+        <p class="cap">正交化后奇异值都约为 1。形状 \(A\times B\) 的满秩矩阵有 \(\min(A,B)\) 个奇异值为 1，元素的 RMS 是 \(\sqrt{1/\max(A,B)}\)：矩阵越大，每个元素的更新越小。</p>
+        <p class="cap">乘上 \(0.2\sqrt{\max(A,B)}\)，所有矩阵的更新 RMS 都对齐到 0.2，和 AdamW 典型的更新 RMS（约 0.2–0.4）同一量级。</p>
+        <p class="cap">于是 Muon 部分可以直接沿用 AdamW 的学习率和权重衰减：\(W\leftarrow W-\eta\big(0.2\sqrt{\max(A,B)}\,O+\lambda W\big)\)。Moonlight 和 Kimi K2 都是这样训的。</p>
+      </div>
+    </section>
+
+    <!-- 27 -->
+    <section class="slide tight" id="s-mem">
+      <div class="kicker">显存</div>
+      <h2>优化器状态：每个参数多少字节</h2>
+      <svg class="fig" viewBox="0 0 1136 410" role="img" aria-label="各优化器每参数状态字节数"></svg>
+      <div class="caps">
+        <p class="cap">只算优化器自己的状态（fp32）：动量、AdaGrad、RMSProp、Lion、Muon 各存 1 份，Adam/AdamW 存 2 份；Adafactor 只存行和、列和，几乎为零。</p>
+        <p class="cap">放到 70 亿参数上：AdamW 的状态 56 GB，Lion 和 Muon 减半。Shampoo 要存 \(L\)、\(R\) 及其逆根，SOAP 还要加上特征基和 Adam 的两份状态，都比 AdamW 多。</p>
+        <p class="cap">混合精度训练里还有 bf16 权重、bf16 梯度和 fp32 主权重：AdamW 合计 16 B/参数，Muon 12 B（非矩阵参数仍按 AdamW 计）。</p>
+      </div>
+    </section>
+
+    <!-- 28 -->
+    <section class="slide tight" id="s-play">
+      <div class="kicker">交互</div>
+      <h2>优化器游乐场</h2>
+      <div class="widget play" data-interactive>
+        <svg id="pg-svg" viewBox="0 0 700 430" role="img" aria-label="可点击设置起点的 loss 地形"></svg>
+        <div class="side">
+          <div><div class="grp-l">地形</div><div class="seg" id="pg-land"></div></div>
+          <div><div class="grp-l">优化器</div><div class="seg" id="pg-opt"></div></div>
+          <div class="rowc"><span>学习率</span><input type="range" id="pg-lr" min="-4" max="0" step="0.01"><output id="pg-lr-o"></output></div>
+          <div class="rowc"><span>梯度噪声</span><input type="range" id="pg-noise" min="0" max="2" step="0.1" value="0"><output id="pg-noise-o"></output></div>
+          <div class="btns"><button class="btn primary" id="pg-run" type="button">▶ 运行</button><button class="btn" id="pg-clear" type="button">清除轨迹</button></div>
+          <div class="readout">
+            <div><span class="k">步数</span><span class="v" id="pg-step">0</span></div>
+            <div><span class="k">loss − 最小值</span><span class="v" id="pg-loss">–</span></div>
+            <div><span class="k">状态</span><span class="v" id="pg-state">–</span></div>
+          </div>
+          <div class="hint2">点地形设置起点，每次运行 250 步。切换优化器或地形时学习率会重置为一个能用的默认值；之前的轨迹保留为淡色，方便对比。</div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 29 -->
+    <section class="slide">
+      <div class="kicker">小结</div>
+      <h2>小结</h2>
+      <ul class="sum">
+        <li class="rise" style="--d: 1">GD 的步长被最陡的方向卡住（\(\eta<2/\lambda_{\max}\)），缓方向的进度 \(\propto\eta\lambda_{\min}\)：条件数决定要走多少步。</li>
+        <li class="rise" style="--d: 2">动量累积一致的方向、抵消来回摆的方向；Nesterov 在前瞻点求梯度。SGD 的噪声能帮它离开鞍点，也让它停不在谷底。</li>
+        <li class="rise" style="--d: 3">AdaGrad → RMSProp → Adam：按坐标除以梯度尺度，每步约走 \(\eta\)；Adam 再加动量和偏差修正。AdamW 把权重衰减放到自适应缩放之外。</li>
+        <li class="rise" style="--d: 4">Warmup 防早期发散；谷底附近的 loss 平台 \(\propto\eta\)，所以最后要降学习率，WSD 让这一步可以随时分叉。</li>
+        <li class="rise" style="--d: 5">Lion 只取符号、省一半状态；Adafactor 把二阶矩分解成行和与列和；Shampoo / SOAP 用两个 Kronecker 因子做矩阵预条件。</li>
+        <li class="rise" style="--d: 6">Muon 用 Newton–Schulz 把隐藏层矩阵的动量正交化（\(\approx UV^\top\)），再乘 \(0.2\sqrt{\max(A,B)}\) 对齐 AdamW 的更新 RMS。</li>
+      </ul>
+    </section>
+
+    <!-- 30 -->
+    <section class="slide">
+      <div class="kicker">参考</div>
+      <h2>参考与延伸阅读</h2>
+      <ul class="refs">
+        <li class="grp">经典方法</li>
+        <li>Sutskever et al., <a href="https://proceedings.mlr.press/v28/sutskever13.html">On the importance of initialization and momentum in deep learning</a>（动量与 Nesterov 在深度学习里的用法）</li>
+        <li>Duchi, Hazan, Singer, <a href="https://jmlr.org/papers/v12/duchi11a.html">Adaptive Subgradient Methods（AdaGrad）</a></li>
+        <li>Hinton, <a href="https://www.cs.toronto.edu/~tijmen/csc321/slides/lecture_slides_lec6.pdf">Neural Networks for ML, Lecture 6e（RMSProp）</a></li>
+        <li>Dauphin et al., <a href="https://arxiv.org/abs/1406.2572">Identifying and attacking the saddle point problem</a></li>
+        <li>Kingma, Ba, <a href="https://arxiv.org/abs/1412.6980">Adam</a>；Loshchilov, Hutter, <a href="https://arxiv.org/abs/1711.05101">Decoupled Weight Decay（AdamW）</a></li>
+        <li class="grp">调度</li>
+        <li>Loshchilov, Hutter, <a href="https://arxiv.org/abs/1608.03983">SGDR（余弦）</a>；<a href="https://arxiv.org/abs/2404.06395">MiniCPM（WSD）</a>；Hägele et al., <a href="https://arxiv.org/abs/2405.18392">Scaling Laws and Compute-Optimal Training Beyond Fixed Training Durations</a></li>
+        <li><a href="https://arxiv.org/abs/2307.09288">Llama 2</a>（AdamW 0.9/0.95、λ = 0.1、裁剪 1.0、余弦到 10%）</li>
+        <li class="grp">新一代优化器</li>
+        <li>Chen et al., <a href="https://arxiv.org/abs/2302.06675">Symbolic Discovery of Optimization Algorithms（Lion）</a></li>
+        <li>Shazeer, Stern, <a href="https://arxiv.org/abs/1804.04235">Adafactor</a>；<a href="https://arxiv.org/abs/1910.10683">T5</a></li>
+        <li>Gupta, Koren, Singer, <a href="https://arxiv.org/abs/1802.09568">Shampoo</a>；Vyas et al., <a href="https://arxiv.org/abs/2409.11321">SOAP</a></li>
+        <li>Keller Jordan, <a href="https://kellerjordan.github.io/posts/muon/">Muon</a>；Jeremy Bernstein, <a href="https://jeremybernste.in/writing/deriving-muon">Deriving Muon</a></li>
+        <li>Liu et al., <a href="https://arxiv.org/abs/2502.16982">Muon is Scalable for LLM Training（Moonlight）</a>；<a href="https://arxiv.org/abs/2507.20534">Kimi K2</a></li>
+        <li class="grp">本站</li>
+        <li><a href="/posts/smol-optim-data/">分词器、优化器、超参与数据配比</a>（AdamW、Muon 与学习率调度的文字版）</li>
+        <li><a href="/posts/kimi-k2/">Kimi K2：MuonClip 与万亿参数 Agent 模型</a>（Muon 的推导与 QK-Clip）</li>
+        <li><a href="/posts/scaling-memory/">训练的账本：显存、FLOPs 与 MFU</a>（每参数 16 字节的来历）</li>
+      </ul>
+    </section>
+
+    <!-- 31 -->
+    <section class="slide center">
+      <h2 class="rise">动画图解 LLM 系统</h2>
+      <nav class="series-pager rise" style="--d: 1" data-series="systems"></nav>
+      <p class="muted rise" style="--d: 2"><a href="/blog/">← 回到博客</a></p>
+    </section>
+
+  </div></main>
+
+  <script src="/assets/slides.js"></script>
+  <script src="/assets/anim.js"></script>
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    /* ---------- core: landscapes, update rules, simulation ---------- */
+    function rng(seed) {
+      let a = seed >>> 0;
+      return () => { a = (a + 0x6D2B79F5) >>> 0; let t = a; t = Math.imul(t ^ (t >>> 15), t | 1); t ^= t + Math.imul(t ^ (t >>> 7), t | 61); return ((t ^ (t >>> 14)) >>> 0) / 4294967296; };
+    }
+    function gauss(r) { const u = Math.max(1e-12, r()); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); }
+    const geo = (a, b, n) => Array.from({ length: n }, (_, i) => a * Math.pow(b / a, i / (n - 1)));
+
+    function quad(l1, l2, deg) {
+      const c = Math.cos(deg * Math.PI / 180), s = Math.sin(deg * Math.PI / 180);
+      // H = R diag(l1,l2) R^T
+      const h11 = l1 * c * c + l2 * s * s, h22 = l1 * s * s + l2 * c * c, h12 = (l1 - l2) * c * s;
+      return {
+        H: [h11, h12, h12, h22],
+        f: (x, y) => 0.5 * (h11 * x * x + 2 * h12 * x * y + h22 * y * y),
+        g: (x, y) => [h11 * x + h12 * y, h12 * x + h22 * y],
+      };
+    }
+    const LAND = {
+      valley: Object.assign(quad(1, 25, 0), { name: '窄谷', dom: [-6.5, 6.5, -2.7, 2.7], levels: geo(0.03, 160, 13), min: [0, 0], fmin: 0, start: [-6, 2] }),
+      tilt: Object.assign(quad(1, 6, 25), { name: '斜碗', dom: [-4.4, 4.4, -2.3, 2.3], levels: geo(0.05, 30, 10), min: [0, 0], fmin: 0, start: [-3.8, -0.4] }),
+      rot: Object.assign(quad(1, 100, 40), { name: '斜谷', dom: [-6, 6, -3.4, 3.4], levels: geo(0.05, 400, 13), min: [0, 0], fmin: 0, start: [-5, -1.2] }),
+      bowl: Object.assign(quad(1, 4, 0), { name: '碗', dom: [-5, 5, -2.6, 2.6], levels: geo(0.02, 30, 10), min: [0, 0], fmin: 0, start: [-4.4, 1.8] }),
+      rosen: {
+        name: 'Rosenbrock', dom: [-2, 2, -0.9, 2.9], levels: geo(0.05, 1500, 12), min: [1, 1], fmin: 0, start: [-1.6, 2.2],
+        f: (x, y) => (1 - x) ** 2 + 100 * (y - x * x) ** 2,
+        g: (x, y) => [-2 * (1 - x) - 400 * x * (y - x * x), 200 * (y - x * x)],
+      },
+      saddle: {
+        name: '鞍点', dom: [-2.6, 2.6, -1.7, 1.7], levels: [-0.24, -0.2, -0.12, -0.04, 0, 0.12, 0.35, 0.7, 1.2, 1.9, 2.8], min: [0, 1], mins: [[0, 1], [0, -1]], fmin: -0.25, start: [-2.4, 1e-6],
+        f: (x, y) => 0.5 * x * x + 0.25 * y ** 4 - 0.5 * y * y,
+        g: (x, y) => [x, y ** 3 - y],
+      },
+    };
+
+    // Each rule: (o) => step(p, G, t), where G(q) returns the (possibly noisy) gradient at q.
+    const RULES = {
+      gd: (o) => (p, G) => { const g = G(p); return [p[0] - o.lr * g[0], p[1] - o.lr * g[1]]; },
+      mom: (o) => { const b = o.beta ?? 0.9; let v = [0, 0]; return (p, G) => { const g = G(p); v = [b * v[0] + g[0], b * v[1] + g[1]]; return [p[0] - o.lr * v[0], p[1] - o.lr * v[1]]; }; },
+      nag: (o) => { const b = o.beta ?? 0.9; let v = [0, 0]; return (p, G) => { const g = G([p[0] - o.lr * b * v[0], p[1] - o.lr * b * v[1]]); v = [b * v[0] + g[0], b * v[1] + g[1]]; return [p[0] - o.lr * v[0], p[1] - o.lr * v[1]]; }; },
+      adagrad: (o) => { let s = [0, 0]; return (p, G) => { const g = G(p); s = [s[0] + g[0] ** 2, s[1] + g[1] ** 2]; o.eff = [o.lr / (Math.sqrt(s[0]) + 1e-8), o.lr / (Math.sqrt(s[1]) + 1e-8)]; return [p[0] - o.eff[0] * g[0], p[1] - o.eff[1] * g[1]]; }; },
+      rmsprop: (o) => { const r = o.rho ?? 0.9; let s = [0, 0]; return (p, G) => { const g = G(p); s = [r * s[0] + (1 - r) * g[0] ** 2, r * s[1] + (1 - r) * g[1] ** 2]; o.eff = [o.lr / (Math.sqrt(s[0]) + 1e-8), o.lr / (Math.sqrt(s[1]) + 1e-8)]; return [p[0] - o.eff[0] * g[0], p[1] - o.eff[1] * g[1]]; }; },
+      adam: (o) => {
+        const b1 = o.b1 ?? 0.9, b2 = o.b2 ?? 0.999, wd = o.wd ?? 0; let m = [0, 0], v = [0, 0];
+        return (p, G, t) => {
+          const g = G(p); m = [b1 * m[0] + (1 - b1) * g[0], b1 * m[1] + (1 - b1) * g[1]]; v = [b2 * v[0] + (1 - b2) * g[0] ** 2, b2 * v[1] + (1 - b2) * g[1] ** 2];
+          const c1 = 1 - b1 ** t, c2 = 1 - b2 ** t;
+          return [0, 1].map((i) => p[i] - o.lr * ((m[i] / c1) / (Math.sqrt(v[i] / c2) + 1e-8) + wd * p[i]));
+        };
+      },
+      lion: (o) => {
+        const b1 = o.b1 ?? 0.9, b2 = o.b2 ?? 0.99; let m = [0, 0];
+        return (p, G) => { const g = G(p); const c = [b1 * m[0] + (1 - b1) * g[0], b1 * m[1] + (1 - b1) * g[1]]; m = [b2 * m[0] + (1 - b2) * g[0], b2 * m[1] + (1 - b2) * g[1]]; return [p[0] - o.lr * Math.sign(c[0]), p[1] - o.lr * Math.sign(c[1])]; };
+      },
+      // Full-matrix Adam: precondition the momentum with (EMA of g g^T)^(-1/2). In 2D this is cheap;
+      // Shampoo approximates the same idea for weight matrices with two Kronecker factors.
+      full: (o) => {
+        const b1 = o.b1 ?? 0.9, b2 = o.b2 ?? 0.99; let m = [0, 0], S = [0, 0, 0];
+        return (p, G, t) => {
+          const g = G(p); m = [b1 * m[0] + (1 - b1) * g[0], b1 * m[1] + (1 - b1) * g[1]];
+          S = [b2 * S[0] + (1 - b2) * g[0] * g[0], b2 * S[1] + (1 - b2) * g[0] * g[1], b2 * S[2] + (1 - b2) * g[1] * g[1]];
+          const c1 = 1 - b1 ** t, c2 = 1 - b2 ** t, eps = 1e-6;
+          const a = S[0] / c2 + eps, b = S[1] / c2, d = S[2] / c2 + eps;
+          // inverse square root of [[a,b],[b,d]]
+          const tr = a + d, dt = Math.sqrt(Math.max(0, (a - d) ** 2 / 4 + b * b));
+          const l1 = tr / 2 + dt, l2 = Math.max(eps, tr / 2 - dt);
+          let ux = b, uy = l1 - a; const n = Math.hypot(ux, uy);
+          if (n < 1e-12) { ux = a >= d ? 1 : 0; uy = a >= d ? 0 : 1; } else { ux /= n; uy /= n; }
+          const q1 = 1 / Math.sqrt(l1), q2 = 1 / Math.sqrt(l2);
+          const P = [q1 * ux * ux + q2 * uy * uy, (q1 - q2) * ux * uy, q1 * uy * uy + q2 * ux * ux];
+          const mx = m[0] / c1, my = m[1] / c1;
+          return [p[0] - o.lr * (P[0] * mx + P[1] * my), p[1] - o.lr * (P[1] * mx + P[2] * my)];
+        };
+      },
+    };
+
+    // Run a rule on a landscape. Returns { pts, loss, eff, diverged }.
+    function simulate(land, rule, o, start, n, noise = 0, seed = 1) {
+      const r = rng(seed); const opt = Object.assign({}, o); const step = RULES[rule](opt);
+      const [x0, x1, y0, y1] = land.dom; const W = x1 - x0, Hh = y1 - y0;
+      const G = (q) => { const g = land.g(q[0], q[1]); return noise ? [g[0] + noise * gauss(r), g[1] + noise * gauss(r)] : g; };
+      let p = start.slice(); const pts = [p], loss = [land.f(p[0], p[1]) - land.fmin], eff = [];
+      let diverged = false;
+      for (let t = 1; t <= n; t++) {
+        p = step(p, G, t);
+        if (opt.eff) eff.push(opt.eff.slice());
+        if (!isFinite(p[0]) || !isFinite(p[1]) || p[0] < x0 - W || p[0] > x1 + W || p[1] < y0 - Hh || p[1] > y1 + Hh) { diverged = true; break; }
+        pts.push(p); loss.push(land.f(p[0], p[1]) - land.fmin);
+      }
+      return { pts, loss, eff, diverged };
+    }
+    /* ---------- SVG helpers ---------- */
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const $ = (s, r = document) => r.querySelector(s);
+    function E(tag, a, parent, text) {
+      const e = document.createElementNS(SVGNS, tag);
+      if (a) for (const k in a) e.setAttribute(k, a[k]);
+      if (text != null) e.textContent = text;
+      if (parent) parent.appendChild(e);
+      return e;
+    }
+    let UID = 0;
+    function defs(svg) { return svg.querySelector('defs') || E('defs', {}, svg); }
+    function marker(svg, color) {
+      svg._mk = svg._mk || {};
+      if (svg._mk[color]) return svg._mk[color];
+      const id = 'mk' + (++UID);
+      const m = E('marker', { id, viewBox: '0 0 10 10', refX: 7, refY: 5, markerWidth: 5, markerHeight: 5, orient: 'auto-start-reverse' }, defs(svg));
+      E('path', { d: 'M0,0 L10,5 L0,10 z', fill: color }, m);
+      return (svg._mk[color] = 'url(#' + id + ')');
+    }
+    function arrow(svg, parent, x1, y1, x2, y2, color, o = {}) {
+      const a = { x1, y1, x2, y2, stroke: color, 'stroke-width': o.w || 3, 'marker-end': marker(svg, color), 'stroke-linecap': 'round' };
+      if (o.dash) a['stroke-dasharray'] = o.dash;
+      const l = E('line', a, parent);
+      if (o.hide) l.style.opacity = 0;
+      return l;
+    }
+    const SUP = { '-': '⁻', 0: '⁰', 1: '¹', 2: '²', 3: '³', 4: '⁴', 5: '⁵', 6: '⁶', 7: '⁷', 8: '⁸', 9: '⁹' };
+    const pow10 = (k) => (k === 0 ? '1' : k === 1 ? '10' : '10' + String(k).split('').map((c) => SUP[c]).join(''));
+    const fmtE = (v) => (v === 0 ? '0' : v >= 100 ? v.toFixed(0) : v >= 0.01 ? v.toFixed(3) : v.toExponential(1));
+    const lerp = (a, b, t) => a + (b - a) * t;
+
+    /* ---------- contours (marching squares) ---------- */
+    const GRIDS = new Map();
+    function grid(land, dom, nx) {
+      const key = land.name + dom.join(',') + nx;
+      if (GRIDS.has(key)) return GRIDS.get(key);
+      const [x0, x1, y0, y1] = dom;
+      const ny = Math.max(8, Math.round(nx * (y1 - y0) / (x1 - x0)));
+      const F = new Float64Array((nx + 1) * (ny + 1));
+      for (let j = 0; j <= ny; j++) for (let i = 0; i <= nx; i++) F[j * (nx + 1) + i] = land.f(x0 + i * (x1 - x0) / nx, y0 + j * (y1 - y0) / ny);
+      const G = { F, nx, ny, dom };
+      GRIDS.set(key, G);
+      return G;
+    }
+    function contourD(G, L, X, Y) {
+      const { F, nx, ny, dom } = G; const [x0, x1, y0, y1] = dom;
+      const dx = (x1 - x0) / nx, dy = (y1 - y0) / ny;
+      let d = '';
+      const pts = [];
+      const cross = (va, vb, xa, ya, xb, yb) => { if ((va < L) !== (vb < L)) { const t = (L - va) / (vb - va); pts.push(xa + (xb - xa) * t, ya + (yb - ya) * t); } };
+      for (let j = 0; j < ny; j++) {
+        for (let i = 0; i < nx; i++) {
+          const a = F[j * (nx + 1) + i], b = F[j * (nx + 1) + i + 1], c = F[(j + 1) * (nx + 1) + i + 1], e = F[(j + 1) * (nx + 1) + i];
+          const xa = x0 + i * dx, ya = y0 + j * dy;
+          pts.length = 0;
+          cross(a, b, xa, ya, xa + dx, ya); cross(b, c, xa + dx, ya, xa + dx, ya + dy);
+          cross(c, e, xa + dx, ya + dy, xa, ya + dy); cross(e, a, xa, ya + dy, xa, ya);
+          for (let k = 0; k + 3 < pts.length; k += 4) d += 'M' + X(pts[k]).toFixed(1) + ' ' + Y(pts[k + 1]).toFixed(1) + 'L' + X(pts[k + 2]).toFixed(1) + ' ' + Y(pts[k + 3]).toFixed(1);
+        }
+      }
+      return d;
+    }
+
+    /* ---------- a landscape view ---------- */
+    function view(svg, land, box, o = {}) {
+      const dom = o.dom || land.dom; const [x0, x1, y0, y1] = dom;
+      const s = Math.min(box.w / (x1 - x0), box.h / (y1 - y0));
+      const w = (x1 - x0) * s, h = (y1 - y0) * s;
+      const ox = box.x + (o.left ? 0 : (box.w - w) / 2), oy = box.y + (o.top ? 0 : (box.h - h) / 2);
+      const X = (x) => ox + (x - x0) * s, Y = (y) => oy + (y1 - y) * s;
+      const g = E('g', { class: 'land' }, o.parent || svg);
+      const id = 'cl' + (++UID);
+      E('rect', { x: ox, y: oy, width: w, height: h, rx: o.bare ? 0 : 14 }, E('clipPath', { id }, defs(svg)));
+      if (!o.bare) E('rect', { x: ox, y: oy, width: w, height: h, rx: 14, class: 'land-bg' }, g);
+      const inner = E('g', { 'clip-path': 'url(#' + id + ')' }, g);
+      const cg = E('g', {}, inner);
+      const G = grid(land, o.gridDom || dom, o.res || 150);
+      const levels = o.levels || land.levels;
+      const paths = levels.map((L, i) => E('path', { d: contourD(G, L, X, Y), class: 'ct', 'vector-effect': 'non-scaling-stroke', 'stroke-opacity': (0.95 - 0.55 * i / levels.length).toFixed(2) }, cg));
+      const mk = E('g', { class: 'minmk' }, inner);
+      if (!o.noMin) (land.mins || [land.min]).forEach(([mx, my]) => E('path', { d: `M${X(mx) - 6} ${Y(my) - 6}L${X(mx) + 6} ${Y(my) + 6}M${X(mx) - 6} ${Y(my) + 6}L${X(mx) + 6} ${Y(my) - 6}` }, mk));
+      const layer = E('g', {}, inner);
+      return { X, Y, s, ox, oy, w, h, g, inner, cg, mk, paths, layer, svg, land, dom,
+        inv: (px, py) => [x0 + (px - ox) / s, y1 - (py - oy) / s] };
+    }
+
+    // A path drawn up to progress p (0..1 of N steps), with a dot at the head.
+    function polyTrail(parent, P, color, o = {}) {
+      const N = o.N || P.length - 1;
+      const g = E('g', {}, parent);
+      g.style.opacity = o.show ? 1 : 0;
+      if (!o.noStart) E('circle', { cx: P[0][0], cy: P[0][1], r: 5, fill: 'none', stroke: color, 'stroke-width': 2 }, g);
+      const line = E('polyline', { fill: 'none', stroke: color, 'stroke-width': o.w || 2.4, 'stroke-linejoin': 'round', 'stroke-linecap': 'round', 'stroke-opacity': o.op || 0.9 }, g);
+      const dot = E('circle', { r: o.r || 7, fill: color, stroke: 'var(--surface)', 'stroke-width': 2 }, g);
+      const set = (p) => {
+        const kf = Math.min(P.length - 1, Math.max(0, p) * N);
+        const i = Math.floor(kf), f = kf - i;
+        let s = '';
+        for (let j = 0; j <= i; j++) s += P[j][0].toFixed(1) + ',' + P[j][1].toFixed(1) + ' ';
+        let c = P[i];
+        if (f > 1e-6 && i + 1 < P.length) { c = [lerp(P[i][0], P[i + 1][0], f), lerp(P[i][1], P[i + 1][1], f)]; s += c[0].toFixed(1) + ',' + c[1].toFixed(1); }
+        line.setAttribute('points', s);
+        dot.setAttribute('cx', c[0].toFixed(1)); dot.setAttribute('cy', c[1].toFixed(1));
+      };
+      set(0);
+      return { g, set, P, line, dot };
+    }
+    function trail(v, pts, color, o = {}) { return polyTrail(v.layer, pts.map((p) => [v.X(p[0]), v.Y(p[1])]), color, o); }
+
+    // Loss-vs-step panel on a log axis with a live legend.
+    function lossPanel(svg, box, o) {
+      const N = o.N, lo = Math.log10(o.lo || 1e-4), hi = Math.log10(o.hi || 100);
+      const g = E('g', {}, svg);
+      const pl = box.x + 50, pr = box.x + box.w - 6, pt = box.y + 30, pb = box.y + (o.ph || 250);
+      E('text', { x: box.x, y: box.y + 16, class: 'lp-t' }, g, o.title || 'loss − 最小值（对数轴）');
+      E('rect', { x: pl, y: pt, width: pr - pl, height: pb - pt, rx: 6, class: 'lp-bg' }, g);
+      const Yv = (v) => pb - (Math.min(hi, Math.max(lo, Math.log10(Math.max(v, 1e-300)))) - lo) / (hi - lo) * (pb - pt);
+      const Xk = (k) => pl + (k / N) * (pr - pl);
+      const stepK = Math.max(1, Math.round((hi - lo) / 5));
+      for (let k = Math.ceil(lo); k <= hi; k += stepK) {
+        E('line', { x1: pl, x2: pr, y1: Yv(10 ** k), y2: Yv(10 ** k), class: 'lp-grid' }, g);
+        E('text', { x: pl - 6, y: Yv(10 ** k) + 4, 'text-anchor': 'end', class: 'lp-ax' }, g, pow10(k));
+      }
+      E('text', { x: pl, y: pb + 16, class: 'lp-ax' }, g, '0');
+      E('text', { x: pr, y: pb + 16, 'text-anchor': 'end', class: 'lp-ax' }, g, N + ' 步');
+      let rows = 0;
+      return {
+        add(loss, color, name) {
+          const line = E('polyline', { fill: 'none', stroke: color, 'stroke-width': 2.2, 'stroke-linejoin': 'round' }, g);
+          const ry = pb + 44 + rows * 27; rows++;
+          const row = E('g', {}, g); row.style.opacity = 0;
+          E('circle', { cx: box.x + 8, cy: ry - 6, r: 6, fill: color }, row);
+          E('text', { x: box.x + 22, y: ry, class: 'lp-n' }, row, name);
+          const val = E('text', { x: box.x + box.w - 6, y: ry, 'text-anchor': 'end', class: 'lp-v' }, row, '');
+          const full = loss.length === N + 1;
+          return {
+            row,
+            set(p) {
+              const kf = Math.max(0, p) * N; const k = Math.min(loss.length - 1, Math.floor(kf + 1e-9));
+              let s = '';
+              for (let i = 0; i <= k; i++) s += Xk(i).toFixed(1) + ',' + Yv(loss[i]).toFixed(1) + ' ';
+              line.setAttribute('points', s);
+              val.textContent = !full && kf > loss.length - 1 ? '发散' : fmtE(loss[k]);
+            },
+          };
+        },
+      };
+    }
+
+    /* ---------- timeline helpers ---------- */
+    // Drive arbitrary drawing from a timeline: fn(progress 0..1) is called on every render.
+    function drive(tl, host, fn, o = {}) {
+      const sp = document.createElement('span');
+      sp.hidden = true; sp.textContent = '0';
+      host.appendChild(sp);
+      tl.to(sp, { text: 1, fmt: (v) => { fn(v); return String(v); } }, { dur: o.dur ?? 4, at: o.at, ease: o.ease || 'linear' });
+      return tl;
+    }
+    // Cross-fade the slide's stacked .cap paragraphs.
+    function caps(tl, slide) {
+      const cs = Array.from(slide.querySelectorAll('.cap'));
+      let cur = -1;
+      return (i, at) => {
+        const t = at ?? tl.duration;
+        if (cur >= 0) tl.to(cs[cur], { opacity: 0 }, { at: t, dur: 0.3 });
+        tl.to(cs[i], { opacity: 1 }, { at: cur >= 0 ? t + 0.15 : t, dur: 0.45 });
+        cur = i;
+      };
+    }
+    const bind = (slide, tl, o = {}) => Anim.slide(slide, tl, Object.assign({ steps: true, controls: true }, o));
+    const slideOf = (id) => document.getElementById(id);
+    const figOf = (s) => s.querySelector('svg.fig');
+
+    // Standard race: a landscape on the left, loss panel on the right.
+    function raceScene(s, land, o = {}) {
+      const svg = figOf(s);
+      const v = view(svg, land, { x: 0, y: 0, w: o.lw || 700, h: 410 }, o.view || {});
+      const lp = o.noPanel ? null : lossPanel(svg, { x: o.px || 740, y: 0, w: 1136 - (o.px || 740), h: 410 }, { N: o.N, lo: o.lo, hi: o.hi, ph: o.ph });
+      return { svg, v, lp };
+    }
+    function runner(sc, land, rule, opt, color, name, o = {}) {
+      const sim = simulate(land, rule, opt, o.start || land.start, o.N, o.noise || 0, o.seed || 1);
+      const tr = trail(sc.v, sim.pts, color, { N: o.N, w: o.w, op: o.op });
+      const lc = sc.lp ? sc.lp.add(sim.loss, color, name) : null;
+      return { sim, tr, lc, set(p) { tr.set(p); if (lc) lc.set(p); } };
+    }
+    function showRun(tl, rs, at) {
+      const t = at ?? tl.duration;
+      rs.forEach((r) => { tl.to(r.tr.g, { opacity: 1 }, { at: t, dur: 0.35 }); if (r.lc) tl.to(r.lc.row, { opacity: 1 }, { at: t, dur: 0.35 }); });
+      return t + 0.35;
+    }
+    function fadeIn(tl, els, o = {}) { tl.to(els, { opacity: 1 }, { at: o.at, dur: o.dur ?? 0.4, stagger: o.stagger ?? 0 }); }
+    function hide(...els) { els.flat().forEach((e) => { e.style.opacity = 0; }); }
+
+    const COL = { gd: 'var(--c-gd)', sgd: 'var(--c-sgd)', mom: 'var(--c-mom)', nag: 'var(--c-nag)', adagrad: 'var(--c-ada)', rmsprop: 'var(--c-rms)', adam: 'var(--c-adam)', lion: 'var(--c-lion)', full: 'var(--c-full)' };
+
+    /* ================= slides ================= */
+
+    // 1 · title: three optimizers racing on a faint Rosenbrock, looping.
+    (() => {
+      const s = slideOf('s-title'); const svg = s.querySelector('.title-bg');
+      const land = LAND.rosen;
+      const v = view(svg, land, { x: 0, y: 0, w: 1280, h: 720 }, { dom: [-3.2, 3.2, -1.4, 2.2], bare: true, levels: geo(0.05, 5000, 15), res: 200 });
+      const N = 300, start = [-1.8, 2.0];
+      const runs = [['gd', { lr: 0.001 }, COL.gd], ['nag', { lr: 0.001, beta: 0.9 }, COL.nag], ['adam', { lr: 0.08 }, COL.adam]]
+        .map(([r, o, c]) => trail(v, simulate(land, r, o, start, N).pts, c, { N, show: true, w: 3, r: 8 }));
+      const tl = Anim.timeline();
+      drive(tl, s, (p) => runs.forEach((t) => t.set(p)), { dur: 7 });
+      tl.wait(2);
+      Anim.slide(s, tl, { loop: true, delay: 600 });
+    })();
+
+    // 3 · intro
+    (() => {
+      const s = slideOf('s-intro'); const svg = figOf(s); const land = LAND.tilt;
+      const v = view(svg, land, { x: 0, y: 0, w: 760, h: 410 });
+      hide(v.paths);
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const start = [-3.0, -1.0], N = 30;
+      const A = E('g', {}, svg); // arrows live outside the clipped layer
+      const sim = simulate(land, 'gd', { lr: 0.12 }, start, N);
+      const tr = trail(v, sim.pts, 'var(--accent-2)', { N });
+      const P0 = [v.X(start[0]), v.Y(start[1])];
+      const g0 = land.g(start[0], start[1]); const gn = Math.hypot(g0[0], g0[1]);
+      const ux = g0[0] / gn, uy = -g0[1] / gn; // screen direction of +grad
+      const aUp = arrow(svg, A, P0[0], P0[1], P0[0] + ux * 100, P0[1] + uy * 100, 'var(--text-soft)', { hide: true });
+      const aDn = arrow(svg, A, P0[0], P0[1], P0[0] - ux * 80, P0[1] - uy * 80, 'var(--accent-2)', { hide: true, w: 4 });
+      const lUp = E('text', { x: P0[0] + ux * 100 + 8, y: P0[1] + uy * 100 - 8, class: 't-m t-math' }, A, '∇L'); hide(lUp);
+      const lDn = E('text', { x: P0[0] - ux * 80 - 10, y: P0[1] - uy * 80 + 26, class: 't-m t-math', 'text-anchor': 'middle', style: 'fill: var(--accent-2)' }, A, '−η∇L'); hide(lDn);
+      // right panel
+      const R = E('g', {}, svg);
+      E('text', { x: 800, y: 70, class: 't-big t-math' }, R, 'θ ← θ − η ∇L(θ)');
+      E('text', { x: 800, y: 130, class: 't-f' }, R, 'η = 0.12（示意）');
+      E('text', { x: 800, y: 200, class: 't-m' }, R, '步数');
+      const tStep = E('text', { x: 800, y: 240, class: 't-big mono' }, R, '0');
+      E('text', { x: 960, y: 200, class: 't-m' }, R, 'loss');
+      const tLoss = E('text', { x: 960, y: 240, class: 't-big mono' }, R, fmtE(sim.loss[0]));
+      hide(R);
+      cap(0);
+      tl.to(v.paths.slice().reverse(), { opacity: 1 }, { at: 0, dur: 0.5, stagger: 0.07 });
+      tl.to(tr.g, { opacity: 1, scale: 1 }, { dur: 0.4 });
+      tl.label('grad');
+      cap(1);
+      tl.set(aUp, { opacity: 1 }).to(aUp, { draw: 1 }, { at: '<', dur: 0.7 }).to(lUp, { opacity: 1 }, { dur: 0.3 });
+      tl.set(aDn, { opacity: 1 }, { at: '+=0.3' }).to(aDn, { draw: 1 }, { at: '<', dur: 0.7 }).to(lDn, { opacity: 1 }, { dur: 0.3 });
+      tl.label('run');
+      cap(2);
+      tl.to([aUp, lUp, aDn, lDn], { opacity: 0 }, { dur: 0.3 });
+      tl.to(R, { opacity: 1 }, { at: '<', dur: 0.4 });
+      drive(tl, s, (p) => {
+        tr.set(p); const k = Math.min(N, Math.floor(p * N + 1e-9));
+        tStep.textContent = String(k); tLoss.textContent = fmtE(sim.loss[k]);
+      }, { dur: 4 });
+      bind(s, tl);
+    })();
+
+    // 4 · 1D learning rate
+    (() => {
+      const s = slideOf('s-1d'); const svg = figOf(s);
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const cases = [[0.3, '慢慢爬'], [1.0, '一步到底'], [1.8, '震荡着收敛'], [2.1, '越跳越远']];
+      const pw = 262, gap = (1136 - 4 * pw) / 3, sx = pw / 4.9, sy = 95, base = 350;
+      const panels = cases.map(([r, lab], i) => {
+        const ox = i * (pw + gap), cx = ox + pw / 2;
+        const X = (x) => cx + x * sx, Y = (f) => base - f * sy;
+        const g = E('g', {}, svg); g.style.opacity = 0.3;
+        E('rect', { x: ox, y: 0, width: pw, height: 410, rx: 14, class: 'land-bg' }, g);
+        E('text', { x: cx, y: 34, 'text-anchor': 'middle', class: 't-h t-math' }, g, 'ηλ = ' + r.toFixed(1));
+        let d = '';
+        for (let k = 0; k <= 80; k++) { const x = -2.45 + 4.9 * k / 80; d += (k ? 'L' : 'M') + X(x).toFixed(1) + ' ' + Y(0.5 * x * x).toFixed(1); }
+        E('path', { d, fill: 'none', stroke: 'var(--text-faint)', 'stroke-width': 2 }, g);
+        E('line', { x1: cx, x2: cx, y1: base + 6, y2: base + 14, stroke: 'var(--text-faint)', 'stroke-width': 2 }, g);
+        E('text', { x: cx, y: 392, 'text-anchor': 'middle', class: 't-s' }, g, lab);
+        const xs = [-1];
+        for (let k = 0; k < 8; k++) { const nx = (1 - r) * xs[xs.length - 1]; if (Math.abs(nx - xs[xs.length - 1]) < 1e-6) break; xs.push(nx); }
+        const P = [];
+        for (let k = 0; k + 1 < xs.length; k++) {
+          const a = xs[k], b = xs[k + 1], bump = 4 + Math.abs(b - a) * sx * 0.3;
+          for (let u = 0; u <= 1.0001; u += 1 / 14) {
+            const x = lerp(a, b, u);
+            P.push([X(x), lerp(Y(0.5 * a * a), Y(0.5 * b * b), u) - bump * 4 * u * (1 - u)]);
+          }
+        }
+        const tr = polyTrail(g, P, 'var(--accent-2)', { show: true, op: 0.5, w: 2 });
+        xs.forEach((x, k) => { if (k) E('circle', { cx: X(x), cy: Y(0.5 * x * x), r: 3.5, fill: 'var(--accent-2)', 'fill-opacity': 0.5 }, g); });
+        tr.g.parentNode.appendChild(tr.g);
+        return { g, tr };
+      });
+      panels.forEach((p, i) => {
+        cap(i);
+        tl.to(p.g, { opacity: 1 }, { dur: 0.4 });
+        drive(tl, s, (v) => p.tr.set(v), { dur: 3.2 });
+        if (i < 3) tl.label('p' + i);
+      });
+      bind(s, tl);
+    })();
+
+    // 5 · valley, three learning rates
+    (() => {
+      const s = slideOf('s-valley'); const land = LAND.valley; const N = 150;
+      const sc = raceScene(s, land, { N, lo: 1e-3, hi: 1e3 });
+      hide(sc.v.g);
+      const { v, svg } = sc;
+      // curvature annotations
+      const A = E('g', {}, v.layer); A.style.opacity = 0;
+      arrow(svg, A, v.X(0), v.Y(0), v.X(4.6), v.Y(0), 'var(--text-soft)', { w: 2.5 });
+      E('text', { x: v.X(4.6), y: v.Y(0) - 10, 'text-anchor': 'end', class: 't-m' }, A, '缓：曲率 1');
+      arrow(svg, A, v.X(0), v.Y(0), v.X(0), v.Y(2.1), 'var(--text-soft)', { w: 2.5 });
+      E('text', { x: v.X(0) + 10, y: v.Y(1.9), class: 't-m' }, A, '陡：曲率 25');
+      const rs = [[0.01, 'var(--c-gd)'], [0.075, 'var(--accent)'], [0.082, 'var(--accent-2)']]
+        .map(([lr, c]) => runner(sc, land, 'gd', { lr }, c, 'GD  η = ' + lr, lr > 0.08 ? { N, w: 1.4, op: 0.6 } : { N }));
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      tl.to(v.g, { opacity: 1 }, { at: 0, dur: 0.5 }).to(A, { opacity: 1 }, { dur: 0.5 });
+      rs.forEach((r, i) => {
+        tl.label('r' + i);
+        cap(i + 1);
+        if (i === 0) tl.to(A, { opacity: 0 }, { at: '<', dur: 0.4 });
+        showRun(tl, [r]);
+        drive(tl, s, (p) => r.set(p), { dur: i === 2 ? 2.5 : 4 });
+      });
+      bind(s, tl);
+    })();
+
+    // 6 · SGD noise
+    (() => {
+      const s = slideOf('s-sgd'); const land = LAND.bowl; const N = 150;
+      const sc = raceScene(s, land, { N, lo: 1e-3, hi: 1e2 });
+      const rs = [
+        runner(sc, land, 'gd', { lr: 0.1 }, COL.gd, 'GD（全量梯度）', { N }),
+        runner(sc, land, 'gd', { lr: 0.1 }, COL.sgd, 'SGD  B = 1', { N, noise: 2, seed: 3 }),
+        runner(sc, land, 'gd', { lr: 0.1 }, 'var(--accent)', 'SGD  B = 16', { N, noise: 0.5, seed: 5 }),
+      ];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      rs.forEach((r, i) => {
+        if (i) tl.label('r' + i);
+        cap(i);
+        showRun(tl, [r]);
+        drive(tl, s, (p) => r.set(p), { dur: 3.5 });
+      });
+      bind(s, tl);
+    })();
+
+    // 7 · saddle
+    (() => {
+      const s = slideOf('s-saddle'); const land = LAND.saddle; const N = 200;
+      const sc = raceScene(s, land, { N, lo: 1e-4, hi: 10 });
+      const { v } = sc;
+      const A = E('g', {}, v.layer); A.style.opacity = 0;
+      E('circle', { cx: v.X(0), cy: v.Y(0), r: 7, fill: 'none', stroke: 'var(--text)', 'stroke-width': 2 }, A);
+      E('text', { x: v.X(0) + 12, y: v.Y(0) - 10, class: 't-m' }, A, '鞍点');
+      E('text', { x: v.X(0) + 12, y: v.Y(1) - 10, class: 't-m' }, A, '最小值');
+      E('text', { x: v.X(0) + 12, y: v.Y(-1) + 24, class: 't-m' }, A, '最小值');
+      const rs = [
+        runner(sc, land, 'gd', { lr: 0.1 }, COL.gd, 'GD', { N }),
+        runner(sc, land, 'gd', { lr: 0.1 }, COL.sgd, 'SGD', { N, noise: 0.3, seed: 1 }),
+      ];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      tl.to(A, { opacity: 1 }, { at: 0.2, dur: 0.5 });
+      tl.label('gd'); cap(1); showRun(tl, [rs[0]]); drive(tl, s, (p) => rs[0].set(p), { dur: 5 });
+      tl.label('sgd'); cap(2); showRun(tl, [rs[1]]); drive(tl, s, (p) => rs[1].set(p), { dur: 5 });
+      bind(s, tl);
+    })();
+
+    // 8 · momentum as vector accumulation
+    (() => {
+      const s = slideOf('s-heavy'); const svg = figOf(s);
+      const T = 10, beta = 0.9, gs = [];
+      for (let t = 1; t <= T; t++) gs.push([0.5, t === 1 ? 1 : t % 2 ? 2 : -2]);
+      const gdSteps = gs.map((g) => [g[0], g[1]]);
+      let v = [0, 0]; const vs = [];
+      gs.forEach((g) => { v = [beta * v[0] + g[0], beta * v[1] + g[1]]; vs.push(v.slice()); });
+      const totX = vs.reduce((a, b) => a + b[0], 0);
+      const k = 860 / totX; // px per unit (η folded in)
+      const lanes = [[gdSteps, 105, 'var(--c-gd)', 'GD：每步 −ηg'], [vs, 305, 'var(--c-mom)', '动量：v ← βv + g，每步 −ηv']];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const built = lanes.map(([steps, cy, color, label]) => {
+        const g = E('g', {}, svg);
+        E('rect', { x: 0, y: cy - 95, width: 1136, height: 190, rx: 14, class: 'land-bg' }, g);
+        E('text', { x: 20, y: cy - 66, class: 't-h' }, g, label);
+        E('line', { x1: 60, x2: 1100, y1: cy, y2: cy, stroke: 'var(--border)', 'stroke-dasharray': '4 6' }, g);
+        let x = 70, y = cy; const arrows = [];
+        steps.forEach((st) => {
+          const nx = x + st[0] * k, ny = y - st[1] * k * 0.42;
+          const a = arrow(svg, g, x, y, nx, ny, color, { w: 3, hide: true });
+          arrows.push(a); x = nx; y = ny;
+        });
+        E('circle', { cx: 70, cy, r: 6, fill: color }, g);
+        return { arrows, g };
+      });
+      const ratio = E('text', { x: 1116, y: 390, 'text-anchor': 'end', class: 't-m mono' }, svg, '');
+      cap(0);
+      built[0].arrows.forEach((a, i) => { tl.set(a, { opacity: 1 }, { at: 0.3 + i * 0.3 }); tl.to(a, { draw: 1 }, { at: 0.3 + i * 0.3, dur: 0.28 }); });
+      tl.label('mom');
+      cap(1);
+      const t0 = tl.duration;
+      built[1].arrows.forEach((a, i) => { tl.set(a, { opacity: 1 }, { at: t0 + i * 0.3 }); tl.to(a, { draw: 1 }, { at: t0 + i * 0.3, dur: 0.28 }); });
+      drive(tl, s, (p) => {
+        const i = Math.min(T - 1, Math.floor(p * T));
+        ratio.textContent = p <= 0 ? '' : 'v 的 x 分量 / g 的 x 分量 = ' + (vs[i][0] / 0.5).toFixed(2);
+      }, { at: t0, dur: T * 0.3 });
+      tl.label('eff');
+      cap(2);
+      const last = built[1].arrows[T - 1];
+      tl.to(last, { attr: { 'stroke-width': 6 } }, { dur: 0.4 }).to(last, { attr: { 'stroke-width': 3 } }, { dur: 0.4 });
+      bind(s, tl);
+    })();
+
+    // 9 · momentum race on the valley
+    (() => {
+      const s = slideOf('s-mom'); const land = LAND.valley; const N = 150;
+      const sc = raceScene(s, land, { N, lo: 1e-3, hi: 1e3 });
+      const rs = [
+        runner(sc, land, 'gd', { lr: 0.01 }, COL.gd, 'GD  η = 0.01', { N }),
+        runner(sc, land, 'mom', { lr: 0.01, beta: 0.9 }, COL.mom, '动量 β = 0.9', { N }),
+        runner(sc, land, 'mom', { lr: 0.01, beta: 0.99 }, 'var(--accent-2)', '动量 β = 0.99', { N }),
+      ];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      showRun(tl, rs.slice(0, 2), 0);
+      drive(tl, s, (p) => { rs[0].set(p); rs[1].set(p); }, { dur: 5 });
+      tl.label('b99');
+      cap(1);
+      showRun(tl, [rs[2]]);
+      drive(tl, s, (p) => rs[2].set(p), { dur: 5 });
+      bind(s, tl);
+    })();
+
+    // 10 · Nesterov look-ahead
+    (() => {
+      const s = slideOf('s-nag'); const svg = figOf(s); const land = LAND.valley;
+      const eta = 0.04, beta = 0.9, th = [-3.0, 0.25], vel = [-37.5, 10];
+      const mstep = [-eta * beta * vel[0], -eta * beta * vel[1]];
+      const look = [th[0] + mstep[0], th[1] + mstep[1]];
+      const gH = land.g(th[0], th[1]), gN = land.g(look[0], look[1]);
+      const endH = [look[0] - eta * gH[0], look[1] - eta * gH[1]];
+      const endN = [look[0] - eta * gN[0], look[1] - eta * gN[1]];
+      const dom = [-3.25, -0.95, -0.6, 0.45];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const mk = (ox, title, nest) => {
+        const v = view(svg, land, { x: ox, y: 30, w: 548, h: 330 }, { dom, noMin: true, levels: geo(0.02, 40, 22) });
+        E('text', { x: ox + 274, y: 20, 'text-anchor': 'middle', class: 't-h' }, svg, title);
+        const L = v.layer, P = (q) => [v.X(q[0]), v.Y(q[1])];
+        E('line', { x1: v.X(-3.25), x2: v.X(-0.95), y1: v.Y(0), y2: v.Y(0), stroke: 'var(--text-faint)', 'stroke-dasharray': '3 5' }, L);
+        E('text', { x: v.X(-3.2), y: v.Y(0) + 20, class: 't-f' }, L, '谷底 y = 0');
+        const [a, b, c] = [P(th), P(look), P(nest ? endN : endH)];
+        const gq = nest ? gN : gH;
+        const gv = [-eta * gq[0] * v.s, eta * gq[1] * v.s];
+        const mArr = arrow(svg, L, a[0], a[1], b[0], b[1], 'var(--c-mom)', { dash: '7 6', hide: true });
+        const gArr = E('g', {}, L); gArr.style.opacity = 0;
+        const gx0 = nest ? b : a;
+        arrow(svg, gArr, gx0[0], gx0[1], gx0[0] + gv[0], gx0[1] + gv[1], 'var(--accent-2)', { w: 4 });
+        E('text', nest ? { x: gx0[0] - 14, y: gx0[1] + 34, 'text-anchor': 'end', class: 't-m', style: 'fill: var(--accent-2)' } : { x: gx0[0] + gv[0] - 12, y: gx0[1] + gv[1] + 10, 'text-anchor': 'end', class: 't-m', style: 'fill: var(--accent-2)' }, gArr, nest ? '−η∇L（前瞻点处）' : '−η∇L（θ 处）');
+        const res = arrow(svg, L, a[0], a[1], c[0], c[1], 'var(--text)', { w: 3, hide: true });
+        E('circle', { cx: a[0], cy: a[1], r: 7, fill: 'var(--text)' }, L);
+        E('text', { x: a[0] - 10, y: a[1] - 12, 'text-anchor': 'middle', class: 't-m t-math' }, L, 'θ');
+        const lk = E('circle', { cx: b[0], cy: b[1], r: 7, fill: 'none', stroke: 'var(--c-mom)', 'stroke-width': 2.5 }, L); lk.style.opacity = 0;
+        const end = E('circle', { cx: c[0], cy: c[1], r: 8, fill: nest ? 'var(--c-nag)' : 'var(--c-gd)', stroke: 'var(--surface)', 'stroke-width': 2 }, L); end.style.opacity = 0;
+        const endL = E('text', { x: c[0] + 14, y: c[1] + (nest ? 34 : 6), class: 't-m' }, L, '落点 y = ' + (nest ? endN : endH)[1].toFixed(2)); endL.style.opacity = 0;
+        const shift = nest ? null : [b[0] - a[0], b[1] - a[1]];
+        return { mArr, gArr, res, lk, end, endL, shift };
+      };
+      const H = mk(0, 'Heavy ball', false), Nn = mk(588, 'Nesterov', true);
+      cap(0);
+      [H, Nn].forEach((p) => { tl.set(p.mArr, { opacity: 1 }, { at: 0.3 }); tl.to(p.mArr, { opacity: 1 }, { at: 0.3, dur: 0.1 }); tl.to(p.lk, { opacity: 1 }, { at: 0.9, dur: 0.3 }); });
+      tl.label('grad');
+      cap(1);
+      const t1 = tl.duration;
+      tl.to([H.gArr, Nn.gArr], { opacity: 1 }, { at: t1, dur: 0.4 });
+      tl.to(H.gArr, { x: H.shift[0], y: H.shift[1] }, { at: t1 + 0.7, dur: 1.0 });
+      tl.label('res');
+      cap(2);
+      const t2 = tl.duration;
+      [H, Nn].forEach((p) => { tl.set(p.res, { opacity: 1 }, { at: t2 }); tl.to(p.res, { draw: 1 }, { at: t2, dur: 0.6 }); tl.to([p.end, p.endL], { opacity: 1 }, { at: t2 + 0.5, dur: 0.3 }); });
+      bind(s, tl);
+    })();
+
+    // 11 · Rosenbrock
+    (() => {
+      const s = slideOf('s-rosen'); const land = LAND.rosen; const N = 300;
+      const sc = raceScene(s, land, { N, lo: 1e-3, hi: 1e2 });
+      const rs = [
+        runner(sc, land, 'gd', { lr: 0.001 }, COL.gd, 'GD', { N }),
+        runner(sc, land, 'mom', { lr: 0.001, beta: 0.9 }, COL.mom, '动量', { N }),
+        runner(sc, land, 'nag', { lr: 0.001, beta: 0.9 }, COL.nag, 'Nesterov', { N }),
+      ];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      tl.to(sc.v.paths, { opacity: 1 }, { at: 0, dur: 0.3 });
+      tl.label('run');
+      cap(1);
+      showRun(tl, rs);
+      drive(tl, s, (p) => rs.forEach((r) => r.set(p)), { dur: 7 });
+      tl.label('note');
+      cap(2);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 12 · AdaGrad and RMSProp with effective step bars
+    (() => {
+      const s = slideOf('s-ada'); const land = LAND.valley; const N = 200;
+      const svg = figOf(s);
+      const v = view(svg, land, { x: 0, y: 0, w: 700, h: 410 });
+      const lp = lossPanel(svg, { x: 740, y: 170, w: 396, h: 240 }, { N, lo: 1e-3, hi: 1e3, ph: 160, title: 'loss − 最小值（对数轴）' });
+      const sc = { v, lp };
+      const rs = [
+        runner(sc, land, 'adagrad', { lr: 0.3 }, COL.adagrad, 'AdaGrad η = 0.3', { N }),
+        runner(sc, land, 'rmsprop', { lr: 0.05 }, COL.rmsprop, 'RMSProp η = 0.05', { N }),
+      ];
+      // bars: effective step per coordinate, log axis 1e-4..1
+      const B = E('g', {}, svg);
+      E('text', { x: 740, y: 16, class: 'lp-t' }, B, '有效步长 η/√s（对数轴）');
+      const bx = 830, bw = 300, lo = -4, hi = 0;
+      const W = (e) => Math.min(1, Math.max(0, (Math.log10(Math.max(e, 1e-12)) - lo) / (hi - lo))) * bw;
+      [-4, -3, -2, -1, 0].forEach((k) => { const x = bx + (k - lo) / (hi - lo) * bw; E('line', { x1: x, x2: x, y1: 28, y2: 140, class: 'lp-grid' }, B); E('text', { x, y: 156, 'text-anchor': 'middle', class: 'lp-ax' }, B, pow10(k)); });
+      const bars = [];
+      rs.forEach((r, i) => ['x', 'y'].forEach((ax, j) => {
+        const y = 34 + (i * 2 + j) * 26;
+        const lab = E('text', { x: 740, y: y + 15, class: 'lp-ax' }, B, (i ? 'RMSProp ' : 'AdaGrad ') + ax);
+        const rect = E('rect', { x: bx, y, width: 0, height: 18, rx: 4, fill: i ? COL.rmsprop : COL.adagrad, 'fill-opacity': j ? 0.55 : 1 }, B);
+        bars.push({ rect, eff: r.sim.eff.map((e) => e[j]), lab });
+      }));
+      const setBars = (idx, p) => { [0, 1].forEach((j) => { const b = bars[idx * 2 + j]; const k = Math.min(b.eff.length - 1, Math.floor(p * N)); b.rect.setAttribute('width', p <= 0 ? 0 : W(b.eff[Math.max(0, k)]).toFixed(1)); }); };
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      showRun(tl, [rs[0]], 0);
+      drive(tl, s, (p) => { rs[0].set(p); setBars(0, p); }, { dur: 5 });
+      tl.label('rms');
+      cap(1);
+      showRun(tl, [rs[1]]);
+      drive(tl, s, (p) => { rs[1].set(p); setBars(1, p); }, { dur: 5 });
+      tl.label('end');
+      cap(2);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 13 · Adam assembly
+    (() => {
+      const s = slideOf('s-adam');
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const m = $('#mc-m'), vv = $('#mc-v'), a = $('#mc-a'), rows = s.querySelectorAll('.eqr');
+      tl.set(a, { scale: 0.6 }, { at: 0 });
+      tl.set([m, vv], { opacity: 0, y: 30 }, { at: 0 });
+      cap(0, 0);
+      tl.to(m, { opacity: 1, y: 0 }, { at: 0.1, dur: 0.6, ease: 'out' });
+      tl.to(vv, { opacity: 1, y: 0 }, { at: 0.35, dur: 0.6, ease: 'out' });
+      tl.label('merge');
+      cap(1);
+      const t = tl.duration;
+      tl.to(m, { x: 328, opacity: 0, scale: 0.7 }, { at: t, dur: 0.9 });
+      tl.to(vv, { x: -328, opacity: 0, scale: 0.7 }, { at: t, dur: 0.9 });
+      tl.to(a, { opacity: 1, scale: 1 }, { at: t + 0.6, dur: 0.6, ease: 'back' });
+      tl.set(rows, { y: 16 }, { at: 0 });
+      tl.to([rows[0], rows[1]], { opacity: 1, y: 0 }, { at: t + 1.0, dur: 0.5, stagger: 0.2 });
+      tl.to(rows[3], { opacity: 1, y: 0 }, { at: t + 1.4, dur: 0.5 });
+      tl.label('bias');
+      cap(2);
+      tl.to(rows[2], { opacity: 1, y: 0 }, { dur: 0.5 });
+      tl.to(rows[2], { background: 'var(--accent-soft)' }, { dur: 0.4 });
+      bind(s, tl);
+    })();
+
+    // 14 · moments m, v and bias correction
+    (() => {
+      const s = slideOf('s-moments'); const svg = figOf(s);
+      const T = 60, r = rng(11), b1 = 0.9, b2 = 0.999;
+      const g = [], m = [], mh = [], v = [], vh = [];
+      let M = 0, V = 0;
+      for (let t = 1; t <= T; t++) {
+        const x = 0.8 + gauss(r); g.push(x);
+        M = b1 * M + (1 - b1) * x; V = b2 * V + (1 - b2) * x * x;
+        m.push(M); mh.push(M / (1 - b1 ** t)); v.push(Math.sqrt(V)); vh.push(Math.sqrt(V / (1 - b2 ** t)));
+      }
+      const pl = 70, pr = 1120;
+      const Xt = (t) => pl + (t / (T - 1)) * (pr - pl);
+      const panel = (y0, h, lo, hi, title, ticks) => {
+        const G = E('g', {}, svg);
+        E('rect', { x: pl, y: y0, width: pr - pl, height: h, rx: 8, class: 'lp-bg' }, G);
+        E('text', { x: pl, y: y0 - 8, class: 'lp-t' }, G, title);
+        const Y = (val) => y0 + h - (val - lo) / (hi - lo) * h;
+        ticks.forEach((tk) => { E('line', { x1: pl, x2: pr, y1: Y(tk), y2: Y(tk), class: 'lp-grid' }, G); E('text', { x: pl - 8, y: Y(tk) + 4, 'text-anchor': 'end', class: 'lp-ax' }, G, String(tk)); });
+        return { G, Y };
+      };
+      const A = panel(26, 170, -2, 3.2, '梯度 g（点）、m（虚线）、m̂（实线）', [-2, 0, 0.8, 3]);
+      const B = panel(250, 150, 0, 1.6, '√v（虚线）、√v̂（实线）、真实 RMS √E[g²] ≈ 1.28', [0, 0.5, 1, 1.28]);
+      const dots = g.map((x, t) => E('circle', { cx: Xt(t), cy: A.Y(Math.max(-2, Math.min(3.2, x))), r: 4, fill: 'var(--text-faint)' }, A.G));
+      const line = (G, Y, arr, color, dash) => polyTrail(G, arr.map((val, t) => [Xt(t), Y(val)]), color, { show: false, noStart: true, w: dash ? 2.5 : 3, r: 5 });
+      const lm = line(A.G, A.Y, m, 'var(--c-mom)', true); lm.line.setAttribute('stroke-dasharray', '6 5');
+      const lmh = line(A.G, A.Y, mh, 'var(--c-mom)');
+      const lv = line(B.G, B.Y, v, 'var(--c-rms)', true); lv.line.setAttribute('stroke-dasharray', '6 5');
+      const lvh = line(B.G, B.Y, vh, 'var(--c-rms)');
+      hide(dots);
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      tl.to(lm.g, { opacity: 1 }, { at: 0.2, dur: 0.3 });
+      drive(tl, s, (p) => { lm.set(p); const k = p * (T - 1); dots.forEach((d, i) => { d.style.opacity = i <= k + 1e-9 ? 1 : 0; }); }, { at: 0.2, dur: 4 });
+      tl.label('mh');
+      cap(1);
+      tl.to(lmh.g, { opacity: 1 }, { dur: 0.3 });
+      drive(tl, s, (p) => lmh.set(p), { dur: 3 });
+      tl.label('v');
+      cap(2);
+      tl.to([lv.g, lvh.g], { opacity: 1 }, { dur: 0.3 });
+      drive(tl, s, (p) => { lv.set(p); lvh.set(p); }, { dur: 4 });
+      bind(s, tl);
+    })();
+
+    // 15 · Adam on the saddle
+    (() => {
+      const s = slideOf('s-adam-race'); const land = LAND.saddle; const N = 200;
+      const sc = raceScene(s, land, { N, lo: 1e-4, hi: 10 });
+      const rs = [
+        runner(sc, land, 'gd', { lr: 0.1 }, COL.gd, 'GD  η = 0.1', { N }),
+        runner(sc, land, 'mom', { lr: 0.05, beta: 0.9 }, COL.mom, '动量 η = 0.05', { N }),
+        runner(sc, land, 'adam', { lr: 0.1 }, COL.adam, 'Adam  η = 0.1', { N }),
+      ];
+      const { v, svg } = sc;
+      const Z = E('g', {}, v.layer); Z.style.opacity = 0;
+      E('rect', { x: v.X(0.25), y: v.Y(-0.25), width: 230, height: 62, rx: 10, fill: 'var(--surface)', stroke: 'var(--accent)' }, Z);
+      E('text', { x: v.X(0.25) + 14, y: v.Y(-0.25) + 26, class: 't-m' }, Z, 'y 方向梯度 ≈ 10⁻⁶');
+      E('text', { x: v.X(0.25) + 14, y: v.Y(-0.25) + 50, class: 't-m t-math', style: 'fill: var(--accent)' }, Z, 'm̂ / √v̂ ≈ 1');
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      showRun(tl, rs, 0);
+      drive(tl, s, (p) => rs.forEach((r) => r.set(p)), { dur: 6 });
+      tl.label('why');
+      cap(1);
+      tl.set(Z, { scale: 0.7 }, { at: 0 });
+      tl.to(Z, { opacity: 1, scale: 1 }, { dur: 0.5, ease: 'back' });
+      tl.label('note');
+      cap(2);
+      tl.to(Z, { opacity: 0 }, { dur: 0.4 });
+      bind(s, tl);
+      void svg;
+    })();
+
+    // 16 · where weight decay enters: token flow
+    (() => {
+      const s = slideOf('s-decouple'); const svg = figOf(s);
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const box = (x, y, w, label, G) => { E('rect', { x, y: y - 30, width: w, height: 60, rx: 12, fill: 'var(--surface)', stroke: 'var(--border)', 'stroke-width': 1.5 }, G); E('text', { x: x + w / 2, y: y + 7, 'text-anchor': 'middle', class: 't-m t-math' }, G, label); };
+      const plus = (x, y, G) => { E('circle', { cx: x, cy: y, r: 16, fill: 'var(--surface)', stroke: 'var(--text-faint)', 'stroke-width': 1.5 }, G); E('text', { x, y: y + 6, 'text-anchor': 'middle', class: 't-m' }, G, '+'); };
+      const token = (label, color, G) => {
+        const t = E('g', {}, G);
+        E('circle', { cx: 0, cy: 0, r: 22, fill: color, 'fill-opacity': 0.18, stroke: color, 'stroke-width': 2.5 }, t);
+        E('text', { x: 0, y: 6, 'text-anchor': 'middle', class: 't-m t-math', style: 'fill: var(--text)' }, t, label);
+        t.style.opacity = 0;
+        return t;
+      };
+      const lane = (cy, title, decoupled) => {
+        const G = E('g', {}, svg);
+        E('rect', { x: 0, y: cy - 90, width: 1136, height: 180, rx: 14, class: 'land-bg' }, G);
+        E('text', { x: 20, y: cy - 62, class: 't-h' }, G, title);
+        E('line', { x1: 80, x2: 1010, y1: cy, y2: cy, stroke: 'var(--border)', 'stroke-width': 2 }, G);
+        const px = decoupled ? 690 : 250;
+        E('line', { x1: px, x2: px, y1: cy - 62, y2: cy, stroke: 'var(--border)', 'stroke-width': 2, 'stroke-dasharray': '4 5' }, G);
+        plus(px, cy, G);
+        box(400, cy, 200, '÷ (√v̂ + ε)', G);
+        box(790, cy, 120, '× η', G);
+        E('circle', { cx: 1040, cy, r: 26, fill: 'var(--surface)', stroke: 'var(--text)', 'stroke-width': 2 }, G);
+        E('text', { x: 1040, y: cy + 7, 'text-anchor': 'middle', class: 't-m t-math' }, G, 'θ');
+        E('text', { x: 80, y: cy + 50, 'text-anchor': 'middle', class: 't-f' }, G, '梯度');
+        E('text', { x: px + 30, y: cy - 52, class: 't-f' }, G, '权重衰减');
+        const g = token('g', 'var(--accent)', G), d = token('λθ', 'var(--accent-2)', G);
+        return { G, g, d, px, cy };
+      };
+      const L1 = lane(98, 'Adam + L2', false), L2 = lane(310, 'AdamW', true);
+      const flow = (L, decoupled, t0) => {
+        const { g, d, px, cy } = L;
+        tl.set(g, { x: 80, y: cy }, { at: 0 }); tl.set(d, { x: px, y: cy - 66 }, { at: 0 });
+        tl.to([g, d], { opacity: 1 }, { at: t0, dur: 0.3 });
+        if (!decoupled) {
+          tl.to(g, { x: px - 14 }, { at: t0 + 0.3, dur: 0.8 });
+          tl.to(d, { y: cy, x: px + 14 }, { at: t0 + 0.6, dur: 0.6 });
+          tl.to(g, { x: 486, scale: 0.55 }, { at: t0 + 1.4, dur: 1.0 });
+          tl.to(d, { x: 514, scale: 0.55 }, { at: t0 + 1.4, dur: 1.0 });
+          tl.to(g, { x: 836 }, { at: t0 + 2.6, dur: 0.8 }); tl.to(d, { x: 864 }, { at: t0 + 2.6, dur: 0.8 });
+          tl.to(g, { x: 940 }, { at: t0 + 3.6, dur: 0.6 }); tl.to(d, { x: 968 }, { at: t0 + 3.6, dur: 0.6 });
+        } else {
+          tl.to(g, { x: 500, scale: 0.55 }, { at: t0 + 0.3, dur: 1.4 });
+          tl.to(g, { x: px - 14 }, { at: t0 + 1.9, dur: 0.6 });
+          tl.to(d, { y: cy, x: px + 14 }, { at: t0 + 2.0, dur: 0.6 });
+          tl.to(g, { x: 836 }, { at: t0 + 2.8, dur: 0.6 }); tl.to(d, { x: 864 }, { at: t0 + 2.8, dur: 0.6 });
+          tl.to(g, { x: 936 }, { at: t0 + 3.6, dur: 0.6 }); tl.to(d, { x: 974 }, { at: t0 + 3.6, dur: 0.6 });
+        }
+      };
+      cap(0, 0);
+      flow(L1, false, 0.3);
+      tl.label('w');
+      cap(1);
+      flow(L2, true, tl.duration);
+      tl.label('end');
+      cap(2);
+      tl.wait(0.4);
+      bind(s, tl);
+    })();
+
+    // 17 · decay curves under L2 vs AdamW
+    (() => {
+      const s = slideOf('s-adamw'); const svg = figOf(s);
+      const T = 300, eta = 0.01, lam = 1, sig = [10, 0.01];
+      const runA = (decoupled) => sig.map((sg, idx) => {
+        const r = rng(21 + idx); let w = 1, m = 0, v = 0; const out = [w];
+        for (let t = 1; t <= T; t++) {
+          let g = sg * gauss(r); if (!decoupled) g += lam * w;
+          m = 0.9 * m + 0.1 * g; v = 0.999 * v + 0.001 * g * g;
+          const u = (m / (1 - 0.9 ** t)) / (Math.sqrt(v / (1 - 0.999 ** t)) + 1e-8);
+          w = w - eta * (u + (decoupled ? lam * w : 0)); out.push(w);
+        }
+        return out;
+      });
+      const data = [runA(false), runA(true)];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const panels = ['Adam + L2', 'AdamW'].map((title, pi) => {
+        const ox = pi * 588, w = 548, pl = ox + 50, pr = ox + w - 10, pt = 40, pb = 360;
+        const G = E('g', {}, svg);
+        E('rect', { x: ox, y: 0, width: w, height: 410, rx: 14, class: 'land-bg' }, G);
+        E('text', { x: ox + 18, y: 28, class: 't-h' }, G, title);
+        const Y = (val) => pb - (val + 0.3) / 1.5 * (pb - pt), X = (t) => pl + t / T * (pr - pl);
+        [0, 0.5, 1].forEach((tk) => { E('line', { x1: pl, x2: pr, y1: Y(tk), y2: Y(tk), class: 'lp-grid' }, G); E('text', { x: pl - 8, y: Y(tk) + 4, 'text-anchor': 'end', class: 'lp-ax' }, G, String(tk)); });
+        E('text', { x: pr, y: pb + 22, 'text-anchor': 'end', class: 'lp-ax' }, G, T + ' 步');
+        if (pi === 1) {
+          let d = ''; for (let t = 0; t <= T; t += 5) d += (t ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(Math.exp(-eta * lam * t)).toFixed(1);
+          E('path', { d, fill: 'none', stroke: 'var(--text-faint)', 'stroke-width': 2, 'stroke-dasharray': '5 5' }, G);
+        }
+        const lines = data[pi].map((arr, j) => polyTrail(G, arr.map((val, t) => [X(t), Y(val)]), j ? 'var(--accent-2)' : 'var(--accent)', { N: T, noStart: true, r: 6, w: 2.4 }));
+        const labs = ['w₁（噪声大）', 'w₂（噪声小）'].map((txt, j) => { const tx = E('text', { x: pr - 4, y: 64 + j * 26, 'text-anchor': 'end', class: 't-m', style: 'fill: ' + (j ? 'var(--accent-2)' : 'var(--accent)') }, G, txt); tx.style.opacity = 0; return tx; });
+        G.style.opacity = 0.35;
+        return { G, lines, labs };
+      });
+      panels.forEach((p, i) => {
+        if (i) tl.label('w');
+        cap(i);
+        tl.to(p.G, { opacity: 1 }, { dur: 0.3 });
+        tl.to(p.lines.map((l) => l.g).concat(p.labs), { opacity: 1 }, { at: '<', dur: 0.3 });
+        drive(tl, s, (q) => p.lines.forEach((l) => l.set(q)), { dur: 4.5 });
+      });
+      tl.label('end');
+      cap(2);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 18 · schedules
+    (() => {
+      const s = slideOf('s-sched'); const svg = figOf(s);
+      const pl = 80, pr = 1110, pt = 30, pb = 340, Tn = 1000, W = 50;
+      const X = (t) => pl + t / Tn * (pr - pl), Y = (lr) => pb - lr * (pb - pt);
+      const cosv = (t) => (t < W ? t / W : 0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * (t - W) / (Tn - W))));
+      const wsd = (t) => (t < W ? t / W : t < 800 ? 1 : 1 - 0.9 * (t - 800) / 200);
+      const br = (t) => (t < 500 ? NaN : t < 600 ? 1 - 0.9 * (t - 500) / 100 : 0.1);
+      const G = E('g', {}, svg);
+      E('rect', { x: pl, y: pt, width: pr - pl, height: pb - pt, rx: 8, class: 'lp-bg' }, G);
+      [[1, '峰值'], [0.1, '10%']].forEach(([lv, t]) => { E('line', { x1: pl, x2: pr, y1: Y(lv), y2: Y(lv), class: 'lp-grid' }, G); E('text', { x: pl - 8, y: Y(lv) + 5, 'text-anchor': 'end', class: 'lp-ax' }, G, t); });
+      E('text', { x: pl, y: pb + 24, class: 'lp-ax' }, G, '0');
+      E('text', { x: pr, y: pb + 24, 'text-anchor': 'end', class: 'lp-ax' }, G, '训练进度 →');
+      E('text', { x: X(W), y: pb + 24, 'text-anchor': 'middle', class: 'lp-ax' }, G, 'warmup');
+      const curve = (fn, color, from = 0, to = Tn) => { const P = []; for (let t = from; t <= to; t += 4) P.push([X(t), Y(fn(t))]); return polyTrail(G, P, color, { noStart: true, w: 3.5, r: 7 }); };
+      const c1 = curve(cosv, 'var(--accent)'), c2 = curve(wsd, 'var(--accent-2)'), c3 = curve(br, 'var(--accent-2)', 500, 1000);
+      c3.line.setAttribute('stroke-dasharray', '7 6');
+      const leg = E('g', {}, svg);
+      const legRow = (x, color, txt, dash) => { const r = E('g', {}, leg); E('line', { x1: x, x2: x + 40, y1: 392, y2: 392, stroke: color, 'stroke-width': 3.5, 'stroke-dasharray': dash || '' }, r); E('text', { x: x + 50, y: 398, class: 't-m' }, r, txt); r.style.opacity = 0; return r; };
+      const L1 = legRow(300, 'var(--accent)', 'warmup + 余弦'), L2 = legRow(540, 'var(--accent-2)', 'WSD'), L3 = legRow(700, 'var(--accent-2)', '中途分叉的衰减', '7 6');
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      tl.to([c1.g, L1], { opacity: 1 }, { at: 0.2, dur: 0.3 });
+      drive(tl, s, (p) => c1.set(p), { at: 0.2, dur: 3.5, ease: 'inOut' });
+      tl.label('wsd');
+      cap(1);
+      tl.to([c2.g, L2], { opacity: 1 }, { dur: 0.3 });
+      drive(tl, s, (p) => c2.set(p), { dur: 3.5, ease: 'inOut' });
+      tl.label('branch');
+      cap(2);
+      tl.to([c3.g, L3], { opacity: 1 }, { dur: 0.3 });
+      drive(tl, s, (p) => c3.set(p), { dur: 2 });
+      bind(s, tl);
+    })();
+
+    // 19 · particle clouds under three schedules
+    (() => {
+      const s = slideOf('s-cloud'); const svg = figOf(s); const land = LAND.bowl;
+      const N = 300, P = 40, W = 15, pk = 0.1;
+      const sched = {
+        const: (t) => (t < W ? pk * (t + 1) / W : pk),
+        cos: (t) => (t < W ? pk * (t + 1) / W : pk * (0.1 + 0.9 * 0.5 * (1 + Math.cos(Math.PI * (t - W) / (N - W))))),
+        wsd: (t) => (t < W ? pk * (t + 1) / W : t < 0.8 * N ? pk : pk * (1 - 0.9 * (t - 0.8 * N) / (0.2 * N))),
+      };
+      const names = [['const', '常数 η'], ['cos', '余弦'], ['wsd', 'WSD']];
+      const pw = 360, gap = (1136 - 3 * pw) / 2;
+      const panels = names.map(([key, title], pi) => {
+        const ox = pi * (pw + gap);
+        const G = E('g', {}, svg);
+        E('text', { x: ox + 4, y: 18, class: 't-h' }, G, title);
+        const v = view(svg, land, { x: ox, y: 28, w: pw, h: 190 }, { parent: G, levels: geo(0.05, 30, 8) });
+        // simulate
+        const r = rng(7 + pi);
+        let ps = Array.from({ length: P }, () => [land.start[0] + 0.15 * gauss(r), land.start[1] + 0.15 * gauss(r)]);
+        const hist = [ps]; const mean = [ps.reduce((a, q) => a + land.f(q[0], q[1]), 0) / P];
+        for (let t = 0; t < N; t++) {
+          const lr = sched[key](t);
+          ps = ps.map((q) => { const g = land.g(q[0], q[1]); return [q[0] - lr * (g[0] + 2 * gauss(r)), q[1] - lr * (g[1] + 2 * gauss(r))]; });
+          hist.push(ps); mean.push(ps.reduce((a, q) => a + land.f(q[0], q[1]), 0) / P);
+        }
+        const dots = Array.from({ length: P }, () => E('circle', { r: 3.2, fill: 'var(--accent)', 'fill-opacity': 0.75 }, v.layer));
+        // lr curve
+        const ly = 232, lh = 60, my = 312, mh = 70;
+        E('rect', { x: ox, y: ly, width: pw, height: lh, rx: 6, class: 'lp-bg' }, G);
+        E('text', { x: ox + 6, y: ly + 16, class: 'lp-ax' }, G, '学习率');
+        let d = ''; for (let t = 0; t <= N; t += 3) d += (t ? 'L' : 'M') + (ox + t / N * pw).toFixed(1) + ' ' + (ly + lh - 4 - sched[key](Math.min(t, N - 1)) / pk * (lh - 22)).toFixed(1);
+        E('path', { d, fill: 'none', stroke: 'var(--accent-2)', 'stroke-width': 2.5 }, G);
+        const cur = E('line', { x1: ox, x2: ox, y1: ly, y2: my + mh, stroke: 'var(--text-soft)', 'stroke-width': 1.5, 'stroke-dasharray': '3 4' }, G);
+        E('rect', { x: ox, y: my, width: pw, height: mh, rx: 6, class: 'lp-bg' }, G);
+        E('text', { x: ox + 6, y: my + 16, class: 'lp-ax' }, G, '平均 loss（对数）');
+        const lo = -1.8, hi = 1.4;
+        const LY = (val) => my + mh - 4 - (Math.log10(Math.max(val, 1e-3)) - lo) / (hi - lo) * (mh - 22);
+        const ml = polyTrail(G, mean.map((val, t) => [ox + t / N * pw, LY(val)]), 'var(--accent)', { N, noStart: true, show: true, r: 4, w: 2 });
+        const val = E('text', { x: ox + pw - 6, y: my + 16, 'text-anchor': 'end', class: 'lp-v' }, G, '');
+        const set = (p) => {
+          const kf = p * N, k = Math.min(N, Math.floor(kf));
+          hist[k].forEach((q, i) => { dots[i].setAttribute('cx', v.X(q[0]).toFixed(1)); dots[i].setAttribute('cy', v.Y(q[1]).toFixed(1)); });
+          const x = ox + k / N * pw; cur.setAttribute('x1', x); cur.setAttribute('x2', x);
+          ml.set(p); val.textContent = mean[k].toFixed(3);
+        };
+        return { set };
+      });
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      drive(tl, s, (p) => panels.forEach((q) => q.set(p)), { at: 0.2, dur: 9 });
+      tl.label('c1', 4);
+      tl.label('c2');
+      cap(1, 4.1);
+      cap(2);
+      tl.wait(0.4);
+      bind(s, tl);
+    })();
+
+    // 20 · Lion
+    (() => {
+      const s = slideOf('s-lion'); const svg = figOf(s);
+      const cx = 180, cy = 200, h = 110;
+      const L = E('g', {}, svg);
+      E('rect', { x: 0, y: 0, width: 360, height: 410, rx: 14, class: 'land-bg' }, L);
+      E('line', { x1: cx - 160, x2: cx + 160, y1: cy, y2: cy, stroke: 'var(--border)' }, L);
+      E('line', { x1: cx, x2: cx, y1: cy - 170, y2: cy + 170, stroke: 'var(--border)' }, L);
+      E('rect', { x: cx - h, y: cy - h, width: 2 * h, height: 2 * h, fill: 'none', stroke: 'var(--text-faint)', 'stroke-dasharray': '5 5' }, L);
+      [[1, 1], [1, -1], [-1, 1], [-1, -1]].forEach(([a, b]) => E('circle', { cx: cx + a * h, cy: cy - b * h, r: 5, fill: 'var(--text-faint)' }, L));
+      E('text', { x: cx + h + 6, y: cy - h - 8, class: 't-f' }, L, '(+η, +η)');
+      E('text', { x: 16, y: 30, class: 't-m' }, L, 'c 的方向（灰）→ 更新（橙）');
+      const cA = arrow(svg, L, cx, cy, cx + 100, cy, 'var(--text-soft)', { w: 3 });
+      const sA = arrow(svg, L, cx, cy, cx + h, cy - h, 'var(--accent-2)', { w: 4.5 });
+      const land = LAND.valley, N = 200;
+      const v = view(svg, land, { x: 390, y: 40, w: 746, h: 330 });
+      const rA = trail(v, simulate(land, 'adam', { lr: 0.1 }, land.start, N).pts, COL.adam, { N });
+      const lionSim = simulate(land, 'lion', { lr: 0.03 }, land.start, N);
+      const rL = trail(v, lionSim.pts, COL.lion, { N });
+      const leg = E('g', {}, svg);
+      [[COL.adam, 'Adam η = 0.1'], [COL.lion, 'Lion η = 0.03']].forEach(([c, t], i) => { E('circle', { cx: 400 + i * 200, cy: 18, r: 6, fill: c }, leg); E('text', { x: 414 + i * 200, y: 24, class: 't-m' }, leg, t); });
+      const stepT = E('text', { x: 1130, y: 398, 'text-anchor': 'end', class: 'lp-v' }, svg, '');
+      hide(leg, v.g);
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      drive(tl, s, (p) => {
+        const a = p * Math.PI * 4 + 0.3, len = 60 + 50 * Math.abs(Math.sin(p * Math.PI * 3));
+        const dx = Math.cos(a) * len, dy = Math.sin(a) * len;
+        cA.setAttribute('x2', (cx + dx).toFixed(1)); cA.setAttribute('y2', (cy - dy).toFixed(1));
+        const sx = Math.sign(dx) || 1, sy = Math.sign(dy) || 1;
+        sA.setAttribute('x2', (cx + sx * h * 0.93).toFixed(1)); sA.setAttribute('y2', (cy - sy * h * 0.93).toFixed(1));
+      }, { at: 0.2, dur: 6, ease: 'linear' });
+      tl.label('race', 3.2);
+      cap(1, 3.3);
+      tl.to([v.g, leg], { opacity: 1 }, { at: 3.3, dur: 0.4 });
+      tl.to([rA.g, rL.g], { opacity: 1 }, { at: 3.5, dur: 0.3 });
+      drive(tl, s, (p) => { rA.set(p); rL.set(p); stepT.textContent = '第 ' + Math.round(p * N) + ' 步'; }, { at: 3.7, dur: 6 });
+      tl.label('note');
+      cap(2);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 21 · Adafactor factorisation
+    (() => {
+      const s = slideOf('s-adafactor'); const svg = figOf(s);
+      const n = 6, m = 10, cs = 40, gp = 4, gx = 40, gy = 40;
+      const r = rng(5);
+      const rf = Array.from({ length: n }, () => 0.3 + 1.4 * r()), cf = Array.from({ length: m }, () => 0.2 + 1.2 * r());
+      const V = rf.map((a) => cf.map((b) => a * b * Math.exp(0.3 * gauss(r))));
+      const R = V.map((row) => row.reduce((a, b) => a + b, 0));
+      const C = cf.map((_, j) => V.reduce((a, row) => a + row[j], 0));
+      const S = R.reduce((a, b) => a + b, 0);
+      const Vh = R.map((a) => C.map((b) => a * b / S));
+      const vmax = Math.max(...V.flat(), ...Vh.flat()), Rmax = Math.max(...R), Cmax = Math.max(...C);
+      let num = 0, den = 0; V.forEach((row, i) => row.forEach((x, j) => { num += (x - Vh[i][j]) ** 2; den += x * x; }));
+      const relErr = Math.sqrt(num / den);
+      const cell = (x, y, op, parent) => E('rect', { x, y, width: cs, height: cs, rx: 6, fill: 'var(--accent)', 'fill-opacity': op.toFixed(3) }, parent);
+      const op = (x, mx) => 0.1 + 0.85 * x / mx;
+      const G = E('g', {}, svg);
+      E('text', { x: gx, y: 26, class: 't-m' }, G, 'v（n × m = 6 × 10）');
+      const cells = [], cl1 = [], cl2 = [];
+      V.forEach((row, i) => row.forEach((x, j) => {
+        const X0 = gx + j * (cs + gp), Y0 = gy + i * (cs + gp);
+        const c = cell(X0, Y0, op(x, vmax), G); c.style.opacity = 0; cells.push(c);
+        const a = cell(X0, Y0, op(x, vmax), G); a.style.opacity = 0; cl1.push({ el: a, dx: gx + m * (cs + gp) + 20 - X0, dy: 0, i, j });
+        const b = cell(X0, Y0, op(x, vmax), G); b.style.opacity = 0; cl2.push({ el: b, dx: 0, dy: gy + n * (cs + gp) + 20 - Y0, i, j });
+      }));
+      const RX = gx + m * (cs + gp) + 20, CY = gy + n * (cs + gp) + 20;
+      const Rc = R.map((x, i) => { const c = cell(RX, gy + i * (cs + gp), op(x, Rmax), G); c.style.opacity = 0; return c; });
+      const Cc = C.map((x, j) => { const c = cell(gx + j * (cs + gp), CY, op(x, Cmax), G); c.style.opacity = 0; return c; });
+      const lR = E('text', { x: RX + cs / 2, y: 26, 'text-anchor': 'middle', class: 't-m t-math' }, G, 'R'); lR.style.opacity = 0;
+      const lC = E('text', { x: gx - 10, y: CY + 27, 'text-anchor': 'end', class: 't-m t-math' }, G, 'C'); lC.style.opacity = 0;
+      // reconstruction on the right
+      const hx = 700;
+      const H = E('g', {}, svg); H.style.opacity = 0;
+      E('text', { x: hx, y: 26, class: 't-m' }, H, 'v̂ = R Cᵀ / ΣR');
+      const hc = [];
+      Vh.forEach((row, i) => row.forEach((x, j) => { const c = cell(hx + j * (cs + gp), gy + i * (cs + gp), op(x, vmax), H); c.style.opacity = 0; hc.push(c); }));
+      const info = E('g', {}, svg); info.style.opacity = 0;
+      E('text', { x: hx, y: CY + 10, class: 't-m' }, info, '存储：60 个数 → 16 个数');
+      E('text', { x: hx, y: CY + 38, class: 't-m' }, info, '相对误差 ' + (relErr * 100).toFixed(0) + '%（这个示意矩阵）');
+      E('text', { x: hx, y: CY + 66, class: 't-f' }, info, '4096 × 14336 的矩阵：58,720,256 → 18,432');
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      tl.to(cells, { opacity: 1 }, { at: 0.1, dur: 0.3, stagger: 0.012 });
+      tl.label('R');
+      cap(1);
+      let t = tl.duration;
+      tl.to(lR, { opacity: 1 }, { at: t, dur: 0.3 });
+      cl1.forEach((c) => {
+        const at = t + c.i * 0.18 + c.j * 0.03;
+        tl.set(c.el, { opacity: 1 }, { at });
+        tl.to(c.el, { x: c.dx, y: c.dy, scale: 0.9 }, { at, dur: 0.7 });
+        tl.to(c.el, { opacity: 0 }, { at: at + 0.55, dur: 0.2 });
+      });
+      Rc.forEach((c, i) => tl.to(c, { opacity: 1 }, { at: t + i * 0.18 + 0.6, dur: 0.3 }));
+      tl.label('C');
+      cap(2);
+      t = tl.duration;
+      tl.to(lC, { opacity: 1 }, { at: t, dur: 0.3 });
+      cl2.forEach((c) => {
+        const at = t + c.j * 0.12 + c.i * 0.03;
+        tl.set(c.el, { opacity: 1 }, { at });
+        tl.to(c.el, { x: c.dx, y: c.dy, scale: 0.9 }, { at, dur: 0.7 });
+        tl.to(c.el, { opacity: 0 }, { at: at + 0.55, dur: 0.2 });
+      });
+      Cc.forEach((c, j) => tl.to(c, { opacity: 1 }, { at: t + j * 0.12 + 0.6, dur: 0.3 }));
+      tl.label('rec');
+      cap(3);
+      t = tl.duration;
+      tl.to(cells, { opacity: 0.25 }, { at: t, dur: 0.4 });
+      tl.to(H, { opacity: 1 }, { at: t, dur: 0.3 });
+      hc.forEach((c, k) => { const i = Math.floor(k / m), j = k % m; tl.to(c, { opacity: 1 }, { at: t + 0.3 + (i + j) * 0.06, dur: 0.3 }); });
+      tl.to(info, { opacity: 1 }, { dur: 0.4 });
+      bind(s, tl);
+    })();
+
+    // 22 · Shampoo / full-matrix preconditioning
+    (() => {
+      const s = slideOf('s-shampoo'); const land = LAND.rot; const N = 200;
+      const sc = raceScene(s, land, { N, lo: 1e-4, hi: 1e3, view: { gridDom: [-14, 14, -9, 9], res: 420 } });
+      const { v } = sc;
+      const rs = [
+        runner(sc, land, 'gd', { lr: 0.019 }, COL.gd, 'GD  η = 0.019', { N }),
+        runner(sc, land, 'adam', { lr: 0.2 }, COL.adam, 'Adam  η = 0.2', { N }),
+        runner(sc, land, 'full', { lr: 0.2 }, COL.full, '全矩阵预条件 η = 0.2', { N }),
+      ];
+      // whitening map M = H^(1/2)/sqrt(10) around the minimum, drawn in screen coords
+      const [h11, h12, , h22] = land.H;
+      const tr = h11 + h22, dt = Math.sqrt((h11 - h22) ** 2 / 4 + h12 * h12);
+      const l1 = tr / 2 + dt, l2 = tr / 2 - dt;
+      let ux = h12, uy = l1 - h11; const nn = Math.hypot(ux, uy); ux /= nn; uy /= nn;
+      const q1 = Math.sqrt(l1) / Math.sqrt(10), q2 = Math.sqrt(l2) / Math.sqrt(10);
+      const M = [q1 * ux * ux + q2 * uy * uy, (q1 - q2) * ux * uy, q1 * uy * uy + q2 * ux * ux];
+      const cx = v.X(0), cy = v.Y(0);
+      const setM = (u) => {
+        const a = lerp(1, M[0], u), b = lerp(0, M[1], u), d = lerp(1, M[2], u);
+        // screen (y down): [[a, -b], [-b, d]]
+        const t = `translate(${cx} ${cy}) matrix(${a} ${-b} ${-b} ${d} 0 0) translate(${-cx} ${-cy})`;
+        v.cg.setAttribute('transform', t); v.mk.setAttribute('transform', t);
+      };
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      cap(0);
+      showRun(tl, rs.slice(0, 2), 0);
+      drive(tl, s, (p) => { rs[0].set(p); rs[1].set(p); }, { dur: 5 });
+      tl.label('white');
+      cap(1);
+      tl.to(v.layer, { opacity: 0 }, { dur: 0.3 });
+      const m1 = tl.duration; tl.wait(2.2);
+      tl.label('full');
+      cap(2);
+      const m2 = tl.duration; tl.wait(1.4);
+      tl.to(v.layer, { opacity: 1 }, { dur: 0.3 });
+      showRun(tl, [rs[2]]);
+      drive(tl, s, (p) => rs[2].set(p), { dur: 5 });
+      tl.label('sh');
+      cap(3);
+      tl.wait(0.3);
+      const TT = tl.duration;
+      drive(tl, s, (p) => {
+        const t = p * TT;
+        const u = t < m1 ? 0 : t < m1 + 2 ? Anim.ease.inOut((t - m1) / 2) : t < m2 ? 1 : t < m2 + 1.2 ? 1 - Anim.ease.inOut((t - m2) / 1.2) : 0;
+        setM(u);
+      }, { at: 0, dur: TT });
+      bind(s, tl);
+    })();
+
+    // Newton–Schulz quintic used by Muon
+    const NSQ = [3.4445, -4.7750, 2.0315], NSC = [1.5, -0.5, 0];
+    const phi = (c, x) => c[0] * x + c[1] * x ** 3 + c[2] * x ** 5;
+
+    // 23 · Muon: ellipse to circle
+    (() => {
+      const s = slideOf('s-muon'); const svg = figOf(s);
+      const k = 150, cx = 300, cy = 205, ang = -25;
+      const sB = [1.6, 0.1];
+      const nrm = Math.hypot(sB[0], sB[1]);
+      const seq = [sB, sB.map((x) => x / nrm)];
+      for (let i = 0; i < 5; i++) seq.push(seq[seq.length - 1].map((x) => phi(NSQ, x)));
+      const G = E('g', {}, svg);
+      E('rect', { x: 0, y: 0, width: 600, height: 410, rx: 14, class: 'land-bg' }, G);
+      const T = E('g', { transform: `translate(${cx} ${cy}) rotate(${ang})` }, G);
+      E('circle', { cx: 0, cy: 0, r: k, fill: 'none', stroke: 'var(--text-faint)', 'stroke-width': 1.5, 'stroke-dasharray': '5 6' }, T);
+      const el = E('ellipse', { cx: 0, cy: 0, rx: sB[0] * k, ry: sB[1] * k, fill: 'var(--accent)', 'fill-opacity': 0.12, stroke: 'var(--accent)', 'stroke-width': 2.5 }, T);
+      const a1 = E('line', { x1: 0, y1: 0, x2: sB[0] * k, y2: 0, stroke: 'var(--accent)', 'stroke-width': 3.5, 'stroke-linecap': 'round' }, T);
+      const a2 = E('line', { x1: 0, y1: 0, x2: 0, y2: -sB[1] * k, stroke: 'var(--accent-2)', 'stroke-width': 3.5, 'stroke-linecap': 'round' }, T);
+      E('text', { x: 18, y: 396, class: 't-f' }, G, '虚线：单位圆');
+      // right: bars
+      const R = E('g', {}, svg);
+      const bx = 680, bs = 270;
+      E('rect', { x: 640, y: 0, width: 496, height: 410, rx: 14, class: 'land-bg' }, R);
+      const stage = E('text', { x: 664, y: 50, class: 't-big' }, R, '0');
+      E('line', { x1: bx + bs, x2: bx + bs, y1: 90, y2: 300, stroke: 'var(--text-faint)', 'stroke-dasharray': '4 5' }, R);
+      E('text', { x: bx + bs, y: 318, 'text-anchor': 'middle', class: 'lp-ax' }, R, 'σ = 1');
+      const bar = (y, color, name) => {
+        E('text', { x: 664, y: y - 10, class: 't-m t-math' }, R, name);
+        const r = E('rect', { x: bx, y, width: sB[0] * bs, height: 34, rx: 6, fill: color }, R);
+        const t = E('text', { x: bx + 8, y: y + 24, class: 'lp-v', style: 'fill: var(--text)' }, R, '0');
+        return { r, t };
+      };
+      const b1 = bar(130, 'var(--accent)', 'σ₁'), b2 = bar(230, 'var(--accent-2)', 'σ₂');
+      b2.r.setAttribute('width', sB[1] * bs);
+      b1.t.textContent = String(sB[0]); b2.t.textContent = String(sB[1]);
+      const label = (x) => (x < 0.5 ? 'B：动量矩阵' : x < 1 ? 'X₀ = B / ‖B‖_F' : '迭代 ' + Math.min(5, Math.floor(x + 1e-6)) + ' / 5');
+      const fmt = (x) => x.toFixed(3);
+      const go = (i, at, dur) => {
+        const [p, q] = seq[i];
+        tl.to(el, { attr: { rx: p * k, ry: q * k } }, { at, dur });
+        tl.to(a1, { attr: { x2: p * k } }, { at, dur }); tl.to(a2, { attr: { y2: -q * k } }, { at, dur });
+        tl.to(b1.r, { attr: { width: p * bs } }, { at, dur }); tl.to(b2.r, { attr: { width: q * bs } }, { at, dur });
+        tl.to(b1.t, { text: p, fmt }, { at, dur }); tl.to(b2.t, { text: q, fmt }, { at, dur });
+      };
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      tl.to(stage, { text: 0, fmt: label }, { at: 0, dur: 0 });
+      cap(0);
+      tl.set(el, { scale: 0.2, opacity: 0 }, { at: 0 });
+      tl.to(el, { scale: 1, opacity: 1 }, { at: 0.2, dur: 0.8, ease: 'back' });
+      tl.label('norm');
+      cap(1);
+      let t = tl.duration;
+      tl.to(stage, { text: 0.6, fmt: label }, { at: t, dur: 0 });
+      go(1, t, 1.0);
+      tl.label('ns');
+      cap(2);
+      t = tl.duration + 0.2;
+      for (let i = 2; i <= 6; i++) { tl.to(stage, { text: i - 1, fmt: label }, { at: t, dur: 0 }); go(i, t, 0.8); t += 1.1; }
+      tl.label('end', t);
+      cap(3, t);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 24 · NS on 20 singular values, cubic vs quintic
+    (() => {
+      const s = slideOf('s-ns'); const svg = figOf(s);
+      const n = 20, sig = Array.from({ length: n }, (_, i) => 0.01 * Math.pow(100, i / (n - 1)));
+      const run = (c) => { const out = [sig]; for (let k = 0; k < 5; k++) out.push(out[k].map((x) => phi(c, x))); return out; };
+      const seqs = [run(NSC), run(NSQ)];
+      const fin = seqs[1][5];
+      const cap3 = $('#ns-cap3');
+      cap3.textContent = cap3.textContent.replace('[0.69, 1.13]', '[' + Math.min(...fin).toFixed(2) + ', ' + Math.max(...fin).toFixed(2) + ']');
+      const bw = 26, bg = 10, x0 = 70, hs = 120;
+      const rows = [['三次 1.5σ − 0.5σ³', 180, 'var(--text-soft)'], ['Muon 五次 (3.4445, −4.7750, 2.0315)', 390, 'var(--accent)']];
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const counter = E('text', { x: 1120, y: 24, 'text-anchor': 'end', class: 't-h' }, svg, '0');
+      const built = rows.map(([title, base, color], ri) => {
+        const G = E('g', {}, svg);
+        E('text', { x: x0, y: base - hs - 36, class: 't-m' }, G, title);
+        E('line', { x1: x0 - 10, x2: x0 + n * (bw + bg), y1: base - hs, y2: base - hs, stroke: 'var(--text-faint)', 'stroke-dasharray': '4 5' }, G);
+        E('text', { x: x0 - 16, y: base - hs + 5, 'text-anchor': 'end', class: 'lp-ax' }, G, '1');
+        E('line', { x1: x0 - 10, x2: x0 + n * (bw + bg), y1: base, y2: base, stroke: 'var(--border)' }, G);
+        const bars = sig.map((x, i) => E('rect', { x: x0 + i * (bw + bg), y: base - x * hs, width: bw, height: x * hs, rx: 3, fill: color }, G));
+        const mn = E('text', { x: x0 + n * (bw + bg), y: base - hs - 36, 'text-anchor': 'end', class: 'lp-v' }, G, '');
+        return { bars, base, mn, seq: seqs[ri] };
+      });
+      // phi plot on the right
+      const P = E('g', {}, svg);
+      const px = 800, py = 40, pw = 320, ph = 320, mx = 1.3;
+      const PX = (x) => px + x / mx * pw, PY = (y) => py + ph - y / mx * ph;
+      E('rect', { x: px, y: py, width: pw, height: ph, rx: 8, class: 'lp-bg' }, P);
+      E('line', { x1: PX(0), y1: PY(0), x2: PX(mx), y2: PY(mx), stroke: 'var(--text-faint)', 'stroke-dasharray': '4 5' }, P);
+      E('line', { x1: PX(0), y1: PY(1), x2: PX(mx), y2: PY(1), class: 'lp-grid' }, P);
+      E('line', { x1: PX(1), y1: PY(0), x2: PX(1), y2: PY(mx), class: 'lp-grid' }, P);
+      E('text', { x: PX(1), y: py + ph + 18, 'text-anchor': 'middle', class: 'lp-ax' }, P, 'σ = 1');
+      E('text', { x: px, y: py - 10, class: 'lp-t' }, P, 'φ(σ)');
+      const curve = (c, color) => { let d = ''; for (let i = 0; i <= 100; i++) { const x = mx * i / 100; d += (i ? 'L' : 'M') + PX(x).toFixed(1) + ' ' + PY(Math.max(0, Math.min(mx, phi(c, x)))).toFixed(1); } return E('path', { d, fill: 'none', stroke: color, 'stroke-width': 3 }, P); };
+      const cv = [curve(NSC, 'var(--text-soft)'), curve(NSQ, 'var(--accent)')];
+      hide(cv);
+      cap(0);
+      built.forEach((b) => b.bars.forEach((r) => { r.style.opacity = 0; }));
+      built.forEach((b, ri) => tl.to(b.bars, { opacity: 1 }, { at: 0.1 + ri * 0.3, dur: 0.3, stagger: 0.03 }));
+      cv.forEach((c, i) => { tl.set(c, { opacity: 1 }, { at: 0.4 + i * 0.6 }); tl.to(c, { draw: 1 }, { at: 0.4 + i * 0.6, dur: 1 }); });
+      tl.label('it');
+      cap(1);
+      let t = tl.duration + 0.2;
+      const cfmt = (x) => (x < 0.5 ? '' : '迭代 ' + Math.round(x) + ' / 5');
+      tl.to(counter, { text: 0, fmt: cfmt }, { at: 0, dur: 0 });
+      for (let k = 1; k <= 5; k++) {
+        tl.to(counter, { text: k, fmt: cfmt }, { at: t, dur: 0 });
+        built.forEach((b) => {
+          b.bars.forEach((r, i) => { const h = Math.min(1.3, b.seq[k][i]) * hs; tl.to(r, { attr: { y: b.base - h, height: h } }, { at: t, dur: 0.8 }); });
+          const lo = Math.min(...b.seq[k]), hi = Math.max(...b.seq[k]);
+          tl.to(b.mn, { text: k, fmt: (x) => (x < 0.5 ? '' : 'σ ∈ [' + Math.min(...b.seq[Math.round(x)]).toFixed(3) + ', ' + Math.max(...b.seq[Math.round(x)]).toFixed(3) + ']') }, { at: t, dur: 0 });
+          void lo; void hi;
+        });
+        t += 1.2;
+      }
+      tl.label('end', t);
+      cap(2, t);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 25 · which parameters go to Muon
+    (() => {
+      const s = slideOf('s-muon-why'); const svg = figOf(s);
+      const tiles = [
+        ['Embedding  V × d', 'A', 'mat'], ['RMSNorm γ', 'A', 'vec'], ['W_Q', 'M', 'mat'], ['W_K', 'M', 'mat'], ['W_V', 'M', 'mat'], ['W_O', 'M', 'mat'],
+        ['RMSNorm γ', 'A', 'vec'], ['W_gate', 'M', 'mat'], ['W_up', 'M', 'mat'], ['W_down', 'M', 'mat'], ['LM head  d × V', 'A', 'mat'],
+      ];
+      const G = E('g', {}, svg);
+      const bins = { M: [330, 0, 'Muon：隐藏层二维矩阵', 'var(--accent)', 240], A: [330, 252, 'AdamW：其余参数', 'var(--accent-2)', 158] };
+      const binG = E('g', {}, svg); binG.style.opacity = 0;
+      Object.values(bins).forEach(([x, y, t, c, bh]) => { E('rect', { x, y, width: 290, height: bh, rx: 14, fill: 'none', stroke: c, 'stroke-width': 2, 'stroke-dasharray': '6 5' }, binG); E('text', { x: x + 14, y: y + 26, class: 't-m', style: 'fill: ' + c }, binG, t); });
+      const cnt = { M: 0, A: 0 };
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const els = tiles.map(([name, bin, kind], i) => {
+        const t = E('g', {}, G);
+        const h = kind === 'mat' ? 26 : 18, w = 230;
+        E('rect', { x: 0, y: -h / 2, width: w, height: h, rx: 5, fill: bin === 'M' ? 'var(--accent)' : 'var(--accent-2)', 'fill-opacity': 0.2, stroke: bin === 'M' ? 'var(--accent)' : 'var(--accent-2)', 'stroke-width': 1.5 }, t);
+        E('text', { x: 10, y: 5, class: 't-f', style: 'fill: var(--text)' }, t, name);
+        const y0 = 22 + i * 35 + (kind === 'vec' ? 4 : 0);
+        const k = cnt[bin]++; const [bx, by] = bins[bin];
+        const tx = bx + 30, ty = by + 52 + k * (bin === 'M' ? 27 : 30);
+        tl.set(t, { x: 20, y: y0, opacity: 0 }, { at: 0 });
+        tl.to(t, { opacity: 1 }, { at: 0.1 + i * 0.07, dur: 0.3 });
+        return { t, tx, ty, kind, bin };
+      });
+      cap(0, 0);
+      tl.label('route');
+      cap(1);
+      let t = tl.duration;
+      tl.to(binG, { opacity: 1 }, { at: t, dur: 0.4 });
+      els.forEach((e, i) => tl.to(e.t, { x: e.tx, y: e.ty }, { at: t + 0.3 + i * 0.12, dur: 0.8 }));
+      // spectrum on the right
+      const sp = E('g', {}, svg); sp.style.opacity = 0;
+      const n = 16, x0 = 680, bw = 22, bg = 6, base = 360, hs = 280;
+      E('rect', { x: 660, y: 0, width: 476, height: 410, rx: 14, class: 'land-bg' }, sp);
+      const stitle = E('text', { x: 680, y: 30, class: 't-m' }, sp, '动量矩阵的奇异值（归一化）');
+      const raw = Array.from({ length: n }, (_, i) => 1 / Math.pow(1 + i, 1.3));
+      const nr = Math.hypot(...raw); let o = raw.map((x) => x / nr); for (let k = 0; k < 5; k++) o = o.map((x) => phi(NSQ, x));
+      const r0 = raw.map((x) => x / raw[0]);
+      const bars = r0.map((x, i) => E('rect', { x: x0 + i * (bw + bg), y: base - x * hs * 0.8, width: bw, height: x * hs * 0.8, rx: 3, fill: 'var(--accent)' }, sp));
+      E('line', { x1: x0 - 6, x2: x0 + n * (bw + bg), y1: base, y2: base, stroke: 'var(--border)' }, sp);
+      tl.label('spec');
+      cap(2);
+      t = tl.duration;
+      tl.to(sp, { opacity: 1 }, { at: t, dur: 0.4 });
+      bars.forEach((b, i) => { const h = Math.min(1.25, o[i]) * hs * 0.8 * 0.85; tl.to(b, { attr: { y: base - h, height: h }, fill: 'var(--accent-2)' }, { at: t + 1.0 + i * 0.04, dur: 1.0 }); });
+      tl.to(stitle, { opacity: 0 }, { at: t + 0.9, dur: 0.2 });
+      const st2 = E('text', { x: 680, y: 30, class: 't-m' }, sp, '正交化之后'); st2.style.opacity = 0;
+      tl.to(st2, { opacity: 1 }, { at: t + 1.1, dur: 0.3 });
+      bind(s, tl);
+    })();
+
+    // 26 · update RMS matching
+    (() => {
+      const s = slideOf('s-rms'); const svg = figOf(s);
+      const shapes = [[1024, 1024], [4096, 4096], [4096, 14336]];
+      const sc = 300 / 14336, base = 390, hs = 150 / 0.2 * 0.8;
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const ref = E('g', {}, svg); ref.style.opacity = 0;
+      E('rect', { x: 0, y: base - 0.4 * hs, width: 1136, height: 0.2 * hs, fill: 'var(--accent-soft)' }, ref);
+      E('text', { x: 1130, y: base - 0.4 * hs + 18, 'text-anchor': 'end', class: 't-f' }, ref, 'AdamW 典型更新 RMS 0.2–0.4');
+      const cols = shapes.map(([a, b], i) => {
+        const cx = 190 + i * 378;
+        const w = Math.max(10, b * sc), h = Math.max(10, a * sc);
+        const G = E('g', {}, svg);
+        E('rect', { x: cx - w / 2, y: 20, width: w, height: h, rx: 4, fill: 'var(--bg-soft)', stroke: 'var(--text-faint)' }, G);
+        E('text', { x: cx, y: 20 + h + 22, 'text-anchor': 'middle', class: 't-m mono' }, G, a + ' × ' + b);
+        const rms = Math.sqrt(1 / Math.max(a, b));
+        const bar = E('rect', { x: cx - 40, y: base, width: 80, height: 0, rx: 5, fill: 'var(--accent)' }, G);
+        const val = E('text', { x: cx, y: base - 8, 'text-anchor': 'middle', class: 'lp-v', style: 'fill: var(--text)' }, G, '0');
+        return { bar, val, rms };
+      });
+      const f3 = (x) => x.toFixed(4);
+      cap(0);
+      cols.forEach((c, i) => {
+        const h = c.rms * hs; const at = 0.3 + i * 0.25;
+        tl.to(c.bar, { attr: { y: base - h, height: h } }, { at, dur: 0.8 });
+        tl.to(c.val, { text: c.rms, fmt: f3, attr: { y: base - h - 8 } }, { at, dur: 0.8 });
+      });
+      tl.label('scale');
+      cap(1);
+      const t = tl.duration;
+      tl.to(ref, { opacity: 1 }, { at: t, dur: 0.4 });
+      cols.forEach((c, i) => {
+        const h = 0.2 * hs; const at = t + 0.3 + i * 0.25;
+        tl.to(c.bar, { attr: { y: base - h, height: h }, fill: 'var(--accent-2)' }, { at, dur: 1.0 });
+        tl.to(c.val, { text: 0.2, fmt: f3, attr: { y: base - h - 8 } }, { at, dur: 1.0 });
+      });
+      tl.label('end');
+      cap(2);
+      tl.wait(0.3);
+      bind(s, tl);
+    })();
+
+    // 27 · optimizer state memory
+    (() => {
+      const s = slideOf('s-mem'); const svg = figOf(s);
+      const rows = [['SGD', 0, COL.gd], ['SGD + 动量', 4, COL.mom], ['AdaGrad', 4, COL.adagrad], ['RMSProp', 4, COL.rmsprop], ['Adam / AdamW', 8, COL.adam], ['Lion', 4, COL.lion], ['Adafactor（β₁ = 0）', 0.002, COL.sgd], ['Muon（隐藏矩阵）', 4, COL.full]];
+      const lx = 0, bx = 230, ps = 62, rh = 34, y0 = 20;
+      const tl = Anim.timeline(); const cap = caps(tl, s);
+      const tot = E('text', { x: 1136, y: 14, 'text-anchor': 'end', class: 'lp-t' }, svg, '70 亿参数时');
+      tot.style.opacity = 0;
+      E('text', { x: bx, y: 14, class: 'lp-t' }, svg, '每参数状态字节（fp32）');
+      const built = rows.map(([name, b, color], i) => {
+        const y = y0 + 12 + i * rh;
+        E('text', { x: lx, y: y + 19, class: 't-m' }, svg, name);
+        const bar = E('rect', { x: bx, y, width: 0, height: 24, rx: 5, fill: color }, svg);
+        const val = E('text', { x: bx + 8, y: y + 19, class: 'lp-v' }, svg, '0');
+        const gb = E('text', { x: 1136, y: y + 19, 'text-anchor': 'end', class: 'lp-v', style: 'fill: var(--text)' }, svg, '0');
+        gb.style.opacity = 0;
+        return { bar, val, gb, b, y };
+      });
+      cap(0);
+      built.forEach((r, i) => {
+        const at = 0.2 + i * 0.12, w = r.b * ps;
+        tl.to(r.bar, { attr: { width: w } }, { at, dur: 0.8, ease: 'out' });
+        tl.to(r.val, { text: r.b, fmt: (x) => (r.b === 0 ? '0 B' : r.b < 0.01 ? '≈ 0（只存行和、列和）' : x.toFixed(0) + ' B'), attr: { x: bx + w + 10 } }, { at, dur: 0.8, ease: 'out' });
+      });
+      tl.label('gb');
+      cap(1);
+      let t = tl.duration;
+      tl.to(tot, { opacity: 1 }, { at: t, dur: 0.3 });
+      built.forEach((r, i) => {
+        tl.to(r.gb, { opacity: 1 }, { at: t + i * 0.08, dur: 0.3 });
+        tl.to(r.gb, { text: r.b * 7, fmt: (x) => (r.b === 0 ? '0 GB' : r.b < 0.01 ? '≈ 0 GB' : x.toFixed(0) + ' GB') }, { at: t + i * 0.08, dur: 1.2, ease: 'out' });
+      });
+      tl.label('stack');
+      cap(2);
+      t = tl.duration;
+      // stacked bars: AdamW vs Muon, 16 vs 12 bytes
+      const segs = [['bf16 权重', 2, 'var(--c-gd)'], ['bf16 梯度', 2, 'var(--c-sgd)'], ['fp32 主权重', 4, 'var(--c-nag)']];
+      const sy = y0 + 12 + rows.length * rh + 16, sh = 26, ss = 36;
+      const st = E('g', {}, svg); st.style.opacity = 0;
+      [['AdamW', segs.concat([['m', 4, 'var(--accent)'], ['v', 4, 'var(--accent)']])], ['Muon', segs.concat([['动量', 4, 'var(--accent-2)']])]].forEach(([name, list], i) => {
+        const y = sy + i * (sh + 8);
+        E('text', { x: 0, y: y + 19, class: 't-m' }, st, name);
+        let x = bx;
+        list.forEach(([lab, b, c], j) => {
+          const r = E('rect', { x, y, width: b * ss - 2, height: sh, rx: 4, fill: c, 'fill-opacity': j === 4 ? 0.6 : 1 }, st);
+          E('text', { x: x + (b * ss - 2) / 2, y: y + 18, 'text-anchor': 'middle', class: 'lp-ax', style: 'fill: var(--surface)' }, st, lab);
+          r.style.opacity = 0; tl.set(r, { x: 40 }, { at: 0 }); tl.to(r, { opacity: 1, x: 0 }, { at: t + 0.3 + i * 0.5 + j * 0.12, dur: 0.4 });
+          x += b * ss;
+        });
+        E('text', { x: x + 8, y: y + 19, class: 'lp-v', style: 'fill: var(--text)' }, st, list.reduce((a, q) => a + q[1], 0) + ' B / 参数');
+      });
+      tl.to(built.map((r) => r.bar), { opacity: 0.35 }, { at: t, dur: 0.4 });
+      tl.to(st, { opacity: 1 }, { at: t, dur: 0.3 });
+      bind(s, tl);
+    })();
+
+    // 28 · playground
+    (() => {
+      const svg = $('#pg-svg');
+      const LANDS = [['valley', '窄谷'], ['rot', '斜谷'], ['rosen', 'Rosenbrock'], ['saddle', '鞍点']];
+      const OPTS = [['gd', 'GD'], ['mom', '动量'], ['nag', 'Nesterov'], ['adagrad', 'AdaGrad'], ['rmsprop', 'RMSProp'], ['adam', 'Adam'], ['lion', 'Lion'], ['full', '全矩阵']];
+      const LR = {
+        valley: { gd: 0.075, mom: 0.01, nag: 0.01, adagrad: 0.5, rmsprop: 0.05, adam: 0.2, lion: 0.03, full: 0.2 },
+        rot: { gd: 0.019, mom: 0.005, nag: 0.005, adagrad: 0.5, rmsprop: 0.05, adam: 0.2, lion: 0.03, full: 0.2 },
+        rosen: { gd: 0.001, mom: 0.001, nag: 0.001, adagrad: 0.3, rmsprop: 0.01, adam: 0.1, lion: 0.01, full: 0.05 },
+        saddle: { gd: 0.1, mom: 0.05, nag: 0.05, adagrad: 0.3, rmsprop: 0.05, adam: 0.1, lion: 0.05, full: 0.1 },
+      };
+      const N = 250;
+      let landKey = 'valley', optKey = 'adam', v = null, start = null, startMk = null, old = [], raf = 0;
+      const lrIn = $('#pg-lr'), lrOut = $('#pg-lr-o'), nzIn = $('#pg-noise'), nzOut = $('#pg-noise-o');
+      const stepO = $('#pg-step'), lossO = $('#pg-loss'), stateO = $('#pg-state');
+      const segBtns = (host, list, cur, fn, colors) => {
+        host.innerHTML = '';
+        list.forEach(([k, t]) => {
+          const b = document.createElement('button'); b.type = 'button';
+          b.innerHTML = (colors ? '<i style="background:' + COL[k] + '"></i>' : '') + t;
+          b.setAttribute('aria-pressed', String(k === cur));
+          b.addEventListener('click', () => { host.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', 'false')); b.setAttribute('aria-pressed', 'true'); fn(k); });
+          host.appendChild(b);
+        });
+      };
+      const setLr = () => { lrIn.value = Math.log10(LR[landKey][optKey]); showLr(); };
+      const showLr = () => { const lr = 10 ** +lrIn.value; lrOut.textContent = lr >= 0.01 ? lr.toFixed(3) : lr.toExponential(1); };
+      const placeStart = (p) => {
+        start = p;
+        if (startMk) startMk.remove();
+        startMk = E('g', {}, v.layer);
+        E('circle', { cx: v.X(p[0]), cy: v.Y(p[1]), r: 8, fill: 'none', stroke: 'var(--text)', 'stroke-width': 2.5 }, startMk);
+      };
+      const build = () => {
+        cancelAnimationFrame(raf); svg.innerHTML = ''; old = [];
+        v = view(svg, LAND[landKey], { x: 0, y: 0, w: 700, h: 430 });
+        placeStart(LAND[landKey].start.slice());
+        stepO.textContent = '0'; lossO.textContent = '–'; stateO.textContent = '–';
+      };
+      const run = () => {
+        cancelAnimationFrame(raf);
+        old.forEach((t) => { t.g.style.opacity = 0.3; });
+        if (old.length > 4) old.shift().g.remove();
+        const land = LAND[landKey];
+        const lr = 10 ** +lrIn.value, noise = +nzIn.value;
+        const sim = simulate(land, optKey, { lr }, start, N, noise, Math.floor(Math.random() * 1e6));
+        const tr = trail(v, sim.pts, COL[optKey], { N, show: true });
+        old.push(tr);
+        const done = (k) => {
+          stepO.textContent = String(k); lossO.textContent = fmtE(sim.loss[Math.min(k, sim.loss.length - 1)]);
+          const fin = k >= N || k >= sim.loss.length - 1;
+          stateO.textContent = sim.diverged && k >= sim.loss.length - 1 ? '发散' : fin ? (sim.loss[sim.loss.length - 1] < 1e-3 ? '收敛' : '未收敛') : '运行中';
+        };
+        if (matchMedia('(prefers-reduced-motion: reduce)').matches) { tr.set(1); done(N); return; }
+        const t0 = performance.now(), D = 3000;
+        const tick = (now) => {
+          const p = Math.min(1, (now - t0) / D);
+          tr.set(p); done(Math.min(sim.loss.length - 1, Math.floor(p * N)));
+          if (p < 1) raf = requestAnimationFrame(tick); else done(N);
+        };
+        raf = requestAnimationFrame(tick);
+      };
+      svg.addEventListener('click', (e) => {
+        const pt = svg.createSVGPoint(); pt.x = e.clientX; pt.y = e.clientY;
+        const q = pt.matrixTransform(svg.getScreenCTM().inverse());
+        const p = v.inv(q.x, q.y);
+        const [x0, x1, y0, y1] = v.dom;
+        if (p[0] < x0 || p[0] > x1 || p[1] < y0 || p[1] > y1) return;
+        placeStart(p);
+      });
+      segBtns($('#pg-land'), LANDS, landKey, (k) => { landKey = k; setLr(); build(); });
+      segBtns($('#pg-opt'), OPTS, optKey, (k) => { optKey = k; setLr(); }, true);
+      lrIn.addEventListener('input', showLr);
+      nzIn.addEventListener('input', () => { nzOut.textContent = (+nzIn.value).toFixed(1); });
+      nzOut.textContent = '0.0';
+      $('#pg-run').addEventListener('click', run);
+      $('#pg-clear').addEventListener('click', () => { cancelAnimationFrame(raf); old.forEach((t) => t.g.remove()); old = []; });
+      setLr(); build();
+      document.addEventListener('slidechange', (e) => { if (e.detail.slide.id !== 's-play') cancelAnimationFrame(raf); });
+    })();
+  })();
+  </script>
+</body>
+</html>

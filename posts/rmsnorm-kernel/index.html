@@ -1,0 +1,1623 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>RMSNorm 与 GPU 算子优化 · Zunzhe Zhang</title>
+  <meta name="description" content="用动画讲 RMSNorm：公式、反向推导、FP32 累加，以及在 GPU 上把它写成一个跑满带宽的融合 kernel——向量化读、warp shuffle 归约、寄存器缓存、残差与 FP8 量化融合、Triton 实现和反向的两阶段 dg 归约。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    /* Literal rgba (not color-mix) so anim.js can tween these colors. */
+    :root { --c3: #0f9d8a; --c3-soft: rgba(15, 157, 138, 0.18); --grad: #d6336c; --idle: rgba(138, 138, 147, 0.26); }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --c3: #34d1b8; --c3-soft: rgba(52, 209, 184, 0.2); --grad: #ff6b9a; --idle: rgba(150, 150, 165, 0.24); } }
+    :root[data-theme="dark"] { --c3: #34d1b8; --c3-soft: rgba(52, 209, 184, 0.2); --grad: #ff6b9a; --idle: rgba(150, 150, 165, 0.24); }
+
+    .slide.an { padding: 34px 64px 92px; gap: 10px; justify-content: flex-start; }
+    .slide.an h2 { font-size: 40px; }
+    .slide svg.fig { width: 100%; height: auto; display: block; overflow: visible; }
+    .slide svg text { font-family: var(--font-sans); }
+    .slide svg .mono { font-family: var(--font-mono); }
+    .caps { position: relative; height: 72px; flex: none; }
+    .caps > p { position: absolute; left: 0; right: 0; top: 0; opacity: 0; font-size: 23px; line-height: 1.45; color: var(--text-soft); }
+    .caps > p:first-child { opacity: 1; }
+    .caps b { color: var(--text); font-weight: 600; }
+    .slide .note { font-size: 17px; color: var(--text-faint); }
+    .slide .eq { font-size: 26px; }
+    .slide .katex-display { margin: 4px 0; }
+    .slide .tight li + li { margin-top: 0.25em; }
+    .slide .s22 { font-size: 22px; }
+    .slide .s24 { font-size: 24px; }
+    .slide .two { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
+    .slide code { font-family: var(--font-mono); font-size: 0.86em; }
+    .split { display: flex; gap: 24px; align-items: flex-start; }
+    .code { position: relative; flex: none; border-radius: 12px; background: var(--code-bg); }
+    .code pre { margin: 0; padding: 12px 16px; font-family: var(--font-mono); font-size: 15px; line-height: 22px; white-space: pre; overflow: hidden; position: relative; }
+    .code .hl { position: absolute; left: 0; right: 0; top: 12px; height: calc(var(--h, 22) * 1px); background: var(--accent-soft); border-left: 3px solid var(--accent); opacity: 0; }
+    .code .cm { color: var(--text-faint); }
+    .code .kw { color: var(--accent); }
+    .widget.bw { display: grid; grid-template-columns: 430px 1fr; gap: 24px; padding: 18px 22px; font-size: 19px; }
+    .bw label { display: grid; grid-template-columns: 7.5em 1fr 5.4em; gap: 10px; align-items: center; color: var(--text-soft); margin-bottom: 8px; }
+    .bw input[type="range"] { width: 100% !important; }
+    .bw output { font-family: var(--font-mono); color: var(--text); text-align: right; }
+    .bw .rd { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+    .bw .rd > div { padding: 8px 12px; border-radius: 10px; background: var(--bg-soft); font-size: 15px; color: var(--text-faint); }
+    .bw .rd b { display: block; font-family: var(--font-mono); font-size: 22px; color: var(--text); }
+    .series-pager { margin-top: 0; font-size: 20px; width: 860px; }
+    .toc { columns: 2; column-gap: 56px; margin: 0; padding-left: 1.2em; font-size: 25px; }
+    .toc li { break-inside: avoid; }
+  </style>
+</head>
+<body class="deck-page">
+  <main class="deck"><div class="stage">
+
+    <!-- 1 -->
+    <section class="slide center">
+      <div class="kicker rise">动画图解 LLM 系统 · RMSNorm</div>
+      <h1 class="rise" style="--d: 1">RMSNorm 与 GPU 算子优化</h1>
+      <p class="muted rise" style="--d: 2">一行公式，一个 kernel：从数学推导到跑满 HBM 带宽</p>
+      <p class="small muted rise" style="--d: 4">按 → 或点击推进动画 · 页面底部的进度条可以拖动回看</p>
+    </section>
+
+    <!-- 2 -->
+    <section class="slide">
+      <div class="kicker">目录</div>
+      <h2>目录</h2>
+      <ol class="toc tight">
+        <li>RMSNorm 的公式与几何意义</li>
+        <li>和 LayerNorm 的区别：为什么可以不减均值</li>
+        <li>反向传播：\(\partial L/\partial x\) 与 \(\partial L/\partial g\)</li>
+        <li>数值精度：为什么一定要 FP32 累加</li>
+        <li>memory-bound：roofline 上的位置</li>
+        <li>eager PyTorch 的 8 个 kernel</li>
+        <li>融合 kernel：行到 block、128-bit 读、warp shuffle、shared memory、寄存器缓存</li>
+        <li>与残差相加、FP8 量化的融合</li>
+        <li>Triton 实现</li>
+        <li>反向 kernel 与 dg 的两阶段归约</li>
+        <li>实际能达到的带宽</li>
+      </ol>
+    </section>
+
+    <!-- 3 -->
+    <section class="slide an" id="s-formula">
+      <div class="kicker">公式</div>
+      <h2>RMSNorm：只按均方根缩放</h2>
+      <div class="eq">$$y = \frac{x}{\sqrt{\tfrac{1}{d}\sum_{j=1}^{d} x_j^2 + \varepsilon}} \odot g$$</div>
+      <svg class="fig" viewBox="0 0 1152 300" aria-label="一行 hidden state 的柱状图依次被平方、求均值、除以 RMS、乘以 g"></svg>
+      <div class="caps">
+        <p>输入是一个 token 的 hidden state：一行 \(d\) 个数（这里画 16 个，数值示意），大小参差不齐。</p>
+        <p>先逐个平方，再求平均：这就是 <b>mean(x²)</b>，均方。</p>
+        <p>开根号得到 <b>RMS</b>（均方根），它刻画了这一行"整体有多大"。</p>
+        <p>每个数除以 RMS：这一行的 RMS 被拉回 1，方向不变，只改长度。\(\varepsilon\)（常取 1e-5 或 1e-6）防止除零。</p>
+        <p>最后逐元素乘可学习的增益 \(g\)（长度 \(d\)），让每个通道自己决定尺度。没有偏置 \(b\)。</p>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="slide an" id="s-ln">
+      <div class="kicker">对比</div>
+      <h2>LayerNorm 做两件事，RMSNorm 只做一件</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="同一组数在 LayerNorm 中先减均值再除以标准差，在 RMSNorm 中只除以 RMS"></svg>
+      <div class="caps">
+        <p>同一组数（示意）分别送进 LayerNorm 和 RMSNorm。</p>
+        <p>LayerNorm 先算均值 \(\mu\)；RMSNorm 只算 RMS，不需要均值。</p>
+        <p>LayerNorm 减掉均值，把这一行挪到 0 附近（<b>re-centering</b>）；RMSNorm 跳过这一步。</p>
+        <p>两边都做缩放（<b>re-scaling</b>）：LayerNorm 除以标准差，RMSNorm 除以 RMS。均值恰好为 0 时，两者完全相同。</p>
+        <p>少一次归约、少一个偏置，效果却与 LayerNorm 相当，运行时间少 7%–64%；LLaMA、Qwen、DeepSeek 等模型都用 RMSNorm。</p>
+      </div>
+    </section>
+
+    <!-- 5 -->
+    <section class="slide an" id="s-inv">
+      <div class="kicker">不变性</div>
+      <h2>保留缩放不变性，放弃平移不变性</h2>
+      <svg class="fig" viewBox="0 0 1152 330" aria-label="输入整体放大两倍时两种归约输出都不变；输入整体平移时只有 LayerNorm 输出不变"></svg>
+      <div class="caps">
+        <p>左边是输入，右边两栏分别是 LayerNorm 与 RMSNorm 的输出（数值示意）。</p>
+        <p>把输入整体乘 2：分子分母同时翻倍，两种输出都不变。这是<b>缩放不变性</b>：权重或激活整体变大，不会改变归一化后的结果。</p>
+        <p>把输入整体加 1.5：LayerNorm 减均值时把它抵消了；RMSNorm 的输出跟着变。</p>
+        <p>实验表明，归一化稳定训练的作用主要来自缩放不变性；平移由前后的线性层自己就能吸收。所以去掉均值几乎不损失效果，却省下一次归约。</p>
+      </div>
+    </section>
+
+    <!-- 6 -->
+    <section class="slide an" id="s-where">
+      <div class="kicker">位置</div>
+      <h2>Pre-norm Transformer 里的 RMSNorm</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="残差流上每层有两个 RMSNorm 分支，最后还有一个"></svg>
+      <div class="caps">
+        <p>残差流（下方横线）一路往前；每个子层先对它做 RMSNorm，再把结果加回残差。</p>
+        <p>每层两次（attention 前、MLP 前），最后再加一次：Llama 3 8B 有 32 层，一次前向调用 <b>65</b> 次。</p>
+        <p>Qwen3 这类模型还在每个头的 q、k 上做 RMSNorm（QK-Norm），每层再多两次。</p>
+        <p>每一次调用都要把整个 [tokens × hidden] 读一遍、写一遍；算子本身很简单，成本几乎全在搬数据。</p>
+      </div>
+    </section>
+
+    <!-- 7 -->
+    <section class="slide an" id="s-bgraph">
+      <div class="kicker">反向传播</div>
+      <h2>梯度沿计算图流回来</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="RMSNorm 的计算图，前向数据流，然后梯度从 y 分流回 g 和 x，其中 x 收到两条路径的梯度"></svg>
+      <div class="caps">
+        <p>前向：x 一路直接走到乘法，另一路经过平方、求均值、rsqrt 得到 \(r\)；\(\hat x = x\,r\)，\(y = \hat x \odot g\)。</p>
+        <p>梯度 \(dy\) 先到 \(\times g\)：一份给 \(g\)，要<b>对所有 token 求和</b>；一份给 \(\hat x\)。</p>
+        <p>\(d\hat x\) 再分两路：直接一路乘 \(r\)；另一路经过 \(r\)——\(r\) 依赖整行，所以要先做一次<b>行内归约</b> \(\sum_j d\hat x_j x_j\)。</p>
+        <p>两路在 \(x\) 处相加。前向一次行内归约，反向也是一次行内归约，外加一个跨行的 dg 归约。</p>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="slide">
+      <div class="kicker">反向传播</div>
+      <h2>推导</h2>
+      <div class="eq s24">
+        <p class="fragment">记 \(r = \big(\tfrac1d\sum_j x_j^2+\varepsilon\big)^{-1/2}\)，\(\hat x_i = x_i r\)，\(y_i = g_i \hat x_i\)。先求 \(r\) 对 \(x_j\) 的导数：</p>
+        <p class="fragment">$$\frac{\partial r}{\partial x_j} = -\tfrac12\Big(\tfrac1d\textstyle\sum x^2+\varepsilon\Big)^{-3/2}\cdot\frac{2x_j}{d} = -\frac{r^3}{d}\,x_j$$</p>
+        <p class="fragment">链式法则，记 \(\hat g = dy \odot g\)：</p>
+        <p class="fragment">$$dx_j = \sum_i \hat g_i\Big(\delta_{ij}\,r + x_i\frac{\partial r}{\partial x_j}\Big) = r\,\hat g_j - \frac{r^3}{d}\,x_j\sum_i \hat g_i x_i = r\Big(\hat g_j - \hat x_j\cdot\tfrac1d\textstyle\sum_i \hat g_i\hat x_i\Big)$$</p>
+        <p class="fragment">$$dg_i = \sum_{\text{tokens}} dy_i\,\hat x_i$$</p>
+        <p class="fragment note">前向把每行的 \(r\)（rstd，一个 FP32）存下来，反向就不必重算那次归约；反向需要的输入是 \(x,\ dy,\ g,\ r\)。</p>
+      </div>
+    </section>
+
+    <!-- 9 -->
+    <section class="slide an" id="s-prec">
+      <div class="kicker">数值精度</div>
+      <h2>平方和必须用 FP32 累加</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="BF16 累加器加到 256 后不再增长；FP32 累加器正常增长"></svg>
+      <div class="caps">
+        <p>往累加器里连加 4096 个 1.0：FP32 得到 4096，BF16 卡在 <b>256</b> 不动了。</p>
+        <p>BF16 只有 8 位有效数字：在 [256, 512) 里相邻两个可表示数相差 2。256 + 1 = 257 落在正中间，就近取偶回到 256。</p>
+        <p>真实场景：4096 个标准正态数的平方和约 4140，BF16 顺序累加只得到 2048（一次模拟）。RMS 被低估 √2 倍，输出整体放大 1.42 倍。</p>
+        <p>FP16 还有溢出：激活里出现 300 这样的值并不罕见，300² = 90000 超过 FP16 上限 65504，直接变成 inf。所以 kernel 一律<b>读入后转 FP32、在 FP32 里累加和缩放，写回时再转回 BF16</b>。</p>
+      </div>
+    </section>
+
+    <!-- 10 -->
+    <section class="slide an" id="s-gpu">
+      <div class="kicker">GPU</div>
+      <h2>H100：算力和带宽差了两个多数量级</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="H100 的 132 个 SM 依次点亮，旁边是峰值算力和带宽"></svg>
+      <div class="caps">
+        <p>H100 SXM 有 132 个 SM，BF16 稠密算力 989 TFLOPS，HBM3 带宽 3.35 TB/s。两者一除：每从 HBM 读 1 个字节，可以做约 <b>295</b> 次浮点运算。</p>
+        <p>每个 SM 有自己的寄存器堆和 shared memory；线程以 32 个为一组（<b>warp</b>）同步执行。kernel 的工作就是让这 132 个 SM 都有活干，并且少碰 HBM。</p>
+      </div>
+    </section>
+
+    <!-- 11 -->
+    <section class="slide an" id="s-roof">
+      <div class="kicker">Roofline</div>
+      <h2>RMSNorm 在屋顶的斜坡最底下</h2>
+      <svg class="fig" viewBox="0 0 1152 410" aria-label="H100 roofline 图，RMSNorm 的算术强度约为 1，远在拐点 295 左侧"></svg>
+      <div class="caps">
+        <p>Roofline：横轴是算术强度（每字节做多少 FLOP），纵轴是能达到的算力。拐点左边受带宽限制，右边受算力限制。</p>
+        <p>RMSNorm 每个元素约 4 次运算（平方、累加、乘 r、乘 g），却要读 2 字节、写 2 字节：强度约 <b>1</b>，离拐点 295 差了两个多数量级。大 GEMM 则在屋顶的平台上。</p>
+        <p>算一笔账：8192 个 token、d = 4096 时，搬数据要约 40 µs，计算只要约 0.14 µs。优化 RMSNorm 只有两件事：<b>少搬字节</b>，以及<b>让搬运接近峰值带宽</b>。</p>
+      </div>
+    </section>
+
+    <!-- 12 -->
+    <section class="slide an" id="s-eager">
+      <div class="kicker">Eager PyTorch</div>
+      <h2>逐行执行：8 个 kernel，数据来回跑</h2>
+      <div class="split">
+        <div class="code" style="width:560px"><div class="hl"></div><pre><span class="cm"># Hugging Face LlamaRMSNorm.forward，拆开写</span>
+x32  = x.to(torch.float32)        <span class="cm"># R2 W4</span>
+sq   = x32.pow(2)                 <span class="cm"># R4 W4</span>
+var  = sq.mean(-1, keepdim=True)  <span class="cm"># R4</span>
+var  = var + eps                  <span class="cm"># 每行 1 个数</span>
+r    = torch.rsqrt(var)           <span class="cm"># 每行 1 个数</span>
+xn   = x32 * r                    <span class="cm"># R4 W4</span>
+xn16 = xn.to(torch.bfloat16)      <span class="cm"># R4 W2</span>
+y    = weight * xn16              <span class="cm"># R2 W2</span>
+
+<span class="cm"># 注释：每个元素读/写的字节数</span></pre></div>
+        <svg class="fig" viewBox="0 0 560 360" style="width:568px" aria-label="每行代码一个 kernel，数据从 HBM 读到 SM 再写回 HBM"></svg>
+      </div>
+      <div class="caps">
+        <p>eager 模式下每个算子是一个独立的 kernel：从 HBM 读输入，算完写回 HBM，下一个 kernel 再读回来。</p>
+        <p>中间结果都是 FP32，体积是输入的两倍；方差、rsqrt 这些每行一个数的小 kernel 几乎没活，却各占一次 launch。</p>
+        <p>合计 8 次 launch，每个元素来回搬 <b>36 字节</b>；而这个算子本质上只需要读 x、写 y：<b>4 字节</b>。</p>
+      </div>
+    </section>
+
+    <!-- 13 -->
+    <section class="slide an" id="s-fused">
+      <div class="kicker">融合</div>
+      <h2>一个 kernel：读一次，写一次</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="融合 kernel 中 x 只从 HBM 读一次，在 SM 内完成平方、归约、缩放，再写回 y"></svg>
+      <div class="caps">
+        <p>融合 kernel 把整行读进 SM，平方累加、归约、乘 \(r\) 和 \(g\) 全在片上完成，中间结果不落 HBM。</p>
+        <p>每个元素 4 字节（g 只有 d 个数，被所有行共享，几乎全在 L2 命中），流量是 eager 的 1/9，launch 从 8 次变成 1 次。torch.compile 也能生成这样的融合 kernel。</p>
+      </div>
+    </section>
+
+    <!-- 14 -->
+    <section class="slide an" id="s-map">
+      <div class="kicker">并行划分</div>
+      <h2>一行交给一个 thread block</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="矩阵的每一行被分派给一个 SM 上的 thread block，一行再被切给 8 个 warp"></svg>
+      <div class="caps">
+        <p>输入是 [M, d]：M 个 token，每个 d 维。行与行之间完全独立，所以 grid 就开 M 个 block，<b>一个 block 负责一行</b>，由硬件分派到各个 SM。</p>
+        <p>block 内部：比如 256 个线程 = 8 个 warp，d = 4096 时每个 warp 分到 512 个元素，每个线程 16 个。</p>
+        <p>d 较小（比如 ≤ 1024）时，一个 warp 处理一行就够了：归约只在 warp 内做，连 shared memory 都不需要。</p>
+      </div>
+    </section>
+
+    <!-- 15 -->
+    <section class="slide an" id="s-vec">
+      <div class="kicker">向量化读取</div>
+      <h2>128-bit 读：一条指令搬 8 个 bf16</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="同一段 512 字节，标量读取需要 8 条指令，128-bit 向量读取只需 1 条"></svg>
+      <div class="caps">
+        <p>标量读：每个 lane 每条指令拿 1 个 bf16（2 字节）。32 个 lane 相邻，访问是合并的，但 512 字节要发 <b>8 条</b>指令。</p>
+        <p>向量读（<code>uint4</code> / <code>LDG.E.128</code>）：每个 lane 一次拿连续 16 字节 = 8 个 bf16，一条指令就搬完，访存指令数降到 1/8。</p>
+        <p>整行 4096 个元素就是 16 次这样的 warp 读：8 个 warp 各读 2 次，每个线程手里 16 个数。要求行首地址 16 字节对齐、d 是 8 的倍数。</p>
+      </div>
+    </section>
+
+    <!-- 16 -->
+    <section class="slide an" id="s-shfl">
+      <div class="kicker">Warp 归约</div>
+      <h2>蝶形交换：<code>__shfl_xor_sync</code></h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="32 个 lane 经过 5 轮 xor 交换后每个 lane 都持有总和"></svg>
+      <div class="caps">
+        <p>每个 lane 先把自己那 16 个数的平方和算好（数值示意）。现在要把 32 个部分和加起来。</p>
+        <p>第 1 轮 offset = 16：lane \(i\) 读 lane \(i \oplus 16\) 的寄存器并相加。数据直接在寄存器间交换，不经过内存。</p>
+        <p>第 2 轮 offset = 8：每个 lane 已经代表 2 个 lane 的和，现在合成 4 个。</p>
+        <p>offset = 4、2：每轮翻倍覆盖范围。</p>
+        <p>第 5 轮 offset = 1 之后，<b>32 个 lane 全都拿到总和</b>：log₂32 = 5 步，<code>for (o = 16; o &gt; 0; o &gt;&gt;= 1) v += __shfl_xor_sync(0xffffffff, v, o);</code></p>
+      </div>
+    </section>
+
+    <!-- 17 -->
+    <section class="slide an" id="s-block">
+      <div class="kicker">Block 归约</div>
+      <h2>跨 warp：经 shared memory 中转</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="8 个 warp 的部分和写进 shared memory，warp 0 读回再归约，算出 r 后广播给所有 warp"></svg>
+      <div class="caps">
+        <p>shuffle 只能在 warp 内交换。每个 warp 的 lane 0 把自己的和写进 shared memory 的一个槽位，然后 <code>__syncthreads()</code> 等所有 warp 写完。</p>
+        <p>warp 0 把 8 个槽位读进自己的 lane，再做一次（更短的）shuffle 归约，得到整行的平方和（数值示意）。</p>
+        <p>lane 0 算出 \(r = \mathrm{rsqrt}(\Sigma/d + \varepsilon)\)，写回 shared memory，再同步一次，所有线程读到同一个 \(r\)。</p>
+      </div>
+    </section>
+
+    <!-- 18 -->
+    <section class="slide an" id="s-reg">
+      <div class="kicker">寄存器缓存</div>
+      <h2>x 留在寄存器里，只从 HBM 读一次</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="两种做法：不缓存时 x 读两遍，寄存器缓存时只读一遍"></svg>
+      <div class="caps">
+        <p>朴素写法分两遍：第一遍读 x 求平方和，第二遍再读一次 x 去乘 \(r\)。每个元素读 4 字节、写 2 字节。</p>
+        <p>更好的做法：第一遍读进来的 x 就留在寄存器里，等 \(r\) 算出来直接用。每个元素只读 2 字节、写 2 字节。</p>
+        <p>代价是寄存器：d = 4096、256 线程时每线程 16 个 FP32，很宽松；d 更大时就得增加线程数、把行暂存在 shared memory，或像 Hopper 上那样用 thread block cluster 把一行分给多个 SM。</p>
+      </div>
+    </section>
+
+    <!-- 19 -->
+    <section class="slide an" id="s-cuda">
+      <div class="kicker">CUDA</div>
+      <h2>把这几步拼成一个 kernel</h2>
+      <div class="split">
+        <div class="code" style="width:780px"><div class="hl"></div><pre><span class="kw">__global__</span> void rmsnorm_fwd(const bf16* x, const bf16* g, bf16* y,
+                            float* rstd, int d, float eps) {
+  const int row = blockIdx.x;                 <span class="cm">// 一个 block 一行</span>
+  const uint4* xr = (const uint4*)(x + (size_t)row * d);
+  float v[ITERS * 8];                         <span class="cm">// 这一行在寄存器里的份</span>
+  float ss = 0.f;
+  for (int i = 0; i &lt; ITERS; ++i) {
+    uint4 pk = xr[i * blockDim.x + threadIdx.x];  <span class="cm">// 128-bit: 8 个 bf16</span>
+    unpack8(pk, v + i * 8);                        <span class="cm">// 转 FP32</span>
+    for (int k = 0; k &lt; 8; ++k) ss += v[i*8+k] * v[i*8+k];
+  }
+  ss = block_reduce_sum(ss);                  <span class="cm">// shuffle + shared memory</span>
+  const float r = rsqrtf(ss / d + eps);
+  if (threadIdx.x == 0) rstd[row] = r;        <span class="cm">// 留给反向</span>
+  for (int i = 0; i &lt; ITERS; ++i)             <span class="cm">// 用寄存器里的 x</span>
+    store8(y, g, v + i * 8, r, row, i);       <span class="cm">// y = bf16(x·r·g)</span>
+}</pre></div>
+        <svg class="fig" viewBox="0 0 340 380" style="width:348px" aria-label="kernel 的六个阶段依次点亮"></svg>
+      </div>
+      <div class="caps">
+        <p>示意代码（省略了尾部处理和类型细节）。<code>ITERS = d / (8 × blockDim.x)</code>，编译期常量，这样 <code>v[]</code> 才能全部放进寄存器。</p>
+        <p>读：每次 128-bit，转成 FP32 存进寄存器，顺手累加平方。</p>
+        <p>归约 → rsqrt → 把 \(r\) 存一份给反向，然后用寄存器里的 x 算 \(y\) 写回。整条路径只碰 HBM 两次。</p>
+      </div>
+    </section>
+
+    <!-- 20 -->
+    <section class="slide an" id="s-fuse">
+      <div class="kicker">再融合</div>
+      <h2>把残差相加和 FP8 量化也并进来</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="分开的 add、RMSNorm、量化三个 kernel 与融合 kernel 每元素字节数对比"></svg>
+      <div class="caps">
+        <p>pre-norm 里 RMSNorm 前面总跟着残差相加：<code>h = h + o; x = RMSNorm(h)</code>。分开做要 10 字节/元素，融合后读 h、o，写回 h 和 x：8 字节。</p>
+        <p>推理时下一层的 GEMM 若用 FP8，还要再量化一次。融合进来后输出直接写 1 字节的 FP8：<b>13 → 7 字节</b>，3 次 launch 变 1 次。</p>
+        <p>推理引擎里都有这些融合算子，比如 vLLM 的 <code>fused_add_rms_norm</code>、<code>fused_add_rms_norm_static_fp8_quant</code>、<code>rms_norm_dynamic_per_token_quant</code>，以及按 128 元素分块量化的 <code>rms_norm_per_block_quant</code>。</p>
+      </div>
+    </section>
+
+    <!-- 21 -->
+    <section class="slide an" id="s-fp8">
+      <div class="kicker">FP8 量化</div>
+      <h2>动态 per-token 量化：再做一次行内归约</h2>
+      <svg class="fig" viewBox="0 0 1152 380" aria-label="一行输出求出绝对值最大值，按 448 缩放后落到 E4M3 网格上"></svg>
+      <div class="caps">
+        <p>RMSNorm 的一行输出 \(y\)（数值示意），要转成 FP8 E4M3，它能表示的最大值是 448。</p>
+        <p>动态 per-token 量化需要这一行的 \(\max|y|\)：又一次行内归约（把加法换成 max），整行此时还在寄存器里，几乎不花额外的访存。</p>
+        <p>\(s = \max|y|/448\)，每个数除以 \(s\) 后舍入到 E4M3 网格；网格是非均匀的，越大的数间隔越宽（[256, 448] 内间隔 32）。\(s\) 每行一个 FP32，随输出一起写回。</p>
+        <p>静态量化用离线校准好的 \(s\)，省掉这次 max 归约；分块量化则每 128 个元素一个 \(s\)，在 block 内分组做 max。</p>
+      </div>
+    </section>
+
+    <!-- 22 -->
+    <section class="slide an" id="s-triton">
+      <div class="kicker">Triton</div>
+      <h2>同一个 kernel 的 Triton 写法</h2>
+      <div class="split">
+        <div class="code" style="width:740px"><div class="hl"></div><pre><span class="kw">@triton.jit</span>
+def rmsnorm_fwd(X, W, Y, RSTD, stride, N, eps,
+                BLOCK: tl.constexpr):
+    row = tl.program_id(0)              <span class="cm"># 一个 program 一行</span>
+    cols = tl.arange(0, BLOCK)          <span class="cm"># BLOCK = next_pow2(N)</span>
+    mask = cols &lt; N
+    x = tl.load(X + row * stride + cols, mask=mask,
+                other=0.).to(tl.float32)
+    rstd = 1 / tl.sqrt(tl.sum(x * x, axis=0) / N + eps)
+    tl.store(RSTD + row, rstd)
+    w = tl.load(W + cols, mask=mask).to(tl.float32)
+    y = x * rstd * w
+    tl.store(Y + row * stride + cols,
+             y.to(Y.dtype.element_ty), mask=mask)
+
+<span class="cm"># 启动：M 行就是 M 个 program</span>
+rmsnorm_fwd[(M,)](x, w, y, rstd, x.stride(0), N, eps,
+    BLOCK=triton.next_power_of_2(N), num_warps=8)</pre></div>
+        <svg class="fig" viewBox="0 0 380 400" style="width:388px" aria-label="program 选中一行，BLOCK 长度的向量中尾部被 mask 掉，求和后写回"></svg>
+      </div>
+      <div class="caps">
+        <p>Triton 以"一个 program 处理一块数据"来写：program_id 就是行号，<code>tl.arange</code> 一次覆盖整行。N = 5120 时 BLOCK = 8192，多出来的 3072 个位置被 mask 掉。</p>
+        <p><code>tl.load</code> 由编译器向量化；<code>tl.sum</code> 被编译成 warp shuffle + shared memory 归约；整行 x 作为一个张量留在寄存器里。</p>
+        <p>需要手动选的只剩 <code>num_warps</code> 等少数参数。CUDA 版本的那几页优化，Triton 编译器大都替你做了。</p>
+      </div>
+    </section>
+
+    <!-- 23 -->
+    <section class="slide an" id="s-bwdk">
+      <div class="kicker">反向 kernel</div>
+      <h2>dx：每行再归约一次</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="反向 kernel 读入 x、dy、g、rstd，行内归约后写出 dx，同时在寄存器里累加 dg 的部分和"></svg>
+      <div class="caps">
+        <p>反向也是一行一个 program：读 x、dy、g 和前向存下的 \(r\)，算 \(\hat x = x r\)、\(\hat g = dy\odot g\)，行内归约得到 \(c = \mathrm{mean}(\hat x\odot\hat g)\)，写出 \(dx = r(\hat g - \hat x c)\)。</p>
+        <p>每个元素读 4 字节、写 2 字节。同一个 program 往下处理更多行，\(dy\odot\hat x\) 一直累加在 FP32 寄存器里——这就是 dg 的部分和，最后写回一次。</p>
+      </div>
+    </section>
+
+    <!-- 24 -->
+    <section class="slide an" id="s-dg">
+      <div class="kicker">dg 归约</div>
+      <h2>两阶段：先按 program 求部分和，再按列加起来</h2>
+      <svg class="fig" viewBox="0 0 1152 400" aria-label="4 个 program 各自负责间隔的行，把部分和写进缓冲区，第二个 kernel 按列求和得到 dg"></svg>
+      <div class="caps">
+        <p>dg 是对<b>所有行</b>求和，和行内归约方向正交。让 P 个 program 各自跨步处理行（program p 负责第 p、p+P、p+2P… 行），各自在寄存器里累加。</p>
+        <p>阶段 1 结束，写出 [P, d] 的 FP32 部分和；第二个小 kernel 按列求和得到 dg。P 一般取 SM 数（H100 上 132），d = 4096 时缓冲区只有 2 MB 左右。</p>
+        <p>为什么不让每行直接 atomicAdd 到 dg：M 行抢同 d 个地址，冲突严重，而且浮点加法顺序不固定，结果不可复现。另一种做法是让几组行共享一个缓冲区、用锁串行累加，同样是两阶段。</p>
+      </div>
+    </section>
+
+    <!-- 25 -->
+    <section class="slide an" id="s-real">
+      <div class="kicker">实测</div>
+      <h2>能跑到多少带宽</h2>
+      <svg class="fig" viewBox="0 0 1152 360" aria-label="H100 峰值带宽、调优的归约 kernel、torch.compile 生成的 kernel 与 eager RMSNorm 有效带宽的对比"></svg>
+      <div class="caps">
+        <p>衡量 memory-bound kernel 用<b>有效带宽</b>：必须搬的字节数 ÷ 耗时。H100 SXM 峰值 3.35 TB/s，实际拷贝也达不到 100%。</p>
+        <p>精心调优的归约类 kernel（softmax、RMSNorm 等）在 H100 上约 3 TB/s，接近峰值的 90%；编译器生成的版本在超宽的行上会掉到 2 TB/s 左右。eager 实现即使每个 kernel 都跑满带宽，也只有 4/36 的字节是有用的。</p>
+      </div>
+    </section>
+
+    <!-- 26 -->
+    <section class="slide an" id="s-bw">
+      <div class="kicker">交互</div>
+      <h2>token 数少的时候，带宽也跑不满</h2>
+      <div class="widget bw" data-interactive>
+        <div>
+          <label>token 数 M <input type="range" id="bw-m" min="0" max="16" step="1" value="13"><output id="bw-mo"></output></label>
+          <label>hidden d <input type="range" id="bw-d" min="0" max="5" step="1" value="1"><output id="bw-do"></output></label>
+          <div class="rd">
+            <div>融合 kernel 耗时<b id="bw-tf"></b></div>
+            <div>eager 耗时<b id="bw-te"></b></div>
+            <div>融合有效带宽<b id="bw-bf"></b></div>
+            <div>加速比<b id="bw-sp"></b></div>
+          </div>
+        </div>
+        <svg id="bw-svg" viewBox="0 0 560 300" style="width:100%" aria-label="有效带宽随 token 数变化的曲线"></svg>
+      </div>
+      <p class="note">示意模型：每个 kernel 固定开销 3 µs（launch、启动与收尾），其余时间按 3.0 TB/s 持续带宽搬字节；融合 4 B/元素、1 个 kernel，eager 36 B/元素、8 个 kernel。decode 阶段 M 很小，固定开销占大头，这时把多个算子融合（或用 CUDA Graph）比优化带宽更重要。</p>
+    </section>
+
+    <!-- 27 -->
+    <section class="slide">
+      <div class="kicker">小结</div>
+      <h2>小结</h2>
+      <ul class="s24 tight">
+        <li>RMSNorm = 除以均方根再乘增益；去掉了 LayerNorm 的均值和偏置，保留缩放不变性。</li>
+        <li>反向：\(dx = r(\hat g - \hat x\cdot\mathrm{mean}(\hat g\odot\hat x))\)，\(dg = \sum_{\text{tokens}} dy\odot\hat x\)；前向存下每行的 \(r\)。</li>
+        <li>平方和一定在 FP32 里累加：BF16 会在 256 附近停住，FP16 会溢出。</li>
+        <li>算术强度约 1 FLOP/B，纯 memory-bound：目标是每元素只读 2 字节、写 2 字节，并接近峰值带宽。</li>
+        <li>做法：一行一个 block（或 warp）、128-bit 读、warp shuffle + shared memory 归约、x 留在寄存器里。</li>
+        <li>再往前一步是和残差相加、FP8 量化融合：13 → 7 字节/元素，3 次 launch 变 1 次。</li>
+        <li>反向的 dg 是跨行归约：P 个 program 各求部分和，第二个 kernel 按列相加。</li>
+      </ul>
+    </section>
+
+    <!-- 28 -->
+    <section class="slide">
+      <div class="kicker">参考</div>
+      <h2>参考与延伸阅读</h2>
+      <ul class="s22 tight">
+        <li>Zhang &amp; Sennrich, <a href="https://arxiv.org/abs/1910.07467">Root Mean Square Layer Normalization</a>（NeurIPS 2019）：RMSNorm 的提出、不变性分析与 7%–64% 的耗时节省</li>
+        <li>Ba et al., <a href="https://arxiv.org/abs/1607.06450">Layer Normalization</a>（2016）</li>
+        <li>Triton 官方教程 <a href="https://triton-lang.org/main/getting-started/tutorials/05-layer-norm.html">Layer Normalization</a>：前向、反向与带锁的 dw 部分和缓冲区</li>
+        <li>vLLM <a href="https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_kernels.cu">layernorm_kernels.cu</a> 与 <a href="https://github.com/vllm-project/vllm/blob/main/csrc/layernorm_quant_kernels.cu">layernorm_quant_kernels.cu</a>：残差融合与 FP8 量化融合</li>
+        <li>Guo, Zadouri &amp; Dao, <a href="https://sysml.cs.princeton.edu/blogs/memory-bound-kernels.html">Getting Memory-bound Kernels to Speed-of-Light</a> 与 <a href="https://github.com/Dao-AILab/quack">QuACK</a>：H100 上约 3 TB/s 的归约 kernel、cluster 归约</li>
+        <li>NVIDIA CUDA C++ Programming Guide：<a href="https://docs.nvidia.com/cuda/cuda-c-programming-guide/index.html#warp-shuffle-functions">Warp Shuffle Functions</a>；H100 规格见 <a href="https://www.nvidia.com/en-us/data-center/h100/">NVIDIA H100</a></li>
+        <li><a href="https://github.com/linkedin/Liger-Kernel">Liger Kernel</a>：训练用的 Triton RMSNorm 前向 / 反向</li>
+        <li>本系列：<a href="/posts/scaling-roofline/">Roofline：算力、带宽与算术强度</a>，<a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a></li>
+      </ul>
+    </section>
+
+    <!-- 29 -->
+    <section class="slide center">
+      <div class="kicker rise">系列 · 动画图解 LLM 系统</div>
+      <h2 class="rise" style="--d: 1">下一篇：Gradient checkpointing</h2>
+      <p class="muted rise" style="--d: 2">训练时激活值占掉的显存，能不能用算力换回来</p>
+      <nav class="series-pager rise" style="--d: 3" data-series="systems"></nav>
+      <p class="small muted rise" style="--d: 4"><a href="/blog/">← 回到博客</a></p>
+    </section>
+
+  </div></main>
+
+  <script src="/assets/slides.js"></script>
+  <script src="/assets/anim.js"></script>
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const $ = (s, r = document) => r.querySelector(s);
+    const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+    function S(p, tag, a = {}) {
+      const e = document.createElementNS(NS, tag);
+      for (const [k, v] of Object.entries(a)) {
+        if (k === 'text') e.textContent = v;
+        else if (k === 'fill' || k === 'stroke' || k === 'opacity') e.style.setProperty(k, v);
+        else e.setAttribute(k, v);
+      }
+      if (p) p.appendChild(e);
+      return e;
+    }
+    const G = (p, a = {}) => S(p, 'g', a);
+    const R = (p, x, y, w, h, a = {}) => S(p, 'rect', { x, y, width: w, height: h, rx: 5, ...a });
+    const T = (p, x, y, s, a = {}) => S(p, 'text', { x, y, 'text-anchor': 'middle', 'font-size': 16, fill: 'var(--text)', ...a, text: s });
+    const P = (p, d, a = {}) => S(p, 'path', { d, fill: 'none', stroke: 'var(--text-faint)', 'stroke-width': 2, ...a });
+    const C = (p, cx, cy, r, a = {}) => S(p, 'circle', { cx, cy, r, ...a });
+    const box = (p, x, y, w, h, label, a = {}) => {
+      const g = G(p);
+      const r = R(g, x, y, w, h, { rx: 10, fill: 'var(--surface)', stroke: 'var(--border)', 'stroke-width': 2, ...a });
+      const t = label ? T(g, x + w / 2, y + h / 2 + 6, label, { 'font-size': 17, 'font-weight': 600 }) : null;
+      return { g, r, t };
+    };
+    function pkt(p, x, y, color, w = 22, h = 14, a = {}) {
+      const g = G(p, { opacity: 0, ...a });
+      R(g, x - w / 2, y - h / 2, w, h, { rx: 4, fill: color });
+      return g;
+    }
+    function cap(tl, sl, i, at) {
+      const ps = $$('.caps > p', sl);
+      ps.forEach((p, j) => { if (j !== i) tl.to(p, { opacity: 0 }, { dur: 0.3, at }); });
+      tl.to(ps[i], { opacity: 1 }, { dur: 0.45, at: at + 0.2 });
+    }
+    function scene(id, build, o = {}) {
+      const sl = document.getElementById(id);
+      const svg = $('svg.fig', sl);
+      const tl = Anim.timeline();
+      build(tl, svg, sl);
+      Anim.slide(sl, tl, { steps: true, controls: true, ...o });
+    }
+    const bar = (v, base, s) => (v >= 0 ? { y: base - v * s, height: v * s } : { y: base, height: -v * s });
+    // Move an element through relative waypoints at constant speed; returns end time.
+    const POS = new WeakMap();
+    function route(tl, el, pts, at, speed = 520) {
+      let t = at;
+      let [px, py] = POS.get(el) || [0, 0];
+      for (const [x, y] of pts) {
+        const d = Math.max(0.12, Math.hypot(x - px, y - py) / speed);
+        tl.to(el, { x, y }, { at: t, dur: d, ease: 'linear' });
+        t += d; px = x; py = y;
+      }
+      POS.set(el, [px, py]);
+      return t;
+    }
+    const flash = (tl, el, color, at, back = 'var(--border)', dur = 0.25) => {
+      tl.to(el, { stroke: color }, { at, dur }).to(el, { stroke: back }, { at: at + 0.6, dur: 0.4 });
+    };
+
+    // ---------------- 3. formula ----------------
+    scene('s-formula', (tl, svg, sl) => {
+      const xs = [0.8, -1.6, 2.4, -0.4, 1.2, -2.8, 0.6, 3.2, -1.0, 0.2, -2.0, 1.4, -0.6, 2.6, -1.8, 0.9];
+      const gs = [1.2, 0.8, 1.0, 1.5, 0.6, 1.1, 0.9, 1.3, 0.7, 1.0, 1.2, 0.5, 1.4, 0.9, 1.1, 0.8];
+      const n = xs.length, base = 165, s1 = 30, s2 = 11, x0 = 150, dx = 56, bw = 32;
+      const ms = xs.reduce((a, v) => a + v * v, 0) / n, rms = Math.sqrt(ms);
+      P(svg, `M${x0 - 30} ${base} L${x0 + n * dx} ${base}`, { stroke: 'var(--border)' });
+      const lbls = ['x', 'x²', 'x', 'x / RMS', 'y = x̂ ⊙ g'].map((s, i) => T(svg, 60, base - 70, s, { 'font-size': 22, 'font-weight': 600, fill: 'var(--text-soft)', opacity: i ? 0 : 1 }));
+      const gl = T(svg, 60, 32, 'g', { 'font-size': 20, 'font-weight': 600, fill: 'var(--c3)', opacity: 0 });
+      const bars = xs.map((v, i) => R(svg, x0 + i * dx, base, bw, 0, { rx: 3, fill: 'var(--accent)' }));
+      const gb = gs.map((v, i) => R(svg, x0 + i * dx + 6, 36 - v * 14, bw - 12, v * 14, { rx: 2, fill: 'var(--c3)', opacity: 0 }));
+      const my = base - ms * s2;
+      const mline = P(svg, `M${x0 - 20} ${my} L${x0 + n * dx} ${my}`, { stroke: 'var(--accent-2)', 'stroke-dasharray': '6 5' });
+      const mt = T(svg, x0 + n * dx + 10, my + 5, 'mean(x²) = ' + ms.toFixed(2), { 'text-anchor': 'start', fill: 'var(--accent-2)', 'font-size': 15, opacity: 0 });
+      const top = G(svg, { opacity: 0 }), bot = G(svg, { opacity: 0 });
+      P(top, `M${x0 - 20} ${base - rms * s1} L${x0 + n * dx} ${base - rms * s1}`, { stroke: 'var(--accent)', 'stroke-dasharray': '6 5' });
+      P(bot, `M${x0 - 20} ${base + rms * s1} L${x0 + n * dx} ${base + rms * s1}`, { stroke: 'var(--accent)', 'stroke-dasharray': '6 5' });
+      const tR1 = T(top, x0 + n * dx + 10, base - rms * s1 + 5, '+RMS = ' + rms.toFixed(2), { 'text-anchor': 'start', fill: 'var(--accent)', 'font-size': 15 });
+      const tR2 = T(bot, x0 + n * dx + 10, base + rms * s1 + 5, '−RMS', { 'text-anchor': 'start', fill: 'var(--accent)', 'font-size': 15 });
+      const t1a = T(svg, x0 + n * dx + 10, base - s1 + 5, '+1', { 'text-anchor': 'start', fill: 'var(--accent)', 'font-size': 15, opacity: 0 });
+      const t1b = T(svg, x0 + n * dx + 10, base + s1 + 5, '−1', { 'text-anchor': 'start', fill: 'var(--accent)', 'font-size': 15, opacity: 0 });
+      const swapLbl = (i, at) => lbls.forEach((l, j) => tl.to(l, { opacity: j === i ? 1 : 0 }, { dur: 0.4, at }));
+      bars.forEach((b, i) => tl.to(b, { attr: bar(xs[i], base, s1) }, { at: 0.1 + i * 0.05, dur: 0.6, ease: 'out' }));
+      tl.label('a', 1.3);
+      // square
+      cap(tl, sl, 1, 1.4); swapLbl(1, 1.4);
+      bars.forEach((b, i) => tl.to(b, { attr: bar(xs[i] * xs[i], base, s2), fill: 'var(--accent-2)' }, { at: 1.5 + i * 0.03, dur: 0.8 }));
+      tl.to(mline, { draw: 1 }, { at: 2.6, dur: 0.8 }).to(mt, { opacity: 1 }, { at: 3.0, dur: 0.4 });
+      tl.label('b', 3.6);
+      // back to x, show RMS
+      cap(tl, sl, 2, 3.7); swapLbl(2, 3.7);
+      tl.to([mline, mt], { opacity: 0 }, { at: 3.7, dur: 0.4 });
+      bars.forEach((b, i) => tl.to(b, { attr: bar(xs[i], base, s1), fill: 'var(--accent)' }, { at: 3.8 + i * 0.02, dur: 0.7 }));
+      tl.to([top, bot], { opacity: 1 }, { at: 4.6, dur: 0.5 });
+      tl.label('c', 5.3);
+      // divide
+      cap(tl, sl, 3, 5.4); swapLbl(3, 5.4);
+      bars.forEach((b, i) => tl.to(b, { attr: bar(xs[i] / rms, base, s1) }, { at: 5.5, dur: 1.0 }));
+      tl.to(top, { y: (rms - 1) * s1 }, { at: 5.5, dur: 1.0 }).to(bot, { y: -(rms - 1) * s1 }, { at: 5.5, dur: 1.0 });
+      tl.to([tR1, tR2], { opacity: 0 }, { at: 5.6, dur: 0.3 }).to([t1a, t1b], { opacity: 1 }, { at: 6.2, dur: 0.4 });
+      tl.label('d', 6.9);
+      // gain
+      cap(tl, sl, 4, 7.0); swapLbl(4, 7.0);
+      tl.to(gl, { opacity: 1 }, { at: 7.0, dur: 0.4 });
+      tl.to(gb, { opacity: 1 }, { at: 7.1, dur: 0.4, stagger: 0.04 });
+      tl.to([top, bot, t1a, t1b], { opacity: 0.25 }, { at: 7.6, dur: 0.4 });
+      bars.forEach((b, i) => tl.to(b, { attr: bar(xs[i] / rms * gs[i], base, s1), fill: 'var(--accent-2)' }, { at: 7.9 + i * 0.03, dur: 0.8 }));
+    });
+
+    // ---------------- 4. LN vs RMS ----------------
+    scene('s-ln', (tl, svg, sl) => {
+      const vs = [2.2, 1.0, 2.8, 0.4, 1.8, 3.0, 0.8, 1.6];
+      const n = vs.length, mean = vs.reduce((a, b) => a + b) / n;
+      const sd = Math.sqrt(vs.reduce((a, v) => a + (v - mean) ** 2, 0) / n);
+      const rms = Math.sqrt(vs.reduce((a, v) => a + v * v, 0) / n);
+      const base = 250, s = 45, dx = 58, bw = 36;
+      const panel = (X0, title) => {
+        T(svg, X0 + 230, 34, title, { 'font-size': 24, 'font-weight': 700 });
+        P(svg, `M${X0} ${base} L${X0 + 470} ${base}`, { stroke: 'var(--border)' });
+        return vs.map((v, i) => R(svg, X0 + 10 + i * dx, base, bw, 0, { rx: 3, fill: 'var(--accent)' }));
+      };
+      const L = panel(20, 'LayerNorm'), Rb = panel(640, 'RMSNorm');
+      const hline = (X0, val, color, label) => {
+        const g = G(svg, { opacity: 0 });
+        P(g, `M${X0} ${base - val * s} L${X0 + 470} ${base - val * s}`, { stroke: color, 'stroke-dasharray': '6 5' });
+        T(g, X0 + 474, base - val * s + 5, label, { 'text-anchor': 'start', 'font-size': 15, fill: color });
+        return g;
+      };
+      const mu = hline(20, mean, 'var(--accent-2)', 'μ');
+      const rl = hline(640, rms, 'var(--accent-2)', 'RMS');
+      const skip = T(svg, 870, 380, '（不减均值）', { 'font-size': 18, fill: 'var(--text-faint)', opacity: 0 });
+      const muT = T(svg, 250, 380, 'μ = ' + mean.toFixed(2) + '，σ = ' + sd.toFixed(2), { 'font-size': 18, fill: 'var(--text-soft)', opacity: 0 });
+      const rT = T(svg, 870, 340, 'RMS = ' + rms.toFixed(2), { 'font-size': 18, fill: 'var(--text-soft)', opacity: 0 });
+      [...L, ...Rb].forEach((b, i) => tl.to(b, { attr: bar(vs[i % n], base, s) }, { at: 0.1 + (i % n) * 0.06, dur: 0.6, ease: 'out' }));
+      tl.label('a', 1.2);
+      cap(tl, sl, 1, 1.3);
+      tl.to([mu, rl], { opacity: 1 }, { at: 1.4, dur: 0.5 }).to([muT, rT], { opacity: 1 }, { at: 1.8, dur: 0.4 });
+      tl.label('b', 2.6);
+      cap(tl, sl, 2, 2.7);
+      L.forEach((b, i) => tl.to(b, { attr: bar(vs[i] - mean, base, s) }, { at: 2.8, dur: 1.0 }));
+      tl.to(mu, { y: mean * s }, { at: 2.8, dur: 1.0 });
+      tl.to(skip, { opacity: 1 }, { at: 3.0, dur: 0.4 });
+      tl.label('c', 4.2);
+      cap(tl, sl, 3, 4.3);
+      L.forEach((b, i) => tl.to(b, { attr: bar((vs[i] - mean) / sd, base, s), fill: 'var(--accent-2)' }, { at: 4.4, dur: 1.0 }));
+      Rb.forEach((b, i) => tl.to(b, { attr: bar(vs[i] / rms, base, s), fill: 'var(--accent-2)' }, { at: 4.4, dur: 1.0 }));
+      tl.to(rl, { y: (rms - 1) * s }, { at: 4.4, dur: 1.0 }).to([mu, skip], { opacity: 0 }, { at: 4.4, dur: 0.5 });
+      tl.label('d', 5.8);
+      cap(tl, sl, 4, 5.9);
+    });
+
+    // ---------------- 5. invariance ----------------
+    scene('s-inv', (tl, svg, sl) => {
+      const u = [1.2, -0.6, 1.8, 0.2, -1.0, 1.4, 0.6, -0.2];
+      const n = u.length, base = 170, s = 34, dx = 42, bw = 28;
+      const ln = (a) => { const m = a.reduce((p, q) => p + q) / n; const sd = Math.sqrt(a.reduce((p, v) => p + (v - m) ** 2, 0) / n); return a.map((v) => (v - m) / sd); };
+      const rn = (a) => { const r = Math.sqrt(a.reduce((p, v) => p + v * v, 0) / n); return a.map((v) => v / r); };
+      const panel = (X0, title, color) => {
+        T(svg, X0 + 175, 28, title, { 'font-size': 21, 'font-weight': 700 });
+        P(svg, `M${X0} ${base} L${X0 + 350} ${base}`, { stroke: 'var(--border)' });
+        return u.map((v, i) => R(svg, X0 + 12 + i * dx, base, bw, 0, { rx: 3, fill: color }));
+      };
+      const inB = panel(10, '', 'var(--accent)');
+      const lnB = panel(400, 'LayerNorm 输出', 'var(--accent-2)');
+      const rnB = panel(790, 'RMSNorm 输出', 'var(--accent-2)');
+      const inT = ['输入 x', '输入 2x', '输入 x + 1.5'].map((s2, i) => T(svg, 185, 28, s2, { 'font-size': 21, 'font-weight': 700, opacity: i ? 0 : 1 }));
+      const mk = (x, s2, c) => T(svg, x, 315, s2, { 'font-size': 20, 'font-weight': 600, fill: c, opacity: 0 });
+      const okL1 = mk(575, '✓ 不变', 'var(--c3)'), okR1 = mk(965, '✓ 不变', 'var(--c3)');
+      const okL2 = mk(575, '✓ 不变', 'var(--c3)'), bad = mk(965, '✗ 变了', 'var(--grad)');
+      const set = (bars, vals, at, dur = 0.8) => bars.forEach((b, i) => tl.to(b, { attr: bar(vals[i], base, s) }, { at, dur }));
+      set(inB, u, 0.1); set(lnB, ln(u), 0.6); set(rnB, rn(u), 0.6);
+      tl.label('a', 1.6);
+      cap(tl, sl, 1, 1.7);
+      tl.to(inT[0], { opacity: 0 }, { at: 1.7, dur: 0.3 }).to(inT[1], { opacity: 1 }, { at: 1.9, dur: 0.3 });
+      const u2 = u.map((v) => 2 * v);
+      set(inB, u2, 1.8, 0.9);
+      tl.to([...lnB, ...rnB], { opacity: 0.35 }, { at: 2.6, dur: 0.25 }).to([...lnB, ...rnB], { opacity: 1 }, { at: 2.9, dur: 0.35 });
+      tl.to([okL1, okR1], { opacity: 1 }, { at: 3.2, dur: 0.4 });
+      tl.label('b', 3.9);
+      cap(tl, sl, 2, 4.0);
+      tl.to([okL1, okR1], { opacity: 0 }, { at: 4.0, dur: 0.3 });
+      tl.to(inT[1], { opacity: 0 }, { at: 4.0, dur: 0.3 }).to(inT[2], { opacity: 1 }, { at: 4.2, dur: 0.3 });
+      const u3 = u.map((v) => v + 1.5);
+      set(inB, u3, 4.1, 0.9);
+      tl.to([...lnB, ...rnB], { opacity: 0.35 }, { at: 4.9, dur: 0.25 }).to([...lnB, ...rnB], { opacity: 1 }, { at: 5.2, dur: 0.35 });
+      set(rnB, rn(u3), 5.2, 0.8);
+      tl.to([okL2, bad], { opacity: 1 }, { at: 5.9, dur: 0.4 });
+      tl.label('c', 6.6);
+      cap(tl, sl, 3, 6.7);
+    });
+
+    // ---------------- 6. where ----------------
+    scene('s-where', (tl, svg, sl) => {
+      const Y = 320, by = 180;
+      P(svg, `M20 ${Y} L1010 ${Y}`, { stroke: 'var(--text-faint)', 'stroke-width': 4 });
+      R(svg, 50, 110, 910, 255, { rx: 16, fill: 'none', stroke: 'var(--border)', 'stroke-dasharray': '8 6', 'stroke-width': 2 });
+      T(svg, 505, 100, '× 32 层（Llama 3 8B）', { 'font-size': 17, fill: 'var(--text-soft)' });
+      T(svg, 30, Y - 14, 'h', { 'font-size': 18, 'font-weight': 700, fill: 'var(--accent)' });
+      const mkBranch = (bx, label) => {
+        P(svg, `M${bx} ${Y} L${bx} ${by} L${bx + 25} ${by}`);
+        const n = box(svg, bx + 25, by - 22, 110, 44, 'RMSNorm');
+        P(svg, `M${bx + 135} ${by} L${bx + 180} ${by}`);
+        const f = box(svg, bx + 180, by - 22, 150, 44, label);
+        P(svg, `M${bx + 330} ${by} L${bx + 380} ${by} L${bx + 380} ${Y - 14}`);
+        C(svg, bx + 380, Y, 14, { fill: 'var(--surface)', stroke: 'var(--text-faint)', 'stroke-width': 2 });
+        const plus = T(svg, bx + 380, Y + 6, '+', { 'font-size': 20, 'font-weight': 700 });
+        return { n, f, plus, bx };
+      };
+      const b1 = mkBranch(90, 'Attention'), b2 = mkBranch(530, 'MLP');
+      const fin = box(svg, 1010, Y - 22, 120, 44, 'RMSNorm');
+      T(svg, 1070, Y + 46, '→ LM head', { 'font-size': 15, fill: 'var(--text-faint)' });
+      const cnt = T(svg, 1070, 64, '0', { 'font-size': 48, 'font-weight': 700, fill: 'var(--accent-2)' });
+      T(svg, 1070, 92, 'RMSNorm 调用', { 'font-size': 15, fill: 'var(--text-soft)' });
+      const main = pkt(svg, 20, Y, 'var(--accent)', 26, 18);
+      tl.to(main, { opacity: 1 }, { at: 0, dur: 0.3 });
+      let t = 0.3, cur = 0;
+      [b1, b2].forEach((b, k) => {
+        t = route(tl, main, [[b.bx - 20, 0]], t);
+        const br = pkt(svg, b.bx, Y, 'var(--accent-2)', 22, 16);
+        tl.to(br, { opacity: 1 }, { at: t, dur: 0.2 });
+        let tb = route(tl, br, [[0, by - Y], [b.bx + 80 - b.bx, by - Y]], t);
+        flash(tl, b.n.r, 'var(--accent-2)', tb - 0.1);
+        tl.to(cnt, { text: ++cur }, { at: tb, dur: 0.2 });
+        tb = route(tl, br, [[255, by - Y]], tb + 0.2);
+        flash(tl, b.f.r, 'var(--accent-2)', tb - 0.1);
+        tb = route(tl, br, [[380, by - Y], [380, 0]], tb + 0.2);
+        // main travels to the merge point meanwhile
+        route(tl, main, [[b.bx + 380 - 20, 0]], t + 0.3, (380) / Math.max(0.5, tb - t - 0.3));
+        tl.to(br, { opacity: 0 }, { at: tb, dur: 0.2 });
+        tl.to(b.plus, { scale: 1.6, fill: 'var(--accent-2)' }, { at: tb, dur: 0.2 }).to(b.plus, { scale: 1, fill: 'var(--text)' }, { at: tb + 0.25, dur: 0.3 });
+        t = tb + 0.3;
+      });
+      t = route(tl, main, [[1060 - 20, 0]], t);
+      flash(tl, fin.r, 'var(--accent-2)', t - 0.1);
+      tl.to(main, { opacity: 0 }, { at: t + 0.1, dur: 0.3 });
+      tl.to(cnt, { text: 3 }, { at: t, dur: 0.2 });
+      tl.label('a', t + 0.6);
+      cap(tl, sl, 1, t + 0.7);
+      tl.to(cnt, { text: 65 }, { at: t + 0.9, dur: 1.4, ease: 'out' });
+      tl.label('b', t + 2.6);
+      cap(tl, sl, 2, t + 2.7);
+      const qk = T(svg, 1070, 124, '+ QK-Norm：129', { 'font-size': 16, fill: 'var(--c3)', 'font-weight': 600, opacity: 0 });
+      tl.to(qk, { opacity: 1 }, { at: t + 3.0, dur: 0.5 });
+      tl.label('c', t + 3.8);
+      cap(tl, sl, 3, t + 3.9);
+    });
+
+    // ---------------- 7. backward graph ----------------
+    scene('s-bgraph', (tl, svg, sl) => {
+      const N = {
+        x: [70, 200, 'x'], sq: [230, 320, 'x²'], mean: [390, 320, 'mean'], rs: [550, 320, 'rsqrt'],
+        m1: [700, 200, '×'], m2: [880, 200, '×'], g: [880, 70, 'g'], y: [1060, 200, 'y'],
+      };
+      P(svg, 'M98 200 L672 200'); P(svg, 'M70 228 L70 320 L202 320'); P(svg, 'M258 320 L362 320'); P(svg, 'M418 320 L522 320');
+      P(svg, 'M578 320 L700 320 L700 228'); P(svg, 'M728 200 L852 200'); P(svg, 'M880 98 L880 172'); P(svg, 'M908 200 L1032 200');
+      const nodes = {};
+      for (const [k, [x, y, l]] of Object.entries(N)) {
+        const g = G(svg);
+        nodes[k] = C(g, x, y, 28, { fill: 'var(--surface)', stroke: k === 'g' ? 'var(--c3)' : 'var(--border)', 'stroke-width': 2.5 });
+        T(g, x, y + 6, l, { 'font-size': l.length > 2 ? 15 : 20, 'font-weight': 600 });
+      }
+      const lab = (x, y, s, c = 'var(--text-soft)', a = {}) => T(svg, x, y, s, { 'font-size': 16, fill: c, ...a });
+      lab(790, 190, 'x̂'); lab(640, 310, 'r'); lab(970, 190, 'y');
+      // forward
+      const f1 = pkt(svg, 70, 200, 'var(--accent)'), f2 = pkt(svg, 70, 200, 'var(--accent)');
+      tl.to([f1, f2], { opacity: 1 }, { at: 0.1, dur: 0.2 });
+      route(tl, f1, [[0, 120], [160, 120], [320, 120], [480, 120], [630, 120], [630, 0]], 0.3, 600);
+      route(tl, f2, [[630, 0]], 0.3, 300);
+      const f3 = pkt(svg, 700, 200, 'var(--accent)'), fg = pkt(svg, 880, 70, 'var(--c3)');
+      tl.to([f1, f2], { opacity: 0 }, { at: 2.7, dur: 0.2 }).to([f3, fg], { opacity: 1 }, { at: 2.7, dur: 0.2 });
+      route(tl, f3, [[180, 0]], 2.8, 400); route(tl, fg, [[0, 130]], 2.8, 300);
+      const fy = pkt(svg, 880, 200, 'var(--accent-2)');
+      tl.to([f3, fg], { opacity: 0 }, { at: 3.3, dur: 0.2 }).to(fy, { opacity: 1 }, { at: 3.3, dur: 0.2 });
+      route(tl, fy, [[180, 0]], 3.4, 400);
+      tl.to(fy, { opacity: 0 }, { at: 4.0, dur: 0.3 });
+      tl.label('a', 4.4);
+      // backward 1
+      cap(tl, sl, 1, 4.5);
+      const dy = pkt(svg, 1060, 200, 'var(--grad)'), dg = pkt(svg, 880, 200, 'var(--grad)'), dxh = pkt(svg, 880, 200, 'var(--grad)');
+      tl.to(dy, { opacity: 1 }, { at: 4.6, dur: 0.2 });
+      const dyl = lab(1060, 250, 'dy', 'var(--grad)', { opacity: 0, 'font-weight': 700 });
+      tl.to(dyl, { opacity: 1 }, { at: 4.6, dur: 0.3 });
+      route(tl, dy, [[-180, 0]], 4.8, 360);
+      tl.to(dy, { opacity: 0 }, { at: 5.3, dur: 0.15 }).to([dg, dxh], { opacity: 1 }, { at: 5.3, dur: 0.15 });
+      route(tl, dg, [[0, -130]], 5.45, 300); route(tl, dxh, [[-180, 0]], 5.45, 300);
+      const lg = lab(925, 50, 'dg = Σ_tokens dy ⊙ x̂', 'var(--grad)', { 'text-anchor': 'start', opacity: 0, 'font-weight': 600 });
+      const lx = lab(790, 240, 'dx̂ = dy ⊙ g', 'var(--grad)', { opacity: 0, 'font-weight': 600 });
+      tl.to([lg, lx], { opacity: 1 }, { at: 6.0, dur: 0.4 });
+      tl.label('b', 6.7);
+      // backward 2
+      cap(tl, sl, 2, 6.8);
+      const p1 = pkt(svg, 700, 200, 'var(--grad)'), p2 = pkt(svg, 700, 200, 'var(--grad)');
+      tl.to(dxh, { opacity: 0 }, { at: 6.9, dur: 0.15 }).to([p1, p2], { opacity: 1 }, { at: 6.9, dur: 0.15 });
+      const l1 = lab(380, 188, 'r · dx̂', 'var(--grad)', { opacity: 0, 'font-weight': 600 });
+      const l2 = lab(625, 362, 'dr = Σⱼ dx̂ⱼ xⱼ（行内归约）', 'var(--grad)', { opacity: 0, 'font-weight': 600 });
+      const l3 = lab(200, 375, '−(r³/d) · x · Σ', 'var(--grad)', { opacity: 0, 'font-weight': 600 });
+      route(tl, p1, [[-630, 0]], 7.1, 300);
+      tl.to(l1, { opacity: 1 }, { at: 7.6, dur: 0.4 });
+      let t = route(tl, p2, [[0, 120], [-150, 120]], 7.1, 260);
+      tl.to(l2, { opacity: 1 }, { at: t - 0.3, dur: 0.4 });
+      tl.to(nodes.rs, { stroke: 'var(--grad)' }, { at: t - 0.2, dur: 0.3 });
+      t = route(tl, p2, [[-310, 120], [-470, 120], [-630, 120], [-630, 28]], t + 0.3, 300);
+      tl.to(l3, { opacity: 1 }, { at: t - 0.8, dur: 0.4 });
+      tl.label('c', t + 0.3);
+      cap(tl, sl, 3, t + 0.4);
+      tl.to([p1, p2, dg], { opacity: 0 }, { at: t + 0.5, dur: 0.3 });
+      tl.to(nodes.x, { stroke: 'var(--grad)', scale: 1.15 }, { at: t + 0.5, dur: 0.3 }).to(nodes.x, { scale: 1 }, { at: t + 0.85, dur: 0.3 });
+      const fx = lab(576, 398, 'dx = r · (ĝ − x̂ · mean(ĝ ⊙ x̂))，  ĝ = dy ⊙ g', 'var(--text)', { opacity: 0, 'font-size': 21, 'font-weight': 600 });
+      tl.to(fx, { opacity: 1 }, { at: t + 0.8, dur: 0.5 });
+    });
+
+    // ---------------- 9. precision ----------------
+    scene('s-prec', (tl, svg, sl) => {
+      const acc = (x, title, color) => {
+        const b = box(svg, x, 30, 220, 120, '');
+        T(svg, x + 110, 58, title, { 'font-size': 17, fill: 'var(--text-soft)', 'font-weight': 600 });
+        const v = T(svg, x + 110, 120, '0', { 'font-size': 46, 'font-weight': 700, fill: color, class: 'mono' });
+        return { b, v };
+      };
+      const bf = acc(40, 'BF16 累加器', 'var(--grad)'), fp = acc(300, 'FP32 累加器', 'var(--accent)');
+      const cntT = T(svg, 280, 188, '0', { 'font-size': 17, fill: 'var(--text-soft)', class: 'mono' });
+      R(svg, 40, 200, 480, 10, { rx: 5, fill: 'var(--idle)' });
+      const prog = R(svg, 40, 200, 0, 10, { rx: 5, fill: 'var(--accent)' });
+      tl.to(prog, { attr: { width: 480 } }, { at: 0.3, dur: 3.5, ease: 'linear' });
+      tl.to(cntT, { text: 4096, fmt: (v) => '已加 ' + Math.round(v) + ' / 4096 个 1.0' }, { at: 0.3, dur: 3.5, ease: 'linear' });
+      tl.to(fp.v, { text: 4096 }, { at: 0.3, dur: 3.5, ease: 'linear' });
+      tl.to(bf.v, { text: 256 }, { at: 0.3, dur: 3.5 * 256 / 4096, ease: 'linear' });
+      tl.to(bf.b.r, { stroke: 'var(--grad)' }, { at: 0.6, dur: 0.3 });
+      tl.label('a', 4.2);
+      // number line near 256
+      cap(tl, sl, 1, 4.3);
+      const nl = G(svg, { opacity: 0 });
+      const X = (v) => 600 + (v - 250) * 40;
+      P(nl, `M${X(249.5)} 110 L${X(262.5)} 110`, { stroke: 'var(--border)' });
+      for (let v = 250; v <= 262; v++) {
+        const rep = v <= 256 || v % 2 === 0;
+        P(nl, `M${X(v)} ${rep ? 96 : 104} L${X(v)} ${rep ? 124 : 116}`, { stroke: rep ? 'var(--text-soft)' : 'var(--idle)', 'stroke-width': rep ? 2 : 1.5 });
+        if (v % 2 === 0) T(nl, X(v), 146, String(v), { 'font-size': 14, fill: 'var(--text-soft)', class: 'mono' });
+      }
+      T(nl, X(253), 70, '间隔 1', { 'font-size': 14, fill: 'var(--text-faint)' });
+      T(nl, X(259), 70, '间隔 2', { 'font-size': 14, fill: 'var(--text-faint)' });
+      tl.to(nl, { opacity: 1 }, { at: 4.4, dur: 0.5 });
+      const dot = G(svg, { opacity: 0 }); C(dot, X(256), 110, 9, { fill: 'var(--accent)' });
+      const ghost = G(svg, { opacity: 0 }); C(ghost, X(256), 110, 9, { fill: 'none', stroke: 'var(--grad)', 'stroke-width': 3 });
+      const plus = T(svg, X(256.5), 88, '+1', { 'font-size': 16, 'font-weight': 700, fill: 'var(--grad)', opacity: 0 });
+      const res = T(svg, X(256), 186, '257 → 256（就近取偶）', { 'font-size': 16, 'font-weight': 600, fill: 'var(--grad)', opacity: 0 });
+      tl.to(dot, { opacity: 1 }, { at: 4.9, dur: 0.3 }).to([ghost, plus], { opacity: 1 }, { at: 5.2, dur: 0.3 });
+      tl.to(ghost, { x: 40 }, { at: 5.4, dur: 0.7 }).to(ghost, { x: 0 }, { at: 6.4, dur: 0.5, ease: 'back' });
+      tl.to(res, { opacity: 1 }, { at: 6.7, dur: 0.4 });
+      tl.label('b', 7.3);
+      // realistic
+      cap(tl, sl, 2, 7.4);
+      const sc = 0.115;
+      const rb = (y, label, val, color) => {
+        T(svg, 600, y - 10, label, { 'text-anchor': 'start', 'font-size': 16, fill: 'var(--text-soft)', opacity: 0, class: 'lbl' + y });
+        const r = R(svg, 600, y, 0, 26, { rx: 5, fill: color });
+        const v = T(svg, 610, y + 19, '0', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--text)', class: 'mono', opacity: 0 });
+        return { r, v, l: $('.lbl' + y, svg), val };
+      };
+      const b1 = rb(260, 'FP32 累加 Σx²（4096 个 N(0,1)）', 4140, 'var(--accent)');
+      const b2 = rb(330, 'BF16 顺序累加', 2048, 'var(--grad)');
+      [b1, b2].forEach((b, i) => {
+        tl.to(b.l, { opacity: 1 }, { at: 7.5 + i * 0.2, dur: 0.3 });
+        tl.to(b.r, { attr: { width: b.val * sc } }, { at: 7.7 + i * 0.2, dur: 1.2, ease: 'out' });
+        tl.to(b.v, { opacity: 1, x: b.val * sc }, { at: 7.7 + i * 0.2, dur: 1.2, ease: 'out' });
+        tl.to(b.v, { text: b.val }, { at: 7.7 + i * 0.2, dur: 1.2, ease: 'out' });
+      });
+      const rr = T(svg, 600, 392, 'RMS：1.005 vs 0.707 → 输出被放大 1.42 倍', { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 600, fill: 'var(--grad)', opacity: 0 });
+      tl.to(rr, { opacity: 1 }, { at: 9.2, dur: 0.4 });
+      tl.label('c', 9.8);
+      // fp16 overflow
+      cap(tl, sl, 3, 9.9);
+      const ov = G(svg, { opacity: 0 });
+      T(ov, 40, 262, 'FP16：x = 300，x² = ?', { 'text-anchor': 'start', 'font-size': 16, fill: 'var(--text-soft)' });
+      const lim = 40 + 65504 / 90000 * 440;
+      P(ov, `M${lim} 270 L${lim} 330`, { stroke: 'var(--text)', 'stroke-dasharray': '4 4' });
+      T(ov, lim, 350, '65504（FP16 上限）', { 'font-size': 14, fill: 'var(--text-soft)' });
+      tl.to(ov, { opacity: 1 }, { at: 10.0, dur: 0.4 });
+      const ob = R(svg, 40, 282, 0, 30, { rx: 5, fill: 'var(--accent)' });
+      tl.to(ob, { attr: { width: 440 } }, { at: 10.4, dur: 1.4, ease: 'in' });
+      tl.to(ob, { fill: 'var(--grad)' }, { at: 11.0, dur: 0.3 });
+      const inf = T(svg, 260, 392, '90000 → inf', { 'font-size': 20, 'font-weight': 700, fill: 'var(--grad)', class: 'mono', opacity: 0 });
+      tl.to(inf, { opacity: 1, scale: 1.1 }, { at: 11.8, dur: 0.4 });
+    });
+
+    // ---------------- 10. GPU ----------------
+    scene('s-gpu', (tl, svg, sl) => {
+      R(svg, 30, 20, 640, 380, { rx: 18, fill: 'var(--surface)', stroke: 'var(--border)', 'stroke-width': 2 });
+      T(svg, 50, 46, 'H100 SXM', { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 700 });
+      const sms = [];
+      for (let r = 0; r < 11; r++) for (let c = 0; c < 12; c++) sms.push(R(svg, 62 + c * 48, 62 + r * 30, 40, 22, { rx: 4, fill: 'var(--idle)' }));
+      const hb = [];
+      for (let i = 0; i < 5; i++) {
+        const b = box(svg, 700, 26 + i * 76, 80, 64, '');
+        T(svg, 740, 64 + i * 76, 'HBM3', { 'font-size': 14, 'font-weight': 600, fill: 'var(--text-soft)' });
+        hb.push(b);
+      }
+      sms.forEach((s, i) => {
+        const r = Math.floor(i / 12), c = i % 12;
+        tl.to(s, { fill: 'var(--accent)' }, { at: 0.2 + (r + c) * 0.06, dur: 0.3 });
+      });
+      for (let k = 0; k < 10; k++) {
+        const p = pkt(svg, 700, 58 + (k % 5) * 76, 'var(--accent-2)', 18, 10);
+        tl.to(p, { opacity: 1 }, { at: 0.4 + k * 0.18, dur: 0.1 }).to(p, { x: -80 - (k % 3) * 40 }, { at: 0.4 + k * 0.18, dur: 0.7, ease: 'in' }).to(p, { opacity: 0 }, { at: 0.95 + k * 0.18, dur: 0.15 });
+      }
+      const stat = G(svg);
+      const rows = [['132', 'SM'], ['989', 'TFLOPS · BF16 稠密'], ['3.35', 'TB/s · HBM3 带宽'], ['295', 'FLOP / 字节']];
+      const nums = rows.map(([v, l], i) => {
+        const t = T(stat, 820, 76 + i * 92, '0', { 'text-anchor': 'start', 'font-size': 46, 'font-weight': 700, fill: i === 3 ? 'var(--accent-2)' : 'var(--text)', class: 'mono' });
+        T(stat, 822, 100 + i * 92, l, { 'text-anchor': 'start', 'font-size': 16, fill: 'var(--text-soft)' });
+        return [t, +v, v.includes('.') ? 2 : 0];
+      });
+      nums.forEach(([t, v, d], i) => tl.to(t, { text: v, fmt: (x) => x.toFixed(d) }, { at: 1.0 + i * 0.5, dur: 1.0, ease: 'out' }));
+      tl.label('a', 3.4);
+      cap(tl, sl, 1, 3.5);
+      tl.to(stat, { opacity: 0 }, { at: 3.5, dur: 0.4 });
+      tl.to(sms, { opacity: 0.35 }, { at: 3.6, dur: 0.4 });
+      tl.to(sms[0], { opacity: 1, fill: 'var(--accent-2)' }, { at: 3.6, dur: 0.4 });
+      const card = G(svg, { opacity: 0 });
+      R(card, 810, 40, 330, 340, { rx: 14, fill: 'var(--surface)', stroke: 'var(--accent-2)', 'stroke-width': 2 });
+      T(card, 830, 76, '一个 SM', { 'text-anchor': 'start', 'font-size': 20, 'font-weight': 700, fill: 'var(--accent-2)' });
+      ['寄存器 64K × 32 bit = 256 KB', 'shared memory / L1 最多 228 KB', '最多 2048 个线程常驻（64 warp）', '4 个分区，各自调度 warp', 'warp = 32 线程，同一条指令'].forEach((s, i) => T(card, 830, 120 + i * 50, s, { 'text-anchor': 'start', 'font-size': 17, fill: 'var(--text)' }));
+      P(svg, 'M102 73 L810 60', { stroke: 'var(--accent-2)', 'stroke-dasharray': '5 5', opacity: 0, class: 'zl' });
+      tl.to($('.zl', svg), { opacity: 0.7 }, { at: 3.9, dur: 0.4 });
+      tl.to(card, { opacity: 1 }, { at: 4.0, dur: 0.5 });
+    });
+
+    // ---------------- 11. roofline ----------------
+    scene('s-roof', (tl, svg, sl) => {
+      const X = (ai) => 110 + (Math.log10(ai) + 1) * 140;
+      const Y = (tf) => 370 - (Math.log10(tf) + 1) * 80;
+      P(svg, `M${X(0.1)} ${Y(0.1)} L${X(1000)} ${Y(0.1)}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M${X(0.1)} ${Y(0.1)} L${X(0.1)} ${Y(1000)}`, { stroke: 'var(--text-soft)' });
+      [0.1, 1, 10, 100, 1000].forEach((v) => { T(svg, X(v), 392, String(v), { 'font-size': 14, fill: 'var(--text-faint)', class: 'mono' }); T(svg, 98, Y(v) + 5, String(v), { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-faint)', class: 'mono' }); });
+      T(svg, X(1000), 412, 'FLOP / 字节', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-soft)' });
+      T(svg, 40, 30, 'TFLOPS', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
+      const roof = P(svg, `M${X(0.1)} ${Y(0.335)} L${X(295.2)} ${Y(989)} L${X(1000)} ${Y(989)}`, { stroke: 'var(--accent)', 'stroke-width': 4 });
+      const ridge = P(svg, `M${X(295.2)} ${Y(989)} L${X(295.2)} ${Y(0.1)}`, { stroke: 'var(--accent)', 'stroke-dasharray': '4 5', opacity: 0 });
+      const t1 = T(svg, X(3), Y(3.35 * 3) - 18, '3.35 TB/s × 强度', { 'font-size': 15, fill: 'var(--accent)', opacity: 0, transform: `rotate(-29 ${X(3)} ${Y(10)})` });
+      const t2 = T(svg, X(600), Y(989) - 12, '989 TFLOPS', { 'font-size': 15, fill: 'var(--accent)', opacity: 0 });
+      const t3 = T(svg, X(295.2), Y(0.1) - 8, '295', { 'font-size': 14, fill: 'var(--accent)', opacity: 0, class: 'mono' });
+      tl.to(roof, { draw: 1 }, { at: 0.2, dur: 1.4 }).to([t1, t2, ridge, t3], { opacity: 1 }, { at: 1.5, dur: 0.5 });
+      tl.label('a', 2.2);
+      cap(tl, sl, 1, 2.3);
+      const dots = [[1, 3.35, 'RMSNorm ≈ 1', 'var(--accent-2)'], [0.167, 0.56, '逐元素 add ≈ 0.17', 'var(--text-soft)'], [683, 989, 'GEMM 2048³ ≈ 683', 'var(--accent)']];
+      dots.forEach(([ai, tf, l, c], i) => {
+        const g = G(svg, { opacity: 0 });
+        C(g, X(ai), Y(tf), 9, { fill: c, stroke: 'var(--surface)', 'stroke-width': 2 });
+        T(g, X(ai) + (i === 2 ? -14 : 14), Y(tf) + (i === 2 ? 26 : 22), l, { 'text-anchor': i === 2 ? 'end' : 'start', 'font-size': 15, 'font-weight': 600, fill: c });
+        tl.set(g, { y: -60 }, { at: 0 });
+        tl.to(g, { opacity: 1, y: 0 }, { at: 2.4 + i * 0.4, dur: 0.7, ease: 'back' });
+      });
+      tl.label('b', 4.0);
+      cap(tl, sl, 2, 4.1);
+      const pan = G(svg, { opacity: 0 });
+      T(pan, 790, 70, 'M = 8192, d = 4096, BF16', { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 600 });
+      T(pan, 790, 112, '搬运 134 MB ÷ 3.35 TB/s', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      T(pan, 790, 212, '计算 134 MFLOP ÷ 989 TFLOPS', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      tl.to(pan, { opacity: 1 }, { at: 4.2, dur: 0.4 });
+      const mb = R(svg, 790, 124, 0, 30, { rx: 5, fill: 'var(--accent-2)' });
+      const cb = R(svg, 790, 224, 0, 30, { rx: 2, fill: 'var(--accent)' });
+      const mt = T(svg, 790, 182, '0', { 'text-anchor': 'start', 'font-size': 22, 'font-weight': 700, class: 'mono', fill: 'var(--accent-2)', opacity: 0 });
+      const ct = T(svg, 790, 282, '0', { 'text-anchor': 'start', 'font-size': 22, 'font-weight': 700, class: 'mono', fill: 'var(--accent)', opacity: 0 });
+      tl.to(mb, { attr: { width: 340 } }, { at: 4.6, dur: 1.4, ease: 'out' }).to(cb, { attr: { width: 340 * 0.14 / 40 + 1.5 } }, { at: 4.6, dur: 0.3 });
+      tl.to([mt, ct], { opacity: 1 }, { at: 4.6, dur: 0.3 });
+      tl.to(mt, { text: 40, fmt: (v) => '≈ ' + Math.round(v) + ' µs' }, { at: 4.6, dur: 1.4, ease: 'out' });
+      tl.to(ct, { text: 0.14, fmt: (v) => '≈ ' + v.toFixed(2) + ' µs' }, { at: 4.6, dur: 0.6 });
+    });
+
+    // ---------------- 12. eager ----------------
+    scene('s-eager', (tl, svg, sl) => {
+      const hl = $('.hl', sl);
+      const sm = box(svg, 70, 20, 420, 76, 'SM');
+      const segs = ['x', 'x32', 'sq', 'var', 'xn', 'xn16', 'y'];
+      const sw = 420 / 7, hy = 250;
+      const segR = segs.map((s, i) => { const r = R(svg, 70 + i * sw + 2, hy, sw - 4, 44, { rx: 6, fill: 'var(--bg-soft)', stroke: 'var(--border)' }); T(svg, 70 + i * sw + sw / 2, hy + 28, s, { 'font-size': 14, class: 'mono' }); return r; });
+      T(svg, 40, hy + 28, 'HBM', { 'text-anchor': 'end', 'font-size': 14, 'font-weight': 700, fill: 'var(--text-soft)' });
+      const bytes = T(svg, 280, 334, '0', { 'font-size': 20, 'font-weight': 700, fill: 'var(--accent-2)' });
+      const launches = T(svg, 280, 140, '0', { 'font-size': 17, fill: 'var(--text-soft)' });
+      const K = [[1, 0, 1, 1, 2, 6], [2, 1, 2, 2, 2, 8], [3, 2, 3, 2, 0, 4], [4, 3, 3, 0, 0, 0], [5, 3, 3, 0, 0, 0], [6, 1, 4, 2, 2, 8], [7, 4, 5, 2, 1, 6], [8, 5, 6, 1, 1, 4]];
+      const cx = (i) => 70 + i * sw + sw / 2;
+      let total = 0, t = 0.2;
+      const run = (k) => {
+        const [line, src, dst, up, down, b] = K[k];
+        tl.to(hl, { opacity: 1, y: line * 22 }, { at: t, dur: 0.3 });
+        tl.to(launches, { text: k + 1, fmt: (v) => 'kernel launch × ' + Math.round(v) }, { at: t, dur: 0.2 });
+        flash(tl, sm.r, 'var(--accent)', t + 0.2);
+        const nu = up || 1, nd = down || (dst !== src ? 0 : 1);
+        for (let j = 0; j < nu; j++) {
+          const p = pkt(svg, cx(src) + (j - (nu - 1) / 2) * 16, hy, up ? 'var(--accent)' : 'var(--text-faint)', up ? 14 : 8, up ? 12 : 8);
+          tl.to(p, { opacity: 1 }, { at: t + 0.2 + j * 0.08, dur: 0.1 });
+          tl.to(p, { x: 280 - cx(src), y: 58 - hy }, { at: t + 0.25 + j * 0.08, dur: 0.55 });
+          tl.to(p, { opacity: 0 }, { at: t + 0.8 + j * 0.08, dur: 0.15 });
+        }
+        for (let j = 0; j < nd; j++) {
+          const p = pkt(svg, 280 + (j - (nd - 1) / 2) * 16, 58, down ? 'var(--accent-2)' : 'var(--text-faint)', down ? 14 : 8, down ? 12 : 8);
+          tl.to(p, { opacity: 1 }, { at: t + 0.95 + j * 0.08, dur: 0.1 });
+          tl.to(p, { x: cx(dst) - 280, y: hy - 58 }, { at: t + 1.0 + j * 0.08, dur: 0.55 });
+          tl.to(p, { opacity: 0.0 }, { at: t + 1.55 + j * 0.08, dur: 0.15 });
+        }
+        tl.to(segR[dst], { fill: 'var(--accent-soft)' }, { at: t + 1.4, dur: 0.3 });
+        total += b;
+        tl.to(bytes, { text: total, fmt: (v) => 'HBM 流量：' + Math.round(v) + ' B / 元素' }, { at: t + 0.3, dur: 1.2 });
+        t += 1.8;
+      };
+      tl.set(bytes, { text: 0, fmt: (v) => 'HBM 流量：' + Math.round(v) + ' B / 元素' }, { at: 0 });
+      tl.set(launches, { text: 0, fmt: (v) => 'kernel launch × ' + Math.round(v) }, { at: 0 });
+      [0, 1, 2].forEach(run);
+      tl.label('a', t);
+      cap(tl, sl, 1, t + 0.1); t += 0.2;
+      [3, 4, 5, 6, 7].forEach(run);
+      tl.label('b', t);
+      cap(tl, sl, 2, t + 0.1);
+      tl.to(bytes, { scale: 1.25 }, { at: t + 0.2, dur: 0.4, ease: 'back' });
+    });
+
+    // ---------------- 13. fused ----------------
+    scene('s-fused', (tl, svg, sl) => {
+      const sm = box(svg, 330, 14, 500, 104, '');
+      T(svg, 350, 40, 'SM · 一个 kernel', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700 });
+      const regs = [];
+      for (let i = 0; i < 16; i++) regs.push(R(svg, 350 + i * 29, 70, 25, 30, { rx: 4, fill: 'var(--idle)' }));
+      const steps = ['① 读入并转 FP32', '② 平方累加 + 归约 → r', '③ × r × g，转 bf16'].map((s, i) => T(svg, 810, 40, s, { 'text-anchor': 'end', 'font-size': 15, fill: 'var(--accent-2)', 'font-weight': 600, opacity: 0 }));
+      const hy = 184;
+      const segs = [['x (bf16)', 2], ['g', 0.5], ['y (bf16)', 2], ['rstd', 0.4]];
+      let xx = 160;
+      const segX = segs.map(([l, w]) => { const W = w * 180; R(svg, xx, hy, W - 6, 44, { rx: 6, fill: 'var(--bg-soft)', stroke: 'var(--border)' }); T(svg, xx + (W - 6) / 2, hy + 28, l, { 'font-size': 14, class: 'mono' }); const c = xx + (W - 6) / 2; xx += W; return c; });
+      T(svg, 140, hy + 28, 'HBM', { 'text-anchor': 'end', 'font-size': 14, 'font-weight': 700, fill: 'var(--text-soft)' });
+      const px = pkt(svg, segX[0], hy, 'var(--accent)', 30, 16), pg = pkt(svg, segX[1], hy, 'var(--c3)', 16, 12);
+      tl.to([px, pg], { opacity: 1 }, { at: 0.2, dur: 0.2 });
+      tl.to(px, { x: 580 - segX[0], y: 85 - hy }, { at: 0.3, dur: 0.8 }).to(px, { opacity: 0 }, { at: 1.1, dur: 0.2 });
+      tl.to(steps[0], { opacity: 1 }, { at: 0.4, dur: 0.3 });
+      tl.to(regs, { fill: 'var(--accent)' }, { at: 1.0, dur: 0.3, stagger: 0.03 });
+      tl.to(steps[0], { opacity: 0 }, { at: 1.7, dur: 0.3 }).to(steps[1], { opacity: 1 }, { at: 1.9, dur: 0.3 });
+      regs.forEach((r, i) => tl.to(r, { scale: 0.7 }, { at: 1.9 + (i % 4) * 0.12, dur: 0.2 }).to(r, { scale: 1 }, { at: 2.15 + (i % 4) * 0.12, dur: 0.2 }));
+      tl.to(pg, { x: 580 - segX[1], y: 85 - hy }, { at: 2.4, dur: 0.7 }).to(pg, { opacity: 0 }, { at: 3.1, dur: 0.2 });
+      tl.to(steps[1], { opacity: 0 }, { at: 3.0, dur: 0.3 }).to(steps[2], { opacity: 1 }, { at: 3.2, dur: 0.3 });
+      tl.to(regs, { fill: 'var(--accent-2)' }, { at: 3.2, dur: 0.3, stagger: 0.03 });
+      const py = pkt(svg, 580, 85, 'var(--accent-2)', 30, 16), pr = pkt(svg, 580, 85, 'var(--text-faint)', 8, 8);
+      tl.to([py, pr], { opacity: 1 }, { at: 3.9, dur: 0.2 });
+      tl.to(py, { x: segX[2] - 580, y: hy - 85 }, { at: 4.0, dur: 0.8 }).to(pr, { x: segX[3] - 580, y: hy - 85 }, { at: 4.0, dur: 0.8 });
+      tl.to([py, pr], { opacity: 0 }, { at: 4.8, dur: 0.2 });
+      tl.to(sm.r, { stroke: 'var(--accent)' }, { at: 0.3, dur: 0.3 });
+      tl.label('a', 5.2);
+      cap(tl, sl, 1, 5.3);
+      const cmp = (y, label, val, color, launches) => {
+        T(svg, 250, y + 22, label, { 'text-anchor': 'end', 'font-size': 17, fill: 'var(--text-soft)' });
+        const r = R(svg, 270, y, 0, 32, { rx: 6, fill: color });
+        const v = T(svg, 282, y + 23, '0', { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 700, class: 'mono', opacity: 0 });
+        tl.to(r, { attr: { width: val * 22 } }, { at: 5.5, dur: 1.2, ease: 'out' });
+        tl.to(v, { opacity: 1, x: val * 22 }, { at: 5.5, dur: 1.2, ease: 'out' });
+        tl.to(v, { text: val, fmt: (x) => Math.round(x) + ' B/元素 · ' + launches }, { at: 5.5, dur: 1.2, ease: 'out' });
+      };
+      cmp(272, 'eager', 36, 'var(--text-faint)', '8 个 kernel');
+      cmp(332, '融合', 4, 'var(--accent-2)', '1 个 kernel');
+    });
+
+    // ---------------- 14. map ----------------
+    scene('s-map', (tl, svg, sl) => {
+      T(svg, 40, 18, 'x：[M tokens × d]', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const sms = [];
+      for (let k = 0; k < 6; k++) {
+        const c = k % 2, r = Math.floor(k / 2);
+        const b = box(svg, 600 + c * 280, 20 + r * 125, 250, 105, '');
+        T(svg, 615 + c * 280, 42 + r * 125, 'SM ' + k, { 'text-anchor': 'start', 'font-size': 14, 'font-weight': 700, fill: 'var(--text-soft)' });
+        sms.push([600 + c * 280 + 125, 20 + r * 125, b]);
+      }
+      const rows = [];
+      for (let r = 0; r < 12; r++) {
+        const g = G(svg, { fill: 'var(--idle)' });
+        for (let c = 0; c < 16; c++) R(g, 40 + c * 28, 30 + r * 28, 26, 20, { rx: 3 });
+        rows.push(g);
+      }
+      rows.forEach((g, r) => {
+        const k = r % 6, wave = Math.floor(r / 6);
+        const [cx, top, b] = sms[k];
+        const tx = cx - 264, ty = top + 58 + wave * 26 - (40 + r * 28);
+        const at = 0.3 + wave * 1.6 + k * 0.12;
+        tl.to(g, { fill: wave ? 'var(--accent-2)' : 'var(--accent)' }, { at, dur: 0.3 });
+        tl.to(g, { x: tx, y: ty, scale: 0.47 }, { at: at + 0.1, dur: 0.9 });
+        flash(tl, b.r, wave ? 'var(--accent-2)' : 'var(--accent)', at + 0.8);
+      });
+      const blk = T(svg, 280, 395, 'grid = M 个 block，一个 block 一行', { 'font-size': 17, 'font-weight': 600, fill: 'var(--text)', opacity: 0 });
+      tl.to(blk, { opacity: 1 }, { at: 3.4, dur: 0.4 });
+      tl.label('a', 4.0);
+      cap(tl, sl, 1, 4.1);
+      tl.to(blk, { opacity: 0 }, { at: 4.1, dur: 0.3 });
+      const det = G(svg, { opacity: 0 });
+      T(det, 40, 70, '一行（d = 4096）→ 一个 block = 8 warp × 32 lane', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 600 });
+      tl.to(det, { opacity: 1 }, { at: 4.2, dur: 0.3 });
+      const chunks = [];
+      for (let w = 0; w < 8; w++) {
+        const g = G(svg, { opacity: 0 });
+        R(g, 40 + w * 56, 110, 54, 40, { rx: 4, fill: w % 2 ? 'var(--accent)' : 'color-mix(in srgb, var(--accent) 60%, var(--surface))' });
+        T(g, 40 + w * 56 + 27, 136, 'w' + w, { 'font-size': 14, 'font-weight': 700, fill: 'var(--bg)' });
+        chunks.push(g);
+      }
+      tl.to(chunks, { opacity: 1 }, { at: 4.3, dur: 0.3 });
+      chunks.forEach((g, w) => tl.to(g, { y: 40 + Math.floor(w / 4) * 80, x: (w % 4) * 56 - w * 56 + (w % 4) * 60 }, { at: 4.9, dur: 0.8 }));
+      const lane = G(svg, { opacity: 0 });
+      T(lane, 40, 330, '每个 warp 512 个元素 = 32 lane × 16 个', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      for (let l = 0; l < 32; l++) R(lane, 40 + l * 14, 345, 12, 22, { rx: 2, fill: 'var(--accent)', opacity: 0.4 + 0.6 * ((l % 4) / 3) });
+      tl.to(lane, { opacity: 1 }, { at: 5.8, dur: 0.4 });
+      tl.label('b', 6.4);
+      cap(tl, sl, 2, 6.5);
+    });
+
+    // ---------------- 15. vector loads ----------------
+    scene('s-vec', (tl, svg, sl) => {
+      const X0 = 64, cw = 4, sy = 46;
+      T(svg, X0, 30, '一个 warp 一轮要读的 512 B = 256 个 bf16', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      for (let e = 0; e < 256; e++) R(svg, X0 + e * cw, sy, cw - 0.6, 26, { rx: 0.5, fill: e % 8 < 4 ? 'var(--accent)' : 'color-mix(in srgb, var(--accent) 65%, var(--surface))' });
+      const ly = 150, lh = 120;
+      for (let l = 0; l < 32; l++) {
+        R(svg, X0 + l * 32 + 1, ly, 30, lh, { rx: 4, fill: 'var(--surface)', stroke: 'var(--border)' });
+        if (l % 4 === 0) T(svg, X0 + l * 32 + 16, ly + lh + 18, String(l), { 'font-size': 12, fill: 'var(--text-faint)', class: 'mono' });
+      }
+      T(svg, X0 - 8, ly + 60, 'lane', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-faint)' });
+      const ins = T(svg, 1090, 30, '0', { 'text-anchor': 'end', 'font-size': 18, 'font-weight': 700, fill: 'var(--accent-2)' });
+      const fmtI = (v) => 'load 指令 × ' + Math.round(v);
+      tl.set(ins, { text: 0, fmt: fmtI }, { at: 0 });
+      const sc = [];
+      for (let w = 0; w < 8; w++) {
+        for (let l = 0; l < 32; l++) {
+          const e = w * 32 + l;
+          const r = R(svg, X0 + e * cw, sy, cw, 26, { rx: 0.5, fill: 'var(--accent-2)', opacity: 0 });
+          sc.push(r);
+          const at = 0.4 + w * 0.42;
+          tl.to(r, { opacity: 1 }, { at, dur: 0.05 });
+          tl.to(r, { attr: { x: X0 + l * 32 + 4, y: ly + 6 + w * 14, width: 24, height: 11 } }, { at: at + 0.05, dur: 0.35 });
+        }
+        tl.to(ins, { text: w + 1, fmt: fmtI }, { at: 0.4 + w * 0.42, dur: 0.1 });
+      }
+      const m1 = T(svg, 576, 340, '标量：每 lane 每条指令 2 B', { 'font-size': 17, 'font-weight': 600, fill: 'var(--text-soft)', opacity: 0 });
+      tl.to(m1, { opacity: 1 }, { at: 0.5, dur: 0.3 });
+      tl.label('a', 4.2);
+      cap(tl, sl, 1, 4.3);
+      tl.to(sc, { opacity: 0 }, { at: 4.3, dur: 0.4 });
+      tl.to(m1, { opacity: 0 }, { at: 4.3, dur: 0.3 });
+      tl.set(ins, { text: 0, fmt: fmtI }, { at: 4.6 });
+      const vec = [];
+      for (let l = 0; l < 32; l++) {
+        const r = R(svg, X0 + l * 32, sy, 32, 26, { rx: 2, fill: 'var(--accent-2)', opacity: 0, stroke: 'var(--surface)' });
+        vec.push(r);
+        tl.to(r, { opacity: 1 }, { at: 4.8, dur: 0.1 });
+        tl.to(r, { attr: { x: X0 + l * 32 + 4, y: ly + 6, width: 24, height: lh - 12 } }, { at: 4.95, dur: 0.6 });
+      }
+      tl.to(ins, { text: 1, fmt: fmtI }, { at: 4.8, dur: 0.1 });
+      const m2 = T(svg, 576, 340, '向量：每 lane 一条 LDG.E.128 拿 16 B', { 'font-size': 17, 'font-weight': 600, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(m2, { opacity: 1 }, { at: 5.3, dur: 0.3 });
+      tl.label('b', 6.0);
+      cap(tl, sl, 2, 6.1);
+      tl.to(m2, { opacity: 0 }, { at: 6.1, dur: 0.3 });
+      const ov = G(svg);
+      T(ov, X0, 345, '整行 4096 个 bf16 = 16 轮 warp 读（8 warp × 2）', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)', opacity: 0, class: 'ovl' });
+      tl.to($('.ovl', svg), { opacity: 1 }, { at: 6.2, dur: 0.3 });
+      for (let k = 0; k < 16; k++) {
+        const w = k % 8;
+        const r = R(ov, X0 + k * 64, 360, 62, 26, { rx: 3, fill: w % 2 ? 'var(--accent)' : 'color-mix(in srgb, var(--accent) 55%, var(--surface))', opacity: 0 });
+        T(ov, X0 + k * 64 + 31, 378, 'w' + w, { 'font-size': 12, fill: 'var(--bg)', 'font-weight': 700, opacity: 0, class: 'wl' + k });
+        tl.to([r, $('.wl' + k, svg)], { opacity: 1 }, { at: 6.4 + k * 0.08, dur: 0.25 });
+      }
+    });
+
+    // ---------------- 16. shuffle butterfly ----------------
+    scene('s-shfl', (tl, svg, sl) => {
+      let v = [3, 1, 4, 1, 5, 9, 2, 6, 5, 3, 5, 8, 9, 7, 9, 3, 2, 3, 8, 4, 6, 2, 6, 4, 3, 3, 8, 3, 2, 7, 9, 5];
+      const X = (i) => 46 + i * 34.6, Y = (r) => 26 + r * 69;
+      T(svg, X(0), 10, 'lane 0', { 'font-size': 12, fill: 'var(--text-faint)' });
+      T(svg, X(31), 10, 'lane 31', { 'font-size': 12, fill: 'var(--text-faint)' });
+      const offs = [16, 8, 4, 2, 1];
+      const mkRow = (r, vals, color) => vals.map((val, i) => {
+        const g = G(svg, { opacity: 0 });
+        R(g, X(i) - 15, Y(r) - 12, 30, 24, { rx: 5, fill: r === 5 ? 'var(--accent-2)' : 'var(--surface)', stroke: color, 'stroke-width': 1.5 });
+        T(g, X(i), Y(r) + 5, String(val), { 'font-size': val > 99 ? 11.5 : 13, 'font-weight': 600, class: 'mono', fill: r === 5 ? 'var(--bg)' : 'var(--text)' });
+        return g;
+      });
+      const r0 = mkRow(0, v, 'var(--border)');
+      tl.to(r0, { opacity: 1 }, { at: 0.2, dur: 0.3, stagger: 0.02 });
+      tl.label('s0', 1.2);
+      let t = 1.3;
+      offs.forEach((o, k) => {
+        cap(tl, sl, [1, 2, 3, 3, 4][k], t);
+        const lines = [], vert = [];
+        for (let i = 0; i < 32; i++) {
+          const j = i ^ o;
+          lines.push(P(svg, `M${X(j)} ${Y(k) + 12} L${X(i)} ${Y(k + 1) - 12}`, { stroke: 'var(--accent)', 'stroke-width': 1.4, opacity: 0.8 }));
+          vert.push(P(svg, `M${X(i)} ${Y(k) + 12} L${X(i)} ${Y(k + 1) - 12}`, { stroke: 'var(--idle)', 'stroke-width': 1.2 }));
+        }
+        tl.to(vert, { draw: 1 }, { at: t + 0.1, dur: 0.4 });
+        tl.to(lines, { draw: 1 }, { at: t + 0.2, dur: 0.7, stagger: 0.012 });
+        v = v.map((x, i) => x + v[i ^ o]);
+        const row = mkRow(k + 1, v, k === 4 ? 'var(--accent-2)' : 'var(--accent)');
+        tl.to(row, { opacity: 1 }, { at: t + 0.8, dur: 0.3, stagger: 0.012 });
+        t += 1.9;
+        if (k < 4) tl.label('s' + (k + 1), t - 0.2);
+      });
+    });
+
+    // ---------------- 17. block reduce ----------------
+    scene('s-block', (tl, svg, sl) => {
+      const part = [171, 160, 149, 183, 158, 166, 175, 152];
+      const tot = part.reduce((a, b) => a + b);
+      const W = (w) => 30 + w * 140;
+      const warps = part.map((p, w) => {
+        const b = box(svg, W(w), 20, 124, 72, '');
+        T(svg, W(w) + 62, 46, 'warp ' + w, { 'font-size': 15, 'font-weight': 700, fill: 'var(--text-soft)' });
+        T(svg, W(w) + 62, 76, String(p), { 'font-size': 18, class: 'mono', 'font-weight': 600 });
+        return b;
+      });
+      const S0 = (i) => 300 + i * 70;
+      T(svg, 280, 214, 'shared memory', { 'text-anchor': 'end', 'font-size': 15, 'font-weight': 600, fill: 'var(--text-soft)' });
+      const slots = part.map((p, i) => { R(svg, S0(i), 190, 62, 38, { rx: 5, fill: 'var(--bg-soft)', stroke: 'var(--border)' }); return T(svg, S0(i) + 31, 215, String(p), { 'font-size': 16, class: 'mono', opacity: 0 }); });
+      R(svg, 890, 190, 80, 38, { rx: 5, fill: 'var(--bg-soft)', stroke: 'var(--c3)', 'stroke-width': 2 });
+      const rT = T(svg, 930, 215, 'r', { 'font-size': 17, 'font-weight': 700, fill: 'var(--c3)', opacity: 0 });
+      const bar1 = P(svg, 'M30 146 L1140 146', { stroke: 'var(--accent-2)', 'stroke-dasharray': '7 6' });
+      const bt = T(svg, 1140, 138, '__syncthreads()', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--accent-2)', class: 'mono', opacity: 0 });
+      part.forEach((p, w) => {
+        const k = pkt(svg, W(w) + 62, 92, 'var(--accent)', 26, 14);
+        tl.to(k, { opacity: 1 }, { at: 0.3 + w * 0.08, dur: 0.15 });
+        tl.to(k, { x: S0(w) + 31 - (W(w) + 62), y: 209 - 92 }, { at: 0.4 + w * 0.08, dur: 0.8 });
+        tl.to(k, { opacity: 0 }, { at: 1.2 + w * 0.08, dur: 0.15 });
+        tl.to(slots[w], { opacity: 1 }, { at: 1.2 + w * 0.08, dur: 0.2 });
+      });
+      tl.to(bar1, { draw: 1 }, { at: 2.1, dur: 0.8 }).to(bt, { opacity: 1 }, { at: 2.3, dur: 0.4 });
+      tl.label('a', 3.1);
+      cap(tl, sl, 1, 3.2);
+      T(svg, 280, 312, 'warp 0', { 'text-anchor': 'end', 'font-size': 15, 'font-weight': 700, fill: 'var(--accent)' });
+      const lanes = part.map((p, i) => {
+        R(svg, S0(i), 288, 62, 36, { rx: 5, fill: 'var(--surface)', stroke: 'var(--accent)' });
+        return T(svg, S0(i) + 31, 312, String(p), { 'font-size': 16, class: 'mono', opacity: 0 });
+      });
+      tl.to(warps[0].r, { stroke: 'var(--accent)' }, { at: 3.2, dur: 0.3 });
+      part.forEach((p, i) => {
+        const k = pkt(svg, S0(i) + 31, 228, 'var(--accent)', 26, 14);
+        tl.to(k, { opacity: 1 }, { at: 3.4 + i * 0.05, dur: 0.1 }).to(k, { y: 78 }, { at: 3.45 + i * 0.05, dur: 0.5 }).to(k, { opacity: 0 }, { at: 3.95 + i * 0.05, dur: 0.1 });
+        tl.to(lanes[i], { opacity: 1 }, { at: 3.95 + i * 0.05, dur: 0.2 });
+      });
+      let vals = part.slice();
+      [4, 2, 1].forEach((o, s) => {
+        vals = vals.map((x, i) => x + vals[i ^ o]);
+        vals.forEach((x, i) => tl.to(lanes[i], { text: x }, { at: 4.6 + s * 0.7, dur: 0.5 }));
+      });
+      const sumT = T(svg, 870, 312, 'Σ = ' + tot, { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, fill: 'var(--accent)', opacity: 0 });
+      tl.to(sumT, { opacity: 1 }, { at: 6.6, dur: 0.4 });
+      tl.label('b', 7.2);
+      cap(tl, sl, 2, 7.3);
+      const rf = T(svg, 576, 380, 'r = rsqrt(Σ / d + ε)', { 'font-size': 19, 'font-weight': 700, fill: 'var(--c3)', class: 'mono', opacity: 0 });
+      tl.to(rf, { opacity: 1 }, { at: 7.4, dur: 0.4 });
+      const kr = pkt(svg, S0(0) + 31, 306, 'var(--c3)', 26, 14);
+      tl.to(kr, { opacity: 1 }, { at: 7.8, dur: 0.1 }).to(kr, { x: 930 - (S0(0) + 31), y: 209 - 306 }, { at: 7.9, dur: 0.7 }).to(kr, { opacity: 0 }, { at: 8.6, dur: 0.1 });
+      tl.to(rT, { opacity: 1 }, { at: 8.6, dur: 0.2 });
+      tl.to(bar1, { stroke: 'var(--c3)' }, { at: 8.8, dur: 0.3 });
+      part.forEach((p, w) => {
+        const k = pkt(svg, 930, 190, 'var(--c3)', 20, 12);
+        tl.to(k, { opacity: 1 }, { at: 9.1, dur: 0.1 }).to(k, { x: W(w) + 62 - 930, y: 92 - 190 }, { at: 9.2 + w * 0.04, dur: 0.7 }).to(k, { opacity: 0 }, { at: 9.9 + w * 0.04, dur: 0.1 });
+        tl.to(warps[w].r, { stroke: 'var(--c3)' }, { at: 9.9 + w * 0.04, dur: 0.2 });
+      });
+    });
+
+    // ---------------- 18. register caching ----------------
+    scene('s-reg', (tl, svg, sl) => {
+      const track = (y0, title) => {
+        T(svg, 40, y0 + 4, title, { 'text-anchor': 'start', 'font-size': 17, 'font-weight': 700 });
+        const h = box(svg, 40, y0 + 22, 170, 90, '');
+        T(svg, 125, y0 + 62, 'HBM', { 'font-size': 16, 'font-weight': 700, fill: 'var(--text-soft)' });
+        T(svg, 125, y0 + 86, 'x → y', { 'font-size': 14, class: 'mono', fill: 'var(--text-faint)' });
+        const s = box(svg, 640, y0 + 12, 480, 110, '');
+        T(svg, 660, y0 + 38, 'SM · 寄存器', { 'text-anchor': 'start', 'font-size': 15, 'font-weight': 700, fill: 'var(--text-soft)' });
+        const regs = [];
+        for (let i = 0; i < 14; i++) regs.push(R(svg, 660 + i * 32, y0 + 62, 28, 32, { rx: 4, fill: 'var(--idle)' }));
+        const cnt = T(svg, 425, y0 + 128, '', { 'font-size': 17, 'font-weight': 700, fill: 'var(--accent-2)' });
+        return { y0, regs, cnt, s };
+      };
+      const A = track(10, '不缓存：x 读两遍'), B = track(205, '寄存器缓存：x 读一遍');
+      const flow = (tr, at, dir, color, n = 4) => {
+        for (let k = 0; k < n; k++) {
+          const sx = dir > 0 ? 215 : 635, ex = dir > 0 ? 635 : 215;
+          const p = pkt(svg, sx, tr.y0 + 67, color, 22, 14);
+          tl.to(p, { opacity: 1 }, { at: at + k * 0.12, dur: 0.1 }).to(p, { x: ex - sx }, { at: at + k * 0.12, dur: 0.8 }).to(p, { opacity: 0 }, { at: at + 0.8 + k * 0.12, dur: 0.1 });
+        }
+      };
+      const fmtA = (v) => 'HBM 流量 ' + Math.round(v) + ' B/元素';
+      tl.set([A.cnt, B.cnt], { text: 0, fmt: fmtA }, { at: 0 });
+      flow(A, 0.3, 1, 'var(--accent)');
+      tl.to(A.regs, { fill: 'var(--accent)' }, { at: 1.1, dur: 0.2, stagger: 0.02 });
+      tl.to(A.cnt, { text: 2, fmt: fmtA }, { at: 0.4, dur: 0.6 });
+      const sA = T(svg, 1100, 48, 'Σx² ✓', { 'text-anchor': 'end', 'font-size': 15, 'font-weight': 700, fill: 'var(--accent)', opacity: 0 });
+      tl.to(sA, { opacity: 1 }, { at: 1.6, dur: 0.3 });
+      tl.to(A.regs, { fill: 'var(--idle)' }, { at: 1.9, dur: 0.3 });
+      flow(A, 2.3, 1, 'var(--accent)');
+      tl.to(A.cnt, { text: 4, fmt: fmtA }, { at: 2.4, dur: 0.6 });
+      tl.to(A.regs, { fill: 'var(--accent-2)' }, { at: 3.1, dur: 0.2, stagger: 0.02 });
+      flow(A, 3.7, -1, 'var(--accent-2)');
+      tl.to(A.cnt, { text: 6, fmt: fmtA }, { at: 3.8, dur: 0.6 });
+      tl.label('a', 4.8);
+      cap(tl, sl, 1, 4.9);
+      flow(B, 5.0, 1, 'var(--accent)');
+      tl.to(B.regs, { fill: 'var(--accent)' }, { at: 5.8, dur: 0.2, stagger: 0.02 });
+      tl.to(B.cnt, { text: 2, fmt: fmtA }, { at: 5.1, dur: 0.6 });
+      const sB = T(svg, 1100, 243, 'Σx² ✓ → r', { 'text-anchor': 'end', 'font-size': 15, 'font-weight': 700, fill: 'var(--accent)', opacity: 0 });
+      tl.to(sB, { opacity: 1 }, { at: 6.3, dur: 0.3 });
+      B.regs.forEach((r, i) => tl.to(r, { scale: 0.75 }, { at: 6.7 + i * 0.03, dur: 0.15 }).to(r, { scale: 1, fill: 'var(--accent-2)' }, { at: 6.85 + i * 0.03, dur: 0.2 }));
+      flow(B, 7.4, -1, 'var(--accent-2)');
+      tl.to(B.cnt, { text: 4, fmt: fmtA }, { at: 7.5, dur: 0.6 });
+      tl.label('b', 8.5);
+      cap(tl, sl, 2, 8.6);
+      const budget = T(svg, 576, 398, 'd = 4096 / 256 线程 → 16 个寄存器；d = 16384 → 64；单线程上限 255', { 'font-size': 16, fill: 'var(--text-soft)', opacity: 0 });
+      tl.to(budget, { opacity: 1 }, { at: 8.8, dur: 0.4 });
+    });
+
+    // ---------------- 19. CUDA walkthrough ----------------
+    scene('s-cuda', (tl, svg, sl) => {
+      const hl = $('.hl', sl);
+      hl.style.setProperty('--h', '22');
+      const ph = ['定位这一行', '128-bit 读入寄存器', '转 FP32，平方累加', 'block 归约', 'rsqrt，存 rstd', '× r × g，写回'];
+      const dots = ph.map((s, i) => {
+        const g = G(svg);
+        const c = C(g, 30, 34 + i * 60, 14, { fill: 'var(--idle)' });
+        T(g, 30, 39 + i * 60, String(i + 1), { 'font-size': 13, 'font-weight': 700, fill: 'var(--bg)' });
+        const t = T(g, 56, 40 + i * 60, s, { 'text-anchor': 'start', 'font-size': 17, fill: 'var(--text-faint)' });
+        if (i < 5) P(g, `M30 ${50 + i * 60} L30 ${78 + i * 60}`, { stroke: 'var(--idle)' });
+        return [c, t];
+      });
+      const go = (i, line, h, at) => {
+        tl.to(hl, { opacity: 1, y: line * 22, style: { '--h': h * 22 } }, { at, dur: 0.45 });
+        dots.forEach(([c, t], j) => {
+          tl.to(c, { fill: j === i ? 'var(--accent)' : j < i ? 'var(--accent-2)' : 'var(--idle)', scale: j === i ? 1.25 : 1 }, { at, dur: 0.35 });
+          tl.to(t, { fill: j === i ? 'var(--text)' : j < i ? 'var(--text-soft)' : 'var(--text-faint)' }, { at, dur: 0.35 });
+        });
+      };
+      go(0, 2, 2, 0.3);
+      tl.label('a', 1.2);
+      cap(tl, sl, 1, 1.3);
+      go(1, 6, 3, 1.4);
+      go(2, 8, 2, 2.6);
+      tl.label('b', 3.6);
+      cap(tl, sl, 2, 3.7);
+      go(3, 11, 1, 3.8);
+      go(4, 12, 2, 5.0);
+      go(5, 14, 2, 6.2);
+    });
+
+    // ---------------- 20. fusion bytes ----------------
+    scene('s-fuse', (tl, svg, sl) => {
+      T(svg, 576, 30, 'h = h + o    x = RMSNorm(h) · g    x8 = fp8(x / s)', { 'font-size': 19, class: 'mono', fill: 'var(--text-soft)' });
+      const sc = 56, X0 = 230;
+      T(svg, X0 - 20, 132, '分开的 kernel', { 'text-anchor': 'end', 'font-size': 18, 'font-weight': 700 });
+      T(svg, X0 - 20, 282, '融合 kernel', { 'text-anchor': 'end', 'font-size': 18, 'font-weight': 700 });
+      const seg = (x, y, w, color, label, sub) => {
+        const g = G(svg);
+        const r = R(g, x, y, 0, 46, { rx: 6, fill: color, stroke: 'var(--surface)', 'stroke-width': 2 });
+        const t = T(g, x + w / 2, y + 22, label, { 'font-size': 15, 'font-weight': 700, fill: 'var(--bg)', opacity: 0 });
+        const t2 = T(g, x + w / 2, y + 39, sub, { 'font-size': 12, fill: 'var(--bg)', opacity: 0 });
+        return { r, t, t2, w };
+      };
+      const grow = (s, at, dur = 0.7) => { tl.to(s.r, { attr: { width: s.w } }, { at, dur, ease: 'out' }); tl.to([s.t, s.t2], { opacity: 1 }, { at: at + dur * 0.6, dur: 0.3 }); };
+      const u1 = seg(X0, 108, 6 * sc, 'var(--text-faint)', 'add', 'R h, o · W h′  = 6 B');
+      const u2 = seg(X0 + 6 * sc, 108, 4 * sc, 'var(--text-soft)', 'RMSNorm', 'R h′ · W x = 4 B');
+      const u3 = seg(X0 + 10 * sc, 108, 3 * sc, 'var(--text-faint)', 'quant', 'R x · W x8 = 3 B');
+      const f1 = seg(X0, 258, 6 * sc, 'var(--accent)', '读 h、o，写 h', '6 B');
+      const f2 = seg(X0 + 6 * sc, 258, 2 * sc, 'var(--accent-2)', '写 x', '2 B');
+      const f3 = seg(X0 + 6 * sc, 258, 1 * sc, 'var(--accent-2)', 'x8', '1 B');
+      const tu = T(svg, X0, 190, '', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono' });
+      const tf = T(svg, X0, 340, '', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono', fill: 'var(--accent-2)' });
+      const fu = (v) => '共 ' + Math.round(v) + ' B/元素';
+      tl.set([tu, tf], { text: 0, fmt: fu }, { at: 0 });
+      grow(u1, 0.3); grow(u2, 1.1); tl.to(tu, { text: 10, fmt: fu }, { at: 0.3, dur: 1.5 });
+      grow(f1, 2.0); grow(f2, 2.8); tl.to(tf, { text: 8, fmt: fu }, { at: 2.0, dur: 1.5 });
+      tl.label('a', 3.8);
+      cap(tl, sl, 1, 3.9);
+      grow(u3, 4.1); tl.to(tu, { text: 13, fmt: (v) => fu(v) + ' · 3 次 launch' }, { at: 4.1, dur: 0.8 });
+      tl.to([f2.r, f2.t, f2.t2], { opacity: 0 }, { at: 5.0, dur: 0.4 });
+      grow(f3, 5.1); tl.to(tf, { text: 7, fmt: (v) => fu(v) + ' · 1 次 launch' }, { at: 5.1, dur: 0.8 });
+      tl.label('b', 6.2);
+      cap(tl, sl, 2, 6.3);
+    });
+
+    // ---------------- 21. FP8 dynamic quant ----------------
+    scene('s-fp8', (tl, svg, sl) => {
+      const ys = [0.9, -1.7, 2.6, -0.5, 1.3, -3.1, 0.6, 3.4, -1.1, 0.3, -2.2, 1.5, -0.7, 2.8, -1.9, 1.0];
+      const amax = 3.4, base = 190, s = 40, x0 = 200, dx = 54, bw = 32;
+      const e4m3 = (v) => { const a = Math.abs(v); if (a === 0) return 0; const e = Math.max(-6, Math.floor(Math.log2(a))); const st = 2 ** (e - 3); return Math.sign(v) * Math.min(448, Math.round(a / st) * st); };
+      P(svg, `M${x0 - 20} ${base} L${x0 + 16 * dx} ${base}`, { stroke: 'var(--border)' });
+      P(svg, `M${x0 - 20} ${base - amax * s - 10} L${x0 - 20} ${base + amax * s + 10}`, { stroke: 'var(--border)' });
+      const axA = G(svg), axB = G(svg, { opacity: 0 });
+      T(axA, x0 - 28, base - amax * s + 5, '3.4', { 'text-anchor': 'end', 'font-size': 14, class: 'mono', fill: 'var(--text-faint)' });
+      T(axA, x0 - 28, base + amax * s + 5, '−3.4', { 'text-anchor': 'end', 'font-size': 14, class: 'mono', fill: 'var(--text-faint)' });
+      T(axB, x0 - 28, base - amax * s + 5, '448', { 'text-anchor': 'end', 'font-size': 14, class: 'mono', fill: 'var(--accent-2)' });
+      T(axB, x0 - 28, base + amax * s + 5, '−448', { 'text-anchor': 'end', 'font-size': 14, class: 'mono', fill: 'var(--accent-2)' });
+      const grid = G(svg, { opacity: 0 });
+      for (let q = 64; q <= 448; q += q < 128 ? 8 : q < 256 ? 16 : 32) {
+        const py = q / 448 * amax * s;
+        P(grid, `M${x0 - 20} ${base - py} L${x0 + 16 * dx} ${base - py}`, { stroke: 'var(--idle)', 'stroke-width': 1 });
+        P(grid, `M${x0 - 20} ${base + py} L${x0 + 16 * dx} ${base + py}`, { stroke: 'var(--idle)', 'stroke-width': 1 });
+      }
+      const bars = ys.map((v, i) => R(svg, x0 + i * dx, base, bw, 0, { rx: 3, fill: 'var(--accent)' }));
+      bars.forEach((b, i) => tl.to(b, { attr: bar(ys[i], base, s) }, { at: 0.2 + i * 0.04, dur: 0.6, ease: 'out' }));
+      tl.label('a', 1.4);
+      cap(tl, sl, 1, 1.5);
+      const sw = P(svg, `M${x0 - 20} ${base - amax * s - 40} L${x0 + 16 * dx} ${base - amax * s - 40}`, { stroke: 'var(--grad)', 'stroke-width': 2.5, opacity: 0 });
+      const sw2 = P(svg, `M${x0 - 20} ${base + amax * s + 40} L${x0 + 16 * dx} ${base + amax * s + 40}`, { stroke: 'var(--grad)', 'stroke-width': 2.5, opacity: 0 });
+      tl.to([sw, sw2], { opacity: 1 }, { at: 1.6, dur: 0.2 });
+      tl.to(sw, { y: 40 }, { at: 1.7, dur: 1.2, ease: 'out' }).to(sw2, { y: -40 + (amax - 3.1) * s }, { at: 1.7, dur: 1.2, ease: 'out' });
+      tl.to(bars[7], { fill: 'var(--grad)' }, { at: 2.8, dur: 0.3 });
+      const am = T(svg, x0 + 16 * dx + 10, base - amax * s + 5, 'max|y| = 3.4', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--grad)', opacity: 0 });
+      tl.to(am, { opacity: 1 }, { at: 2.9, dur: 0.4 }).to(sw2, { opacity: 0 }, { at: 3.0, dur: 0.4 });
+      tl.label('b', 3.6);
+      cap(tl, sl, 2, 3.7);
+      tl.to(axA, { opacity: 0 }, { at: 3.8, dur: 0.4 }).to(axB, { opacity: 1 }, { at: 4.0, dur: 0.4 });
+      tl.to(am, { opacity: 0 }, { at: 3.8, dur: 0.3 }).to(sw, { opacity: 0 }, { at: 3.8, dur: 0.3 });
+      const sT = T(svg, x0 + 16 * dx + 10, base + 5, 's = 3.4 / 448', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--accent-2)', opacity: 0 });
+      tl.to(sT, { opacity: 1 }, { at: 4.0, dur: 0.4 });
+      tl.to(grid, { opacity: 1 }, { at: 4.4, dur: 0.6 });
+      bars.forEach((b, i) => {
+        const q = e4m3(ys[i] / amax * 448) / 448 * amax;
+        tl.to(b, { attr: bar(q, base, s), fill: 'var(--accent-2)' }, { at: 5.1 + i * 0.05, dur: 0.5, ease: 'back' });
+      });
+      const ex = T(svg, 576, 372, '例：2.6 → 2.6 / s = 342.6 → E4M3 网格上最近的是 352', { 'font-size': 17, fill: 'var(--text-soft)', opacity: 0 });
+      tl.to(ex, { opacity: 1 }, { at: 6.0, dur: 0.4 });
+      tl.label('c', 6.6);
+      cap(tl, sl, 3, 6.7);
+    });
+
+    // ---------------- 22. Triton ----------------
+    scene('s-triton', (tl, svg, sl) => {
+      const hl = $('.hl', sl);
+      hl.style.setProperty('--h', '22');
+      const hi = (line, h, at) => tl.to(hl, { opacity: 1, y: line * 22, style: { '--h': h * 22 } }, { at, dur: 0.4 });
+      T(svg, 10, 18, 'x：[M, N]，N = 5120', { 'text-anchor': 'start', 'font-size': 14, fill: 'var(--text-soft)' });
+      const rows = [];
+      for (let r = 0; r < 6; r++) rows.push(R(svg, 10, 28 + r * 14, 360, 10, { rx: 2, fill: 'var(--idle)' }));
+      const cells = [];
+      for (let c = 0; c < 16; c++) cells.push(R(svg, 10 + c * 22.5, 180, 20, 34, { rx: 3, fill: 'var(--idle)', opacity: 0 }));
+      const lb = T(svg, 190, 166, 'BLOCK = 8192（每格 512 个）', { 'font-size': 14, fill: 'var(--text-soft)', opacity: 0 });
+      const mt = T(svg, 302, 234, 'mask', { 'font-size': 14, fill: 'var(--text-faint)', opacity: 0 });
+      const sum = G(svg, { opacity: 0 }); C(sum, 190, 290, 22, { fill: 'var(--accent)' }); T(sum, 190, 296, 'Σ', { 'font-size': 18, 'font-weight': 700, fill: 'var(--bg)' });
+      const rs = T(svg, 240, 296, 'rstd', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700, fill: 'var(--c3)', opacity: 0 });
+      const out = [];
+      for (let c = 0; c < 10; c++) out.push(R(svg, 10 + c * 22.5, 340, 20, 34, { rx: 3, fill: 'var(--accent-2)', opacity: 0 }));
+      hi(3, 1, 0.3);
+      tl.to(rows[2], { fill: 'var(--accent)' }, { at: 0.4, dur: 0.3 });
+      hi(4, 1, 1.0);
+      tl.to([...cells, lb], { opacity: 1 }, { at: 1.1, dur: 0.3, stagger: 0.02 });
+      hi(5, 1, 1.9);
+      cells.slice(10).forEach((c) => tl.to(c, { opacity: 0.25 }, { at: 2.0, dur: 0.4 }));
+      tl.to(mt, { opacity: 1 }, { at: 2.1, dur: 0.3 });
+      tl.label('a', 2.7);
+      cap(tl, sl, 1, 2.8);
+      hi(6, 2, 2.9);
+      cells.slice(0, 10).forEach((c, i) => tl.to(c, { fill: 'var(--accent)' }, { at: 3.0 + i * 0.05, dur: 0.3 }));
+      hi(8, 1, 3.9);
+      cells.slice(0, 10).forEach((c, i) => tl.to(c, { y: 110, x: 180 - (10 + i * 22.5) - 10, scale: 0.4 }, { at: 4.0, dur: 0.6 }).to(c, { opacity: 0 }, { at: 4.5, dur: 0.2 }));
+      tl.to(sum, { opacity: 1 }, { at: 4.5, dur: 0.3 }).to(rs, { opacity: 1 }, { at: 4.9, dur: 0.3 });
+      hi(9, 1, 5.3);
+      tl.label('b', 5.9);
+      cap(tl, sl, 2, 6.0);
+      hi(10, 2, 6.1);
+      hi(12, 2, 7.0);
+      tl.to(out, { opacity: 1 }, { at: 7.1, dur: 0.3, stagger: 0.05 });
+      tl.to([sum, rs], { opacity: 0.3 }, { at: 7.1, dur: 0.4 });
+      tl.to(rows[2], { fill: 'var(--accent-2)' }, { at: 8.3, dur: 0.3 });
+      hi(15, 3, 8.6);
+    });
+
+    // ---------------- 23. backward kernel ----------------
+    scene('s-bwdk', (tl, svg, sl) => {
+      const sm = box(svg, 230, 10, 700, 130, '');
+      T(svg, 250, 36, 'SM · 一个 program', { 'text-anchor': 'start', 'font-size': 16, 'font-weight': 700 });
+      const st = ['x̂ = x · r     ĝ = dy ⊙ g', 'c = mean(x̂ ⊙ ĝ)   ← 行内归约', 'dx = r · (ĝ − x̂ · c)', 'dg_acc += dy ⊙ x̂'].map((s) => T(svg, 560, 80, s, { 'font-size': 20, class: 'mono', 'font-weight': 600, opacity: 0, fill: 'var(--text)' }));
+      R(svg, 250, 104, 400, 22, { rx: 4, fill: 'var(--bg-soft)' });
+      T(svg, 910, 36, 'dg 部分和（FP32 寄存器）', { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--c3)' });
+      const acc = R(svg, 660, 104, 0, 22, { rx: 4, fill: 'var(--c3)' });
+      const rowT = T(svg, 250, 160, '', { 'text-anchor': 'start', 'font-size': 16, fill: 'var(--text-soft)' });
+      const hy = 290;
+      const segs = [['x', 'var(--accent)'], ['dy', 'var(--grad)'], ['g', 'var(--c3)'], ['rstd', 'var(--c3)'], ['dx', 'var(--accent-2)'], ['dg 部分和', 'var(--c3)']];
+      const sx = segs.map(([l], i) => { R(svg, 80 + i * 170, hy, 160, 46, { rx: 6, fill: 'var(--bg-soft)', stroke: 'var(--border)' }); T(svg, 160 + i * 170, hy + 29, l, { 'font-size': 15, class: 'mono' }); return 160 + i * 170; });
+      T(svg, 64, hy + 29, 'HBM', { 'text-anchor': 'end', 'font-size': 14, 'font-weight': 700, fill: 'var(--text-soft)' });
+      const fly = (i, at, up = true, w = 26) => {
+        const p = pkt(svg, up ? sx[i] : 450, up ? hy : 115, segs[i][1], w, 14);
+        tl.to(p, { opacity: 1 }, { at, dur: 0.1 });
+        tl.to(p, up ? { x: 450 - sx[i], y: 115 - hy } : { x: sx[i] - 450, y: hy - 115 }, { at: at + 0.05, dur: 0.6 });
+        tl.to(p, { opacity: 0 }, { at: at + 0.65, dur: 0.1 });
+      };
+      const fr = (v) => '第 ' + Math.round(v) + ' 行';
+      const row = (k, at, slow) => {
+        const sp = slow ? 1 : 0.45;
+        tl.to(rowT, { text: k, fmt: fr }, { at, dur: 0.05 });
+        fly(0, at); fly(1, at + 0.1 * sp);
+        if (k === 1) { fly(2, at + 0.2, true, 14); fly(3, at + 0.3, true, 10); }
+        const s0 = at + 0.8 * sp;
+        st.forEach((s, i) => tl.to(s, { opacity: 1 }, { at: s0 + i * 0.7 * sp, dur: 0.2 * sp }).to(s, { opacity: 0 }, { at: s0 + (i + 1) * 0.7 * sp - 0.1 * sp, dur: 0.15 * sp }));
+        fly(4, s0 + 1.6 * sp, false);
+        tl.to(acc, { attr: { width: Math.min(250, 70 * k) } }, { at: s0 + 2.2 * sp, dur: 0.4 * sp });
+        return s0 + 3.0 * sp;
+      };
+      let t = row(1, 0.3, true);
+      tl.label('a', t);
+      cap(tl, sl, 1, t + 0.1);
+      t = row(2, t + 0.3, false); t = row(3, t, false);
+      tl.to(rowT, { text: 3, fmt: (v) => '…… 这个 program 负责的行全部做完' }, { at: t, dur: 0.05 });
+      const p = pkt(svg, 790, 115, 'var(--c3)', 40, 14);
+      tl.to(p, { opacity: 1 }, { at: t + 0.2, dur: 0.1 }).to(p, { x: sx[5] - 790, y: hy - 115 }, { at: t + 0.3, dur: 0.7 }).to(p, { opacity: 0 }, { at: t + 1.0, dur: 0.1 });
+      tl.to(acc, { attr: { width: 0 } }, { at: t + 1.0, dur: 0.3 });
+    });
+
+    // ---------------- 24. dg two-stage ----------------
+    scene('s-dg', (tl, svg, sl) => {
+      const M = 24, D = 16, Pn = 4;
+      const cols = ['var(--accent)', 'var(--accent-2)', 'var(--c3)', 'var(--grad)'];
+      T(svg, 60, 30, 'dy ⊙ x̂：[M, d]', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const rows = [];
+      for (let r = 0; r < M; r++) {
+        const g = G(svg, { fill: 'var(--idle)' });
+        for (let c = 0; c < D; c++) R(g, 60 + c * 17, 42 + r * 14, 15, 11, { rx: 2 });
+        rows.push(g);
+        T(svg, 50, 51 + r * 14, String(r), { 'text-anchor': 'end', 'font-size': 10, fill: 'var(--text-faint)', class: 'mono' });
+      }
+      const PX = 560, PW = 28;
+      T(svg, PX, 82, '部分和 [P, d]（FP32）', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)' });
+      const part = [];
+      for (let p = 0; p < Pn; p++) {
+        T(svg, PX - 12, 112 + p * 34, 'P' + p, { 'text-anchor': 'end', 'font-size': 14, 'font-weight': 700, fill: cols[p] });
+        const rowc = [];
+        for (let c = 0; c < D; c++) rowc.push(R(svg, PX + c * PW, 94 + p * 34, PW - 4, 26, { rx: 3, fill: cols[p], opacity: 0.08 }));
+        part.push(rowc);
+      }
+      for (let k = 0; k < M / Pn; k++) {
+        for (let p = 0; p < Pn; p++) {
+          const r = k * Pn + p, at = 0.3 + k * 0.75 + p * 0.05;
+          tl.to(rows[r], { fill: cols[p] }, { at, dur: 0.2 });
+          const fl = R(svg, 60, 42 + r * 14, D * 17 - 2, 11, { rx: 2, fill: cols[p], opacity: 0 });
+          tl.to(fl, { opacity: 0.9 }, { at: at + 0.1, dur: 0.1 });
+          tl.to(fl, { attr: { x: PX, y: 94 + p * 34, width: D * PW - 4, height: 26 } }, { at: at + 0.15, dur: 0.45 });
+          tl.to(fl, { opacity: 0 }, { at: at + 0.55, dur: 0.15 });
+          part[p].forEach((c) => tl.to(c, { opacity: 0.15 + 0.85 * (k + 1) / (M / Pn) }, { at: at + 0.55, dur: 0.15 }));
+        }
+      }
+      const t1 = 0.3 + (M / Pn) * 0.75 + 0.3;
+      tl.label('a', t1);
+      cap(tl, sl, 1, t1 + 0.1);
+      T(svg, PX, 300, 'dg [d]', { 'text-anchor': 'start', 'font-size': 15, fill: 'var(--text-soft)', opacity: 0, class: 'dgl' });
+      tl.to($('.dgl', svg), { opacity: 1 }, { at: t1 + 0.2, dur: 0.3 });
+      const fin = [];
+      for (let c = 0; c < D; c++) fin.push(R(svg, PX + c * PW, 312, PW - 4, 30, { rx: 3, fill: 'var(--c3)', opacity: 0.08, stroke: 'var(--c3)' }));
+      for (let c = 0; c < D; c++) {
+        const at = t1 + 0.4 + c * 0.1;
+        for (let p = 0; p < Pn; p++) {
+          const k = R(svg, PX + c * PW + 4, 98 + p * 34, PW - 12, 18, { rx: 2, fill: cols[p], opacity: 0 });
+          tl.to(k, { opacity: 1 }, { at, dur: 0.05 }).to(k, { attr: { y: 318 } }, { at: at + 0.05, dur: 0.45 + p * 0.05, ease: 'in' }).to(k, { opacity: 0 }, { at: at + 0.55 + p * 0.05, dur: 0.1 });
+        }
+        tl.to(fin[c], { opacity: 1 }, { at: at + 0.6, dur: 0.2 });
+      }
+      const t2 = t1 + 0.4 + D * 0.1 + 1.0;
+      tl.label('b', t2);
+      cap(tl, sl, 2, t2 + 0.1);
+    });
+
+    // ---------------- 25. achieved bandwidth ----------------
+    scene('s-real', (tl, svg, sl) => {
+      const X0 = 470, sc = 190;
+      const rows = [
+        ['H100 SXM HBM3 峰值', 3.35, 'var(--text-faint)', '100%'],
+        ['调优的归约 kernel（H100 实测）', 3.0, 'var(--accent)', '≈ 90%'],
+        ['torch.compile 生成（超宽行，实测）', 1.9, 'color-mix(in srgb, var(--accent) 55%, var(--surface))', '≈ 57%'],
+        ['eager RMSNorm 有效带宽（上限估算）', 3.35 * 4 / 36, 'var(--accent-2)', '≤ 11%'],
+      ];
+      P(svg, `M${X0 + 3.35 * sc} 20 L${X0 + 3.35 * sc} 330`, { stroke: 'var(--text-faint)', 'stroke-dasharray': '5 5' });
+      rows.forEach(([l, v, c, pct], i) => {
+        const y = 36 + i * 76;
+        T(svg, X0 - 16, y + 26, l, { 'text-anchor': 'end', 'font-size': 18, fill: 'var(--text)' });
+        const r = R(svg, X0, y, 0, 40, { rx: 6, fill: c });
+        const t = T(svg, X0 + 10, y + 27, '0', { 'text-anchor': 'start', 'font-size': 18, 'font-weight': 700, class: 'mono', opacity: 0 });
+        const at = 0.3 + i * 0.35;
+        tl.to(r, { attr: { width: v * sc } }, { at, dur: 1.2, ease: 'out' });
+        tl.to(t, { opacity: 1, x: v * sc }, { at, dur: 1.2, ease: 'out' });
+        tl.to(t, { text: v, fmt: (x) => x.toFixed(2) + ' TB/s  ' + pct }, { at, dur: 1.2, ease: 'out' });
+      });
+      tl.label('a', 2.8);
+      cap(tl, sl, 1, 2.9);
+    });
+
+    // ---------------- 26. widget ----------------
+    (() => {
+      const mI = $('#bw-m'), dI = $('#bw-d'), svg = $('#bw-svg');
+      const Ds = [2048, 4096, 5120, 7168, 8192, 16384];
+      const tau = 3e-6, BW = 3.0e12;
+      const tF = (M, d) => tau + 4 * M * d / BW, tE = (M, d) => 8 * tau + 36 * M * d / BW;
+      const X = (lm) => 50 + lm / 16 * 490, Y = (b) => 260 - b / 3.35 * 230;
+      P(svg, `M50 ${Y(0)} L540 ${Y(0)}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M50 ${Y(0)} L50 ${Y(3.35)}`, { stroke: 'var(--text-soft)' });
+      P(svg, `M50 ${Y(3.0)} L540 ${Y(3.0)}`, { stroke: 'var(--text-faint)', 'stroke-dasharray': '4 4' });
+      T(svg, 536, Y(3.0) - 6, '3.0 TB/s', { 'text-anchor': 'end', 'font-size': 12, fill: 'var(--text-faint)' });
+      [0, 4, 8, 12, 16].forEach((l) => T(svg, X(l), 280, String(2 ** l), { 'font-size': 12, fill: 'var(--text-faint)', class: 'mono' }));
+      [0, 1, 2, 3].forEach((b) => T(svg, 44, Y(b) + 4, String(b), { 'text-anchor': 'end', 'font-size': 12, fill: 'var(--text-faint)', class: 'mono' }));
+      T(svg, 540, 298, 'token 数 M', { 'text-anchor': 'end', 'font-size': 12, fill: 'var(--text-soft)' });
+      T(svg, 56, 18, '有效带宽 TB/s', { 'text-anchor': 'start', 'font-size': 12, fill: 'var(--text-soft)' });
+      const cf = P(svg, '', { stroke: 'var(--accent-2)', 'stroke-width': 3 });
+      const ce = P(svg, '', { stroke: 'var(--text-faint)', 'stroke-width': 3 });
+      const lf = T(svg, 0, 0, '融合', { 'font-size': 13, fill: 'var(--accent-2)', 'font-weight': 700, 'text-anchor': 'end' });
+      const le = T(svg, 0, 0, 'eager', { 'font-size': 13, fill: 'var(--text-soft)', 'font-weight': 700, 'text-anchor': 'end' });
+      const mk = C(svg, 0, 0, 6, { fill: 'var(--accent-2)', stroke: 'var(--surface)', 'stroke-width': 2 });
+      const mk2 = C(svg, 0, 0, 5, { fill: 'var(--text-faint)', stroke: 'var(--surface)', 'stroke-width': 2 });
+      const vline = P(svg, '', { stroke: 'var(--idle)', 'stroke-dasharray': '3 4' });
+      const fmtT = (s) => (s < 1e-3 ? (s * 1e6).toFixed(1) + ' µs' : (s * 1e3).toFixed(2) + ' ms');
+      function upd() {
+        const lm = +mI.value, M = 2 ** lm, d = Ds[+dI.value];
+        $('#bw-mo').textContent = M.toLocaleString('en-US');
+        $('#bw-do').textContent = String(d);
+        let a = '', b = '';
+        for (let k = 0; k <= 64; k++) {
+          const l = k / 4, m = 2 ** l;
+          a += (k ? 'L' : 'M') + X(l).toFixed(1) + ' ' + Y(4 * m * d / tF(m, d) / 1e12).toFixed(1);
+          b += (k ? 'L' : 'M') + X(l).toFixed(1) + ' ' + Y(4 * m * d / tE(m, d) / 1e12).toFixed(1);
+        }
+        cf.setAttribute('d', a); ce.setAttribute('d', b);
+        const bf = 4 * M * d / tF(M, d) / 1e12, be = 4 * M * d / tE(M, d) / 1e12;
+        lf.setAttribute('x', X(16) - 4); lf.setAttribute('y', Y(4 * 65536 * d / tF(65536, d) / 1e12) + 18);
+        le.setAttribute('x', X(16) - 4); le.setAttribute('y', Y(4 * 65536 * d / tE(65536, d) / 1e12) - 8);
+        mk.setAttribute('cx', X(lm)); mk.setAttribute('cy', Y(bf));
+        mk2.setAttribute('cx', X(lm)); mk2.setAttribute('cy', Y(be));
+        vline.setAttribute('d', `M${X(lm)} ${Y(0)} L${X(lm)} ${Y(3.35)}`);
+        $('#bw-tf').textContent = fmtT(tF(M, d));
+        $('#bw-te').textContent = fmtT(tE(M, d));
+        $('#bw-bf').textContent = bf.toFixed(2) + ' TB/s';
+        $('#bw-sp').textContent = (tE(M, d) / tF(M, d)).toFixed(1) + '×';
+      }
+      mI.addEventListener('input', upd); dI.addEventListener('input', upd);
+      upd();
+    })();
+  })();
+  </script>
+</body>
+</html>

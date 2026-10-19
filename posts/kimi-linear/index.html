@@ -45,6 +45,23 @@
       figure .diagram { min-width: 540px; }
       .chart text, .chart .lbl { font-size: 17px; }
     }
+    /* animated figures (assets/anim.js) */
+    .anim-fig { margin: 24px 0; }
+    .anim-fig svg { display: block; width: 100%; height: auto; max-width: 560px; margin: 0 auto; }
+    .anim-fig .anim-bar { max-width: 560px; margin-left: auto; margin-right: auto; }
+    .anim-fig text { font-family: var(--font-sans); font-size: 14px; }
+    .anim-fig .at-t { fill: var(--text); }
+    .anim-fig .at-b { font-weight: 600; }
+    .anim-fig .at-soft { fill: var(--text-soft); }
+    .anim-fig .at-mono { fill: var(--text-soft); font-family: var(--font-mono); font-size: 13.5px; }
+    .anim-fig .at-fill1 { fill: var(--accent); }
+    .anim-fig .at-fill2 { fill: var(--accent-2); }
+    .anim-fig .at-cell { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1; }
+    .anim-fig .at-box2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .anim-fig .at-box2.at-solid { fill: color-mix(in srgb, var(--accent-2) 16%, var(--surface)); }
+    .anim-fig .at-box1 { fill: color-mix(in srgb, var(--accent) 12%, var(--surface)); stroke: var(--accent); stroke-width: 1.5; }
+    .anim-fig .at-dash { stroke: var(--text-faint); stroke-width: 1.2; stroke-dasharray: 4 4; fill: none; }
+    .anim-fig .at-line { stroke: var(--text-faint); stroke-width: 1.2; fill: none; }
   </style>
 </head>
 <body>
@@ -134,6 +151,11 @@
       </div>
       <p>表里的 \(\alpha_t, \beta_t\) 都在 \([0,1]\) 里，“数据相关”指它们由当前输入 \(x_t\) 经过一个小投影算出来。在在线学习视角里，衰减对应在损失上加一个 Frobenius 范数正则（例如 \(\tfrac12\|\sqrt{1-\alpha_t}\,S\|_F^2\)），也就是快权重上的权重衰减。<strong>逐通道</strong>的 \(\operatorname{Diag}(\alpha_t)\) 意味着状态的每一行（对应 key 的一个维度）有自己的遗忘速度。GLA 最早系统地用了这种对角门，并给出了能分块并行的实现。</p>
 
+      <figure class="anim-fig" id="decay-anim">
+        <svg viewBox="0 0 440 232" role="img" aria-label="同一个状态在标量门和通道门下的衰减：标量门让所有行一起变淡，通道门让慢通道保留、快通道清空"></svg>
+        <figcaption>同一个 \(6\times6\) 状态（行 = key 通道，数值为示意）连续 4 步只做衰减。左边每个头一个标量 \(\alpha\)，所有行一起变淡；右边 \(\operatorname{Diag}(\alpha_t)\) 给每一行自己的保留率，上面的慢通道几乎不动，下面的快通道很快清空。标量取右边 6 个 \(\alpha\) 的几何平均，两边的总遗忘量相同。</figcaption>
+      </figure>
+
       <h2 id="delta">4. DeltaNet：把状态当成在线回归</h2>
       <h3>4.1 从重构损失推出 delta 规则</h3>
       <p>DeltaNet 把损失换成重构误差：希望用 key 读出来的东西 \(S^\top k_t\) 等于 \(v_t\)：</p>
@@ -163,6 +185,11 @@
       <p>KDA 把 GDN 的标量 \(\alpha_t\) 换成对角矩阵 \(\operatorname{Diag}(\alpha_t)\)，\(\alpha_t\in[0,1]^{d_k}\)：</p>
       $$S_t = \big(I-\beta_tk_tk_t^\top\big)\operatorname{Diag}(\alpha_t)\,S_{t-1} + \beta_tk_tv_t^\top \in\mathbb R^{d_k\times d_v},\qquad o_t = S_t^\top q_t .$$
       <p>注意顺序：先逐通道衰减，再做 delta 修正。状态的第 \(c\) 行对应 key 的第 \(c\) 个维度，它有自己的保留率 \(\alpha_{t,c}\)。于是模型可以学会把需要长期保存的信息写进“慢”通道（\(\alpha\approx1\)），把短期信息写进“快”通道（\(\alpha\) 小），快通道很快被清空，不会干扰慢通道里的长期记忆。</p>
+      <figure class="anim-fig" id="kda-anim">
+        <svg viewBox="0 0 440 320" role="img" aria-label="KDA 的一步：逐通道衰减、读出旧值、写入差值"></svg>
+        <figcaption>KDA 的一步（\(\beta=1\)，向量与 \(\alpha_t\) 为示意）。状态的行是 key 通道：先按 \(\alpha_t\) 逐行衰减，再用 \(k_1\) 读出旧值 \(S^\top k_1\)，只把差值 \(v'-S^\top k_1\) 沿 \(k_1\) 写回。写完 \(S^\top k_1=v'\)。</figcaption>
+      </figure>
+
       <h3>6.2 参数化（每个头）</h3>
       $$\begin{aligned}
       q_t, k_t &amp;= \operatorname{L2Norm}\big(\operatorname{Swish}(\operatorname{ShortConv}(W_{q/k}x_t))\big)\in\mathbb R^{d_k},\\
@@ -241,6 +268,11 @@
       <p>块内第 \(r\) 个输出 \(o_r^\top = q_r^\top S^r\) 同样展开后，堆叠成矩阵：</p>
       $$O_{[t]} = \underbrace{(\Gamma\odot Q)\,S_{[t]}}_{\text{块间}} + \underbrace{\operatorname{Tril}\big((\Gamma\odot Q)(K/\Gamma)^\top\big)}_{\text{块内}}\ \underbrace{\big(U - WS_{[t]}\big)}_{\text{“伪 value”}} .$$
       <p>这个结构和第 2.2 节普通线性注意力的分块形式几乎一样：块间项用初始状态读，块内项是一个下三角的 \(C\times C\) 注意力矩阵乘以 value。区别是 value 被换成了“伪 value” \(U-WS\)——delta 规则的效果全部被吸收进了 \(U\) 和 \(W\)。注意 Tril 包含对角线：每个输出读的是当前 token 写入之后的状态。</p>
+      <figure class="anim-fig" id="kchunk-anim">
+        <svg viewBox="0 0 440 256" role="img" aria-label="KDA 分块算法：每块并行算出 W、U、伪 value 和输出，块末逐通道衰减并更新状态，再传给下一块"></svg>
+        <figcaption>12 个 token、块长 4。每一块内部都是矩阵运算：先做 UT 变换，再用块首状态 \(S\) 算伪 value 和输出（\(S\) 闪一下表示被读取）；块末状态按 \(\gamma^C\) 逐通道衰减（快通道的行变淡得多），加上本块的写入，再交给下一块。状态的数值为示意。</figcaption>
+      </figure>
+
       <h3>7.5 伪代码</h3>
       <p>把上面的公式写成 PyTorch 风格的伪代码（\(g\) 是对数衰减 \(\log\alpha\)，块内做 cumsum 得到 \(\log\gamma\)）：</p>
       <pre><code>def chunk_kda(q, k, v, g, beta, C=64):          # q,k: [T,dk]  v: [T,dv]  g: [T,dk] (log α)
@@ -615,6 +647,212 @@
       }
       [Ls, mem, bw].forEach((x) => x.addEventListener('input', calc));
       calc();
+    })();
+  })();
+  </script>
+  <script src="/assets/anim.js"></script>
+  <script>
+  /* ---------------- animated figures (assets/anim.js) ---------------- */
+  (() => {
+    if (!window.Anim) return;
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (parent, tag, attrs = {}, text) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      if (text !== undefined) e.textContent = text;
+      parent.appendChild(e);
+      return e;
+    };
+    const bind = (fig, tl) => {
+      const host = document.createElement('div');
+      fig.insertBefore(host, fig.querySelector('figcaption'));
+      Anim.inView(fig, tl, { controls: true, controlsIn: host });
+    };
+    // A matrix of cells: purple overlay for positive, orange for negative, opacity = |value|.
+    const op = (v) => Math.min(1, Math.abs(v)) * 0.9;
+    function grid(parent, x, y, R, C, cs, vals) {
+      const g = mk(parent, 'g');
+      const cells = [];
+      for (let i = 0; i < R; i++) {
+        cells.push([]);
+        for (let j = 0; j < C; j++) {
+          const a = { x: x + j * cs + 1, y: y + i * cs + 1, width: cs - 2, height: cs - 2, rx: 3 };
+          mk(g, 'rect', { ...a, class: 'at-cell' });
+          const v = vals ? vals[i][j] : 0;
+          const p = mk(g, 'rect', { ...a, class: 'at-fill1', style: 'opacity:' + (v > 0 ? op(v) : 0) });
+          const n = mk(g, 'rect', { ...a, class: 'at-fill2', style: 'opacity:' + (v < 0 ? op(v) : 0) });
+          cells[i].push({ p, n });
+        }
+      }
+      return { g, cells, R, C };
+    }
+    function toGrid(tl, G, vals, at, dur = 0.4, stagger = 0) {
+      for (let i = 0; i < G.R; i++) for (let j = 0; j < G.C; j++) {
+        const v = vals[i][j], c = G.cells[i][j], o = { at: at + i * stagger, dur };
+        tl.to(c.p, { opacity: v > 0 ? op(v) : 0 }, o);
+        tl.to(c.n, { opacity: v < 0 ? op(v) : 0 }, o);
+      }
+    }
+    const col = (v) => v.map((x) => [x]);
+    const row = (v) => [v];
+    const zeros = (R, C) => Array.from({ length: R }, () => new Array(C).fill(0));
+    const outer = (a, b) => a.map((x) => b.map((y) => x * y));
+    const add = (A, B) => A.map((r, i) => r.map((x, j) => x + B[i][j]));
+    const scale = (A, s) => A.map((r) => r.map((x) => x * s));
+    const say = (tl, el, list, idx, at) => tl.set(el, { text: idx, fmt: (v) => list[Math.max(0, Math.min(list.length - 1, Math.round(v)))] }, { at });
+    const dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+    const tvec = (S, k) => S[0].map((_, j) => S.reduce((s, r, i) => s + r[j] * k[i], 0)); // Sᵀk
+    const rowScale = (S, a) => S.map((r, i) => r.map((x) => x * a[i]));
+    let seed = 11;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const randM = (R, C) => Array.from({ length: R }, () => Array.from({ length: C }, () => (rnd() < 0.5 ? -1 : 1) * (0.45 + 0.5 * rnd())));
+
+    /* ---- scalar vs channel-wise decay ---- */
+    (() => {
+      const fig = document.getElementById('decay-anim'); if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const R = 6, CS = 24, STEPS = 4;
+      const ach = [0.98, 0.97, 0.95, 0.7, 0.5, 0.35];
+      const gm = Math.exp(ach.reduce((s, a) => s + Math.log(a), 0) / R);
+      const asc = new Array(R).fill(gm);
+      const S0 = randM(R, R);
+      const tl = Anim.timeline();
+      const panels = [[24, asc, '标量门（GDN）'], [244, ach, '通道门（KDA）']].map(([x, a, title]) => {
+        mk(svg, 'text', { x: x + 72, y: 22, 'text-anchor': 'middle', class: 'at-t at-b' }, title);
+        mk(svg, 'text', { x: x + 166, y: 38, 'text-anchor': 'middle', class: 'at-soft' }, 'α');
+        a.forEach((v, i) => mk(svg, 'text', { x: x + 150, y: 46 + i * CS + 17, class: 'at-mono' }, v.toFixed(2)));
+        return { G: grid(svg, x, 46, R, R, CS, S0), a };
+      });
+      const st = mk(svg, 'text', { x: 220, y: 216, 'text-anchor': 'middle', class: 'at-t' }, '');
+      const fmtS = (v) => '经过 ' + Math.round(v) + ' 步：S ← Diag(α) S（只看衰减，不写入）';
+      tl.set(st, { text: 0, fmt: fmtS }, { at: 0 });
+      for (let n = 1; n <= STEPS; n++) {
+        const t = 0.4 + (n - 1) * 1.0;
+        tl.set(st, { text: n, fmt: fmtS }, { at: t });
+        panels.forEach(({ G, a }) => toGrid(tl, G, rowScale(S0, a.map((x) => x ** n)), t, 0.6));
+      }
+      tl.wait(0.5);
+      bind(fig, tl);
+    })();
+
+    /* ---- one KDA step: channel decay, read, write the difference ---- */
+    (() => {
+      const fig = document.getElementById('kda-anim'); if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const D = 5, CS = 28;
+      const k1 = [0.8, 0.6, 0, 0, 0], k2 = [0, 0, 0.6, 0.8, 0];
+      const v1 = [0.9, -0.5, 0.3, 0.0, -0.7], v2 = [-0.4, 0.8, 0.6, -0.6, 0.2], vn = [-0.6, 0.2, 0.9, 0.4, 0.1];
+      const al = [0.95, 0.6, 0.9, 0.5, 0.8];
+      const S0 = add(outer(k1, v1), outer(k2, v2));
+      const Sd = rowScale(S0, al), pred = tvec(Sd, k1);
+      const diff = vn.map((x, i) => x - pred[i]);
+      const S1 = add(Sd, outer(k1, diff));
+      const tl = Anim.timeline();
+      const msgs = ['S（行 = key 通道）里存着 k₁→v₁ 和 k₂→v₂', '① 逐通道衰减：S ← Diag(α) S', '② 读旧值：Sᵀk₁', '③ 差值：v′ − Sᵀk₁', '④ 写入：S ← S + k₁ (v′ − Sᵀk₁)ᵀ', '⑤ 再读：Sᵀk₁ = v′'];
+      const st = mk(svg, 'text', { x: 220, y: 22, 'text-anchor': 'middle', class: 'at-t at-b' }, msgs[0]);
+      say(tl, st, msgs, 0, 0);
+      const SX = 110, SY = 70;
+      const S = grid(svg, SX, SY, D, D, CS, S0);
+      grid(svg, 70, SY, D, 1, CS, col(k1));
+      mk(svg, 'text', { x: 84, y: 62, 'text-anchor': 'middle', class: 'at-soft' }, 'k₁');
+      mk(svg, 'text', { x: 274, y: 62, 'text-anchor': 'middle', class: 'at-soft' }, 'α');
+      const alT = al.map((a, i) => mk(svg, 'text', { x: 258, y: SY + i * CS + 19, class: 'at-mono', style: 'opacity:0' }, a.toFixed(2)));
+      const rowAt = (y, vals, name) => {
+        const G = grid(svg, SX, y, 1, D, CS, row(vals)); G.g.style.opacity = 0;
+        const l = mk(svg, 'text', { x: SX - 8, y: y + 19, 'text-anchor': 'end', class: 'at-soft', style: 'opacity:0' }, name);
+        return [G, l];
+      };
+      const [Rd, rdl] = rowAt(222, pred, 'Sᵀk₁');
+      const [Vn, vnl] = rowAt(254, vn, 'v′');
+      const [Df, dfl] = rowAt(286, diff, 'v′ − Sᵀk₁');
+      let t = 0.6;
+      say(tl, st, msgs, 1, t);
+      tl.to(alT, { opacity: 1 }, { at: t, dur: 0.3 });
+      toGrid(tl, S, Sd, t + 0.4, 0.6);
+      t += 1.5;
+      say(tl, st, msgs, 2, t);
+      tl.to([Rd.g, rdl], { opacity: 1 }, { at: t + 0.2, dur: 0.4 });
+      t += 1.2;
+      say(tl, st, msgs, 3, t);
+      tl.to([Vn.g, vnl], { opacity: 1 }, { at: t + 0.1, dur: 0.4 });
+      tl.to([Df.g, dfl], { opacity: 1 }, { at: t + 0.7, dur: 0.4 });
+      t += 1.6;
+      say(tl, st, msgs, 4, t);
+      const stage = mk(svg, 'g', { style: 'opacity:0' });
+      grid(stage, 296, SY, D, D, CS, outer(k1, diff));
+      const sl = mk(svg, 'text', { x: 366, y: 62, 'text-anchor': 'middle', class: 'at-soft', style: 'opacity:0' }, 'k₁(v′ − Sᵀk₁)ᵀ');
+      tl.to([stage, sl], { opacity: 1 }, { at: t + 0.2, dur: 0.4 });
+      tl.to([Rd.g, rdl, Vn.g, vnl], { opacity: 0 }, { at: t + 0.2, dur: 0.3 });
+      tl.to(sl, { opacity: 0 }, { at: t + 0.9, dur: 0.2 });
+      tl.to(stage, { x: SX - 296 }, { at: t + 0.9, dur: 0.7 });
+      tl.to([stage, Df.g, dfl], { opacity: 0 }, { at: t + 1.6, dur: 0.25 });
+      toGrid(tl, S, S1, t + 1.6, 0.3);
+      t += 2.3;
+      say(tl, st, msgs, 5, t);
+      const [R2, r2l] = rowAt(222, tvec(S1, k1), 'Sᵀk₁');
+      const [V2, v2l] = rowAt(254, vn, 'v′');
+      tl.to([R2.g, r2l], { opacity: 1 }, { at: t + 0.2, dur: 0.4 });
+      tl.to([V2.g, v2l], { opacity: 1 }, { at: t + 0.8, dur: 0.4 });
+      tl.wait(0.5);
+      bind(fig, tl);
+    })();
+
+    /* ---- chunkwise KDA ---- */
+    (() => {
+      const fig = document.getElementById('kchunk-anim'); if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const N = 12, Cn = 4, X0 = 52, TW = 32, NC = N / Cn;
+      const tx = (i) => X0 + i * TW;
+      const tl = Anim.timeline();
+      const msgs = ['UT 变换：块内三角求逆，得到 W、U', '伪 value：U − W S，用块首状态 S', '输出：(Γ⊙Q) S + 块内下三角注意力 × 伪 value', '块末：S ← Diag(γᶜ) S + 本块的写入'];
+      const st = mk(svg, 'text', { x: 220, y: 20, 'text-anchor': 'middle', class: 'at-t at-b' }, msgs[0]);
+      say(tl, st, msgs, 0, 0);
+      for (let c = 1; c < NC; c++) mk(svg, 'line', { x1: tx(c * Cn) - 2, x2: tx(c * Cn) - 2, y1: 32, y2: 248, class: 'at-dash' });
+      const tok = [], pv = [], outs = [];
+      const rowOf = (y, arr, cls) => { for (let i = 0; i < N; i++) { mk(svg, 'rect', { x: tx(i), y, width: TW - 4, height: 24, rx: 4, class: 'at-cell' }); arr.push(mk(svg, 'rect', { x: tx(i), y, width: TW - 4, height: 24, rx: 4, class: cls, style: 'opacity:0' })); } };
+      rowOf(32, tok, 'at-fill2');
+      for (let i = 0; i < N; i++) mk(svg, 'text', { x: tx(i) + 14, y: 49, 'text-anchor': 'middle', class: 'at-mono' }, String(i + 1));
+      rowOf(130, pv, 'at-fill2');
+      rowOf(160, outs, 'at-fill1');
+      [['x', 49], ['U−WS', 147], ['O', 177]].forEach(([s, y]) => mk(svg, 'text', { x: X0 - 6, y, 'text-anchor': 'end', class: 'at-mono' }, s));
+      const tri = [];
+      for (let c = 0; c < NC; c++) {
+        const g = mk(svg, 'g', { style: 'opacity:0' });
+        const mx = tx(c * Cn) + 36, cs = 12;
+        for (let i = 0; i < Cn; i++) for (let j = 0; j < Cn; j++)
+          mk(g, 'rect', { x: mx + j * cs, y: 68 + i * cs, width: cs - 2, height: cs - 2, rx: 2, class: j <= i ? 'at-fill1' : 'at-cell', style: j <= i ? 'opacity:0.55' : '' });
+        tri.push(g);
+      }
+      // state S (4 key channels × 4 value dims), rows decay at different rates
+      const chip = mk(svg, 'g');
+      const gam = [0.95, 0.8, 0.45, 0.2];
+      let Sv = randM(4, 4).map((r) => r.map((x) => x * 0.6));
+      const SG = grid(chip, 0, 196, 4, 4, 13, Sv);
+      mk(chip, 'text', { x: 56, y: 226, class: 'at-t at-b' }, 'S');
+      tl.set(chip, { x: tx(0) }, { at: 0 });
+      let t = 0.3;
+      for (let c = 0; c < NC; c++) {
+        const ids = [0, 1, 2, 3].map((r) => c * Cn + r);
+        say(tl, st, msgs, 0, t);
+        tl.to(ids.map((i) => tok[i]), { opacity: 0.8 }, { at: t, dur: 0.25 });
+        tl.to(tri[c], { opacity: 1 }, { at: t + 0.2, dur: 0.35 });
+        say(tl, st, msgs, 1, t + 0.9);
+        tl.to(SG.g, { scale: 1.15 }, { at: t + 0.9, dur: 0.2 }).to(SG.g, { scale: 1 }, { at: t + 1.1, dur: 0.2 });
+        tl.to(ids.map((i) => pv[i]), { opacity: 0.75 }, { at: t + 1.1, dur: 0.3 });
+        say(tl, st, msgs, 2, t + 1.8);
+        tl.to(SG.g, { scale: 1.15 }, { at: t + 1.8, dur: 0.2 }).to(SG.g, { scale: 1 }, { at: t + 2.0, dur: 0.2 });
+        tl.to(ids.map((i) => outs[i]), { opacity: 0.8 }, { at: t + 2.0, dur: 0.3 });
+        say(tl, st, msgs, 3, t + 2.7);
+        Sv = rowScale(Sv, gam);
+        toGrid(tl, SG, Sv, t + 2.8, 0.5);
+        Sv = add(Sv, randM(4, 4).map((r, i) => r.map((x) => x * 0.5 * (i < 2 ? 0.4 : 1))));
+        toGrid(tl, SG, Sv, t + 3.4, 0.35);
+        tl.to(ids.map((i) => tok[i]), { opacity: 0 }, { at: t + 3.4, dur: 0.2 });
+        if (c < NC - 1) tl.to(chip, { x: tx((c + 1) * Cn) }, { at: t + 3.8, dur: 0.6 });
+        t += 4.5;
+      }
+      tl.wait(0.3);
+      bind(fig, tl);
     })();
   })();
   </script>

@@ -67,6 +67,23 @@
     .compbar div { height: 100%; }
     .row2 { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 8px 0; font-size: 15px; }
     .prose .eqnote { font-size: 14px; color: var(--text-soft); }
+    /* animated figures (assets/anim.js) */
+    .anim-fig { margin: 24px 0; }
+    .anim-fig svg { display: block; width: 100%; height: auto; max-width: 560px; margin: 0 auto; }
+    .anim-fig .anim-bar { max-width: 560px; margin-left: auto; margin-right: auto; }
+    .anim-fig text { font-family: var(--font-sans); font-size: 14px; }
+    .anim-fig .at-t { fill: var(--text); }
+    .anim-fig .at-b { font-weight: 600; }
+    .anim-fig .at-soft { fill: var(--text-soft); }
+    .anim-fig .at-mono { fill: var(--text-soft); font-family: var(--font-mono); font-size: 13.5px; }
+    .anim-fig .at-fill1 { fill: var(--accent); }
+    .anim-fig .at-fill2 { fill: var(--accent-2); }
+    .anim-fig .at-cell { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1; }
+    .anim-fig .at-box2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .anim-fig .at-box2.at-solid { fill: color-mix(in srgb, var(--accent-2) 16%, var(--surface)); }
+    .anim-fig .at-box1 { fill: color-mix(in srgb, var(--accent) 12%, var(--surface)); stroke: var(--accent); stroke-width: 1.5; }
+    .anim-fig .at-dash { stroke: var(--text-faint); stroke-width: 1.2; stroke-dasharray: 4 4; fill: none; }
+    .anim-fig .at-line { stroke: var(--text-faint); stroke-width: 1.2; fill: none; }
   </style>
 </head>
 <body>
@@ -211,6 +228,11 @@
       <p>这就是一个以矩阵 \(S_t\) 为隐状态的 RNN。decode 时每步只做一次外积更新和一次矩阵-向量乘，代价 \(O(d_kd_v)\)，和已经生成了多少 token 无关；显存也只需要存 \(S_t\)，不需要 KV cache。</p>
       <p>\(S\) 可以理解为一个<strong>联想记忆</strong>（associative memory）：写入时把「键 → 值」的映射以外积形式叠加进去，读出时用查询去「检索」：\(S q=\sum_j v_j(k_j^\top q)\)，即所有存过的值按键与查询的相似度加权求和。这和 90 年代的 fast weight programmer 是同一个东西：\(S\) 是一组「快权重」，由慢权重（投影矩阵）在每一步编程。</p>
 
+      <figure class="anim-fig" id="add-anim">
+        <svg viewBox="0 0 440 300" role="img" aria-label="线性注意力的状态 S：每个 token 把外积 v kᵀ 叠加进去，读出时 S q 带有串扰"></svg>
+        <figcaption>\(d_k=d_v=5\) 的状态 \(S\)（紫色为正、橙色为负，深浅为绝对值；向量为示意）。每个 token 把外积 \(v_tk_t^\top\) 整块加进 \(S\)；最后用 \(q=k_1\) 读出，因为 \(k_3^\top k_1=0.48\neq 0\)，读到的不只是 \(v_1\)。</figcaption>
+      </figure>
+
       <h3>2.4 并行形式与分块形式</h3>
       <p>训练时不想一个个 token 地递推（GPU 上串行很慢）。展开递推得到并行形式：</p>
       $$O=\big((QK^\top)\odot M\big)V ,$$
@@ -218,6 +240,11 @@
       $$O_{[i]}=\underbrace{Q_{[i]}S_{[i]}^\top}_{\text{块间：读历史状态}}+\underbrace{\big(Q_{[i]}K_{[i]}^\top\odot M\big)V_{[i]}}_{\text{块内：小的并行注意力}},\qquad
       S_{[i+1]}=S_{[i]}+V_{[i]}^\top K_{[i]} .$$
       <p>每块的成本是 \(O(C^2d+Cd^2)\)，总成本 \(O(NCd+Nd^2)\)，对 \(N\) 线性；而且全部是稠密矩阵乘，能吃满 Tensor Core。串行步数从 \(N\) 降到 \(N/C\)。Qwen3-Next 用的块长是 \(C=64\)。</p>
+
+      <figure class="anim-fig" id="chunk-anim">
+        <svg viewBox="0 0 440 260" role="img" aria-label="递推形式逐 token 串行传递状态；分块形式块内并行计算，块与块之间传递状态"></svg>
+        <figcaption>12 个 token、块长 \(C=4\)。递推形式每个 token 一步，状态 \(S\) 要串行传 12 次；分块形式一次处理一整块：块内是一个 \(C\times C\) 的因果小注意力（紫色下三角），再加上从 \(S_{[i]}\) 读历史，块末更新出 \(S_{[i+1]}\) 交给下一块，串行只剩 3 步。</figcaption>
+      </figure>
 
       <h3>2.5 问题：加性记忆会「撑爆」</h3>
       <p>线性注意力在语言建模困惑度上能接近 Transformer，但在需要精确回忆的任务（在上下文里找某个 key 对应的 value、多跳检索、长文问答）上明显落后。原因可以从联想记忆的角度直接看出来。假设所有键都是单位向量，读出第 \(i\) 个键：</p>
@@ -312,6 +339,11 @@ pred = S.T @ k_t                     # 旧记忆对 k_t 的预测
 S = S + outer(k_t, beta_t * (v_t - pred))   # 只写入差值
 o_t = S.T @ q_t</code></pre>
       <p>注意顺序：先衰减，再用<em>衰减后</em>的状态算预测。这和上面的公式一致：\(\alpha_tS_{t-1}(I-\beta_tk_tk_t^\top)=\alpha_tS_{t-1}-\beta_t(\alpha_tS_{t-1}k_t)k_t^\top\)。</p>
+
+      <figure class="anim-fig" id="delta-anim">
+        <svg viewBox="0 0 440 270" role="img" aria-label="门控 Delta 规则的一步：衰减、读旧值、算差值、写入差值"></svg>
+        <figcaption>门控 Delta 规则的一步（\(\alpha=0.8\)、\(\beta=1\)，向量为示意）。新 token 的键还是 \(k_1\)，值换成 \(v'\)：先整体衰减，再读出 \(k_1\) 方向的旧值，只把差值写回去。写完 \(Sk_1=v'\)，而 \(k_2\) 方向的内容只是跟着衰减了一次，没有被改动。</figcaption>
+      </figure>
 
       <h3>4.3 门怎么参数化</h3>
       <p>Qwen3-Next 的 \(\alpha_t\) 沿用 Mamba2 的「离散化」写法。每个值头 \(h\) 有一个可学习的 \(A_h>0\)（以 \(\log A_h\) 存储）和偏置 \(\Delta_h\)，输入投影给出一个标量 \(a_t\)：</p>
@@ -1180,6 +1212,245 @@ o_t = S.T @ q_t</code></pre>
       }
       ['sd-p', 'sd-g', 'sd-c'].forEach((id) => $(id).addEventListener('input', update));
       update();
+    })();
+  })();
+  </script>
+  <script src="/assets/anim.js"></script>
+  <script>
+  /* ---------------- animated figures (assets/anim.js) ---------------- */
+  (() => {
+    if (!window.Anim) return;
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (parent, tag, attrs = {}, text) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      if (text !== undefined) e.textContent = text;
+      parent.appendChild(e);
+      return e;
+    };
+    const bind = (fig, tl) => {
+      const host = document.createElement('div');
+      fig.insertBefore(host, fig.querySelector('figcaption'));
+      Anim.inView(fig, tl, { controls: true, controlsIn: host });
+    };
+    // A matrix of cells: purple overlay for positive, orange for negative, opacity = |value|.
+    const op = (v) => Math.min(1, Math.abs(v)) * 0.9;
+    function grid(parent, x, y, R, C, cs, vals) {
+      const g = mk(parent, 'g');
+      const cells = [];
+      for (let i = 0; i < R; i++) {
+        cells.push([]);
+        for (let j = 0; j < C; j++) {
+          const a = { x: x + j * cs + 1, y: y + i * cs + 1, width: cs - 2, height: cs - 2, rx: 3 };
+          mk(g, 'rect', { ...a, class: 'at-cell' });
+          const v = vals ? vals[i][j] : 0;
+          const p = mk(g, 'rect', { ...a, class: 'at-fill1', style: 'opacity:' + (v > 0 ? op(v) : 0) });
+          const n = mk(g, 'rect', { ...a, class: 'at-fill2', style: 'opacity:' + (v < 0 ? op(v) : 0) });
+          cells[i].push({ p, n });
+        }
+      }
+      return { g, cells, R, C };
+    }
+    function toGrid(tl, G, vals, at, dur = 0.4, stagger = 0) {
+      for (let i = 0; i < G.R; i++) for (let j = 0; j < G.C; j++) {
+        const v = vals[i][j], c = G.cells[i][j], o = { at: at + i * stagger, dur };
+        tl.to(c.p, { opacity: v > 0 ? op(v) : 0 }, o);
+        tl.to(c.n, { opacity: v < 0 ? op(v) : 0 }, o);
+      }
+    }
+    const col = (v) => v.map((x) => [x]);
+    const row = (v) => [v];
+    const zeros = (R, C) => Array.from({ length: R }, () => new Array(C).fill(0));
+    const outer = (a, b) => a.map((x) => b.map((y) => x * y));
+    const add = (A, B) => A.map((r, i) => r.map((x, j) => x + B[i][j]));
+    const scale = (A, s) => A.map((r) => r.map((x) => x * s));
+    const say = (tl, el, list, idx, at) => tl.set(el, { text: idx, fmt: (v) => list[Math.max(0, Math.min(list.length - 1, Math.round(v)))] }, { at });
+    const dot = (a, b) => a.reduce((s, x, i) => s + x * b[i], 0);
+    const matvec = (S, k) => S.map((r) => dot(r, k));
+    const k1 = [0.8, 0.6, 0, 0, 0], k2 = [0, 0, 0.6, 0.8, 0], k3 = [0.6, 0, 0, 0, 0.8];
+    const v1 = [0.9, -0.5, 0.3, 0.0, -0.7], v2 = [-0.4, 0.8, 0.6, -0.6, 0.2], v3 = [0.5, 0.4, -0.8, 0.7, 0.3];
+    const D = 5, CS = 28;
+
+    /* ---- additive write S ← S + v kᵀ, then read ---- */
+    (() => {
+      const fig = document.getElementById('add-anim'); if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const tl = Anim.timeline();
+      const msgs = ['S 从 0 开始', 'token 1：S ← S + v₁k₁ᵀ', 'token 2：S ← S + v₂k₂ᵀ', 'token 3：S ← S + v₃k₃ᵀ', '读出：o = S q，取 q = k₁'];
+      const st = mk(svg, 'text', { x: 220, y: 22, 'text-anchor': 'middle', class: 'at-t at-b' }, msgs[0]);
+      say(tl, st, msgs, 0, 0);
+      const S = grid(svg, 40, 92, D, D, CS);
+      mk(svg, 'text', { x: 110, y: 254, 'text-anchor': 'middle', class: 'at-soft' }, 'S（dᵥ × dₖ）');
+      const plus = mk(svg, 'text', { x: 201, y: 168, 'text-anchor': 'middle', class: 'at-t at-b' }, '+');
+      const V = grid(svg, 222, 92, D, 1, CS);
+      const K = grid(svg, 262, 52, 1, D, CS);
+      const stage = mk(svg, 'g');
+      const P = grid(stage, 262, 92, D, D, CS);
+      const labs = [mk(svg, 'text', { x: 236, y: 254, 'text-anchor': 'middle', class: 'at-soft' }, 'v'),
+        mk(svg, 'text', { x: 256, y: 72, 'text-anchor': 'end', class: 'at-soft' }, 'kᵀ'),
+        mk(svg, 'text', { x: 332, y: 254, 'text-anchor': 'middle', class: 'at-soft' }, 'v kᵀ')];
+      const toks = [[k1, v1], [k2, v2], [k3, v3]];
+      let cur = zeros(D, D), t = 0.3;
+      toks.forEach(([k, v], n) => {
+        say(tl, st, msgs, n + 1, t);
+        toGrid(tl, K, row(k), t, 0.35);
+        toGrid(tl, V, col(v), t, 0.35);
+        const op_ = outer(v, k);
+        toGrid(tl, P, op_, t + 0.5, 0.35, 0.06);
+        tl.to(stage, { x: -222 }, { at: t + 1.2, dur: 0.7 });
+        cur = add(cur, op_);
+        tl.to(stage, { opacity: 0 }, { at: t + 1.9, dur: 0.25 });
+        toGrid(tl, S, cur, t + 1.9, 0.3);
+        tl.set(stage, { x: 0 }, { at: t + 2.2 });
+        toGrid(tl, P, zeros(D, D), t + 2.2, 0);
+        tl.set(stage, { opacity: 1 }, { at: t + 2.25 });
+        if (n < 2) { toGrid(tl, K, zeros(1, D), t + 2.2, 0.2); toGrid(tl, V, zeros(D, 1), t + 2.2, 0.2); }
+        t += 2.5;
+      });
+      // read with q = k1
+      say(tl, st, msgs, 4, t);
+      tl.to([plus, V.g, K.g, stage, ...labs], { opacity: 0 }, { at: t, dur: 0.3 });
+      const Q = grid(svg, 40, 52, 1, D, CS); Q.g.style.opacity = 0;
+      const ql = mk(svg, 'text', { x: 34, y: 72, 'text-anchor': 'end', class: 'at-soft', style: 'opacity:0' }, 'q');
+      tl.to([Q.g, ql], { opacity: 1 }, { at: t + 0.2, dur: 0.3 });
+      toGrid(tl, Q, row(k1), t + 0.2, 0);
+      const O = grid(svg, 236, 92, D, 1, CS), V1 = grid(svg, 300, 92, D, 1, CS);
+      O.g.style.opacity = 0; V1.g.style.opacity = 0;
+      const ol = mk(svg, 'text', { x: 250, y: 254, 'text-anchor': 'middle', class: 'at-soft', style: 'opacity:0' }, 'S q');
+      const vl = mk(svg, 'text', { x: 314, y: 254, 'text-anchor': 'middle', class: 'at-soft', style: 'opacity:0' }, 'v₁');
+      toGrid(tl, O, col(matvec(cur, k1)), 0, 0);
+      toGrid(tl, V1, col(v1), 0, 0);
+      tl.to([O.g, ol], { opacity: 1 }, { at: t + 0.8, dur: 0.4 });
+      tl.to([V1.g, vl], { opacity: 1 }, { at: t + 1.5, dur: 0.4 });
+      const note = mk(svg, 'text', { x: 220, y: 286, 'text-anchor': 'middle', class: 'at-t', style: 'opacity:0' }, 'S k₁ = v₁ + 0.48·v₃：k₃ 与 k₁ 不正交，读出带了串扰');
+      tl.to(note, { opacity: 1 }, { at: t + 2.1, dur: 0.4 });
+      tl.wait(0.4);
+      bind(fig, tl);
+    })();
+
+    /* ---- gated delta rule: decay, read, write the difference ---- */
+    (() => {
+      const fig = document.getElementById('delta-anim'); if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const alpha = 0.8, vn = [-0.6, 0.2, 0.9, 0.4, 0.1];
+      const S0 = add(outer(v1, k1), outer(v2, k2));
+      const Sa = scale(S0, alpha), pred = matvec(Sa, k1);
+      const diff = vn.map((x, i) => x - pred[i]);
+      const S1 = add(Sa, outer(diff, k1));
+      const tl = Anim.timeline();
+      const msgs = ['S 里存着 k₁→v₁ 和 k₂→v₂；新 token 用 k₁ 写入 v′', '① 衰减：S ← αS（α = 0.8，整体变淡）', '② 读旧值：S k₁', '③ 差值：v′ − S k₁', '④ 写入差值：S ← S + (v′ − S k₁) k₁ᵀ', '⑤ 再读：S k₁ = v′，k₁ 方向的旧值被替换'];
+      const st = mk(svg, 'text', { x: 220, y: 22, 'text-anchor': 'middle', class: 'at-t at-b' }, msgs[0]);
+      say(tl, st, msgs, 0, 0);
+      const S = grid(svg, 40, 92, D, D, CS, S0);
+      mk(svg, 'text', { x: 110, y: 254, 'text-anchor': 'middle', class: 'at-soft' }, 'S');
+      const K = grid(svg, 40, 52, 1, D, CS, row(k1));
+      mk(svg, 'text', { x: 34, y: 72, 'text-anchor': 'end', class: 'at-soft' }, 'k₁');
+      const colAt = (x, vals, name) => {
+        const G = grid(svg, x, 92, D, 1, CS, col(vals)); G.g.style.opacity = 0;
+        const l = mk(svg, 'text', { x: x + 14, y: 84, 'text-anchor': 'middle', class: 'at-soft', style: 'opacity:0' }, name);
+        return [G, l];
+      };
+      const [Pr, prl] = colAt(206, pred, 'S k₁');
+      const [Vn, vnl] = colAt(266, vn, 'v′');
+      const [Df, dfl] = colAt(326, diff, 'v′ − S k₁');
+      const minus = mk(svg, 'text', { x: 250, y: 168, 'text-anchor': 'middle', class: 'at-t at-b', style: 'opacity:0' }, '−');
+      const eq = mk(svg, 'text', { x: 310, y: 168, 'text-anchor': 'middle', class: 'at-t at-b', style: 'opacity:0' }, '=');
+      let t = 0.6;
+      say(tl, st, msgs, 1, t);
+      toGrid(tl, S, Sa, t + 0.2, 0.6);
+      t += 1.4;
+      say(tl, st, msgs, 2, t);
+      tl.to([Pr.g, prl], { opacity: 1 }, { at: t + 0.2, dur: 0.4 });
+      t += 1.2;
+      say(tl, st, msgs, 3, t);
+      tl.to([Vn.g, vnl, minus], { opacity: 1 }, { at: t + 0.1, dur: 0.4 });
+      tl.to([Df.g, dfl, eq], { opacity: 1 }, { at: t + 0.7, dur: 0.4 });
+      t += 1.6;
+      say(tl, st, msgs, 4, t);
+      tl.to([Pr.g, prl, Vn.g, vnl, minus, eq, dfl], { opacity: 0 }, { at: t, dur: 0.3 });
+      tl.to(Df.g, { x: -104 }, { at: t + 0.3, dur: 0.6 });
+      const stage = mk(svg, 'g', { style: 'opacity:0' });
+      const P = grid(stage, 262, 92, D, D, CS, outer(diff, k1));
+      const Kc = grid(stage, 262, 52, 1, D, CS, row(k1));
+      tl.to(stage, { opacity: 1 }, { at: t + 0.9, dur: 0.4 });
+      tl.to(stage, { x: -222 }, { at: t + 1.6, dur: 0.7 });
+      tl.to([stage, Df.g], { opacity: 0 }, { at: t + 2.3, dur: 0.25 });
+      toGrid(tl, S, S1, t + 2.3, 0.3);
+      t += 3.0;
+      say(tl, st, msgs, 5, t);
+      const [O, ol] = colAt(236, matvec(S1, k1), 'S k₁');
+      const [V2, v2l] = colAt(300, vn, 'v′');
+      tl.to([O.g, ol], { opacity: 1 }, { at: t + 0.2, dur: 0.4 });
+      tl.to([V2.g, v2l], { opacity: 1 }, { at: t + 0.8, dur: 0.4 });
+      tl.wait(0.5);
+      bind(fig, tl);
+    })();
+
+    /* ---- chunkwise: recurrent steps vs chunks ---- */
+    (() => {
+      const fig = document.getElementById('chunk-anim'); if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const N = 12, Cn = 4, X0 = 40, TW = 32;
+      const tx = (i) => X0 + i * TW;
+      const tl = Anim.timeline();
+      const msgs = ['递推：每个 token 一步，S 串行往后传', '分块：块内并行，块与块之间传 S'];
+      const st = mk(svg, 'text', { x: 220, y: 22, 'text-anchor': 'middle', class: 'at-t at-b' }, msgs[0]);
+      say(tl, st, msgs, 0, 0);
+      for (let c = 1; c < N / Cn; c++) mk(svg, 'line', { x1: tx(c * Cn) - 2, x2: tx(c * Cn) - 2, y1: 34, y2: 220, class: 'at-dash' });
+      const tok = [], outs = [];
+      for (let i = 0; i < N; i++) {
+        mk(svg, 'rect', { x: tx(i), y: 36, width: TW - 4, height: 26, rx: 4, class: 'at-cell' });
+        tok.push(mk(svg, 'rect', { x: tx(i), y: 36, width: TW - 4, height: 26, rx: 4, class: 'at-fill2', style: 'opacity:0' }));
+        mk(svg, 'text', { x: tx(i) + 14, y: 54, 'text-anchor': 'middle', class: 'at-mono' }, String(i + 1));
+        mk(svg, 'rect', { x: tx(i), y: 184, width: TW - 4, height: 26, rx: 4, class: 'at-cell' });
+        outs.push(mk(svg, 'rect', { x: tx(i), y: 184, width: TW - 4, height: 26, rx: 4, class: 'at-fill1', style: 'opacity:0' }));
+      }
+      mk(svg, 'text', { x: 34, y: 54, 'text-anchor': 'end', class: 'at-soft' }, 'x');
+      mk(svg, 'text', { x: 34, y: 202, 'text-anchor': 'end', class: 'at-soft' }, 'o');
+      // intra-chunk causal blocks
+      const masks = [];
+      for (let c = 0; c < N / Cn; c++) {
+        const g = mk(svg, 'g', { style: 'opacity:0' });
+        const mx = tx(c * Cn) + 30, my = 76, cs = 13;
+        for (let i = 0; i < Cn; i++) for (let j = 0; j < Cn; j++)
+          mk(g, 'rect', { x: mx + j * cs, y: my + i * cs, width: cs - 2, height: cs - 2, rx: 2, class: j <= i ? 'at-fill1' : 'at-cell', style: j <= i ? 'opacity:0.55' : '' });
+        masks.push(g);
+      }
+      const sChip = mk(svg, 'g');
+      mk(sChip, 'rect', { x: 0, y: 136, width: 30, height: 30, rx: 6, class: 'at-box2 at-solid' });
+      mk(sChip, 'text', { x: 15, y: 156, 'text-anchor': 'middle', class: 'at-t at-b' }, 'S');
+      const cnt = mk(svg, 'text', { x: 220, y: 246, 'text-anchor': 'middle', class: 'at-t' }, '');
+      const fmtC = (v) => '串行步数：' + Math.round(v);
+      tl.set(cnt, { text: 0, fmt: fmtC }, { at: 0 });
+      tl.set(sChip, { x: tx(0) - 1 }, { at: 0 });
+      let t = 0.3;
+      for (let i = 0; i < N; i++) {
+        tl.to(tok[i], { opacity: 0.8 }, { at: t, dur: 0.12 });
+        tl.to(sChip, { x: tx(i) - 1 }, { at: t, dur: 0.18 });
+        tl.to(outs[i], { opacity: 0.8 }, { at: t + 0.12, dur: 0.12 });
+        tl.set(cnt, { text: i + 1, fmt: fmtC }, { at: t + 0.12 });
+        tl.to(tok[i], { opacity: 0 }, { at: t + 0.26, dur: 0.1 });
+        t += 0.3;
+      }
+      t += 0.6;
+      say(tl, st, msgs, 1, t);
+      tl.to(outs, { opacity: 0 }, { at: t, dur: 0.3 });
+      tl.set(cnt, { text: 0, fmt: fmtC }, { at: t });
+      tl.to(sChip, { x: tx(0) - 1 }, { at: t, dur: 0.4 });
+      t += 0.7;
+      for (let c = 0; c < N / Cn; c++) {
+        const ids = [0, 1, 2, 3].map((r) => c * Cn + r);
+        tl.to(ids.map((i) => tok[i]), { opacity: 0.8 }, { at: t, dur: 0.25 });
+        tl.to(masks[c], { opacity: 1 }, { at: t + 0.15, dur: 0.3 });
+        tl.to(ids.map((i) => outs[i]), { opacity: 0.8 }, { at: t + 0.55, dur: 0.3 });
+        tl.set(cnt, { text: c + 1, fmt: fmtC }, { at: t + 0.55 });
+        tl.to(ids.map((i) => tok[i]), { opacity: 0 }, { at: t + 0.9, dur: 0.2 });
+        if (c < N / Cn - 1) tl.to(sChip, { x: tx((c + 1) * Cn) - 1 }, { at: t + 0.9, dur: 0.5 });
+        else tl.to(sChip, { x: 408 }, { at: t + 0.9, dur: 0.5 });
+        t += 1.5;
+      }
+      tl.wait(0.3);
+      bind(fig, tl);
     })();
   })();
   </script>

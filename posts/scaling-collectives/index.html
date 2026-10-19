@@ -27,6 +27,16 @@
       --c0: #8f84ff; --c1: #ff8a4c; --c2: #38d9a9; --c3: #f06595;
       --c4: #4dabf7; --c5: #ffd43b; --c6: #b197fc; --c7: #69db7c;
     }
+    :root { --chip-ink: #fff; }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --chip-ink: #16141f; } }
+    :root[data-theme="dark"] { --chip-ink: #16141f; }
+    svg.dia text.ink { fill: var(--chip-ink); }
+    .ring-slide .cols { grid-template-columns: 1fr 1fr; gap: 28px; align-items: center; }
+    .ring-text { display: grid; gap: 10px; font-size: 20px; }
+    .ring-text ul { margin: 0; }
+    .ring-text .box { padding: 12px 18px; }
+    .slide.mm-case { gap: 14px; padding-top: 44px; padding-bottom: 64px; }
+    .mm-case .cols { grid-template-columns: 1fr 500px; gap: 32px; align-items: center; }
     .slide.dense { font-size: 23px; gap: 18px; padding: 56px 80px; }
     .slide.dense h2 { font-size: 40px; }
     .slide .cols { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; align-items: start; }
@@ -52,6 +62,8 @@
     .slide .tag { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 0.8em; background: var(--accent-soft); color: var(--accent); }
     .slide .warn { color: var(--accent-2); }
     svg.dia { width: 100%; height: auto; display: block; }
+    svg.prim { flex: none; }
+    .slide.prim-tight pre { font-size: 14px; padding: 10px 16px; }
     svg.dia text { fill: var(--text); font-family: var(--font-sans); }
     svg.dia .soft { fill: var(--text-soft); }
     svg.dia .faint { fill: var(--text-faint); }
@@ -171,7 +183,7 @@ def init_process():
     <section class="slide">
       <div class="kicker">I · 原语</div>
       <h2>Broadcast：一份数据发给所有人</h2>
-      <svg class="dia prim" data-kind="broadcast" viewBox="0 0 1000 250"></svg>
+      <svg class="dia prim" data-kind="broadcast" viewBox="0 0 1000 200"></svg>
       <div class="cols">
         <p class="small">root（这里是 rank 0）有一份张量，其余 rank 拿到<b>完整拷贝</b>。典型用途：训练开始时把初始权重从 rank 0 同步给所有副本。</p>
         <pre><code>if rank == 0:
@@ -187,7 +199,7 @@ dist.broadcast(t, src=0)
     <section class="slide">
       <div class="kicker">I · 原语</div>
       <h2>Reduce 与 AllReduce：把大家的数合起来</h2>
-      <svg class="dia prim" data-kind="reduce" viewBox="0 0 1000 250"></svg>
+      <svg class="dia prim" data-kind="reduce" viewBox="0 0 1000 200"></svg>
       <div class="cols">
         <p class="small">每个 rank 有一个同形状的张量，用一个函数 \(f\)（求和、平均、最大…）逐元素合并。<b>Reduce</b> 只把结果交给 root；<b>AllReduce</b> 让每个 rank 都拿到结果，等于 Reduce + Broadcast。数据并行的梯度同步就是一个 AllReduce。</p>
         <pre><code>t = torch.full((5,), rank + 1.).cuda()  # 1,2,3
@@ -202,7 +214,7 @@ dist.all_reduce(t, op=dist.ReduceOp.SUM)
     <section class="slide">
       <div class="kicker">I · 原语</div>
       <h2>Gather 与 AllGather：把碎片拼成整体</h2>
-      <svg class="dia prim" data-kind="gather" viewBox="0 0 1000 250"></svg>
+      <svg class="dia prim" data-kind="gather" viewBox="0 0 1000 200"></svg>
       <div class="cols">
         <p class="small">每个 rank 有<b>不同的一块</b>，数据本身不做运算，只是搬运拼接。<b>Gather</b> 拼到 root 上；<b>AllGather</b> 让每个 rank 都拿到拼好的完整张量。ZeRO-3 / FSDP 在用到某层之前把这层被切开的权重 AllGather 回来。</p>
         <pre><code>out = [torch.zeros(5).cuda()
@@ -216,12 +228,12 @@ dist.gather(t, out if rank == 0 else None,
     </section>
 
     <!-- 8 -->
-    <section class="slide">
+    <section class="slide dense prim-tight">
       <div class="kicker">I · 原语</div>
       <h2>Scatter 与 ReduceScatter：切开再分发</h2>
-      <svg class="dia prim" data-kind="reducescatter" viewBox="0 0 1000 250"></svg>
+      <svg class="dia prim" data-kind="reducescatter" viewBox="0 0 1000 200"></svg>
       <div class="cols">
-        <p class="small"><b>Scatter</b> 是 Gather 的反向：root 把张量切成 N 块，第 r 块发给 rank r（不同于 Broadcast 发整份）。<b>ReduceScatter</b>：每个 rank 都有一个分成 N 块的张量，先逐块求和，再把第 r 块的和只交给 rank r。图里画的是 ReduceScatter。</p>
+        <p class="small"><b>Scatter</b> 是 Gather 的反向：root 把张量切成 N 块，第 r 块发给 rank r（不同于 Broadcast 发整份）。<b>ReduceScatter</b>：每个 rank 都有一个分成 N 块的张量，先逐块求和，再把第 r 块的和只交给 rank r。图里先演示 Scatter，再演示 ReduceScatter。</p>
         <pre><code># 3 个 rank，rank r 的第 j 块是
 #   [r+1, 2(r+1)] 的 j+1 次方
 inp = [torch.tensor([rank+1., 2*(rank+1)]).cuda()
@@ -237,7 +249,7 @@ dist.reduce_scatter(out, inp, op=dist.ReduceOp.SUM)
     <section class="slide">
       <div class="kicker">I · 原语</div>
       <h2>AllToAll：分布式的"转置"</h2>
-      <svg class="dia prim" data-kind="alltoall" viewBox="0 0 1000 250"></svg>
+      <svg class="dia prim" data-kind="alltoall" viewBox="0 0 1000 200"></svg>
       <div class="cols">
         <p class="small">每个 rank 有 N 块，第 j 块要送给 rank j；收完以后 rank j 拿着"所有人的第 j 块"。把 rank 当行、块当列，这就是一次矩阵转置。不做运算，也不复制数据。</p>
         <p class="small">它不会自然出现在分片矩阵乘里，但在 MoE 里随处可见：每个 token 要送到它选中的 expert 所在的卡上（见<a href="/posts/scaling-moe/">专家并行</a>）。分片记号里它表示"把下标从一个维度挪到另一个维度"。</p>
@@ -245,7 +257,7 @@ dist.reduce_scatter(out, inp, op=dist.ReduceOp.SUM)
     </section>
 
     <!-- 10 -->
-    <section class="slide">
+    <section class="slide" id="barrier-slide">
       <div class="kicker">I · 原语</div>
       <h2>Barrier：等所有人到齐</h2>
       <div class="cols">
@@ -256,17 +268,18 @@ dist.barrier()
 # rank 0/1/2 都在约 2.0 秒后才通过</code></pre>
           <p class="small muted" style="margin-top: 16px">最快的 rank 一点没睡，也要等最慢的那个。所以 barrier 要慎用：很多时候让快的 rank 先往下做更好，下一轮它可能变成慢的那个，延迟会平均掉。</p>
         </div>
-        <svg class="dia" viewBox="0 0 480 300">
+        <svg class="dia" id="barrier-svg" viewBox="0 0 480 300">
           <g font-size="16">
             <text x="10" y="58" class="soft">rank 0</text><text x="10" y="128" class="soft">rank 1</text><text x="10" y="198" class="soft">rank 2</text>
-            <rect x="80" y="40" width="10" height="28" rx="4" fill="var(--c0)"/>
-            <rect x="80" y="110" width="110" height="28" rx="4" fill="var(--c1)"/>
-            <rect x="80" y="180" width="210" height="28" rx="4" fill="var(--c2)"/>
-            <rect x="90" y="40" width="200" height="28" rx="4" fill="var(--bg-soft)" stroke="var(--border)"/>
-            <rect x="190" y="110" width="100" height="28" rx="4" fill="var(--bg-soft)" stroke="var(--border)"/>
-            <text x="150" y="60" class="faint" font-size="14">等待</text>
-            <line x1="292" y1="20" x2="292" y2="230" stroke="var(--accent-2)" stroke-width="3" stroke-dasharray="6 5"/>
-            <text x="300" y="250" fill="var(--accent-2)">barrier</text>
+            <rect class="b-work" x="80" y="40" width="10" height="28" rx="4" fill="var(--c0)"/>
+            <rect class="b-work" x="80" y="110" width="110" height="28" rx="4" fill="var(--c1)"/>
+            <rect class="b-work" x="80" y="180" width="210" height="28" rx="4" fill="var(--c2)"/>
+            <rect class="b-wait" x="90" y="40" width="200" height="28" rx="4" fill="var(--bg-soft)" stroke="var(--border)"/>
+            <rect class="b-wait" x="190" y="110" width="100" height="28" rx="4" fill="var(--bg-soft)" stroke="var(--border)"/>
+            <text x="150" y="60" class="faint b-wl" font-size="14">等待</text>
+            <g class="b-bar"><line x1="292" y1="20" x2="292" y2="230" stroke="var(--accent-2)" stroke-width="3" stroke-dasharray="6 5"/>
+            <text x="300" y="250" fill="var(--accent-2)">barrier</text></g>
+            <line class="b-head" x1="80" y1="24" x2="80" y2="262" stroke="var(--text-faint)" stroke-width="1.5"/>
             <line x1="80" y1="270" x2="460" y2="270" class="line"/>
             <text x="80" y="292" class="faint" font-size="14">0 s</text><text x="282" y="292" class="faint" font-size="14">2 s</text>
           </g>
@@ -329,72 +342,59 @@ dist.barrier()
     </section>
 
     <!-- 14 -->
-    <section class="slide">
+    <section class="slide" id="naive-slide">
       <div class="kicker">II · 代价</div>
       <h2>笨办法：全部发给 root</h2>
       <div class="cols">
         <div>
           <p class="small">AllReduce 一个 \(V\) 字节的张量：其余 N−1 个 rank 都把整份发给 root，root 求和，再把整份广播回去。</p>
           $$T_\text{naive} \approx \frac{(N-1)V}{W} \cdot 2$$
-          <p class="small fragment">root 的入口和出口各要扛 \((N-1)V\) 字节，其他链路大部分时间闲着。<b>时间随 N 线性增长</b>，卡越多越慢。</p>
-          <p class="small fragment">想要的效果：让<b>每条链路同时都在忙</b>，而且每个 rank 只收发 \(O(V)\) 字节，与 N 无关。环形算法做到了这一点。</p>
+          <p class="small a-rev">root 的入口和出口各要扛 \((N-1)V\) 字节，其他链路大部分时间闲着。<b>时间随 N 线性增长</b>，卡越多越慢。</p>
+          <p class="small a-rev">想要的效果：让<b>每条链路同时都在忙</b>，而且每个 rank 只收发 \(O(V)\) 字节，与 N 无关。环形算法做到了这一点。</p>
         </div>
-        <svg class="dia" viewBox="0 0 440 320">
-          <circle cx="220" cy="160" r="42" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="2"/>
-          <text x="220" y="167" text-anchor="middle" font-size="20">root</text>
-          <g font-size="16">
-            <g><circle cx="80" cy="60" r="26" class="frame"/><text x="80" y="66" text-anchor="middle">1</text></g>
-            <g><circle cx="360" cy="60" r="26" class="frame"/><text x="360" y="66" text-anchor="middle">2</text></g>
-            <g><circle cx="80" cy="260" r="26" class="frame"/><text x="80" y="266" text-anchor="middle">3</text></g>
-            <g><circle cx="360" cy="260" r="26" class="frame"/><text x="360" y="266" text-anchor="middle">4</text></g>
-            <g><circle cx="220" cy="20" r="0"/></g>
-          </g>
-          <g stroke="var(--accent-2)" stroke-width="3">
-            <line x1="100" y1="78" x2="188" y2="132"/><line x1="340" y1="78" x2="252" y2="132"/>
-            <line x1="100" y1="242" x2="188" y2="188"/><line x1="340" y1="242" x2="252" y2="188"/>
-          </g>
-          <text x="220" y="310" text-anchor="middle" class="soft" font-size="15">所有流量挤在 root 的一条链路上</text>
-        </svg>
+        <svg class="dia" id="naive-svg" viewBox="0 0 440 340"></svg>
       </div>
     </section>
 
     <!-- 15 -->
-    <section class="slide dense">
+    <section class="slide dense ring-slide" id="ag-slide">
       <div class="kicker">II · 代价 · 环形算法</div>
       <h2>环形 AllGather</h2>
       <div class="cols">
-        <div>
+        <div class="ring-text">
           <p>把 N 个 rank 排成环，每个只向右邻居发、从左邻居收。张量总共 \(V\) 字节，每个 rank 开始时有一块 \(V/N\)。</p>
           <ul>
-            <li class="fragment">第 1 步：每个 rank 把自己那块发给右邻居。</li>
-            <li class="fragment">第 k 步：把上一步收到的那块再转发给右邻居。</li>
-            <li class="fragment">N−1 步后，每块都走遍了整个环，每个 rank 都有全部 N 块。</li>
+            <li class="a-rev">第 1 步：每个 rank 把自己那块发给右邻居。</li>
+            <li class="a-rev">第 k 步：把上一步收到的那块再转发给右邻居。</li>
+            <li class="a-rev">N−1 步后，每块都走遍了整个环，每个 rank 都有全部 N 块。</li>
           </ul>
+          <div class="box hl a-rev">
+            <p>每步每条链路发 \(V/N\) 字节，共 \(N-1\) 步：</p>
+            $$T_\text{AG} = (N-1)\,\alpha + \frac{N-1}{N}\cdot\frac{V}{W}$$
+            <p class="small">带宽项 \(\to V/W\)，<b>与 N 无关</b>。环上所有链路每一步都在工作，这是关键。</p>
+            <p class="small muted">GPU 节点内是交换机而不是物理环，但可以按任意顺序"假装"成环，每跳都用满单卡出口带宽，结论相同。</p>
+          </div>
         </div>
-        <div class="box fragment hl">
-          <p>每步每条链路发 \(V/N\) 字节，共 \(N-1\) 步：</p>
-          $$T_\text{AG} = (N-1)\,\alpha + \frac{N-1}{N}\cdot\frac{V}{W}$$
-          <p class="small">带宽项 \(\to V/W\)，<b>与 N 无关</b>。环上所有链路每一步都在工作，这是关键。</p>
-          <p class="small muted">GPU 节点内是交换机而不是物理环，但可以按任意顺序"假装"成环，每跳都用满单卡出口带宽，结论相同。</p>
-        </div>
+        <svg class="dia" id="ag-svg" viewBox="0 0 520 420"></svg>
       </div>
     </section>
 
     <!-- 16 -->
-    <section class="slide dense">
+    <section class="slide dense ring-slide" id="rs-slide">
       <div class="kicker">II · 代价 · 环形算法</div>
       <h2>环形 ReduceScatter</h2>
       <div class="cols">
-        <div>
-          <p>每个 rank 把自己的张量切成 N 块。第 \(k\) 步，rank \(i\) 把第 \((i-k) \bmod N\) 块（已经累加了前面几个 rank 的贡献）发给右邻居，右邻居把<b>自己的同一块加上去</b>。</p>
-          <p class="fragment">N−1 步以后，rank \(i\) 手上第 \((i+1) \bmod N\) 块已经加了全部 N 个 rank 的贡献，就是这一块的最终和。</p>
+        <div class="ring-text">
+          <p>每个 rank 把自己的张量切成 N 块。第 \(k\) 步（\(k\) 从 0 数起），rank \(i\) 把第 \((i-k) \bmod N\) 块（已经累加了前面几个 rank 的贡献）发给右邻居，右邻居把<b>自己的同一块加上去</b>。</p>
+          <p class="a-rev">N−1 步以后，rank \(i\) 手上第 \((i+1) \bmod N\) 块已经加了全部 N 个 rank 的贡献，就是这一块的最终和。</p>
+          <div class="box hl a-rev">
+            <p>通信模式和 AllGather 完全一样，只是"收到后相加"而不是"收到后保存"：</p>
+            $$T_\text{RS} = (N-1)\,\alpha + \frac{N-1}{N}\cdot\frac{V}{W}$$
+            <p class="small">另外有 \((N-1)V/N\) 次加法，通常远小于通信时间。</p>
+            <p class="small muted">注意 \(V\) 是<b>整个</b>张量的字节数（NCCL 里 = 每 rank 输出大小 × N）。</p>
+          </div>
         </div>
-        <div class="box fragment hl">
-          <p>通信模式和 AllGather 完全一样，只是"收到后相加"而不是"收到后保存"：</p>
-          $$T_\text{RS} = (N-1)\,\alpha + \frac{N-1}{N}\cdot\frac{V}{W}$$
-          <p class="small">另外有 \((N-1)V/N\) 次加法，通常远小于通信时间。</p>
-          <p class="small muted">注意 \(V\) 是<b>整个</b>张量的字节数（NCCL 里 = 每 rank 输出大小 × N）。</p>
-        </div>
+        <svg class="dia" id="rs-svg" viewBox="0 0 520 420"></svg>
       </div>
     </section>
 
@@ -481,7 +481,7 @@ dist.barrier()
     </section>
 
     <!-- 21 -->
-    <section class="slide dense">
+    <section class="slide dense" id="torus-slide">
       <div class="kicker">II · 代价 · TPU 环面</div>
       <h2>双向环、环面与多个轴</h2>
       <div class="cols">
@@ -492,12 +492,14 @@ dist.barrier()
             <li>每跳耗时 \(\frac{2V}{N \cdot W_\text{bi}}\)，乘以 \(N/2\) 跳：</li>
           </ul>
           $$T_\text{AG} = \max\!\left[\frac{T_\text{min}\cdot N}{2},\ \frac{V}{W_\text{bi}}\right]$$
+          <svg class="dia" id="biring-svg" viewBox="0 0 540 170"></svg>
         </div>
         <div>
-          <p class="fragment">在 \(k\) 个 mesh 轴上同时做（例如 \(\text{AllGather}_{XY}\)），可用链路翻 \(k\) 倍：</p>
-          <div class="fragment">$$T = \max\!\left[\frac{T_\text{min}\sum_i |X_i|}{2},\ \frac{V}{W_\text{bi}\, N_\text{axes}}\right]$$</div>
-          <p class="fragment">AllReduce 仍是 2 倍，ReduceScatter 与 AllGather 相同。<b>只要是带宽受限，耗时只取决于数组大小和链路带宽，与分片数无关</b>。</p>
-          <p class="small muted fragment">注意：v5e 只有某个轴长为 16 时才有回绕链路；没有回绕就只能单向走满 N−1 跳。</p>
+          <p class="a-rev">在 \(k\) 个 mesh 轴上同时做（例如 \(\text{AllGather}_{XY}\)），可用链路翻 \(k\) 倍：</p>
+          <svg class="dia" id="torus-svg" viewBox="0 0 540 140"></svg>
+          <div class="a-rev">$$T = \max\!\left[\frac{T_\text{min}\sum_i |X_i|}{2},\ \frac{V}{W_\text{bi}\, N_\text{axes}}\right]$$</div>
+          <p class="a-rev">AllReduce 仍是 2 倍，ReduceScatter 与 AllGather 相同。<b>只要是带宽受限，耗时只取决于数组大小和链路带宽，与分片数无关</b>。</p>
+          <p class="small muted a-rev">注意：v5e 只有某个轴长为 16 时才有回绕链路；没有回绕就只能单向走满 N−1 跳。</p>
         </div>
       </div>
     </section>
@@ -777,24 +779,27 @@ dist.barrier()
     </section>
 
     <!-- 33 -->
-    <section class="slide">
+    <section class="slide dense mm-case" id="case1-slide">
       <div class="kicker">III · 情形 1</div>
       <h2>收缩维度都没切：不需要通信</h2>
       $$A[I_X, J] \cdot B[J, K_Y] \;\to\; C[I_X, K_Y]$$
       <div class="cols">
-        <ul class="small">
-          <li>坐标为 \((x, y)\) 的卡有 A 的第 \(x\) 个行块（完整的 J）和 B 的第 \(y\) 个列块（完整的 J），正好能算出 C 的 \((x, y)\) 块，不缺任何数据。</li>
-          <li>输出的分片直接继承输入的非收缩维度分片。</li>
-        </ul>
-        <div class="small">
-          $$\begin{aligned} A[I, J]\cdot B[J, K] &\to C[I, K] \\ A[I_X, J]\cdot B[J, K] &\to C[I_X, K] \\ A[I, J]\cdot B[J, K_Y] &\to C[I, K_Y] \\ A[I_X, J]\cdot B[J, K_Y] &\to C[I_X, K_Y] \end{aligned}$$
+        <div style="display: grid; gap: 14px">
+          <ul class="small">
+            <li>坐标为 \((x, y)\) 的卡有 A 的第 \(x\) 个行块（完整的 J）和 B 的第 \(y\) 个列块（完整的 J），正好能算出 C 的 \((x, y)\) 块，不缺任何数据。</li>
+            <li>输出的分片直接继承输入的非收缩维度分片。</li>
+          </ul>
+          <div class="small">
+            $$\begin{aligned} A[I, J]\cdot B[J, K] &\to C[I, K] \\ A[I_X, J]\cdot B[J, K] &\to C[I_X, K] \\ A[I, J]\cdot B[J, K_Y] &\to C[I, K_Y] \\ A[I_X, J]\cdot B[J, K_Y] &\to C[I_X, K_Y] \end{aligned}$$
+          </div>
+          <p class="small muted">前提：两个输入的非收缩维度没有用同一个 mesh 轴（那是情形 4）。</p>
         </div>
+        <svg class="dia mesh" id="case1-svg" viewBox="0 0 520 250"></svg>
       </div>
-      <p class="small muted">前提：两个输入的非收缩维度没有用同一个 mesh 轴（那是情形 4）。</p>
     </section>
 
     <!-- 34 -->
-    <section class="slide dense">
+    <section class="slide dense mm-case" id="case2-slide">
       <div class="kicker">III · 情形 2</div>
       <h2>只有一个输入的收缩维度被切：先 AllGather</h2>
       $$A[I, J_X] \cdot B[J, K] \;\to\; C[I, K]$$
@@ -804,36 +809,33 @@ dist.barrier()
           $$\textbf{AllGather}_X\, A[I, J_X] \to A[I, J]$$
           <p>然后每卡做完整的本地乘法。AllGather 在记号上就是<b>删掉一个下标</b>；也可以只删一部分：\(A[I_{XY}, J] \to A[I_Y, J]\) 是只沿 X 的 AllGather。</p>
         </div>
-        <div class="box fragment">
-          <h3>另一种选择</h3>
-          <p class="small">如果 B 在 X 上是复制的，可以把 B 本地切成 \(B[J_X, K]\)（免费，丢掉一部分即可），本地乘出部分和，再 AllReduce 输出（变成情形 3）。这样计算也被分摊了，但通信的是输出 \(C\) 而不是输入 \(A\)。</p>
-          <p class="small" style="margin-top: 8px">哪个更好取决于 \(|A|\) 和 \(|C|\) 谁大（见"怎么选"）。实际中 B 通常也已经被切了，所以这种情况不常见。</p>
-        </div>
+        <svg class="dia mesh" id="case2-svg" viewBox="0 0 520 250"></svg>
+      </div>
+      <div class="box a-rev">
+        <p class="small"><b>另一种选择：</b>如果 B 在 X 上是复制的，可以把 B 本地切成 \(B[J_X, K]\)（免费，丢掉一部分即可），本地乘出部分和，再 AllReduce 输出（变成情形 3）。这样计算也被分摊了，但通信的是输出 \(C\) 而不是输入 \(A\)。哪个更好取决于 \(|A|\) 和 \(|C|\) 谁大（见"怎么选"）。实际中 B 通常也已经被切了，所以这种情况不常见。</p>
       </div>
     </section>
 
     <!-- 35 -->
-    <section class="slide dense">
+    <section class="slide dense mm-case" id="case3-slide">
       <div class="kicker">III · 情形 3</div>
       <h2>两个输入的收缩维度沿同一轴切：本地乘，再 AllReduce</h2>
       $$A[I, J_X] \cdot_\text{LOCAL} B[J_X, K] \;\to\; C[I, K]\{U_X\} \quad\xrightarrow{\ \textbf{AllReduce}_X\ }\quad C[I, K]$$
       <div class="cols">
         <div>
-          <p>每张卡拿着同一段 J，可以本地乘，但得到的只是<b>部分和</b>。记号 \(\{U_X\}\) 读作"沿 X 未归约"（unreduced）。</p>
-          <p>从外积的角度看：</p>
+          <p>每张卡拿着同一段 J，可以本地乘，但得到的只是<b>部分和</b>。记号 \(\{U_X\}\) 读作"沿 X 未归约"（unreduced）。从外积的角度看：</p>
           $$A \cdot B = \sum_{j} A_{:,j} \otimes B_{j,:}$$
           <p>每张卡算了这个求和里属于自己那段 \(j\) 的项，剩下的求和要跨卡完成。</p>
         </div>
-        <div class="box fragment">
-          <p class="small"><b>AllReduce</b> 删掉 \(\{U_X\}\)：\(\textbf{AllReduce}_Y\, A[I_X, J]\{U_Y\} \to A[I_X, J]\)，其他分片不变。</p>
-          <p class="small" style="margin-top: 8px">它比 AllGather 贵：被归约的每个"分片"都有完整输出那么大。AllReduce = ReduceScatter + AllGather，所以是 AllGather 的 <b>2 倍</b>：</p>
-          $$T_\text{AR} = \frac{2V}{W_\text{bi}}\ \text{(TPU)}\quad\text{或}\quad \frac{2(N-1)V}{N\,W}\ \text{(GPU)}$$
-        </div>
+        <svg class="dia mesh" id="case3-svg" viewBox="0 0 520 250"></svg>
+      </div>
+      <div class="box a-rev">
+        <p class="small"><b>AllReduce</b> 删掉 \(\{U_X\}\)：\(\textbf{AllReduce}_Y\, A[I_X, J]\{U_Y\} \to A[I_X, J]\)，其他分片不变。它比 AllGather 贵：被归约的每个"分片"都有完整输出那么大。AllReduce = ReduceScatter + AllGather，所以是 AllGather 的 <b>2 倍</b>：\(T_\text{AR} = \frac{2V}{W_\text{bi}}\) (TPU) 或 \(\frac{2(N-1)V}{N\,W}\) (GPU)。</p>
       </div>
     </section>
 
     <!-- 36 -->
-    <section class="slide dense">
+    <section class="slide dense mm-case" id="case4-slide">
       <div class="kicker">III · 情形 4</div>
       <h2>两个非收缩维度用了同一个轴：非法，先 AllGather 一个</h2>
       $$A[I_X, J] \cdot B[J, K_X] \;\to\; C[I_X, K_X]\ \ \text{✗}$$
@@ -841,11 +843,11 @@ dist.barrier()
         <div>
           <p>X 坐标为 \(i\) 的卡只有 A 的第 \(i\) 行块和 B 的第 \(i\) 列块，只能算出 C 的 \((i, i)\) 块，也就是对角块。非对角块的信息根本不存在于任何一张卡上，而且输出写成 \(C[I_X, K_X]\) 违反了"一个轴只用一次"。</p>
         </div>
-        <div class="box fragment">
-          <p class="small">两种解法，看后续算子需要哪种输出分片：</p>
-          $$\begin{aligned} &\textbf{AllGather}_X A[I_X, J] \to A[I, J];\ \ A[I,J]\cdot B[J,K_X] \to C[I, K_X] \\ &\textbf{AllGather}_X B[J, K_X] \to B[J, K];\ \ A[I_X,J]\cdot B[J,K] \to C[I_X, K] \end{aligned}$$
-          <p class="small">只看通信量，就 gather 小的那个。</p>
-        </div>
+        <svg class="dia mesh" id="case4-svg" viewBox="0 0 520 250"></svg>
+      </div>
+      <div class="box a-rev">
+        <p class="small">两种解法，看后续算子需要哪种输出分片；只看通信量，就 gather 小的那个：</p>
+        $$\begin{aligned} &\textbf{AllGather}_X A[I_X, J] \to A[I, J];\ \ A[I,J]\cdot B[J,K_X] \to C[I, K_X] \\ &\textbf{AllGather}_X B[J, K_X] \to B[J, K];\ \ A[I_X,J]\cdot B[J,K] \to C[I_X, K] \end{aligned}$$
       </div>
     </section>
 
@@ -888,15 +890,18 @@ dist.barrier()
     </section>
 
     <!-- 39 -->
-    <section class="slide">
+    <section class="slide dense mm-case" id="case5-slide">
       <div class="kicker">III · 情形 3 的变体</div>
       <h2>输出不必完整：用 ReduceScatter 代替 AllReduce</h2>
       $$A[I, J_X] \cdot_\text{LOCAL} B[J_X, K] \to C[I, K]\{U_X\} \xrightarrow{\ \textbf{ReduceScatter}_{X,K}\ } C[I, K_X]$$
-      <ul class="small">
-        <li>AllReduce = RS + AG，最后的 AllGather 往往可以推迟甚至省掉：下一个算子要的本来就是切开的输入。</li>
-        <li class="fragment">RS 必须选一个维度来"加下标"（这里选 K，也可以选 I），所以写成 \(\text{ReduceScatter}_{X,K}\)。通常由上下文决定。</li>
-        <li class="fragment">省一半通信：这正是 ZeRO-2 把数据并行里的梯度 AllReduce 换成 ReduceScatter，以及序列并行把张量并行里的 AllReduce 拆开的基础。</li>
-      </ul>
+      <div class="cols">
+        <ul class="small">
+          <li>AllReduce = RS + AG，最后的 AllGather 往往可以推迟甚至省掉：下一个算子要的本来就是切开的输入。</li>
+          <li class="a-rev">RS 必须选一个维度来"加下标"（这里选 K，也可以选 I），所以写成 \(\text{ReduceScatter}_{X,K}\)。通常由上下文决定。</li>
+          <li class="a-rev">省一半通信：这正是 ZeRO-2 把数据并行里的梯度 AllReduce 换成 ReduceScatter，以及序列并行把张量并行里的 AllReduce 拆开的基础。</li>
+        </ul>
+        <svg class="dia mesh" id="case5-svg" viewBox="0 0 520 250"></svg>
+      </div>
     </section>
 
     <!-- 40 W3 -->
@@ -955,7 +960,7 @@ dist.barrier()
     </section>
 
     <!-- 42 -->
-    <section class="slide dense">
+    <section class="slide dense" id="overlap-slide">
       <div class="kicker">III · 重叠</div>
       <h2>把通信藏在矩阵乘法后面</h2>
       <div class="cols c43">
@@ -973,8 +978,9 @@ dist.barrier()
           <text x="10" y="110" class="soft" font-size="15">通信</text>
           <g id="cm-bars"></g>
           <text x="10" y="180" class="soft" font-size="15">串行</text>
-          <rect x="70" y="160" width="200" height="30" rx="5" fill="var(--accent)" opacity="0.8"/>
-          <rect x="270" y="160" width="150" height="30" rx="5" fill="var(--accent-2)" opacity="0.8"/>
+          <rect class="ser" x="70" y="160" width="200" height="30" rx="5" fill="var(--accent)" opacity="0.8"/>
+          <rect class="ser" x="270" y="160" width="150" height="30" rx="5" fill="var(--accent-2)" opacity="0.8"/>
+          <line id="cm-head" x1="70" y1="8" x2="70" y2="200" stroke="var(--text-faint)" stroke-width="1.5"/>
           <text x="70" y="230" class="faint" font-size="14">分块后：通信与下一块计算同时进行，只剩尾巴暴露</text>
         </svg>
       </div>
@@ -1026,6 +1032,7 @@ dist.barrier()
 
   <script src="/assets/slides.js"></script>
   <script src="/assets/series.js"></script>
+  <script src="/assets/anim.js"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -1049,52 +1056,6 @@ dist.barrier()
         cb();
       });
     }
-
-    /* ---------- primitive diagrams ---------- */
-    const SUB = '₀₁₂₃';
-    const SUP = '⁰¹²³';
-    const prims = {
-      broadcast: { names: ['Broadcast'], before: [[['x', 0]], [], [], []], after: [[['x', 0]], [['x', 0]], [['x', 0]], [['x', 0]]] },
-      reduce: { names: ['Reduce（到 rank 0）', 'AllReduce'],
-        before: [0, 1, 2, 3].map((r) => [['x' + SUB[r], r]]),
-        after: [[['Σx', 's']], [['x₁', 1]], [['x₂', 2]], [['x₃', 3]]],
-        after2: [0, 1, 2, 3].map(() => [['Σx', 's']]) },
-      gather: { names: ['Gather（到 rank 0）', 'AllGather'],
-        before: [0, 1, 2, 3].map((r) => [['x' + SUB[r], r]]),
-        after: [[0, 1, 2, 3].map((r) => ['x' + SUB[r], r]), [['x₁', 1]], [['x₂', 2]], [['x₃', 3]]],
-        after2: [0, 1, 2, 3].map(() => [0, 1, 2, 3].map((r) => ['x' + SUB[r], r])) },
-      reducescatter: { names: ['ReduceScatter'],
-        before: [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((c) => ['x' + SUB[r] + SUP[c], r])),
-        after: [0, 1, 2, 3].map((r) => [['Σx' + SUP[r], 's']]) },
-      alltoall: { names: ['AllToAll'],
-        before: [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((c) => ['x' + SUB[r] + SUP[c], r])),
-        after: [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((s) => ['x' + SUB[s] + SUP[r], s])) },
-    };
-    function drawCol(svg, x0, rows, title) {
-      el('text', { x: x0, y: 22, 'font-size': 17, class: 'soft' }, svg, title);
-      rows.forEach((blocks, r) => {
-        const y = 38 + r * 52;
-        el('text', { x: x0, y: y + 27, 'font-size': 15, class: 'faint' }, svg, 'rank ' + r);
-        el('rect', { x: x0 + 62, y: y, width: 4 * 52 + 6, height: 42, rx: 8, class: 'frame' }, svg);
-        blocks.forEach(([t, c], k) => {
-          const fill = c === 's' ? 'var(--accent-2)' : 'var(--c' + c + ')';
-          el('rect', { x: x0 + 66 + k * 52, y: y + 4, width: 48, height: 34, rx: 6, fill, opacity: c === 's' ? 0.9 : 0.75 }, svg);
-          el('text', { x: x0 + 90 + k * 52, y: y + 27, 'font-size': 15, 'text-anchor': 'middle', fill: '#fff', style: 'fill:#fff' }, svg, t);
-        });
-      });
-    }
-    document.querySelectorAll('svg.prim').forEach((svg) => {
-      const p = prims[svg.dataset.kind];
-      if (p.after2) {
-        drawCol(svg, 0, p.before, '之前');
-        drawCol(svg, 340, p.after, p.names[0]);
-        drawCol(svg, 680, p.after2, p.names[1]);
-      } else {
-        drawCol(svg, 60, p.before, '之前');
-        el('text', { x: 400, y: 140, 'font-size': 40, class: 'faint', 'text-anchor': 'middle' }, svg, '→');
-        drawCol(svg, 560, p.after, p.names[0] + ' 之后');
-      }
-    });
 
     /* GPU boxes in the H100 diagram */
     const gb = document.getElementById('gpu-boxes');
@@ -1197,20 +1158,47 @@ dist.barrier()
       document.getElementById('ring-prev').disabled = t === 0;
       document.getElementById('ring-next').disabled = t === total;
     }
+    // One step = every GPU sends one chunk to its right neighbour at the same
+    // time; the chunks fly along the ring, then the grid updates.
+    let ringAnim = null;
+    function ringFinish() { if (ringAnim) ringAnim.player.seek(ringAnim.duration); }
+    function ringCancel() { if (ringAnim) { const a = ringAnim; ringAnim = null; a.player.pause(); ringRender(); } }
+    function ringAdvance() {
+      ringFinish();
+      const N = +ring.n.value, s = ring.t;
+      if (s >= 2 * (N - 1)) return;
+      if (!window.Anim) { ring.t = s + 1; ringRender(); return; }
+      const cx = 165, cy = 150, R = 105;
+      const pos = (i) => [cx + R * Math.sin(2 * Math.PI * i / N), cy - R * Math.cos(2 * Math.PI * i / N)];
+      const col = s < N - 1 ? 'var(--accent)' : 'var(--accent-2)';
+      const tl = Anim.timeline();
+      for (let i = 0; i < N; i++) {
+        const [x, y] = pos(i), [x2, y2] = pos((i + 1) % N);
+        const g = el('g', {}, ring.svg);
+        el('rect', { x: x - 21, y: y - 12, width: 42, height: 24, rx: 6, fill: col }, g);
+        el('text', { x, y: y + 5, 'text-anchor': 'middle', 'font-size': 13, class: 'ink' }, g, '块' + sendChunk(N, s, i));
+        tl.to(g, { x: x2 - x, y: y2 - y }, { at: 0, dur: 0.6 });
+      }
+      ringAnim = tl;
+      tl.call(() => { if (ringAnim !== tl) return; ringAnim = null; ring.t = s + 1; ringRender(); }, tl.duration);
+      tl.player.play();
+    }
     function ringStop() { clearInterval(ring.timer); ring.timer = null; document.getElementById('ring-play').textContent = '自动播放'; }
-    ring.n.addEventListener('input', () => { ringStop(); ring.t = 0; ringRender(); });
-    document.getElementById('ring-next').addEventListener('click', () => { ringStop(); ring.t = Math.min(ring.t + 1, 2 * (+ring.n.value - 1)); ringRender(); });
-    document.getElementById('ring-prev').addEventListener('click', () => { ringStop(); ring.t = Math.max(ring.t - 1, 0); ringRender(); });
-    document.getElementById('ring-reset').addEventListener('click', () => { ringStop(); ring.t = 0; ringRender(); });
+    ring.n.addEventListener('input', () => { ringStop(); ringCancel(); ring.t = 0; ringRender(); });
+    document.getElementById('ring-next').addEventListener('click', () => { ringStop(); ringAdvance(); });
+    document.getElementById('ring-prev').addEventListener('click', () => { ringStop(); ringFinish(); ring.t = Math.max(ring.t - 1, 0); ringRender(); });
+    document.getElementById('ring-reset').addEventListener('click', () => { ringStop(); ringCancel(); ring.t = 0; ringRender(); });
     document.getElementById('ring-play').addEventListener('click', (e) => {
       if (ring.timer) { ringStop(); return; }
-      if (ring.t >= 2 * (+ring.n.value - 1)) ring.t = 0;
+      ringFinish();
+      if (ring.t >= 2 * (+ring.n.value - 1)) { ring.t = 0; ringRender(); }
       e.target.textContent = '暂停';
       ring.timer = setInterval(() => {
-        ring.t++; ringRender();
-        if (ring.t >= 2 * (+ring.n.value - 1)) ringStop();
-      }, reduceMotion ? 1600 : 900);
-      ringRender();
+        ringFinish();
+        if (ring.t >= 2 * (+ring.n.value - 1)) { ringStop(); return; }
+        ringAdvance();
+      }, reduceMotion ? 1600 : 1000);
+      ringAdvance();
     });
     ringRender();
 
@@ -1404,9 +1392,663 @@ dist.barrier()
     whenKatex(() => { shRender(); mmRender(); });
     shRender(); mmRender();
 
-    document.addEventListener('slidechange', (e) => {
+    document.addEventListener('slidechange', () => {
       ringStop();
+      ringFinish();
     });
+  })();
+  </script>
+  <script>
+  /* ---------- animated scenes (assets/anim.js) ---------- */
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, parent, text) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      if (text != null) e.textContent = text;
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const $ = (id) => document.getElementById(id);
+    const hide = (e) => { e.style.opacity = 0; return e; };
+    const RC = (r) => 'var(--c' + r + ')';
+    const SUB = '₀₁₂₃';
+    const SUP = '⁰¹²³';
+    // Text revealed by a timeline step instead of a .fragment.
+    function reveals(slide) {
+      const els = Array.from(slide.querySelectorAll('.a-rev'));
+      els.forEach(hide);
+      return els;
+    }
+    function show(tl, e, at) {
+      tl.set(e, { y: 14 }, { at: 0 });
+      tl.to(e, { opacity: 1, y: 0 }, { at, dur: 0.45, ease: 'out' });
+    }
+    function swap(tl, from, to, at) {
+      tl.to(from, { opacity: 0 }, { at, dur: 0.3 }).to(to, { opacity: 1 }, { at, dur: 0.3 });
+    }
+    function bind(slide, tl) { Anim.slide(slide, tl, { steps: true, controls: true }); }
+
+    /* ===== I · primitives: 4 GPUs in a row, chunks fly between them ===== */
+    const PW = 248, SW = 54;
+    const BX = (r) => 18 + r * PW, BY = 70;
+    const SX = (r, k) => BX(r) + 8 + k * SW, SY = BY + 8;
+    function primBase(svg, captions) {
+      for (let r = 0; r < 4; r++) {
+        el('text', { x: BX(r) + 113, y: BY - 10, 'text-anchor': 'middle', 'font-size': 16, class: 'soft' }, svg, 'rank ' + r);
+        el('rect', { x: BX(r), y: BY, width: 226, height: 54, rx: 10, class: 'frame' }, svg);
+        for (let k = 0; k < 4; k++) el('rect', { x: SX(r, k), y: SY, width: 48, height: 38, rx: 6, fill: 'none', stroke: 'var(--border)', 'stroke-dasharray': '4 4' }, svg);
+      }
+      return captions.map((c, i) => {
+        const t = el('text', { x: 500, y: 26, 'text-anchor': 'middle', 'font-size': 18 }, svg, c);
+        if (i) hide(t);
+        return t;
+      });
+    }
+    function chip(svg, r, k, label, color, hidden) {
+      const g = el('g', {}, svg);
+      el('rect', { x: SX(r, k), y: SY, width: 48, height: 38, rx: 6, fill: color }, g);
+      el('text', { x: SX(r, k) + 24, y: SY + 25, 'text-anchor': 'middle', 'font-size': 15, class: 'ink' }, g, label);
+      if (hidden) hide(g);
+      return g;
+    }
+    // Move a chunk by dx along an arc that dips below the row of GPUs.
+    function fly(tl, g, dx, at, dur = 0.9) {
+      const depth = 28 + Math.min(3, Math.round(Math.abs(dx) / PW)) * 15;
+      tl.to(g, { opacity: 1 }, { at, dur: 0.15 })
+        .to(g, { x: dx }, { at, dur, ease: 'inOut' })
+        .to(g, { y: depth }, { at, dur: dur / 2, ease: 'out' })
+        .to(g, { y: 0 }, { at: at + dur / 2, dur: dur / 2, ease: 'in' });
+      return at + dur;
+    }
+    const prims = {
+      broadcast(svg) {
+        const cap = primBase(svg, ['之前：只有 rank 0 有 x', 'Broadcast 之后：每个 rank 都有一份完整的 x']);
+        chip(svg, 0, 0, 'x', RC(0));
+        const tl = Anim.timeline();
+        let end = 0;
+        for (let r = 1; r < 4; r++) end = fly(tl, chip(svg, 0, 0, 'x', RC(0), true), r * PW, 0.5 + (r - 1) * 0.3);
+        swap(tl, cap[0], cap[1], end - 0.3);
+        return tl;
+      },
+      reduce(svg) {
+        const cap = primBase(svg, ['之前：rank r 有 xᵣ', 'Reduce 之后：rank 0 有 Σx = x₀+x₁+x₂+x₃', 'AllReduce = Reduce + Broadcast：每个 rank 都有 Σx']);
+        const own = [0, 1, 2, 3].map((r) => chip(svg, r, 0, 'x' + SUB[r], RC(r)));
+        const sum0 = chip(svg, 0, 0, 'Σx', 'var(--accent-2)', true);
+        const tl = Anim.timeline();
+        let t = 0.5;
+        for (let r = 1; r < 4; r++) {
+          const g = chip(svg, r, 0, 'x' + SUB[r], RC(r), true);
+          const end = fly(tl, g, -r * PW, t);
+          tl.to(g, { opacity: 0 }, { at: end, dur: 0.2 });
+          t += 0.3;
+        }
+        t += 0.75;
+        tl.to(sum0, { opacity: 1 }, { at: t, dur: 0.3 }).to(own[0], { opacity: 0 }, { at: t, dur: 0.3 });
+        swap(tl, cap[0], cap[1], t);
+        tl.label('reduce', t + 0.4);
+        t += 0.8;
+        for (let r = 1; r < 4; r++) {
+          const end = fly(tl, chip(svg, 0, 0, 'Σx', 'var(--accent-2)', true), r * PW, t + (r - 1) * 0.3);
+          tl.to(own[r], { opacity: 0 }, { at: end - 0.2, dur: 0.2 });
+        }
+        swap(tl, cap[1], cap[2], t + 1.4);
+        return tl;
+      },
+      gather(svg) {
+        const cap = primBase(svg, ['之前：rank r 有自己那块 xᵣ', 'Gather 之后：rank 0 有 [x₀, x₁, x₂, x₃]', 'AllGather 之后：每个 rank 都有 [x₀, x₁, x₂, x₃]']);
+        for (let r = 0; r < 4; r++) chip(svg, r, r, 'x' + SUB[r], RC(r));
+        const tl = Anim.timeline();
+        let end = 0;
+        for (let r = 1; r < 4; r++) end = fly(tl, chip(svg, r, r, 'x' + SUB[r], RC(r), true), -r * PW, 0.5 + (r - 1) * 0.3);
+        swap(tl, cap[0], cap[1], end - 0.3);
+        tl.label('gather', end + 0.1);
+        const t0 = end + 0.5;
+        for (let r = 0; r < 4; r++) {
+          for (let q = 1; q < 4; q++) {
+            if (q === r) continue;
+            end = Math.max(end, fly(tl, chip(svg, r, r, 'x' + SUB[r], RC(r), true), (q - r) * PW, t0 + r * 0.35));
+          }
+        }
+        swap(tl, cap[1], cap[2], end - 0.3);
+        return tl;
+      },
+      reducescatter(svg) {
+        const cap = primBase(svg, ['之前：rank 0 有 [x⁰, x¹, x², x³]', 'Scatter 之后：rank r 拿到第 r 块 xʳ', 'ReduceScatter 之前：每个 rank r 都有 N 块 xᵣ⁰ … xᵣ³', 'ReduceScatter 之后：rank r 有第 r 块的和 Σₛ xₛʳ']);
+        const scat = [];
+        for (let k = 0; k < 4; k++) scat.push(chip(svg, 0, k, 'x' + SUP[k], RC(0)));
+        const tl = Anim.timeline();
+        let end = 0;
+        for (let r = 1; r < 4; r++) {
+          const g = chip(svg, 0, r, 'x' + SUP[r], RC(0), true);
+          scat.push(g);
+          end = fly(tl, g, r * PW, 0.5 + (r - 1) * 0.3);
+        }
+        swap(tl, cap[0], cap[1], end - 0.3);
+        tl.label('scatter', end + 0.1);
+        // ReduceScatter: new input buffers.
+        let t = end + 0.4;
+        const rs = [0, 1, 2, 3].map((r) => [0, 1, 2, 3].map((c) => chip(svg, r, c, 'x' + SUB[r] + SUP[c], RC(r), true)));
+        const sums = [0, 1, 2, 3].map((c) => chip(svg, c, c, 'Σx' + SUP[c], 'var(--accent-2)', true));
+        tl.to(scat, { opacity: 0 }, { at: t, dur: 0.3 });
+        tl.to(rs.flat(), { opacity: 1 }, { at: t + 0.2, dur: 0.4 });
+        swap(tl, cap[1], cap[2], t);
+        tl.label('rs-before', t + 0.7);
+        t += 1.1;
+        end = 0;
+        for (let r = 0; r < 4; r++) {
+          for (let c = 0; c < 4; c++) {
+            if (c === r) continue;
+            const e = fly(tl, rs[r][c], (c - r) * PW, t + r * 0.25);
+            tl.to(rs[r][c], { opacity: 0 }, { at: e, dur: 0.25 });
+            end = Math.max(end, e);
+          }
+        }
+        for (let c = 0; c < 4; c++) tl.to(sums[c], { opacity: 1 }, { at: end, dur: 0.35 }).to(rs[c][c], { opacity: 0 }, { at: end, dur: 0.35 });
+        swap(tl, cap[2], cap[3], end);
+        return tl;
+      },
+      alltoall(svg) {
+        const cap = primBase(svg, ['之前：rank r 的第 c 块 xᵣᶜ 要送给 rank c', 'AllToAll 之后：rank c 有所有人的第 c 块（转置）']);
+        const tl = Anim.timeline();
+        let end = 0;
+        for (let r = 0; r < 4; r++) {
+          for (let c = 0; c < 4; c++) {
+            const g = chip(svg, r, c, 'x' + SUB[r] + SUP[c], RC(r));
+            if (c !== r) end = Math.max(end, fly(tl, g, (c - r) * PW + (r - c) * SW, 0.5 + r * 0.3, 1.1));
+          }
+        }
+        swap(tl, cap[0], cap[1], end - 0.3);
+        return tl;
+      },
+    };
+    document.querySelectorAll('svg.prim').forEach((svg) => bind(svg.closest('.slide'), prims[svg.dataset.kind](svg)));
+
+    /* ===== barrier ===== */
+    (() => {
+      const svg = $('barrier-svg');
+      const work = svg.querySelectorAll('.b-work'), wait = svg.querySelectorAll('.b-wait');
+      const tl = Anim.timeline();
+      const px = 100; // 100 px per second
+      [10, 110, 210].forEach((w, r) => { tl.set(work[r], { attr: { width: 0 } }, { at: 0 }).to(work[r], { attr: { width: w } }, { at: 0.3, dur: w / px, ease: 'linear' }); });
+      [[90, 200], [190, 100]].forEach(([x, w], r) => {
+        const start = (x - 80) / px;
+        tl.set(wait[r], { attr: { width: 0 }, opacity: 0 }, { at: 0 })
+          .set(wait[r], { opacity: 1 }, { at: 0.3 + start })
+          .to(wait[r], { attr: { width: w } }, { at: 0.3 + start, dur: w / px, ease: 'linear' });
+      });
+      tl.set(svg.querySelector('.b-wl'), { opacity: 0 }, { at: 0 }).to(svg.querySelector('.b-wl'), { opacity: 1 }, { at: 0.9, dur: 0.3 });
+      tl.set(svg.querySelector('.b-bar'), { opacity: 0 }, { at: 0 }).to(svg.querySelector('.b-bar'), { opacity: 1 }, { at: 2.4, dur: 0.3 });
+      tl.to(svg.querySelector('.b-head'), { x: 212 }, { at: 0.3, dur: 2.12, ease: 'linear' }).to(svg.querySelector('.b-head'), { opacity: 0 }, { at: 2.5, dur: 0.3 });
+      bind($('barrier-slide'), tl);
+    })();
+
+    /* ===== naive all-to-root vs ring ===== */
+    (() => {
+      const slide = $('naive-slide'), svg = $('naive-svg');
+      const rev = reveals(slide);
+      const ROOT = [220, 170];
+      const P = [1, 2, 3, 4].map((k) => [[80, 70], [360, 70], [80, 270], [360, 270]][k - 1]);
+      const star = el('g', { stroke: 'var(--accent-2)', 'stroke-width': 3 }, svg);
+      P.forEach(([x, y]) => {
+        const dx = ROOT[0] - x, dy = ROOT[1] - y, L = Math.hypot(dx, dy);
+        el('line', { x1: x + dx / L * 28, y1: y + dy / L * 28, x2: ROOT[0] - dx / L * 44, y2: ROOT[1] - dy / L * 44 }, star);
+      });
+      // ring positions (pentagon), ring order: root, 2, 4, 3, 1
+      const RP = [0, 1, 2, 3, 4].map((k) => { const a = (-90 + 72 * k) * Math.PI / 180; return [220 + 118 * Math.cos(a), 170 + 118 * Math.sin(a)]; });
+      const ringPath = el('path', { d: 'M' + RP.map((p) => p.join(' ')).join(' L') + ' Z', fill: 'none', stroke: 'var(--accent)', 'stroke-width': 3 }, svg);
+      hide(ringPath);
+      const rootG = el('g', {}, svg);
+      const rootC = el('circle', { cx: ROOT[0], cy: ROOT[1], r: 42, fill: 'var(--accent-soft)', stroke: 'var(--accent)', 'stroke-width': 2 }, rootG);
+      el('text', { x: ROOT[0], y: ROOT[1] + 7, 'text-anchor': 'middle', 'font-size': 20 }, rootG, 'root');
+      const nodes = P.map(([x, y], i) => {
+        const g = el('g', { 'font-size': 16 }, svg);
+        el('circle', { cx: x, cy: y, r: 26, class: 'frame' }, g);
+        el('text', { x, y: y + 6, 'text-anchor': 'middle' }, g, String(i + 1));
+        return g;
+      });
+      const capA = el('text', { x: 220, y: 334, 'text-anchor': 'middle', class: 'soft', 'font-size': 15 }, svg, '所有流量挤在 root 的一条链路上');
+      const capB = hide(el('text', { x: 220, y: 334, 'text-anchor': 'middle', class: 'soft', 'font-size': 15 }, svg, '环：5 条链路同时在传，每次只传 V/5'));
+      const cntA = el('text', { x: 220, y: 22, 'text-anchor': 'middle', 'font-size': 16, fill: 'var(--accent-2)', style: 'fill: var(--accent-2)' }, svg, '');
+      const cntB = hide(el('text', { x: 220, y: 22, 'text-anchor': 'middle', 'font-size': 16, fill: 'var(--accent)', style: 'fill: var(--accent)' }, svg, ''));
+      cntA.textContent = '笨办法耗时 ≈ 0 × V/W';
+      cntB.textContent = '环形耗时 ≈ 0.0 × V/W';
+      const tl = Anim.timeline();
+      const D = 0.55;
+      let t = 0.4;
+      // gather to root: one full tensor at a time over root's link
+      P.forEach(([x, y], i) => {
+        const g = el('g', {}, svg);
+        el('rect', { x: x - 16, y: y - 11, width: 32, height: 22, rx: 5, fill: RC(i + 1) }, g);
+        el('text', { x, y: y + 5, 'text-anchor': 'middle', 'font-size': 13, class: 'ink' }, g, 'V');
+        hide(g);
+        tl.to(g, { opacity: 1 }, { at: t, dur: 0.1 }).to(g, { x: ROOT[0] - x, y: ROOT[1] - y }, { at: t, dur: D }).to(g, { opacity: 0 }, { at: t + D, dur: 0.12 });
+        t += D + 0.05;
+      });
+      tl.to(cntA, { text: 4, fmt: (v) => '笨办法耗时 ≈ ' + Math.round(v) + ' × V/W' }, { at: 0.4, dur: t - 0.4, ease: 'linear' });
+      tl.to(rootC, { fill: 'var(--accent-2)' }, { at: t, dur: 0.3 });
+      t += 0.4;
+      const t1 = t;
+      P.forEach(([x, y]) => {
+        const g = el('g', {}, svg);
+        el('rect', { x: ROOT[0] - 16, y: ROOT[1] - 11, width: 32, height: 22, rx: 5, fill: 'var(--accent-2)' }, g);
+        el('text', { x: ROOT[0], y: ROOT[1] + 5, 'text-anchor': 'middle', 'font-size': 13, class: 'ink' }, g, 'Σ');
+        hide(g);
+        tl.to(g, { opacity: 1 }, { at: t, dur: 0.1 }).to(g, { x: x - ROOT[0], y: y - ROOT[1] }, { at: t, dur: D }).to(g, { opacity: 0 }, { at: t + D, dur: 0.12 });
+        t += D + 0.05;
+      });
+      tl.to(cntA, { text: 8, fmt: (v) => '笨办法耗时 ≈ ' + Math.round(v) + ' × V/W' }, { at: t1, dur: t - t1, ease: 'linear' });
+      tl.label('naive', t + 0.1);
+      show(tl, rev[0], t + 0.3);
+      tl.label('why', t + 0.8);
+      t += 1.0;
+      show(tl, rev[1], t);
+      // rearrange into a ring
+      tl.to(star, { opacity: 0 }, { at: t, dur: 0.4 }).to(rootC, { fill: 'var(--accent-soft)' }, { at: t, dur: 0.4 });
+      tl.to(rootG, { x: RP[0][0] - ROOT[0], y: RP[0][1] - ROOT[1], scale: 0.64 }, { at: t + 0.2, dur: 0.9 });
+      const slotOf = [4, 1, 3, 2]; // node 1 -> slot 4, node 2 -> slot 1, node 3 -> slot 3, node 4 -> slot 2
+      nodes.forEach((g, i) => tl.to(g, { x: RP[slotOf[i]][0] - P[i][0], y: RP[slotOf[i]][1] - P[i][1] }, { at: t + 0.2, dur: 0.9 }));
+      tl.to(ringPath, { opacity: 1 }, { at: t + 1.0, dur: 0.4 });
+      swap(tl, capA, capB, t + 1.0);
+      swap(tl, cntA, cntB, t + 1.0);
+      t += 1.5;
+      const H = 0.42;
+      const toks = RP.map(([x, y]) => {
+        const g = el('g', {}, svg);
+        el('rect', { x: x - 13, y: y - 9, width: 26, height: 18, rx: 4, fill: 'var(--accent)' }, g);
+        return hide(g);
+      });
+      toks.forEach((g, j) => {
+        tl.to(g, { opacity: 1 }, { at: t, dur: 0.1 });
+        for (let h = 1; h <= 8; h++) {
+          const p = RP[(j + h) % 5];
+          tl.to(g, { x: p[0] - RP[j][0], y: p[1] - RP[j][1] }, { at: t + (h - 1) * H, dur: H * 0.9 });
+        }
+        tl.to(g, { opacity: 0 }, { at: t + 8 * H, dur: 0.2 });
+      });
+      tl.to(cntB, { text: 1.6, fmt: (v) => '环形耗时 ≈ ' + v.toFixed(1) + ' × V/W' }, { at: t, dur: 8 * H, ease: 'linear' });
+      bind(slide, tl);
+    })();
+
+    /* ===== ring AllGather / ReduceScatter on 4 GPUs ===== */
+    const RB = [[24, 52], [324, 52], [324, 316], [24, 316]];
+    const RSX = (i, c) => RB[i][0] + 8 + c * 40, RSY = (i) => RB[i][1] + 8;
+    function ringBase(svg) {
+      const lines = el('g', { stroke: 'var(--text-faint)', 'stroke-width': 2, fill: 'none' }, svg);
+      const defs = el('defs', {}, svg);
+      const m = el('marker', { id: svg.id + '-arr', viewBox: '0 0 10 10', refX: 8, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto' }, defs);
+      el('path', { d: 'M0 0 L10 5 L0 10 z', fill: 'var(--text-faint)' }, m);
+      [[200, 75, 318, 75], [410, 104, 410, 310], [318, 339, 200, 339], [110, 310, 110, 104]].forEach(([x1, y1, x2, y2]) =>
+        el('line', { x1, y1, x2, y2, 'marker-end': 'url(#' + svg.id + '-arr)' }, lines));
+      RB.forEach(([x, y], i) => {
+        el('text', { x: x + 86, y: i < 2 ? y - 10 : y + 70, 'text-anchor': 'middle', 'font-size': 16, class: 'soft' }, svg, 'GPU ' + i);
+        el('rect', { x, y, width: 172, height: 46, rx: 10, class: 'frame' }, svg);
+        for (let c = 0; c < 4; c++) el('rect', { x: RSX(i, c), y: RSY(i), width: 36, height: 30, rx: 5, fill: 'none', stroke: 'var(--border)', 'stroke-dasharray': '4 4' }, svg);
+      });
+      el('text', { x: 260, y: 186, 'text-anchor': 'middle', 'font-size': 15, class: 'soft' }, svg, '每一步：每条链路同时传 V/4');
+      const cnt = el('text', { x: 260, y: 214, 'text-anchor': 'middle', 'font-size': 22 }, svg, '第 0 / 3 步');
+      return cnt;
+    }
+    // Move along ring edge i -> i+1, bulging outward so the chunk clears the other slots.
+    function hopRing(tl, g, i, at, dur = 0.8) {
+      const j = (i + 1) % 4;
+      const dx = RB[j][0] - RB[i][0], dy = RB[j][1] - RB[i][1];
+      tl.to(g, { opacity: 1 }, { at, dur: 0.12 }).to(g, { x: dx, y: dy }, { at, dur, ease: 'inOut' });
+      if (dy === 0) {
+        const out = i === 0 ? -34 : 34;
+        // the y tween above is 0 for horizontal edges; add a bump on top of it
+        tl.to(g, { y: out }, { at, dur: dur / 2, ease: 'out' }).to(g, { y: 0 }, { at: at + dur / 2, dur: dur / 2, ease: 'in' });
+      }
+      return at + dur;
+    }
+    const stepFmt = (v) => '第 ' + Math.round(v) + ' / 3 步';
+
+    (() => {
+      const slide = $('ag-slide'), svg = $('ag-svg');
+      const rev = reveals(slide);
+      const cnt = ringBase(svg);
+      const mk = (i, c, hidden) => {
+        const g = el('g', {}, svg);
+        el('rect', { x: RSX(i, c), y: RSY(i), width: 36, height: 30, rx: 5, fill: RC(c) }, g);
+        el('text', { x: RSX(i, c) + 18, y: RSY(i) + 20, 'text-anchor': 'middle', 'font-size': 14, class: 'ink' }, g, 'x' + SUB[c]);
+        return hidden ? hide(g) : g;
+      };
+      for (let i = 0; i < 4; i++) mk(i, i);
+      const tl = Anim.timeline();
+      tl.label('start', 0);
+      let t = 0.1;
+      for (let k = 1; k <= 3; k++) {
+        if (k === 1) show(tl, rev[0], t);
+        if (k === 2) show(tl, rev[1], t);
+        let end = t;
+        for (let i = 0; i < 4; i++) {
+          const c = ((i - k + 1) % 4 + 4) % 4;
+          end = hopRing(tl, mk(i, c, true), i, t + 0.3);
+        }
+        tl.to(cnt, { text: k, fmt: stepFmt }, { at: end - 0.1, dur: 0.01 });
+        t = end + 0.2;
+        if (k !== 2) tl.label('s' + k, t);
+      }
+      show(tl, rev[2], t);
+      tl.label('done', t + 0.5);
+      show(tl, rev[3], t + 0.6);
+      bind(slide, tl);
+    })();
+
+    (() => {
+      const slide = $('rs-slide'), svg = $('rs-svg');
+      const rev = reveals(slide);
+      const cnt = ringBase(svg);
+      el('text', { x: 260, y: 244, 'text-anchor': 'middle', 'font-size': 14, class: 'faint' }, svg, '色条 = 已经加进这一块的 rank');
+      // A chunk = 4 colour bands, one per contributing rank.
+      const mk = (i, c, mask, hidden) => {
+        const g = el('g', {}, svg);
+        el('rect', { x: RSX(i, c), y: RSY(i), width: 36, height: 30, rx: 5, fill: 'var(--bg-soft)', stroke: 'var(--border)' }, g);
+        const bands = [0, 1, 2, 3].map((o) => {
+          const b = el('rect', { x: RSX(i, c) + 2, y: RSY(i) + 2 + o * 6.5, width: 32, height: 6.5, fill: RC(o) }, g);
+          if (!(mask >> o & 1)) hide(b);
+          return b;
+        });
+        return { g: hidden ? hide(g) : g, bands };
+      };
+      const cells = [0, 1, 2, 3].map((i) => [0, 1, 2, 3].map((c) => mk(i, c, 1 << i)));
+      const done = [0, 1, 2, 3].map((i) => {
+        const c = (i + 1) % 4;
+        return hide(el('rect', { x: RSX(i, c) - 3, y: RSY(i) - 3, width: 42, height: 36, rx: 7, fill: 'none', stroke: 'var(--accent-2)', 'stroke-width': 3 }, svg));
+      });
+      const mask = [0, 1, 2, 3].map((i) => [0, 1, 2, 3].map(() => 1 << i));
+      const tl = Anim.timeline();
+      tl.label('start', 0);
+      let t = 0.1;
+      for (let k = 0; k < 3; k++) {
+        const snap = mask.map((r) => r.slice());
+        let end = t;
+        for (let i = 0; i < 4; i++) {
+          const j = (i + 1) % 4, c = ((i - k) % 4 + 4) % 4;
+          const m = snap[i][c];
+          const mv = mk(i, c, m, true);
+          end = hopRing(tl, mv.g, i, t + 0.3);
+          tl.to(mv.g, { opacity: 0 }, { at: end, dur: 0.25 });
+          for (let o = 0; o < 4; o++) if (m >> o & 1) tl.to(cells[j][c].bands[o], { opacity: 1 }, { at: end - 0.05, dur: 0.3 });
+          mask[j][c] = snap[j][c] | m;
+        }
+        tl.to(cnt, { text: k + 1, fmt: stepFmt }, { at: end - 0.1, dur: 0.01 });
+        t = end + 0.35;
+        if (k === 2) { tl.to(done, { opacity: 1 }, { at: t - 0.2, dur: 0.4 }); show(tl, rev[0], t); t += 0.5; }
+        tl.label('s' + k, t);
+      }
+      show(tl, rev[1], t);
+      bind(slide, tl);
+    })();
+
+    /* ===== bidirectional ring and 2D torus ===== */
+    (() => {
+      const slide = $('torus-slide'), svg = $('biring-svg'), tsvg = $('torus-svg');
+      const rev = reveals(slide);
+      const tl = Anim.timeline();
+      // 8-node bidirectional ring
+      const N = 8, C = [96, 85], R = 64;
+      const ang = (k) => (-90 + 360 * k / N) * Math.PI / 180;
+      const at = (k, r) => [C[0] + r * Math.cos(ang(k)), C[1] + r * Math.sin(ang(k))];
+      el('circle', { cx: C[0], cy: C[1], r: R, fill: 'none', stroke: 'var(--border)', 'stroke-width': 2 }, svg);
+      const counts = [];
+      for (let k = 0; k < N; k++) {
+        const [x, y] = at(k, R);
+        el('circle', { cx: x, cy: y, r: 14, fill: 'var(--surface)', stroke: RC(k), 'stroke-width': 2.5 }, svg);
+        counts.push(el('text', { x, y: y + 5, 'text-anchor': 'middle', 'font-size': 14 }, svg, '1'));
+      }
+      el('text', { x: 196, y: 50, 'font-size': 17 }, svg, '双向环，N = 8：每块同时往两边走');
+      el('text', { x: 196, y: 78, 'font-size': 15, class: 'faint' }, svg, '圈里的数 = 这个芯片已有几块');
+      const hopCnt = el('text', { x: 196, y: 118, 'font-size': 20 }, svg, '');
+      const hfmt = (v) => '第 ' + Math.round(v) + ' / ' + N / 2 + ' 跳';
+      hopCnt.textContent = hfmt(0);
+      const H = 0.75;
+      let t = 0.4;
+      for (let h = 1; h <= N / 2; h++) {
+        for (let o = 0; o < N; o++) {
+          for (const d of [1, -1]) {
+            if (h === N / 2 && d === -1) continue; // the far node is reached from one side only
+            const r = d === 1 ? R + 21 : R - 21;
+            const [x1, y1] = at(o + d * (h - 1), r), [x2, y2] = at(o + d * h, r);
+            const tok = hide(el('circle', { cx: x1, cy: y1, r: 5, fill: RC(o) }, svg));
+            tl.to(tok, { opacity: 1 }, { at: t, dur: 0.1 }).to(tok, { x: x2 - x1, y: y2 - y1 }, { at: t, dur: H * 0.85 }).to(tok, { opacity: 0 }, { at: t + H * 0.85, dur: 0.12 });
+          }
+        }
+        counts.forEach((c) => tl.to(c, { text: Math.min(N, 1 + 2 * h) }, { at: t + H * 0.8, dur: 0.01 }));
+        tl.to(hopCnt, { text: h, fmt: hfmt }, { at: t + H * 0.8, dur: 0.01 });
+        t += H;
+      }
+      tl.label('ring', t + 0.1);
+      // 4x4 torus: rows are the X axis, columns the Y axis
+      show(tl, rev[0], t + 0.3);
+      const tor = el('g', {}, tsvg);
+      const TX = (j) => 330 + j * 44, TY = (i) => 22 + i * 32;
+      const links = el('g', { stroke: 'var(--border)', 'stroke-width': 2 }, tor);
+      for (let i = 0; i < 4; i++) {
+        el('line', { x1: TX(0) - 20, y1: TY(i), x2: TX(3) + 20, y2: TY(i) }, links);
+        el('line', { x1: TX(i), y1: TY(0) - 18, x2: TX(i), y2: TY(3) + 18 }, links);
+      }
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) el('rect', { x: TX(j) - 8, y: TY(i) - 8, width: 16, height: 16, rx: 3, fill: 'var(--surface)', stroke: 'var(--text-faint)', 'stroke-width': 1.5 }, tor);
+      el('text', { x: 10, y: 30, 'font-size': 17 }, tor, '4×4 环面（回绕链路画成断头）');
+      el('rect', { x: 10, y: 52, width: 14, height: 14, rx: 3, fill: 'var(--accent)' }, tor);
+      el('text', { x: 32, y: 64, 'font-size': 15, class: 'soft' }, tor, '沿 X 轴（行）的流量');
+      el('rect', { x: 10, y: 80, width: 14, height: 14, rx: 3, fill: 'var(--accent-2)' }, tor);
+      el('text', { x: 32, y: 92, 'font-size': 15, class: 'soft' }, tor, '沿 Y 轴（列）的流量');
+      el('text', { x: 10, y: 124, 'font-size': 15, class: 'faint' }, tor, '两个轴的链路同时在用');
+      hide(tor);
+      t += 0.4;
+      tl.to(tor, { opacity: 1 }, { at: t, dur: 0.4 });
+      t += 0.5;
+      // one token per directed link per hop; links leaving the edge wrap around
+      const tok = (x1, y1, x2, y2, color, at0, fadeIn, fadeOut) => {
+        const g = hide(el('rect', { x: x1 - 4, y: y1 - 4, width: 8, height: 8, rx: 2, fill: color }, tsvg));
+        tl.to(g, { opacity: 1 }, { at: at0 + (fadeIn ? 0.25 : 0), dur: 0.12 }).to(g, { x: x2 - x1, y: y2 - y1 }, { at: at0, dur: 0.6, ease: 'linear' }).to(g, { opacity: 0 }, { at: at0 + (fadeOut ? 0.35 : 0.6), dur: 0.12 });
+      };
+      for (let h = 0; h < 2; h++) {
+        const t0 = t + h * 0.8;
+        for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+          for (const d of [1, -1]) {
+            const off = d * 4;
+            const jn = j + d;
+            if (jn >= 0 && jn < 4) tok(TX(j), TY(i) + off, TX(jn), TY(i) + off, 'var(--accent)', t0);
+            else {
+              tok(TX(j), TY(i) + off, TX(j) + d * 22, TY(i) + off, 'var(--accent)', t0, false, true);
+              const jw = d === 1 ? 0 : 3;
+              tok(TX(jw) - d * 22, TY(i) + off, TX(jw), TY(i) + off, 'var(--accent)', t0, true, false);
+            }
+            const iN = i + d;
+            if (iN >= 0 && iN < 4) tok(TX(j) + off, TY(i), TX(j) + off, TY(iN), 'var(--accent-2)', t0);
+            else {
+              tok(TX(j) + off, TY(i), TX(j) + off, TY(i) + d * 18, 'var(--accent-2)', t0, false, true);
+              const iw = d === 1 ? 0 : 3;
+              tok(TX(j) + off, TY(iw) - d * 18, TX(j) + off, TY(iw), 'var(--accent-2)', t0, true, false);
+            }
+          }
+        }
+      }
+      t += 1.7;
+      tl.label('torus', t);
+      show(tl, rev[1], t + 0.05);
+      tl.label('f', t + 0.6);
+      show(tl, rev[2], t + 0.65);
+      tl.label('ar', t + 1.2);
+      show(tl, rev[3], t + 1.25);
+      bind(slide, tl);
+    })();
+
+    /* ===== sharded matmul on a 2x2 mesh ===== */
+    // Device (x, y): X is the vertical mesh axis, Y the horizontal one. Each
+    // device shows its local blocks of A (2x2), B (2x2) and C (2x2).
+    const DX = (y) => 50 + y * 238, DY = (x) => 26 + x * 108;
+    const GX = { A: 12, B: 84, C: 156 }, CELL = 21, GAP = 3;
+    const COL = { A: 'var(--accent)', B: 'var(--c4)', C: 'var(--c2)' };
+    const cellXY = (x, y, m, r, c) => [DX(y) + GX[m] + c * (CELL + GAP), DY(x) + 26 + r * (CELL + GAP)];
+    function mesh(svg, init, caption) {
+      // init(m, x, y, r, c) -> initial opacity of that block (0 = not held)
+      el('line', { x1: 24, y1: 28, x2: 24, y2: 230, stroke: 'var(--accent)', 'stroke-width': 3 }, svg);
+      el('text', { x: 18, y: 22, 'font-size': 16, 'font-weight': 700, fill: 'var(--accent)', style: 'fill: var(--accent)' }, svg, 'X');
+      el('line', { x1: 50, y1: 10, x2: 500, y2: 10, stroke: 'var(--c5)', 'stroke-width': 3 }, svg);
+      el('text', { x: 506, y: 15, 'font-size': 16, 'font-weight': 700, fill: 'var(--c5)', style: 'fill: var(--c5)' }, svg, 'Y');
+      const F = {};
+      for (let x = 0; x < 2; x++) for (let y = 0; y < 2; y++) {
+        el('rect', { x: DX(y), y: DY(x), width: 214, height: 100, rx: 10, class: 'frame' }, svg);
+        el('text', { x: DX(y) + 10, y: DY(x) + 17, 'font-size': 13, class: 'soft' }, svg, '卡 (' + x + ', ' + y + ')');
+        el('text', { x: DX(y) + 74, y: DY(x) + 56, 'text-anchor': 'middle', 'font-size': 16, class: 'faint' }, svg, '·');
+        el('text', { x: DX(y) + 146, y: DY(x) + 56, 'text-anchor': 'middle', 'font-size': 16, class: 'faint' }, svg, '=');
+        for (const m of ['A', 'B', 'C']) {
+          el('text', { x: DX(y) + GX[m] + 22, y: DY(x) + 91, 'text-anchor': 'middle', 'font-size': 13, class: 'faint' }, svg, m);
+          for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) {
+            const [cx, cy] = cellXY(x, y, m, r, c);
+            el('rect', { x: cx, y: cy, width: CELL, height: CELL, rx: 3, fill: 'var(--bg-soft)', stroke: 'var(--border)' }, svg);
+            const f = el('rect', { x: cx, y: cy, width: CELL, height: CELL, rx: 3, fill: COL[m] }, svg);
+            f.style.opacity = init(m, x, y, r, c);
+            F[[m, x, y, r, c].join()] = f;
+          }
+        }
+      }
+      const caps = caption.map((s, i) => {
+        const t = el('text', { x: 270, y: 246, 'text-anchor': 'middle', 'font-size': 15, class: 'soft' }, svg, s);
+        if (i) hide(t);
+        return t;
+      });
+      return { f: (m, x, y, r, c) => F[[m, x, y, r, c].join()], caps };
+    }
+    const DEVS = [[0, 0], [0, 1], [1, 0], [1, 1]];
+    const PART = 0.38; // opacity of an unreduced partial sum
+    // A copy of block (m, r, c) flies from device x to device 1-x (along X).
+    function sendX(svg, tl, m, x, y, r, c, at, opacity = 0.9) {
+      const [cx, cy] = cellXY(x, y, m, r, c);
+      const lane = x === 0 ? -4 : 4;
+      const g = hide(el('rect', { x: cx + lane, y: cy, width: CELL, height: CELL, rx: 3, fill: COL[m], stroke: 'var(--surface)' }, svg));
+      tl.to(g, { opacity }, { at, dur: 0.1 }).to(g, { y: DY(1 - x) - DY(x) }, { at, dur: 1.0 }).to(g, { opacity: 0 }, { at: at + 1.0, dur: 0.2 });
+      return at + 1.0;
+    }
+    function compute(tl, M, cells, at, to = 0.9) {
+      cells.forEach(([x, y, r, c], k) => {
+        const f = M.f('C', x, y, r, c);
+        tl.set(f, { scale: 0.3 }, { at: 0 }).to(f, { opacity: to, scale: 1 }, { at: at + k * 0.05, dur: 0.45, ease: 'back' });
+      });
+      return at + cells.length * 0.05 + 0.45;
+    }
+    const allC = (pred) => { const out = []; DEVS.forEach(([x, y]) => { for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) if (pred(x, y, r, c)) out.push([x, y, r, c]); }); return out; };
+
+    // Case 1: A[I_X, J] . B[J, K_Y] -> C[I_X, K_Y]
+    (() => {
+      const svg = $('case1-svg');
+      const M = mesh(svg, (m, x, y, r, c) => (m === 'A' ? (r === x ? 0.85 : 0) : m === 'B' ? (c === y ? 0.85 : 0) : 0),
+        ['A 的第 x 行块、B 的第 y 列块，各在本地', '每张卡本地算出 C 的 (x, y) 块，不需要通信']);
+      const tl = Anim.timeline();
+      const end = compute(tl, M, allC((x, y, r, c) => r === x && c === y), 0.8);
+      swap(tl, M.caps[0], M.caps[1], end - 0.3);
+      bind($('case1-slide'), tl);
+    })();
+
+    // Case 2: A[I, J_X] . B[J, K] -> AllGather_X A, then local matmul
+    (() => {
+      const slide = $('case2-slide'), svg = $('case2-svg');
+      const rev = reveals(slide);
+      const M = mesh(svg, (m, x, y, r, c) => (m === 'A' ? (c === x ? 0.85 : 0) : m === 'B' ? 0.85 : 0),
+        ['A[I, Jₓ]：卡 (x, ·) 只有 A 的第 x 列块；B 完整', '沿 X 做 AllGather：A 的列块送给 X 方向的邻居 → A[I, J]', '每张卡本地乘出完整的 C[I, K]']);
+      const tl = Anim.timeline();
+      tl.label('start', 0);
+      let end = 0;
+      DEVS.forEach(([x, y]) => [0, 1].forEach((r) => {
+        end = sendX(svg, tl, 'A', x, y, r, x, 0.3);
+        tl.to(M.f('A', 1 - x, y, r, x), { opacity: 0.85 }, { at: end - 0.1, dur: 0.3 });
+      }));
+      swap(tl, M.caps[0], M.caps[1], 0.3);
+      tl.label('ag', end + 0.3);
+      end = compute(tl, M, allC(() => true), end + 0.5);
+      swap(tl, M.caps[1], M.caps[2], end - 0.6);
+      tl.label('mm', end + 0.1);
+      show(tl, rev[0], end + 0.2);
+      bind(slide, tl);
+    })();
+
+    // Case 3: A[I, J_X] . B[J_X, K] -> partial sums -> AllReduce_X
+    function partialScene(id, caps) {
+      const svg = $(id + '-svg');
+      const M = mesh(svg, (m, x, y, r, c) => (m === 'A' ? (c === x ? 0.85 : 0) : m === 'B' ? (r === x ? 0.85 : 0) : 0), caps);
+      const tl = Anim.timeline();
+      tl.label('start', 0);
+      const end = compute(tl, M, allC(() => true), 0.3, PART);
+      swap(tl, M.caps[0], M.caps[1], 0.3);
+      tl.label('partial', end + 0.2);
+      return { svg, M, tl, t: end + 0.5 };
+    }
+    (() => {
+      const slide = $('case3-slide');
+      const rev = reveals(slide);
+      const { svg, M, tl, t } = partialScene('case3', ['卡 (x, ·) 有 A 的第 x 列块和 B 的第 x 行块', '本地乘：C 的每一块都只是部分和（浅色）', '沿 X 做 AllReduce：部分和交换并相加 → 每张卡都有完整的 C']);
+      let end = t;
+      DEVS.forEach(([x, y]) => { for (let r = 0; r < 2; r++) for (let c = 0; c < 2; c++) {
+        end = sendX(svg, tl, 'C', x, y, r, c, t, PART + 0.1);
+        tl.to(M.f('C', 1 - x, y, r, c), { opacity: 0.9 }, { at: end - 0.1, dur: 0.35 });
+      } });
+      swap(tl, M.caps[1], M.caps[2], t);
+      tl.label('ar', end + 0.4);
+      show(tl, rev[0], end + 0.5);
+      bind(slide, tl);
+    })();
+
+    // Case 3 variant: ReduceScatter over K
+    (() => {
+      const slide = $('case5-slide');
+      const rev = reveals(slide);
+      const { svg, M, tl, t } = partialScene('case5', ['卡 (x, ·) 有 A 的第 x 列块和 B 的第 x 行块', '本地乘：C 的每一块都只是部分和（浅色）', '沿 X 做 ReduceScatter：第 k 列块的部分和在卡 (k, ·) 上相加 → C[I, Kₓ]']);
+      let end = t;
+      DEVS.forEach(([x, y]) => { for (let r = 0; r < 2; r++) {
+        const c = 1 - x; // device x keeps column block x and sends the other one away
+        end = sendX(svg, tl, 'C', x, y, r, c, t, PART + 0.1);
+        tl.to(M.f('C', x, y, r, c), { opacity: 0 }, { at: t + 0.3, dur: 0.4 });
+        tl.to(M.f('C', 1 - x, y, r, c), { opacity: 0.9 }, { at: end - 0.1, dur: 0.35 });
+      } });
+      swap(tl, M.caps[1], M.caps[2], t);
+      show(tl, rev[0], t);
+      tl.label('rs', end + 0.4);
+      show(tl, rev[1], end + 0.5);
+      bind(slide, tl);
+    })();
+
+    // Case 4: A[I_X, J] . B[J, K_X]: only diagonal blocks; AllGather A first
+    (() => {
+      const slide = $('case4-slide'), svg = $('case4-svg');
+      const rev = reveals(slide);
+      const M = mesh(svg, (m, x, y, r, c) => (m === 'A' ? (r === x ? 0.85 : 0) : m === 'B' ? (c === x ? 0.85 : 0) : 0),
+        ['卡 (x, ·) 有 A 的第 x 行块和 B 的第 x 列块', '本地只能算出对角块 C(x, x)，其余块缺数据', '沿 X 对 A 做 AllGather → A[I, J]，再乘出 C[I, Kₓ]']);
+      const tl = Anim.timeline();
+      tl.label('start', 0);
+      let end = compute(tl, M, allC((x, y, r, c) => r === x && c === x), 0.3);
+      swap(tl, M.caps[0], M.caps[1], 0.3);
+      tl.label('diag', end + 0.2);
+      const t = end + 0.5;
+      DEVS.forEach(([x, y]) => [0, 1].forEach((c) => {
+        end = sendX(svg, tl, 'A', x, y, x, c, t);
+        tl.to(M.f('A', 1 - x, y, x, c), { opacity: 0.85 }, { at: end - 0.1, dur: 0.3 });
+      }));
+      swap(tl, M.caps[1], M.caps[2], t);
+      end = compute(tl, M, allC((x, y, r, c) => c === x && r !== x), end + 0.3);
+      tl.label('ag', end + 0.2);
+      show(tl, rev[0], end + 0.3);
+      bind(slide, tl);
+    })();
+
+    /* ===== collective matmul overlap ===== */
+    (() => {
+      const svg = document.querySelector('#overlap-slide svg.dia');
+      const bars = svg.querySelectorAll('#cm-bars rect'), ser = svg.querySelectorAll('.ser');
+      const tl = Anim.timeline();
+      const px = 100, t0 = 0.4;
+      bars.forEach((b) => tl.set(b, { attr: { width: 0 } }, { at: 0 }));
+      ser.forEach((b) => tl.set(b, { attr: { width: 0 } }, { at: 0 }));
+      for (let k = 0; k < 4; k++) {
+        tl.to(bars[2 * k], { attr: { width: 48 } }, { at: t0 + (52 * k) / px, dur: 0.48, ease: 'linear' });
+        tl.to(bars[2 * k + 1], { attr: { width: 36 } }, { at: t0 + (52 + 52 * k) / px, dur: 0.36, ease: 'linear' });
+      }
+      tl.to(ser[0], { attr: { width: 200 } }, { at: t0, dur: 2, ease: 'linear' }).to(ser[1], { attr: { width: 150 } }, { at: t0 + 2, dur: 1.5, ease: 'linear' });
+      tl.to($('cm-head'), { x: 350 }, { at: t0, dur: 3.5, ease: 'linear' }).to($('cm-head'), { opacity: 0 }, { at: t0 + 3.6, dur: 0.3 });
+      bind($('overlap-slide'), tl);
+    })();
   })();
   </script>
   <script src="/assets/post-links.js"></script>

@@ -7,7 +7,8 @@
 //     .to('.blk', { opacity: 1, y: 0 }, { at: '<', stagger: 0.05 })    // together with the previous one
 //     .label('step')                                                   // a stop for the next key press
 //     .to('#arrow', { draw: 1 })                                       // stroke-draw a path or line
-//     .to('#n', { text: 4096, fmt: (v) => Math.round(v) + ' tok' });
+//     .to('#n', { text: 4096, fmt: (v) => Math.round(v) + ' tok' })
+//     .during((p) => drawTrail(p), { at: 0, dur: 3 });                  // custom per-frame drawing
 //   Anim.slide(document.getElementById('my-slide'), tl, { steps: true, controls: true });
 //
 // Props: x, y, scale, rotate (deg), opacity, fill, stroke, color, background
@@ -35,8 +36,11 @@
     if (!probe) { probe = document.createElement('i'); probe.style.display = 'none'; document.body.appendChild(probe); }
     probe.style.color = '';
     probe.style.color = c;
-    const m = getComputedStyle(probe).color.match(/[\d.]+/g) || [0, 0, 0];
-    return [+m[0], +m[1], +m[2], m[3] === undefined ? 1 : +m[3]];
+    const c2 = getComputedStyle(probe).color;
+    const m = c2.match(/[\d.]+/g) || [0, 0, 0];
+    // color-mix() and friends compute to color(srgb r g b / a) with channels in 0..1.
+    const k = c2.startsWith('color(') ? 255 : 1;
+    return [m[0] * k, m[1] * k, m[2] * k, m[3] === undefined ? 1 : +m[3]];
   }
 
   function targets(sel, root) {
@@ -97,6 +101,7 @@
     const tweens = []; // { el, key, to, start, dur, ease, fmt }
     const labels = []; // [{ name, t }]
     const calls = [];  // [{ t, fn }]
+    const hooks = [];  // during(): [{ fn, start, dur, ease }]
     let prevStart = 0;
     let end = 0;       // end of the timeline so far
     let built = null;  // per (el,key) sorted tween lists with resolved from-values
@@ -134,6 +139,17 @@
         return api;
       },
       set(sel, props, o = {}) { return api.to(sel, props, { ...o, dur: 0 }); },
+      // Run fn(progress, t) on every render once t reaches the start, with
+      // progress eased over dur (clamped to 1 after). For custom drawing such
+      // as trails or curves; fn must draw purely from its arguments.
+      during(fn, o = {}) {
+        const start = resolveAt(o.at);
+        const dur = o.dur ?? 0.6;
+        hooks.push({ fn, start, dur, ease: typeof o.ease === 'function' ? o.ease : EASE[o.ease || 'linear'] });
+        prevStart = start;
+        end = Math.max(end, start + dur);
+        return api;
+      },
       wait(sec) { prevStart = end; end += sec; return api; },
       label(name, at) { const t = resolveAt(at); labels.push({ name, t }); end = Math.max(end, t); return api; },
       call(fn, at) { calls.push({ t: resolveAt(at), fn }); return api; },
@@ -192,6 +208,9 @@
           s.dirty = false;
         }
       }
+      for (const h of hooks) {
+        if (t >= h.start) h.fn(h.ease(h.dur === 0 ? 1 : Math.min(1, (t - h.start) / h.dur)), t);
+      }
       // Fire calls crossed while moving forward.
       if (t > lastT) calls.forEach((c) => { if (c.t > lastT && c.t <= t) c.fn(); });
       lastT = t;
@@ -223,10 +242,10 @@
       lastFrame = now;
       t = Math.min(target, t + dt * (opts.speed || 1));
       render(t);
-      emit();
       if (t < target) raf = requestAnimationFrame(tick);
       else if (player.loop && target >= api.duration) { t = 0; lastT = -1; raf = requestAnimationFrame(tick); }
       else raf = 0;
+      emit();
     }
     api.player = player;
     // Colors are resolved from CSS tokens when the timeline is built; rebuild

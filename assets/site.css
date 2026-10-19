@@ -846,6 +846,7 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
   line-height: 1.5;
   pointer-events: none;
 }
+.link-card[hidden] { display: none; }
 .link-card .kind { justify-self: start; }
 .link-card .lc-cat { color: var(--accent); font-size: 12px; }
 .link-card b { font-size: 15px; color: var(--text); }
