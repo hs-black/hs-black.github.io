@@ -1,0 +1,1244 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>DeepSeek-V4 技术报告精读 · Zunzhe Zhang</title>
+  <meta name="description" content="拆解 DeepSeek-V4：CSA/HCA 注意力、mHC、Muon、FP4 QAT 与多教师蒸馏，附成本计算器。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig { margin: 1.4em 0 0; }
+    .fig svg { display: block; width: 100%; height: auto; }
+    .fig text { fill: var(--text); font-family: var(--font-sans); }
+    .fig .soft { fill: var(--text-soft); }
+    .fig .faint { fill: var(--text-faint); }
+    .fig .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .fig .box-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .fig .box-acc2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .fig .box-soft { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1.2; }
+    .fig .ln { stroke: var(--text-soft); stroke-width: 1.4; fill: none; }
+    .fig .ln-acc { stroke: var(--accent); stroke-width: 1.6; fill: none; }
+    .fig .ln-acc2 { stroke: var(--accent-2); stroke-width: 1.6; fill: none; }
+    .fig .f-acc { fill: var(--accent); }
+    .fig .f-acc2 { fill: var(--accent-2); }
+    .fig .f-soft { fill: var(--bg-soft); }
+    .fig .f-border { fill: var(--border); }
+    .fig .mono { font-family: var(--font-mono); }
+    .demo svg { display: block; width: 100%; height: auto; }
+    .sx { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 560px) { .sx > svg { min-width: 540px; } }
+    .demo svg text { fill: var(--text); font-family: var(--font-sans); }
+    .demo .note { font-size: 13px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+    .demo .row-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin-top: 10px; }
+    .mat { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 4px; max-width: 420px; margin: 12px auto 0; font-family: var(--font-mono); font-size: 13px; }
+    .mat div { padding: 6px 2px; text-align: center; border-radius: 6px; }
+    .mat .sum { background: none; color: var(--text-faint); }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-soft); margin-top: 8px; }
+    .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+    .bk { display: grid; gap: 6px; margin-top: 12px; font-size: 13px; }
+    .bk-row { display: grid; grid-template-columns: 6.5em 1fr 5.5em; gap: 8px; align-items: center; }
+    .bk-track { display: flex; height: 18px; border-radius: 5px; overflow: hidden; background: var(--bg-soft); }
+    .bk-track span { display: block; height: 100%; }
+    .bk-val { font-family: var(--font-mono); text-align: right; color: var(--text-soft); }
+    .ptab td, .ptab th { font-size: 14px; }
+    .tight td, .tight th { padding: 6px 8px; font-size: 14px; }
+    .prose td.hl { font-weight: 700; }
+    .kv-tag { font-family: var(--font-mono); font-size: 0.86em; color: var(--text-soft); }
+    .num-in { width: 7em; }
+    @media (max-width: 560px) {
+      .bk-row { grid-template-columns: 5em 1fr 4.6em; }
+      .mat { font-size: 11px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>DeepSeek-V4 技术报告精读</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="reports"></nav>
+
+    <article class="prose">
+      <p>DeepSeek 在 2026 年 4 月放出了 V4 的预览版和一份 58 页的技术报告《DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence》（arXiv 2606.19348）。这份报告的主线很清楚：<strong>让一百万 token 的上下文变得便宜到可以日常使用</strong>。为此它几乎把 V3 的注意力推倒重来（CSA + HCA 混合注意力），换了残差连接（mHC），换了优化器（Muon），又在训练、推理、后训练三套基础设施上做了一大堆配套工作。</p>
+      <p>这篇笔记按报告的顺序走一遍，但每个新东西我都先把它所依赖的旧东西（MLA、DeepSeekMoE、MTP、DSA）讲清楚，再讲 V4 改了什么、为什么这样改、张量形状是什么。除了报告本身，我还读了 Hugging Face 上随模型发布的 <code>config.json</code> 和参考推理代码 <code>inference/model.py</code>；报告自己也说「细节以开源实现为准」。凡是从代码或我自己推算得到、报告正文里没写的东西，我都会标出来。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#overview">全景：V4 相对 V3 / V3.2 改了什么</a></li>
+          <li><a href="#baseline">先复习基线：MLA、DeepSeekMoE、MTP、DSA</a></li>
+          <li><a href="#attn">混合注意力：CSA 与 HCA</a></li>
+          <li><a href="#cost">一百万 token 到底省了多少：KV cache 与 FLOPs</a></li>
+          <li><a href="#mhc">mHC：流形约束的超连接</a></li>
+          <li><a href="#moe">MoE 的小改动与参数账</a></li>
+          <li><a href="#muon">Muon 优化器</a></li>
+          <li><a href="#infra">训练与推理基础设施</a></li>
+          <li><a href="#pretrain">预训练：数据、超参与稳定性</a></li>
+          <li><a href="#post">后训练：专家 RL + 多教师在线蒸馏</a></li>
+          <li><a href="#eval">评测结果</a></li>
+          <li><a href="#summary">小结与我的看法</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="overview">1. 全景：V4 相对 V3 / V3.2 改了什么</h2>
+      <p>V4 有两个型号，都是 MoE（Mixture-of-Experts，混合专家）模型，都原生支持 1M（\(2^{20}=1{,}048{,}576\)）token 上下文：</p>
+      <ul>
+        <li><strong>DeepSeek-V4-Pro</strong>：总参数 1.6T，每个 token 激活 49B，预训练 33T token；</li>
+        <li><strong>DeepSeek-V4-Flash</strong>：总参数 284B，激活 13B，预训练 32T token。</li>
+      </ul>
+      <p>每个模型又有三档「推理强度」：Non-think、Think High、Think Max。报告里最常出现的 <em>V4-Pro-Max</em> 就是 Pro 在 Think Max 档。</p>
+      <p>报告开篇给了两个效率数字，后文我会用自己的计算器复现：在 1M 上下文下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV cache 只有 10%；V4-Flash 分别是 10% 和 7%。</p>
+
+      <p>下面这张表是我整理的「改动清单」，后面每一行都会展开：</p>
+      <div class="table-wrap">
+      <table class="tight">
+        <thead><tr><th>部件</th><th>V3（2024.12）</th><th>V3.2（2025.12）</th><th>V4（2026.04）</th></tr></thead>
+        <tbody>
+          <tr><td>注意力</td><td>MLA（稠密）</td><td>MLA + DSA（lightning indexer 选 top-2048 个 token）</td><td><b>CSA</b>（4 倍压缩 + DSA 选 top-k）与 <b>HCA</b>（128 倍压缩、稠密）交替，外加 128 token 滑动窗口</td></tr>
+          <tr><td>KV 形式</td><td>512 维潜向量 + 64 维 RoPE key</td><td>同 V3，另加 128 维 indexer key</td><td>单个 512 维向量同时当 K 和 V（shared-KV MQA），后 64 维带 RoPE</td></tr>
+          <tr><td>残差连接</td><td>普通残差</td><td>普通残差</td><td><b>mHC</b>：4 路残差流，混合矩阵约束为双随机矩阵</td></tr>
+          <tr><td>FFN</td><td>前 3 层稠密，其余 DeepSeekMoE（256 路由 + 1 共享，激活 8）</td><td>同 V3</td><td>全部 MoE；前 3 层用 <b>Hash 路由</b>；激活 6 个；打分函数 Sigmoid → <b>Sqrt(Softplus)</b>；取消节点数限制</td></tr>
+          <tr><td>MTP</td><td>深度 1</td><td>同 V3</td><td>不变</td></tr>
+          <tr><td>优化器</td><td>AdamW</td><td>AdamW</td><td><b>Muon</b>（混合 Newton–Schulz），部分参数仍用 AdamW</td></tr>
+          <tr><td>上下文</td><td>128K</td><td>128K</td><td>1M</td></tr>
+          <tr><td>后训练</td><td>SFT + RL</td><td>专家蒸馏 + 混合 RL（GRPO）</td><td>专家 SFT+GRPO，再用<b>多教师在线蒸馏（OPD）</b>替换混合 RL</td></tr>
+          <tr><td>精度</td><td>FP8 训练</td><td>FP8</td><td>FP8 训练；后训练对专家权重与 indexer QK 做 <b>FP4 QAT</b></td></tr>
+        </tbody>
+      </table>
+      </div>
+
+      <figure class="fig"><div class="sx">
+        <svg viewBox="0 0 640 330" role="img" aria-label="DeepSeek-V4 总体结构示意">
+          <rect class="box-soft" x="20" y="285" width="170" height="30" rx="6"/>
+          <text x="105" y="305" text-anchor="middle" font-size="13">Embedding（d 维）</text>
+          <path class="ln" d="M105 285 V262"/>
+          <rect class="box-soft" x="20" y="232" width="170" height="30" rx="6"/>
+          <text x="105" y="252" text-anchor="middle" font-size="13">复制成 4 路残差流</text>
+          <path class="ln" d="M105 232 V212"/>
+          <rect class="box" x="10" y="32" width="300" height="180" rx="10"/>
+          <text x="22" y="47" font-size="12" class="soft">Transformer Block ×L</text>
+          <rect class="box-acc2" x="30" y="166" width="120" height="30" rx="6"/>
+          <text x="90" y="186" text-anchor="middle" font-size="12.5">Pre-mix（A）</text>
+          <rect class="box-acc" x="170" y="166" width="120" height="30" rx="6"/>
+          <text x="230" y="186" text-anchor="middle" font-size="12.5">CSA / HCA</text>
+          <rect class="box-acc2" x="100" y="128" width="140" height="28" rx="6"/>
+          <text x="170" y="147" text-anchor="middle" font-size="12">Post + Res mix（C, B）</text>
+          <rect class="box-acc2" x="30" y="90" width="120" height="30" rx="6"/>
+          <text x="90" y="110" text-anchor="middle" font-size="12.5">Pre-mix（A）</text>
+          <rect class="box-acc" x="170" y="90" width="120" height="30" rx="6"/>
+          <text x="230" y="110" text-anchor="middle" font-size="12.5">DeepSeekMoE</text>
+          <rect class="box-acc2" x="100" y="52" width="140" height="28" rx="6"/>
+          <text x="170" y="71" text-anchor="middle" font-size="12">Post + Res mix（C, B）</text>
+          <path class="ln" d="M150 181 H170 M230 166 V156 M150 105 H170 M230 90 V80"/>
+          <path class="ln" d="M105 32 V22 H340"/>
+          <rect class="box-soft" x="340" y="8" width="130" height="28" rx="6"/>
+          <text x="405" y="27" text-anchor="middle" font-size="12.5">合并 4 路 → 输出头</text>
+          <rect class="box-soft" x="490" y="8" width="130" height="28" rx="6"/>
+          <text x="555" y="27" text-anchor="middle" font-size="12.5">MTP 模块（深度 1）</text>
+          <path class="ln" d="M470 22 H490"/>
+          <text x="340" y="80" font-size="13">注意力层的类型由层号决定：</text>
+          <text x="340" y="104" font-size="12.5" class="soft">Flash（43 层）：SWA, SWA, CSA, HCA, CSA, …</text>
+          <text x="340" y="126" font-size="12.5" class="soft">Pro（61 层）：HCA, HCA, CSA, HCA, CSA, …</text>
+          <text x="340" y="156" font-size="13">每层 MoE：1 共享 + N 路由专家，激活 6 个</text>
+          <text x="340" y="180" font-size="12.5" class="soft">前 3 层按 token id 做 Hash 路由</text>
+          <text x="340" y="210" font-size="13">残差流形状：n_hc × d = 4 × d</text>
+          <text x="340" y="234" font-size="12.5" class="soft">子层的输入输出仍是 d 维</text>
+        </svg></div>
+        <figcaption>图 1　V4 总体结构（我根据报告图 2 和参考代码重画）。橙色是 mHC 的三种映射，紫色是子层本体。</figcaption>
+      </figure>
+
+      <!-- ============================================================ -->
+      <h2 id="baseline">2. 先复习基线：MLA、DeepSeekMoE、MTP、DSA</h2>
+      <p>V4 的每个新部件都是在这四样东西上改出来的，所以先把它们过一遍。记号：\(d\) 是隐藏维度，\(\mathbf h_t\in\mathbb R^d\) 是第 \(t\) 个 token 进入某层时的隐藏状态，\(n_h\) 是注意力头数。</p>
+
+      <h3>2.1 MLA：把 KV 压成一个潜向量</h3>
+      <p>标准多头注意力（MHA）在每层为每个 token 缓存 \(n_h\) 个 key 和 \(n_h\) 个 value。以 V3 的尺寸（\(n_h=128\)，每头 128 维）算，每 token 每层要存 \(2\times128\times128=32768\) 个数。解码时每生成一个 token 都要把整个 KV cache 从显存读一遍，所以 cache 越大越慢、能并发的请求越少。</p>
+      <p>MLA（Multi-head Latent Attention，V2 提出、V3 沿用）的做法是：只缓存一个低维潜向量，需要时再「解压」出各头的 K、V：</p>
+      $$\mathbf c^{KV}_t = W^{DKV}\mathbf h_t\in\mathbb R^{512},\qquad \mathbf k^{C}_{t,i}=W^{UK}_i\mathbf c^{KV}_t,\qquad \mathbf v^{C}_{t,i}=W^{UV}_i\mathbf c^{KV}_t .$$
+      <p>RoPE（旋转位置编码）和这种低秩分解不兼容（旋转矩阵夹在中间，没法把 \(W^{UK}\) 吸收进别的矩阵），所以 MLA 另开一条 64 维的「解耦 RoPE」通道：\(\mathbf k^R_t=\mathrm{RoPE}(W^{KR}\mathbf h_t)\in\mathbb R^{64}\)，所有头共享。query 也先压到 \(d_c'=1536\) 维再升回来。于是每 token 每层只需缓存 \(512+64=576\) 个数，是 MHA 的 1/57。</p>
+      <p>还有一个关键技巧叫<strong>矩阵吸收</strong>：注意力分数 \(\mathbf q_i^\top\mathbf k^C_{s,i}=\mathbf q_i^\top W^{UK}_i\mathbf c^{KV}_s=(W^{UK\top}_i\mathbf q_i)^\top\mathbf c^{KV}_s\)。把 \(W^{UK}_i\) 并进 query 一侧之后，每个头的 query 直接在 512 维潜空间里和缓存的 \(\mathbf c^{KV}\) 做内积；同理 \(W^{UV}_i\) 可以并进输出投影。解码时 MLA 因此等价于一个 <strong>MQA</strong>（Multi-Query Attention，所有头共享同一份 K/V）：128 个 query 头，key 是 576 维 \([\mathbf c^{KV};\mathbf k^R]\)，value 是 512 维 \(\mathbf c^{KV}\)。V3.2 报告把这叫 MLA 的「MQA 模式」。记住这一点，V4 的注意力就是把它变成了模型的「原生形式」。</p>
+
+      <h3>2.2 DeepSeekMoE 与无辅助损失的负载均衡</h3>
+      <p>MoE 层把一个大 FFN 拆成很多小专家，每个 token 只走其中几个。DeepSeekMoE 的两个特点是：专家切得细（V3 每个专家中间维度只有 2048），以及有始终激活的<strong>共享专家</strong>。V3 的一层 MoE 可以写成：</p>
+      $$\mathbf h'_t=\mathbf u_t+\sum_{i=1}^{N_s}\mathrm{FFN}^{(s)}_i(\mathbf u_t)+\sum_{i=1}^{N_r}g_{i,t}\,\mathrm{FFN}^{(r)}_i(\mathbf u_t),\qquad s_{i,t}=\sigma(\mathbf u_t^\top\mathbf e_i),$$
+      <p>其中 \(\mathbf e_i\) 是第 \(i\) 个专家的「质心」向量，\(s_{i,t}\) 是亲和度分数。选专家时用 \(s_{i,t}+b_i\) 排序取 top-\(K_r\)，但门控权重 \(g_{i,t}\) 只用 \(s_{i,t}\)，并在选中的 \(K_r\) 个里归一化。偏置 \(b_i\) 不参与梯度：每步之后，过载的专家 \(b_i\) 减 \(\gamma\)，欠载的加 \(\gamma\)，这就是<strong>无辅助损失的负载均衡</strong>（auxiliary-loss-free）。V3 另外加了一个权重很小的序列级均衡损失，防止单条序列内部极端不均。V3 还限制每个 token 最多发往 4 个节点，以控制跨节点通信。</p>
+
+      <h3>2.3 MTP：多预测一个 token</h3>
+      <p>MTP（Multi-Token Prediction）在主干之后串一个小模块：把主干第 \(i\) 个位置的最终表示和第 \(i+1\) 个 token 的嵌入拼起来，过一个 Transformer 块，再用共享的输出头预测第 \(i+2\) 个 token。训练时它是一个附加损失（加权 \(\lambda\)），让表示更「往前看」；推理时可以拿来做投机解码。V3 用深度 1；V4 报告明确说 MTP 配置与 V3 完全相同。参考代码里 MTP 块是 \(\mathbf x=W_e\,\mathrm{RMSNorm}(\mathrm{Emb})+W_h\,\mathrm{RMSNorm}(\mathbf h)\)，等价于先拼接再投影。</p>
+
+      <h3>2.4 DSA：用一个便宜的打分器挑 token</h3>
+      <p>V3.2 引入了 DSA（DeepSeek Sparse Attention）。它的出发点是：一个 query 真正需要关注的历史 token 往往很少。DSA 用一个轻量的 <strong>lightning indexer</strong> 给每个历史 token 打分：</p>
+      $$I_{t,s}=\sum_{j=1}^{H^I}w^I_{t,j}\cdot\mathrm{ReLU}\!\left(\mathbf q^I_{t,j}\cdot\mathbf k^I_s\right),$$
+      <p>其中 indexer 的头数 \(H^I=64\)、维度 128，可以全程用 FP8 算；然后只取分数最高的 top-\(k\)（V3.2 是 2048）个 token 的 KV 做真正的注意力。这样核心注意力从 \(O(L^2)\) 降到 \(O(Lk)\)。但 indexer 本身仍要扫过全部历史 token，是 \(O(L^2)\) 的，只是常数小。</p>
+      <p>V3.2 的 indexer 是这样训出来的：先冻结主模型、保持稠密注意力，用 KL 散度把 indexer 的分布 \(\mathrm{Softmax}(I_{t,:})\) 拉向主注意力在所有头上求和、L1 归一化后的分布（1000 步，共 2.1B token）；再打开稀疏选择，所有参数一起训（943.7B token），indexer 只在选中的集合上继续对齐，且它的输入从计算图中 detach，只受自己的 KL 损失驱动。</p>
+      <div class="callout">
+        <p><b>V3.2 留下的两个问题。</b>第一，KV cache 每 token 每层仍是 576 个数再加 128 维 indexer key，1M 上下文下 61 层要几十 GB；第二，indexer 每生成一个 token 要和全部历史做 64 头 × 128 维的内积，长度一到百万，这一项会压过其他所有计算（第 4 节的计算器里能看到）。V4 的混合注意力就是冲着这两点来的：先沿序列维度压缩，再做稀疏。</p>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="attn">3. 混合注意力：CSA 与 HCA</h2>
+      <p>V4 设计了两种注意力层，交替堆叠：</p>
+      <ul>
+        <li><strong>CSA</strong>（Compressed Sparse Attention，压缩稀疏注意力）：先把每 \(m=4\) 个 token 的 KV 压成 1 个条目，再在压缩后的条目上做 DSA，只挑 top-\(k\) 个参加注意力；</li>
+        <li><strong>HCA</strong>（Heavily Compressed Attention，重度压缩注意力）：把每 \(m'=128\) 个 token 压成 1 个条目，压完之后条目已经很少，直接做稠密注意力，不再挑选。</li>
+      </ul>
+      <p>两者都额外带一个 128 token 的滑动窗口分支，用来看最近的、尚未凑满一个压缩块的 token。下面逐个拆开。</p>
+
+      <h3>3.1 Token 级压缩器</h3>
+      <p>设一段输入隐藏状态 \(H\in\mathbb R^{n\times d}\)，\(n\) 是序列长度，\(c\) 是注意力的头维度（V4 里 \(c=512\)）。CSA 的压缩器先算两套「原始 KV」和两套「压缩权重」：</p>
+      $$C^a=HW^{aKV},\quad C^b=HW^{bKV},\quad Z^a=HW^{aZ},\quad Z^b=HW^{bZ},\qquad W^{\ast}\in\mathbb R^{d\times c}.$$
+      <p>于是 \(C^a,C^b,Z^a,Z^b\in\mathbb R^{n\times c}\)。第 \(i\) 个压缩条目由「本块」的 \(m\) 个 \(C^a\) 和「上一块」的 \(m\) 个 \(C^b\) 共 \(2m\) 个向量加权得到：</p>
+      $$\big[S^a_{mi:m(i+1)-1};\,S^b_{m(i-1):mi-1}\big]=\mathrm{Softmax}_{\text{row}}\big(\big[Z^a_{mi:m(i+1)-1}+B^a;\;Z^b_{m(i-1):mi-1}+B^b\big]\big),$$
+      $$C^{\text{Comp}}_i=\sum_{j=mi}^{m(i+1)-1}S^a_j\odot C^a_j+\sum_{j=m(i-1)}^{mi-1}S^b_j\odot C^b_j\in\mathbb R^{c}.$$
+      <p>有几个细节值得停下来看：</p>
+      <ul>
+        <li><strong>softmax 是逐通道的。</strong>\(Z\) 和 \(C\) 形状相同（每个 token 每个通道都有一个权重），softmax 沿「这 \(2m\) 个 token」的方向做，\(c\) 个通道各自归一化。所以这是一个可学习的、逐通道的加权池化，不是简单平均。</li>
+        <li>\(B^a,B^b\in\mathbb R^{m\times c}\) 是可学习的<strong>位置偏置</strong>：块内第几个位置天然更重要，可以由它表达。</li>
+        <li><strong>重叠。</strong>条目 \(i\) 用到上一块的 \(C^b\)，条目 \(i-1\) 用到同一块的 \(C^a\)，所以相邻条目覆盖的 token 有一半重叠，每个条目「看」的是 \(2m=8\) 个 token，但条目数仍是 \(n/m\)。\(i=0\) 时上一块不存在，\(Z^b\) 填 \(-\infty\)、\(C^b\) 填 0。参考代码里只有压缩率为 4 时才启用重叠。</li>
+      </ul>
+      <p>HCA 的压缩器更简单：只有一套 \(C=HW^{KV}\)、\(Z=HW^{Z}\)，不重叠，每 \(m'=128\) 个 token 做一次逐通道 softmax 加权求和（位置偏置 \(B\in\mathbb R^{m'\times c}\)），条目数 \(n/m'\)。</p>
+
+      <figure class="fig"><div class="sx">
+        <svg viewBox="0 0 640 210" role="img" aria-label="CSA 重叠压缩示意">
+          <text x="10" y="20" font-size="13">token：</text>
+          <g id="cmp-tokens"></g>
+          <text x="10" y="196" font-size="12" class="soft">m = 4：条目 i 由「块 i 的 C^a」+「块 i−1 的 C^b」共 8 个 token 加权得到；条目数仍是 n/4。</text>
+        </svg></div>
+        <figcaption>图 2　CSA 压缩器的重叠窗口。橙色是当前块（\(C^a\) 部分），紫色是借用的上一块（\(C^b\) 部分）。</figcaption>
+      </figure>
+
+      <p>压缩之后，参考代码还会对每个条目做 RMSNorm，在最后 64 维上施加 RoPE（位置取该块第一个 token 的位置 \(mi\)），再把非 RoPE 的 448 维量化成 FP8 存进 cache。注意：只有凑满 \(m\) 个 token 才会产生一个新条目；没凑满的尾巴 token 要先放在缓冲区里（8.5 节的「state cache」）。</p>
+
+      <h3>3.2 CSA：在压缩条目上做 DSA</h3>
+      <p>有了 \(n/m\) 个压缩条目，CSA 接下来用 lightning indexer 挑选。indexer 有自己的一套压缩器（同样的重叠压缩，但头维度是 \(c_I=128\)），得到压缩的 indexer key \(K^{\text{IComp}}\in\mathbb R^{\frac nm\times c_I}\)。query 一侧走低秩路径：</p>
+      $$\mathbf c^Q_t=\mathbf h_tW^{DQ}\in\mathbb R^{d_c},\qquad \mathbf q^I_t=\mathbf c^Q_tW^{IUQ}\in\mathbb R^{c_In^I_h},\qquad \mathbf w^I_t=\mathbf h_tW^{w}\in\mathbb R^{n^I_h},$$
+      $$I_{t,s}=\sum_{h=1}^{n_h^I}w^I_{t,h}\cdot\mathrm{ReLU}\!\left(\mathbf q^I_{t,h}\cdot K^{\text{IComp}}_s\right),\qquad s\lt\lfloor t/m\rfloor .$$
+      <p>形式和 V3.2 一模一样，区别只是打分对象从「每个 token」变成了「每个压缩块」，候选数少了 4 倍。然后取 top-\(k\)：</p>
+      $$\mathcal C^{\text{SprsComp}}_t=\big\{C^{\text{Comp}}_s\;\big|\;I_{t,s}\in\text{Top-}k(I_{t,:})\big\}.$$
+      <p>V4-Flash 取 \(k=512\)，V4-Pro 取 \(k=1024\)，都比 V3.2 的 2048 小。每个压缩条目代表 4 个 token，所以 Pro 每层实际「覆盖」约 4096 个 token 的信息，而 V3.2 是 2048 个 token。</p>
+      <p>注意 query 的低秩潜向量 \(\mathbf c^Q_t\) 由主注意力和 indexer 共享。参考代码里 indexer 的 query 和 key 在量化到 FP4 之前还会做一次 Hadamard 旋转（把离群值摊到各维上，降低量化误差），这一点报告正文没写。</p>
+
+      <h3>3.3 Shared-KV MQA 与分组输出投影</h3>
+      <p>挑出来的压缩条目直接同时充当 key 和 value，所有 query 头共享（MQA）：</p>
+      $$\mathbf q_t=\mathbf c^Q_tW^{UQ}\in\mathbb R^{cn_h},\qquad \mathbf o_{t,i}=\mathrm{CoreAttn}\big(\mathbf q_{t,i},\;\mathcal C^{\text{SprsComp}}_t,\;\mathcal C^{\text{SprsComp}}_t\big)\in\mathbb R^{c}.$$
+      <p>和 2.1 节对照：MLA 在 MQA 模式下，key 是 576 维 \([\mathbf c^{KV};\mathbf k^R]\)，value 是其中 512 维的 \(\mathbf c^{KV}\)；V4 直接把它统一成一个 512 维向量（最后 64 维带 RoPE），K 和 V 用同一个，也不再有 \(W^{UK},W^{UV}\) 这层「先压后解」的分解。我的理解是：V4 把「吸收后的 MLA」当成了模型本来的样子。</p>
+      <p>代价是输出变宽了：每头输出 512 维，Pro 有 128 个头，拼起来 \(cn_h=65536\) 维，直接投影回 \(d=7168\) 要一个 \(65536\times7168\) 的矩阵（4.7 亿参数，每 token 每层 9.4 亿 FLOPs）。V4 因此用了<strong>分组输出投影</strong>：把 \(n_h\) 个头分成 \(g\) 组，每组 \(\frac{n_h}{g}\) 个头的输出（\(c\frac{n_h}{g}\) 维）先各自投影到 \(d_g\) 维，拼成 \(gd_g\) 维后再投影到 \(d\)：</p>
+      $$\mathbf o^G_{t,i}\in\mathbb R^{c\,n_h/g}\xrightarrow{\;W^{O1}_i\;}\mathbf o'^G_{t,i}\in\mathbb R^{d_g},\qquad[\mathbf o'^G_{t,1};\dots;\mathbf o'^G_{t,g}]\in\mathbb R^{gd_g}\xrightarrow{\;W^{O2}\;}\hat{\mathbf o}_t\in\mathbb R^{d}.$$
+      <p>算一下 Pro（\(g=16,\ d_g=1024\)）：第一级 16 个 \(4096\times1024\) 矩阵，共 67.1M 参数；第二级 \(16384\times7168\)，117.4M；合计 184.5M，是直接投影的 39%。Flash（\(g=8\)）：33.6M + 33.6M = 67.1M，是直接投影（\(32768\times4096\)）的一半。这其实就是把一个大矩阵换成「块对角 + 稠密」的低秩结构。</p>
+
+      <figure class="fig"><div class="sx">
+        <svg viewBox="0 0 640 300" role="img" aria-label="CSA 数据流">
+          <rect class="box-soft" x="20" y="250" width="180" height="32" rx="6"/>
+          <text x="110" y="271" text-anchor="middle" font-size="12.5">历史 token 的 h_s（n×d）</text>
+          <rect class="box-soft" x="440" y="250" width="180" height="32" rx="6"/>
+          <text x="530" y="271" text-anchor="middle" font-size="12.5">当前 token 的 h_t</text>
+          <rect class="box-acc2" x="20" y="190" width="85" height="40" rx="6"/>
+          <text x="62" y="207" text-anchor="middle" font-size="11.5">KV 压缩器</text>
+          <text x="62" y="222" text-anchor="middle" font-size="10.5" class="soft">c=512, m=4</text>
+          <rect class="box-acc2" x="115" y="190" width="85" height="40" rx="6"/>
+          <text x="157" y="207" text-anchor="middle" font-size="11.5">indexer 压缩器</text>
+          <text x="157" y="222" text-anchor="middle" font-size="10.5" class="soft">c_I=128</text>
+          <path class="ln" d="M62 250 V230 M157 250 V230"/>
+          <rect class="box-soft" x="440" y="190" width="180" height="40" rx="6"/>
+          <text x="530" y="207" text-anchor="middle" font-size="11.5">c^Q = h_t W^DQ（d_c 维）</text>
+          <text x="530" y="222" text-anchor="middle" font-size="10.5" class="soft">主 query 与 indexer query 共享</text>
+          <path class="ln" d="M530 250 V230"/>
+          <rect class="box-acc" x="230" y="130" width="180" height="40" rx="6"/>
+          <text x="320" y="147" text-anchor="middle" font-size="11.5">Lightning indexer（FP4）</text>
+          <text x="320" y="162" text-anchor="middle" font-size="10.5" class="soft">I_ts = Σ_h w_h·ReLU(q_h·K_s)</text>
+          <path class="ln" d="M157 190 V150 H230 M480 190 V150 H410"/>
+          <rect class="box-acc" x="250" y="80" width="140" height="32" rx="6"/>
+          <text x="320" y="101" text-anchor="middle" font-size="12">Top-k 选择</text>
+          <path class="ln" d="M320 130 V112"/>
+          <rect class="box" x="20" y="80" width="190" height="32" rx="6"/>
+          <text x="115" y="101" text-anchor="middle" font-size="12">压缩 KV 条目 n/4 × 512</text>
+          <path class="ln" d="M62 190 V112"/>
+          <rect class="box" x="440" y="80" width="180" height="32" rx="6"/>
+          <text x="530" y="101" text-anchor="middle" font-size="12">滑窗 KV：最近 128 token</text>
+          <rect class="box-acc" x="170" y="22" width="300" height="36" rx="6"/>
+          <text x="320" y="44" text-anchor="middle" font-size="12.5">Shared-KV MQA（n_h 头）→ 分组输出投影</text>
+          <path class="ln" d="M115 80 V68 H250 V58 M320 80 V58 M530 80 V68 H390 V58"/>
+          <path class="ln" d="M620 210 H632 V40 H470"/>
+        </svg></div>
+        <figcaption>图 3　CSA 的数据流（按报告图 3 重画）。HCA 去掉 indexer 和 top-k，压缩率换成 128，其余相同。</figcaption>
+      </figure>
+
+      <h3>3.4 HCA：压得更狠，但不挑</h3>
+      <p>HCA 和 CSA 共用 query 路径、shared-KV MQA、分组输出投影，区别只在压缩：128 个 token 压成 1 个条目、不重叠、没有 indexer，query 对所有已完成的压缩条目做稠密注意力。1M 上下文时也只有 8192 个条目，是 V3.2 每层 top-k（2048 个 token）的 4 倍，远小于 1M。</p>
+      <p>为什么要两种层交替？报告没有做消融，只说这种混合结构显著改善长上下文效率。我的理解是分工：HCA 以极低成本给每一层提供「全局但模糊」的视图，CSA 提供「按需取回、分辨率 4 倍」的细节，滑窗分支补最近的精确信息。</p>
+
+      <h3>3.5 其他细节</h3>
+      <p><strong>Query 与 KV 条目的 RMSNorm。</strong>在核心注意力之前，对每个 query 头和唯一的那个 KV 头各做一次 RMSNorm。这样 \(\mathbf q\cdot\mathbf k\) 的量级被锁住，注意力 logit 不会爆炸。后面 Muon 一节会看到，正因为有这一步，V4 不需要 Kimi K2 用的 QK-Clip。</p>
+      <p><strong>部分 RoPE + 输出的反向旋转。</strong>每个 query 和 KV 条目只在最后 64 维施加 RoPE。问题来了：K 和 V 是同一个向量，于是 value 也带着绝对位置 \(s\) 的旋转。设 \(R(\theta_s)\) 是位置 \(s\) 的旋转矩阵，注意力输出的 RoPE 部分是</p>
+      $$\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}\,R(\theta_s)\,\mathbf x_s .$$
+      <p>V4 的处理是在输出上再乘一次位置 \(-t\) 的旋转：\(R(-\theta_t)\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}R(\theta_{s-t})\mathbf x_s\)。旋转矩阵满足 \(R(a)R(b)=R(a+b)\)，所以每个条目对输出的贡献只依赖相对距离 \(s-t\)。参考代码里就是对输出最后 64 维调用一次 <code>apply_rotary_emb(..., inverse=True)</code>。</p>
+      <p><strong>滑动窗口分支。</strong>压缩条目只有在整块凑满后才可见（严格因果），所以 query 看不到自己所在块里的其他 token；而最近的 token 往往最相关。因此 CSA 和 HCA 都额外接入最近 \(n_{\text{win}}=128\) 个<em>未压缩</em>的 KV（同样是 512 维 shared-KV），和压缩条目放在同一个 softmax 里。</p>
+      <p><strong>Attention sink。</strong>每个头有一个可学习的 logit \(z'_h\)，加到 softmax 的分母上：</p>
+      $$s_{h,i,j}=\frac{\exp(z_{h,i,j})}{\sum_k\exp(z_{h,i,k})+\exp(z'_h)} .$$
+      <p>这样一个头的注意力权重之和可以小于 1，甚至接近 0，头可以选择「这次什么都不看」。在稀疏和压缩注意力里这很有用：被选中的条目不一定真的相关，强行归一到 1 会引入噪声。</p>
+      <p><strong>层的排布。</strong>Flash 共 43 层：前两层只用滑动窗口注意力（SWA），之后 CSA 与 HCA 交替；Pro 共 61 层：前两层用 HCA，之后交替。从 <code>config.json</code> 的 <code>compress_ratios</code> 数下来，Pro 是 30 个 CSA 层 + 31 个 HCA 层，Flash 是 21 个 CSA + 20 个 HCA + 2 个 SWA；MTP 层的压缩率为 0，即只用滑窗。</p>
+      <p><strong>位置编码的配置</strong>（来自 config，报告未写）：RoPE 底数 10000，带压缩的层用 <code>compress_rope_theta = 160000</code> 并开 YaRN（factor 16，原始长度 65536）；纯 SWA 层不开 YaRN。</p>
+
+      <div class="demo" id="vis-demo">
+        <div class="demo-label">交互演示 · 一个 query 在 CSA / HCA 里能看到什么</div>
+        <p style="margin-top:8px;font-size:15px">为了画得下，这里用缩小的玩具尺寸：64 个 token，CSA 压缩率 \(m=4\)、top-\(k=4\)，HCA 压缩率 \(m'=16\)，滑窗 8。索引分数由随机向量算出，<b>仅作示意</b>；可见性规则（块凑满才可见、重叠覆盖、滑窗包含自身）与参考代码一致。</p>
+        <div class="ctrls">
+          <label class="ctrl"><span>query 位置 t</span><input type="range" id="vis-t" min="0" max="63" value="41"><output id="vis-t-out">41</output></label>
+        </div>
+        <div class="row-btns">
+          <button class="btn" id="vis-play">▶ 播放</button>
+          <button class="btn" id="vis-seed">换一组随机分数</button>
+        </div>
+        <div class="sx"><svg id="vis-svg" viewBox="0 0 660 298" aria-label="可见性示意"></svg></div>
+        <div class="legend">
+          <span><i style="background:var(--accent)"></i>被 top-k 选中的压缩条目 / 它覆盖的 token</span>
+          <span><i style="background:var(--accent-2)"></i>滑动窗口内的原始 token</span>
+          <span><i style="background:var(--text-faint)"></i>可见但未选中的压缩条目</span>
+          <span><i style="background:var(--border)"></i>尚未凑满、不可见</span>
+        </div>
+        <div class="readout" id="vis-readout"></div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="cost">4. 一百万 token 到底省了多少：KV cache 与 FLOPs</h2>
+      <p>报告 2.3.4 节列了四个效率来源：</p>
+      <ol>
+        <li><strong>混合精度存储 KV</strong>：RoPE 的 64 维用 BF16，其余 448 维用 FP8，比纯 BF16 小将近一半；</li>
+        <li><strong>indexer 用 FP4 计算</strong>：indexer 的 QK 路径在 FP4 下缓存、读取和相乘（这是后训练 QAT 的结果，见 10.6 节）；</li>
+        <li><strong>更小的 top-k</strong>：512 / 1024 而不是 2048，对中短文本也更省；</li>
+        <li>最重要的：<strong>压缩 + 混合</strong>本身。</li>
+      </ol>
+      <p>报告给出的对照是：以「BF16、GQA8、头维度 128」这种常见配置为基线，V4 在 1M 上下文时的 KV cache 约为基线的 2%。报告图 1 还画了 V3.2 / V4-Pro / V4-Flash 的累计 KV cache 和单 token FLOPs 随长度变化的曲线，在 1M 处标注 KV 小 9.5×（Pro）和 13.7×（Flash），FLOPs 低 3.7×（Pro）和 9.8×（Flash）。</p>
+      <p>报告没给这些曲线的具体算法，所以我按超参自己搭了一个模型。下面写清楚每一项怎么算（单位：每生成一个 token；\(n\) 是当前上下文长度；「层」是主干层，不含 MTP）：</p>
+      <div class="table-wrap">
+      <table class="tight">
+        <thead><tr><th></th><th>V3.2（61 层）</th><th>V4（CSA 层 / HCA 层）</th></tr></thead>
+        <tbody>
+          <tr><td>KV cache / 层</td><td>\(n\times\)(512 B FP8 潜向量 + 128 B BF16 RoPE + 128 B FP8 indexer key)</td><td>CSA：\(\frac n4\times\)(448 B FP8 + 128 B BF16 + 64 B FP4 indexer key)；HCA：\(\frac n{128}\times576\) B；每层另有 128 个滑窗条目</td></tr>
+          <tr><td>线性层</td><td>\(2\times37\text{B}\)，FP8</td><td>\(2\times\)激活参数（49B / 13B），FP8</td></tr>
+          <tr><td>indexer</td><td>\(64\times128\times2\times n\)，FP8</td><td>CSA 层：\(64\times128\times2\times\frac n4\)，FP4</td></tr>
+          <tr><td>核心注意力</td><td>\(128\)头\(\times\min(n,2048)\times2\times(576+512)\)，BF16</td><td>\(n_h\times(\text{条目数}+128)\times2\times(512+512)\)，BF16；CSA 条目数 \(=\min(\frac n4,k)\)，HCA \(=\frac n{128}\)</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>报告说 FLOPs 是「等效 FP8 FLOPs」。我按 FP8 计 1、BF16 计 2（吞吐减半）、FP4 计 0.5 来折算。<b>这个折算规则是我猜的</b>，但用它算出来：1M 处 KV 比值是 9.5× 和 13.6×，FLOPs 比值是 3.8× 和 10.1×，V4-Pro 的 FLOPs 是 V3.2 的 26.5%、KV 是 10.6%，Flash 是 9.9% 和 7.4%；以 61 层 GQA8 BF16 为基线，Pro 的 KV 是 1.98%。和报告的数字都在几个百分点以内吻合，说明这套账大体是对的。</p>
+
+      <div class="demo" id="cost-demo">
+        <div class="demo-label">交互演示 · KV cache / 单 token FLOPs 计算器（V3.2 vs V4）</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>上下文长度</span><input type="range" id="cost-n" min="12" max="20" step="0.25" value="20"><output id="cost-n-out">1M</output></label>
+          <div class="ctrl"><span>指标</span><span class="seg" id="cost-metric"><button aria-pressed="true" data-v="kv">KV cache</button><button aria-pressed="false" data-v="flops">单 token FLOPs</button></span><span></span></div>
+          <div class="ctrl"><span>FLOPs 折算</span><span class="seg" id="cost-eq"><button aria-pressed="true" data-v="eq">等效 FP8</button><button aria-pressed="false" data-v="raw">原始 FLOPs</button></span><span></span></div>
+        </div>
+        <div class="sx"><svg id="cost-chart" viewBox="0 0 640 260" aria-label="随长度变化曲线"></svg></div>
+        <div class="readout" id="cost-readout"></div>
+        <div class="bk" id="cost-bk"></div>
+        <div class="note">按上表的假设计算；忽略量化 scale、注意力 sink、mHC、MoE 门控等小项。V3.2 的激活参数取 37B，V4 取报告的 49B / 13B。KV 指整条序列在全部主干层上的累计量（单位 GB = 10⁹ 字节）。</div>
+      </div>
+
+      <p>拖一拖能看到几件事：</p>
+      <ul>
+        <li>V3.2 的 FLOPs 在长上下文里几乎全被 indexer 吃掉：1M 时 indexer 约 1.05 TFLOPs，线性层只有 74 GFLOPs。这正是 CSA 先压缩再 index 的动机：候选数少 4 倍、只有一半左右的层带 indexer，原始 FLOPs 降到约 1/8，再算上 FP4 折算约为 1/16。</li>
+        <li>V4-Pro 的核心注意力里，HCA 层反而是大头：1M 时每个 HCA 层要对 8192 个条目做 128 头的稠密注意力，而 CSA 层只看 1024 + 128 个条目。</li>
+        <li>短上下文（4K）下 V4-Pro 的 FLOPs 和 V3.2 相近，因为激活参数更多（49B vs 37B）。V4 的优势几乎完全体现在长度上。</li>
+        <li>KV cache 的比值在 32K 以上基本是常数：V4 每 token 每层的平均开销是 \(\frac{30\times160+31\times4.5}{61}\approx 81\) 字节（Pro），V3.2 是 768 字节。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="mhc">5. mHC：流形约束的超连接</h2>
+      <h3>5.1 从残差到超连接（HC）</h3>
+      <p>普通残差连接是 \(\mathbf x_{l+1}=\mathbf x_l+F_l(\mathbf x_l)\)：只有一条宽度为 \(d\) 的「残差流」。超连接（Hyper-Connections，HC）把残差流加宽成 \(n_{hc}\) 条：残差状态是一个矩阵 \(X_l\in\mathbb R^{n_{hc}\times d}\)，用三个小映射连接子层：</p>
+      $$X_{l+1}=B_lX_l+C_l\,F_l(A_lX_l),\qquad A_l\in\mathbb R^{1\times n_{hc}},\;B_l\in\mathbb R^{n_{hc}\times n_{hc}},\;C_l\in\mathbb R^{n_{hc}\times1}.$$
+      <ul>
+        <li>\(A_l\)（输入映射）：把 \(n_{hc}\) 条流加权合成一个 \(d\) 维向量，喂给子层 \(F_l\)（注意力或 MoE）；</li>
+        <li>\(C_l\)（输出映射）：把子层的 \(d\) 维输出按权重写回各条流；</li>
+        <li>\(B_l\)（残差变换）：各条流之间互相混合。</li>
+      </ul>
+      <p>子层本身的输入输出仍是 \(d\) 维，所以内部结构不用改。HC 相当于提供了一条和隐藏维度解耦的扩展轴：\(n_{hc}=4\) 时残差流宽了 4 倍，但额外计算只是几个 \(4\times4\) 的混合。普通残差就是 \(n_{hc}=1,\ A=B=C=1\) 的特例。</p>
+      <p>问题是：深层堆叠时信号经过的是 \(\prod_l B_l\)。只要 \(B_l\) 的谱范数稍大于 1，乘上上百层就会爆炸；稍小于 1 就会消失。报告说 HC 在层数多时会频繁出现数值不稳定，难以扩展。</p>
+
+      <h3>5.2 把 B 约束成双随机矩阵</h3>
+      <p>mHC（DeepSeek 2025 年底的论文，arXiv 2512.24880）的核心是把 \(B_l\) 限制在<strong>双随机矩阵</strong>集合（Birkhoff 多面体）上：</p>
+      $$B_l\in\mathcal M:=\{M\in\mathbb R^{n\times n}\mid M\mathbf 1_n=\mathbf 1_n,\;\mathbf 1_n^\top M=\mathbf 1_n^\top,\;M\ge0\}.$$
+      <p>即非负、每行和每列都等于 1。它有两条好性质：</p>
+      <ol>
+        <li><strong>谱范数 \(\le1\)。</strong>Birkhoff–von Neumann 定理说双随机矩阵是置换矩阵的凸组合 \(M=\sum_k\lambda_kP_k\)（\(\lambda_k\ge0,\sum\lambda_k=1\)），而置换矩阵是正交的，\(\|P_k\|_2=1\)，由三角不等式 \(\|M\|_2\le\sum_k\lambda_k=1\)。也就是说残差变换是「非扩张」的，前向和反向都不会放大。</li>
+        <li><strong>对乘法封闭。</strong>两个双随机矩阵的乘积仍是双随机的（行和：\(M_1M_2\mathbf1=M_1\mathbf1=\mathbf1\)），所以堆多少层，\(\prod_lB_l\) 都还在 \(\mathcal M\) 里，范数仍 \(\le1\)。</li>
+      </ol>
+      <p>同时 \(A_l\) 和 \(C_l\) 也被约束为非负且有界（用 sigmoid），避免不同流之间的信号互相抵消。</p>
+
+      <h3>5.3 动态参数化与 Sinkhorn 投影</h3>
+      <p>三个映射的参数是「动态 + 静态」两部分：先把 \(X_l\) 展平并归一化 \(\hat X_l=\mathrm{RMSNorm}(\mathrm{vec}(X_l))\in\mathbb R^{1\times n_{hc}d}\)，再线性生成原始参数：</p>
+      $$\tilde A_l=\alpha^{\text{pre}}_l\,(\hat X_lW^{\text{pre}}_l)+S^{\text{pre}}_l,\qquad \tilde B_l=\alpha^{\text{res}}_l\,\mathrm{Mat}(\hat X_lW^{\text{res}}_l)+S^{\text{res}}_l,\qquad \tilde C_l=\alpha^{\text{post}}_l\,(\hat X_lW^{\text{post}}_l)^\top+S^{\text{post}}_l,$$
+      <p>其中 \(W^{\text{pre}},W^{\text{post}}\in\mathbb R^{n_{hc}d\times n_{hc}}\)，\(W^{\text{res}}\in\mathbb R^{n_{hc}d\times n_{hc}^2}\)，\(S\) 是静态偏置，\(\alpha\) 是初始化为小值的门控标量。然后施加约束：</p>
+      $$A_l=\sigma(\tilde A_l),\qquad C_l=2\sigma(\tilde C_l),\qquad B_l=\mathrm{Sinkhorn}(\exp(\tilde B_l)).$$
+      <p>Sinkhorn–Knopp 迭代：从 \(M^{(0)}=\exp(\tilde B_l)\)（保证正）出发，交替做列归一化和行归一化 \(M^{(t)}=\mathcal T_r(\mathcal T_c(M^{(t-1)}))\)，迭代 \(t_{\max}=20\) 次。对正矩阵这个过程收敛到一个双随机矩阵。</p>
+      <p>形状账（Pro，\(d=7168,\ n_{hc}=4\)）：三组 \(W\) 合在一起是 \(4d\times(4+4+16)=28672\times24\)，每个子层一份（注意力前一份、MoE 前一份），每层 1.38M 参数，61 层约 84M，相对 1.6T 可以忽略。报告第 3.3 节提到的「mHC 里有一个输出维度只有 24 的矩阵乘」就是它。参考代码中，模型入口把嵌入复制成 4 份，出口用一个只有 sigmoid 权重的 \(A\) 把 4 路合成 1 路再接输出头。</p>
+
+      <div class="demo" id="sk-demo">
+        <div class="demo-label">交互演示 · Sinkhorn 把任意矩阵拉到双随机流形上</div>
+        <p style="margin-top:8px;font-size:15px">\(\tilde B\) 是随机生成的 4×4 矩阵（元素 ~ N(0, σ²)，<b>示意用</b>）。拖动迭代次数，看行和、列和与谱范数怎么变；矩阵右边一列是行和，下面一行是列和。</p>
+        <div class="ctrls">
+          <label class="ctrl"><span>迭代次数 t</span><input type="range" id="sk-t" min="0" max="20" value="0"><output id="sk-t-out">0</output></label>
+          <label class="ctrl"><span>初始化尺度 σ</span><input type="range" id="sk-s" min="0.2" max="3" step="0.1" value="1.5"><output id="sk-s-out">1.5</output></label>
+        </div>
+        <div class="row-btns"><button class="btn" id="sk-new">重新随机</button></div>
+        <div class="mat" id="sk-mat"></div>
+        <div class="readout" id="sk-readout"></div>
+        <div class="row-btns" style="margin-top:14px"><button class="btn primary" id="sk-stack">堆叠 122 层看看</button><span id="sk-stack-out" style="font-size:14px;color:var(--text-soft)"></span></div>
+        <div class="note">「堆叠」对比两种 122 层（61 层 × 每层两个子层）的残差变换连乘：一种是不加约束的 \(B=I+0.15\,\mathcal N(0,1)\)（模拟 HC 初始化附近的随机扰动），另一种是 20 步 Sinkhorn 投影后的 \(B\)。都是随机矩阵，只为说明量级。</div>
+      </div>
+
+      <p>工程上 mHC 并不免费：残差流宽了 4 倍，激活显存和流水线阶段之间的通信量都变大。报告用融合 kernel、选择性重计算、调整 DualPipe 的 1F1B 重叠三招把墙钟开销压到流水线阶段的 6.7%（见 8.3 节）。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="moe">6. MoE 的小改动与参数账</h2>
+      <p>V4 的 MoE 仍是 DeepSeekMoE，报告列了这些改动：</p>
+      <ul>
+        <li><strong>打分函数从 Sigmoid 换成 Sqrt(Softplus)：</strong>\(s_{i,t}=\sqrt{\log(1+e^{\mathbf u_t^\top\mathbf e_i})}\)。Sigmoid 会在 1 处饱和，而 \(\sqrt{\mathrm{softplus}(x)}\) 在 \(x\) 大时像 \(\sqrt x\) 一样继续增长，在 \(x\) 很负时像 \(e^{x/2}\) 一样趋于 0。报告没解释动机。参考代码里选中专家的分数在 top-k 内归一化后再乘一个 <code>route_scale</code>（Pro 2.5，Flash 1.5，来自 config）。</li>
+        <li><strong>无辅助损失均衡 + 轻微的序列级均衡损失</strong>，与 V3 一样；偏置更新速度 0.001，均衡损失权重 0.0001。</li>
+        <li><strong>取消路由目标节点数的限制</strong>（V3 是最多 4 个节点），改为重新设计并行策略来维持训练效率，见 8.1 节的 MegaMoE。</li>
+        <li><strong>前几层的稠密 FFN 换成 Hash 路由的 MoE。</strong>V3 前 3 层是稠密 FFN；V4 所有层都是 MoE，但前 3 层的专家由 token id 经过预先定义的哈希决定（参考代码里是一张 <code>tid2eid[vocab, 6]</code> 的固定表），不由隐藏状态决定。门控权重仍然由打分函数计算。</li>
+        <li><strong>激活专家数从 8 降到 6</strong>，但单个专家更大（Pro 的专家中间维度 3072）。每 token 计算 1 个共享 + 6 个路由专家。</li>
+        <li><strong>SwiGLU clamping</strong>：线性分支截断到 \([-10,10]\)，门控分支上界截断到 10（见 9.4 节）。</li>
+      </ul>
+      <p>有了完整的 config，我可以从头数一遍参数：注意力（含 query 低秩、KV 投影、两级输出投影、压缩器、indexer）、mHC、门控、专家、嵌入和输出头。结果 Flash 主干 284.3B、激活 13.3B（不含嵌入表），Pro 主干 1573B、激活 48.9B，和报告的 284B/13B、1.6T/49B 对得上（Pro 的 1.6T 是四舍五入）。MTP 模块另有 6.6B（Flash）和 25.8B（Pro），与主干共享嵌入和输出头。</p>
+
+      <div class="demo" id="moe-demo">
+        <div class="demo-label">交互演示 · 参数量与专家并行（EP）通信计算器</div>
+        <div class="ctrls">
+          <div class="ctrl"><span>起点</span><span class="seg" id="moe-preset"><button aria-pressed="false" data-v="flash">V4-Flash</button><button aria-pressed="true" data-v="pro">V4-Pro</button></span><span></span></div>
+          <label class="ctrl"><span>路由专家数 E</span><input type="range" id="moe-e" min="64" max="768" step="32" value="384"><output id="moe-e-out">384</output></label>
+          <label class="ctrl"><span>激活数 k</span><input type="range" id="moe-k" min="1" max="16" step="1" value="6"><output id="moe-k-out">6</output></label>
+          <label class="ctrl"><span>专家中间维度</span><input type="range" id="moe-f" min="512" max="6144" step="256" value="3072"><output id="moe-f-out">3072</output></label>
+        </div>
+        <div class="readout" id="moe-readout"></div>
+        <div class="table-wrap" style="margin-top:12px"><table class="ptab" id="moe-table"></table></div>
+        <p style="margin-top:16px;font-size:15px"><b>通信能否被计算藏住？</b>每个 token-专家对，SwiGLU 的三个矩阵乘要 \(6hd\) FLOPs（\(h\) 隐藏维度，\(d\) 专家中间维度），而 dispatch（FP8）加 combine（BF16）只传 \(3h\) 字节，所以只要 \(C/B\le 2d\)，通信就能完全藏在计算后面（\(C\) 峰值算力，\(B\) 互联带宽）。</p>
+        <div class="ctrls">
+          <label class="ctrl"><span>峰值算力 C（TFLOP/s）</span><input type="range" id="ep-c" min="100" max="5000" step="50" value="2000"><output id="ep-c-out">2000</output></label>
+          <label class="ctrl"><span>互联带宽 B（GB/s）</span><input type="range" id="ep-b" min="25" max="900" step="25" value="400"><output id="ep-b-out">400</output></label>
+        </div>
+        <div class="readout" id="ep-readout"></div>
+        <div class="note">参数按参考代码的模块逐项计数，其余超参取所选起点模型的 config。激活参数不含嵌入表（含输出头）。EP 部分算力、带宽的默认值是随手设的，<b>不是任何具体硬件的数据</b>。</div>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="muon">7. Muon 优化器</h2>
+      <h3>7.1 为什么要「正交化」更新</h3>
+      <p>对一个权重矩阵 \(W\in\mathbb R^{n\times m}\)，SGD/Adam 的更新方向通常是低秩、病态的：少数几个奇异方向占了绝大部分能量。Muon 的想法是：取动量矩阵 \(M=U\Sigma V^\top\)，把它替换成 \(UV^\top\)，即保留方向、把所有奇异值拉成 1。这样每个奇异方向都得到同样大小的更新，相当于在谱范数意义下做最速下降。直接算 SVD 太贵，于是用 Newton–Schulz 迭代近似。</p>
+      <p>先归一化 \(M_0=M/\|M\|_F\)（保证最大奇异值 \(\le1\)），再迭代</p>
+      $$M_k=aM_{k-1}+b\,(M_{k-1}M_{k-1}^\top)M_{k-1}+c\,(M_{k-1}M_{k-1}^\top)^2M_{k-1}.$$
+      <p>因为 \(M=U\Sigma V^\top\) 时 \((MM^\top)^jM=U\Sigma^{2j+1}V^\top\)，这个迭代对每个奇异值独立地作用一个奇多项式 \(f(\sigma)=a\sigma+b\sigma^3+c\sigma^5\)，奇异向量不变。我们要的就是让 \(f\) 迭代若干次后把 \((0,1]\) 里的所有值都推到 1 附近。</p>
+
+      <h3>7.2 V4 的混合 Newton–Schulz</h3>
+      <p>V4 共做 10 次迭代，分两个阶段：</p>
+      <ul>
+        <li>前 8 次用 \((a,b,c)=(3.4445,-4.7750,2.0315)\)：原点处斜率 3.44，小奇异值每步放大约 3.4 倍，收敛快，但不会精确停在 1，而是在约 0.7～1.13 之间来回振荡；</li>
+        <li>后 2 次用 \((a,b,c)=(2,-1.5,0.5)\)：这个多项式满足 \(f(1)=1\) 且 \(f'(1)=a+3b+5c=0\)，在 1 附近二次收敛，把奇异值「钉」在 1 上。</li>
+      </ul>
+
+      <div class="demo" id="ns-demo">
+        <div class="demo-label">交互演示 · Newton–Schulz 对奇异值做了什么</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>迭代次数</span><input type="range" id="ns-k" min="0" max="10" value="8"><output id="ns-k-out">8</output></label>
+          <div class="ctrl"><span>系数方案</span><span class="seg" id="ns-mode"><button aria-pressed="true" data-v="hyb">V4 混合（8+2）</button><button aria-pressed="false" data-v="a">全用 (3.44, −4.78, 2.03)</button><button aria-pressed="false" data-v="b">全用 (2, −1.5, 0.5)</button></span><span></span></div>
+        </div>
+        <div class="sx"><svg id="ns-svg" viewBox="0 0 640 280" aria-label="奇异值映射曲线"></svg></div>
+        <div class="readout" id="ns-readout"></div>
+        <div class="note">横轴是归一化后的输入奇异值（对数刻度），纵轴是迭代后的输出。这是确定性的标量计算，没有随机成分。</div>
+      </div>
+
+      <h3>7.3 完整算法与其他配置</h3>
+      <p>报告的算法 1，对每个逻辑上独立的权重矩阵 \(W\in\mathbb R^{n\times m}\)：</p>
+      $$\begin{aligned}
+      G_t&amp;=\nabla_W\mathcal L_t(W_{t-1}),\qquad M_t=\mu M_{t-1}+G_t,\\
+      O'_t&amp;=\mathrm{HybridNewtonSchulz}(\mu M_t+G_t),\\
+      O_t&amp;=O'_t\cdot\sqrt{\max(n,m)}\cdot\gamma,\qquad W_t=W_{t-1}(1-\eta\lambda)-\eta O_t .
+      \end{aligned}$$
+      <ul>
+        <li>\(\mu M_t+G_t\) 是 Nesterov 动量；\(\mu=0.95\)，权重衰减 \(\lambda=0.1\)。</li>
+        <li><strong>RMS 重标定</strong>：正交矩阵 \(O'\) 有 \(\min(n,m)\) 个为 1 的奇异值，\(\|O'\|_F^2=\min(n,m)\)，所以每个元素的均方根是 \(1/\sqrt{\max(n,m)}\)。乘 \(\sqrt{\max(n,m)}\) 把 RMS 变成 1，再乘 \(\gamma=0.18\)，让 Muon 的更新幅度和 AdamW 的典型更新 RMS 对齐，从而直接沿用 AdamW 的学习率等超参（这一做法来自 Moonshot 的 Moonlight 工作）。</li>
+        <li><strong>仍用 AdamW 的部分</strong>：嵌入、输出头、mHC 的静态偏置和门控因子、所有 RMSNorm 权重。AdamW 超参 \(\beta_1=0.9,\beta_2=0.95,\varepsilon=10^{-20}\)，权重衰减 0.1。</li>
+        <li><strong>不用 QK-Clip</strong>：Kimi K2 用 Muon 时遇到注意力 logit 爆炸，靠 QK-Clip 截断；V4 的注意力结构允许直接对 query 和 KV 条目做 RMSNorm（3.5 节），logit 本来就不会爆。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="infra">8. 训练与推理基础设施</h2>
+      <p>报告第 3 节和第 5.2 节有大量工程内容，这里按「训练/推理通用 → 训练框架 → 推理框架」的顺序整理。报告没有给出并行度（TP/PP/EP/DP 各多少）等具体数字，下面也就不臆测。</p>
+
+      <h3>8.1 细粒度专家并行：把通信藏进计算</h3>
+      <p>专家并行（EP）把不同专家放在不同 GPU 上，每层 MoE 要做两次 all-to-all：<strong>Dispatch</strong>（把 token 发给专家所在的卡）和 <strong>Combine</strong>（把结果收回来）。一层 MoE 因此分成四个阶段：Dispatch（通信）、Linear-1（gate/up 投影，计算）、Linear-2（down 投影，计算）、Combine（通信）。DeepSeek 的 profiling 发现单层里通信总时间小于计算总时间，所以只要排得好，通信可以完全藏住。</p>
+      <ul>
+        <li>朴素做法：四个阶段串行。</li>
+        <li>Comet（字节的工作）：Dispatch 与 Linear-1 重叠、Linear-2 与 Combine 重叠，在 V4-Flash 的配置下理论加速 1.42×。</li>
+        <li>V4 的做法：把专家切成若干 <strong>wave</strong>（每波一小部分专家）。一个 wave 的 token 一到齐就开算，不等其他专家；稳态下「当前 wave 的计算」「下一 wave 的 token 传输」「已完成专家的结果回传」三件事同时进行。理论加速 1.92×。</li>
+      </ul>
+      <figure class="fig"><div class="sx">
+        <svg viewBox="0 0 640 200" role="img" aria-label="EP 重叠时间线">
+          <text x="10" y="30" font-size="12.5">朴素</text>
+          <rect x="70" y="16" width="90" height="20" class="box-acc2"/><rect x="160" y="16" width="110" height="20" class="box-acc"/><rect x="270" y="16" width="110" height="20" class="box-acc"/><rect x="380" y="16" width="90" height="20" class="box-acc2"/>
+          <text x="115" y="30" text-anchor="middle" font-size="10.5">Dispatch</text><text x="215" y="30" text-anchor="middle" font-size="10.5">L1+Act</text><text x="325" y="30" text-anchor="middle" font-size="10.5">L2</text><text x="425" y="30" text-anchor="middle" font-size="10.5">Combine</text>
+          <text x="10" y="80" font-size="12.5">wave 化</text>
+          <g id="ep-waves"></g>
+          <text x="70" y="185" font-size="11.5" class="soft">橙＝通信，紫＝计算；三个 wave 示意。计算串成一条，通信藏在缝里。时间比例为示意。</text>
+        </svg></div>
+        <figcaption>图 4　按报告图 5 的思路重画的 EP 时间线。</figcaption>
+      </figure>
+      <p>实测：在 NVIDIA GPU 和华为昇腾 NPU 上都验证过，相对强的非融合基线，一般推理负载加速 1.50～1.73×，RL rollout、高速 agent 服务这类延迟敏感场景最高 1.96×。CUDA 版的「mega-kernel」以 MegaMoE 的名字开源在 DeepGEMM 里。</p>
+      <p>报告由此给硬件厂商提了几条建议，第一条就是上面计算器里的那个比值：通信能否完全藏住取决于「算力/带宽」比 \(C/B\) 而不是带宽本身。对 V4-Pro，每个 token-专家对需要 \(6hd\) FLOPs、传输 \(3h\) 字节，条件化简为 \(C/B\le2d=6144\) FLOPs/字节，即每 1 GB/s 带宽足以藏住 6.1 TFLOP/s 算力的通信；超过这个平衡点后继续堆带宽收益递减。另外三条：极端融合让算力、显存、网络同时满载，功耗墙会成为瓶颈，需要更多功耗余量；Dispatch 用的是「拉」（每张卡主动读远端激活）而不是「推」，因为细粒度推送的通知延迟太高，希望硬件提供更低延迟的跨卡信号；建议把 SwiGLU 换成不含指数和除法的逐元素激活函数，减少 GEMM 之后的处理开销。</p>
+
+      <h3>8.2 用 TileLang 写算子</h3>
+      <p>V4 的结构如果用 PyTorch 原生算子拼，会有几百个细碎的 ATen 算子。DeepSeek 用 TileLang（一种写 GPU kernel 的领域专用语言）写了一批融合 kernel 替换掉其中绝大部分，参考推理代码里的 FP4/FP8 GEMM、稀疏注意力、Sinkhorn 都是 TileLang 写的。报告提到三项对 TileLang 本身的改进：</p>
+      <ul>
+        <li><strong>Host Codegen</strong>：kernel 越快，CPU 端 Python 里的参数检查等固定开销占比越高。他们在 IR 层面同时生成设备 kernel 和一个轻量的宿主端启动器（基于 TVM-FFI），把类型、形状、步长检查都挪进生成的宿主代码，每次调用的 CPU 开销从几十到几百微秒降到 1 微秒以下。</li>
+        <li><strong>Z3 SMT 求解器辅助的整数分析</strong>：布局推断、内存冲突检测、边界分析都要判断整数表达式的性质。把 TileLang 的整数表达式翻译成 Z3 的无量词非线性整数算术（QF_NIA），能处理可变形状下的向量化等难题，编译时间只多几秒。</li>
+        <li><strong>数值精度与逐位可复现</strong>：默认关闭 fast-math，近似函数（<code>T.__exp</code> 等）需要显式选用；提供带显式舍入模式的 IEEE 内建函数；代数化简规则与 NVCC 对齐，可以用布局注解固定累加顺序，从而和手写 CUDA 参考实现逐位一致。</li>
+      </ul>
+
+      <h3>8.3 训练框架</h3>
+      <p><strong>Muon 与 ZeRO 的冲突。</strong>ZeRO 把优化器状态按元素切分到多个数据并行 rank 上，这对 AdamW 这种逐元素优化器很自然；但 Muon 要对整个矩阵做 Newton–Schulz，需要完整的梯度矩阵。V4 的混合方案：</p>
+      <ul>
+        <li>稠密参数：限制 ZeRO 的最大并行度，用背包算法把整个矩阵分配给各 rank，使负载大致均衡；各 rank 的 bucket 填充到最大 bucket 的大小以便做 reduce-scatter，每个 rank 不超过 5 个矩阵，填充开销通常低于 10%。数据并行规模超过 ZeRO 上限时，多出来的组冗余地计算 Muon 更新，用计算换显存。</li>
+        <li>MoE 参数：专家数量多，每个专家独立优化。把所有层所有专家的 down 投影展平，再接 up 和 gate，填充到能被各 rank 整除且不切断任何一个矩阵，不限制 ZeRO 并行度。</li>
+        <li>同一 rank 上相邻且形状相同的矩阵自动合并，批量执行 Newton–Schulz。Newton–Schulz 在 BF16 矩阵乘下仍然稳定，于是 MoE 梯度在数据并行同步前用<strong>随机舍入</strong>量化到 BF16，通信量减半；为避免低精度加法累积误差，不用树形或环形 reduce-scatter，而是先 all-to-all 交换，再在每个 rank 上用 FP32 本地求和。</li>
+      </ul>
+      <p><strong>mHC 的开销控制。</strong>融合 kernel（训练与推理各一套）；选择性重计算：层间的大多数隐藏状态和所有归一化后的层输入都重算，计算密集的操作不重算；调整 DualPipe 的 1F1B 重叠，容纳更大的流水线通信并让部分 mHC 操作并发。合起来 mHC 的墙钟开销只占重叠后 1F1B 流水线阶段的 6.7%。</p>
+      <p><strong>压缩注意力下的上下文并行（CP）。</strong>CP 把序列切成连续的段，每个 rank 持有 \(s\) 个 token。压缩注意力带来两个麻烦：训练样本是多条序列拼起来的，每条序列独立压缩、尾部不足 \(m\) 个的 token 丢弃，所以各 rank 的压缩长度不一定是 \(s/m\)；而且一个压缩块可能跨在两个 rank 的边界上。V4 用两阶段通信解决：</p>
+      <ol>
+        <li>rank \(i\) 把最后 \(m\) 个未压缩的 KV 发给 rank \(i+1\)；rank \(i+1\) 把它们和本地 \(s\) 个 KV 一起压缩，产生固定长度 \(s/m+1\) 个条目（含若干填充）。</li>
+        <li>all-gather 收集所有 rank 的压缩条目，再用一个融合的 select-and-pad 算子整理成总长 \(\text{cp\_size}\cdot s/m\) 的完整序列，填充放在末尾。</li>
+      </ol>
+      <p>对 HCA 和 CSA 的 indexer，每个 query 可见的压缩条目范围按规则预先算好；对 CSA 的稀疏注意力，top-k 选择器直接给出可见条目的下标。</p>
+      <p><strong>张量级激活检查点。</strong>常规的激活检查点以模块为单位决定保存还是重算，粒度太粗；手写整层的前向和反向又失去了自动微分的便利。V4 的框架让开发者只写前向、给个别张量打「需要重算」的标注；框架用 TorchFX 追踪完整计算图，对每个标注张量反向遍历找出重算它所需的最小子图，插到对应梯度计算之前。重算时直接释放原张量显存、复用重算结果的存储指针，没有额外拷贝；由于追踪时能看到底层存储指针，共享存储的张量（如 reshape 前后）会自动去重。与手写实现相比没有额外开销。</p>
+
+      <h3>8.4 批不变与确定性 kernel</h3>
+      <p>V4 要求预训练、后训练和推理三条管线之间<strong>逐位对齐</strong>。两个概念：</p>
+      <ul>
+        <li><strong>批不变（batch invariance）</strong>：一个 token 的输出与它在 batch 里的位置、batch 里还有什么无关，逐位相同。</li>
+        <li><strong>确定性（determinism）</strong>：同样的输入多次运行结果逐位相同。</li>
+      </ul>
+      <p>难点和解法：</p>
+      <ul>
+        <li><strong>注意力解码</strong>：为了批不变不能用 split-KV（把一条序列的注意力拆到多个 SM 上），否则累加顺序随 batch 变化；但不拆会有严重的 wave quantization（最后一波 SM 吃不满）。解法是双 kernel：第一个 kernel 一条序列一个 SM，处理满载的波；第二个 kernel 专门处理最后不满的那一波，一条序列用多个 SM，但精心设计累加路径与第一个完全相同，并用 thread-block cluster 的分布式共享内存在 SM 间高速交换数据。开销可以忽略。</li>
+        <li><strong>矩阵乘</strong>：cuBLAS 做不到批不变，于是全面换成 DeepGEMM；小 batch 常用的 split-k 也不批不变，因此大多数场景放弃 split-k，再用一系列优化把性能追平甚至超过 split-k。</li>
+        <li><strong>稀疏注意力反向</strong>：KV 的梯度原本用 atomicAdd 累加，浮点加法不满足结合律，结果不确定。改为每个 SM 一个独立累加缓冲区，最后做一次确定性的全局求和。</li>
+        <li><strong>MoE 反向</strong>：多个 rank 的 SM 同时往接收方同一缓冲区写数据时，协商写入位置会引入不确定性。用 rank 内的 token 顺序预处理加 rank 间缓冲区隔离解决。</li>
+        <li><strong>mHC 里输出维度 24 的矩阵乘</strong>：小 batch 时不得不用 split-k，于是让每个分片单独输出，再由后续 kernel 做确定性归约。</li>
+      </ul>
+      <p>这件事在后训练里尤其值钱：10.7 节的 rollout 服务会说到，有了批不变和确定性，「中断后用同一个随机种子重新生成」在数学上就是正确的。</p>
+
+      <h3>8.5 推理：异构 KV cache 的布局</h3>
+      <p>V4 一个模型里有好几种 KV：CSA 的主 KV（每 4 token 一个，512 维）、CSA 的 indexer KV（每 4 token 一个，128 维）、HCA 的 KV（每 128 token 一个）、滑窗 KV（每层最近 128 个），还有「没凑满一个压缩块」的尾巴 token 及其隐藏状态。不同层的 cache 大小、更新规则、淘汰策略都不同，打破了 PagedAttention 的基本假设。报告把障碍归成两条：滑窗等不同的缓存策略；高性能注意力 kernel 的对齐要求。对应地：</p>
+      <ul>
+        <li><strong>State cache</strong>：把滑窗 KV 和未压缩的尾巴 token 看成一种「状态」（像状态空间模型一样，只依赖当前位置，大小固定）。预分配一个固定大小的池子，每个请求分一块。</li>
+        <li><strong>经典 KV cache</strong>：存压缩后的 CSA/HCA 条目，按块分页。每块覆盖 \(\mathrm{lcm}(m,m')\) 个原始 token，产生 \(k_1=\mathrm{lcm}(m,m')/m\) 个 CSA 条目和 \(k_2=\mathrm{lcm}(m,m')/m'\) 个 HCA 条目。代入 \(m=4,m'=128\)：每块 128 token，含 32 个 CSA 条目、1 个 HCA 条目。借助能处理「每块条目数可变」的稀疏注意力 kernel，块大小可以是 \(\mathrm{lcm}(m,m')\) 的任意倍数，并可填充对齐 cache line。</li>
+      </ul>
+
+      <h3>8.6 磁盘 KV cache</h3>
+      <p>为了让共享前缀的请求不再重复 prefill，V4 把 KV 存到磁盘。CSA/HCA 的压缩条目全部落盘，命中前缀时读取到最后一个完整压缩块为止，尾部不完整块里的 token 需要重算（未压缩的 KV 不落盘）。滑窗 KV 不压缩且每层都有，体积约是压缩条目的 8 倍，报告给了三种策略：</p>
+      <ul>
+        <li><strong>全量缓存</strong>：存所有 token 的滑窗 KV，命中时只读前缀最后 \(n_{\text{win}}\) 个 token 的即可，零重算；但写多读少，对 SSD 不友好。</li>
+        <li><strong>周期检查点</strong>：每 \(p\) 个 token 存一次「最后 \(n_{\text{win}}\) 个 token 的滑窗 KV」，命中时加载最近的检查点再重算尾巴；\(p\) 可调，在存储和计算之间折中。</li>
+        <li><strong>不缓存</strong>：完全重算。第 \(l\) 层某 token 的滑窗 KV 只依赖第 \(l-1\) 层最近 \(n_{\text{win}}\) 个 token，所以 \(L\) 层模型只需重算最后 \(n_{\text{win}}\cdot L\) 个 token（借助已缓存的 CSA/HCA 条目）。以 Pro 为例是 \(128\times61=7808\) 个 token，与前缀总长度无关。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="pretrain">9. 预训练：数据、超参与稳定性</h2>
+      <h3>9.1 数据</h3>
+      <ul>
+        <li>在 V3 的预训练数据之上继续改进，总量超过 32T token，包含数学、代码、网页、长文档等。</li>
+        <li>网页数据过滤掉批量自动生成和模板化的内容，降低模型崩溃（model collapse）的风险。</li>
+        <li>数学和代码仍是核心；在 mid-training 阶段加入 agentic 数据增强代码能力。</li>
+        <li>更大的多语言语料，覆盖不同文化的长尾知识。</li>
+        <li>特别重视长文档：优先收集科学论文、技术报告等有独特学术价值的材料。</li>
+        <li>分词器沿用 V3（词表 128K，config 里是 129280），只新增了几个构造上下文用的特殊 token；沿用 V3 的 token-splitting 和 FIM（Fill-in-Middle）策略；按来源打包文档以尽量减少截断；与 V3 不同，预训练使用<strong>样本级注意力掩码</strong>（同一个打包序列里的不同文档互相看不到）。</li>
+      </ul>
+
+      <h3>9.2 超参数总表</h3>
+      <p>报告 4.2 节的全部数字，加上 config 里补充的几项（标 ⓒ）。V3.2 一列是对照，来自它的 config 和报告。</p>
+      <div class="table-wrap">
+      <table class="tight">
+        <thead><tr><th>项目</th><th class="num">V4-Flash</th><th class="num">V4-Pro</th><th class="num">V3.2（对照）</th></tr></thead>
+        <tbody>
+          <tr><td>总参数 / 激活参数</td><td class="num">284B / 13B</td><td class="num">1.6T / 49B</td><td class="num">671B / 37B</td></tr>
+          <tr><td>层数 \(L\)</td><td class="num">43</td><td class="num">61</td><td class="num">61</td></tr>
+          <tr><td>隐藏维度 \(d\)</td><td class="num">4096</td><td class="num">7168</td><td class="num">7168</td></tr>
+          <tr><td>前两层</td><td class="num">纯 SWA</td><td class="num">HCA</td><td class="num">—</td></tr>
+          <tr><td>CSA 压缩率 \(m\) / HCA 压缩率 \(m'\)</td><td class="num">4 / 128</td><td class="num">4 / 128</td><td class="num">—</td></tr>
+          <tr><td>CSA / HCA / SWA 层数 ⓒ</td><td class="num">21 / 20 / 2</td><td class="num">30 / 31 / 0</td><td class="num">—</td></tr>
+          <tr><td>query 头数 \(n_h\)</td><td class="num">64</td><td class="num">128</td><td class="num">128</td></tr>
+          <tr><td>头维度 \(c\)（其中 RoPE 维）</td><td class="num">512（64）</td><td class="num">512（64）</td><td class="num">qk 192 / v 128；cache 512+64</td></tr>
+          <tr><td>KV 头数</td><td class="num">1（shared KV）</td><td class="num">1（shared KV）</td><td class="num">MQA 模式下 1</td></tr>
+          <tr><td>query 压缩维度 \(d_c\)</td><td class="num">1024</td><td class="num">1536</td><td class="num">1536</td></tr>
+          <tr><td>输出投影组数 \(g\) / 中间维度 \(d_g\)</td><td class="num">8 / 1024</td><td class="num">16 / 1024</td><td class="num">—</td></tr>
+          <tr><td>indexer 头数 \(n^I_h\) / 头维度 \(c_I\)</td><td class="num">64 / 128</td><td class="num">64 / 128</td><td class="num">64 / 128</td></tr>
+          <tr><td>attention top-k</td><td class="num">512</td><td class="num">1024</td><td class="num">2048（token）</td></tr>
+          <tr><td>滑窗 \(n_{\text{win}}\)</td><td class="num">128</td><td class="num">128</td><td class="num">—</td></tr>
+          <tr><td>MoE：共享 + 路由专家</td><td class="num">1 + 256</td><td class="num">1 + 384</td><td class="num">1 + 256</td></tr>
+          <tr><td>专家中间维度</td><td class="num">2048</td><td class="num">3072</td><td class="num">2048</td></tr>
+          <tr><td>激活路由专家</td><td class="num">6</td><td class="num">6</td><td class="num">8</td></tr>
+          <tr><td>Hash 路由层 / 稠密 FFN 层</td><td class="num">前 3 层 / 0</td><td class="num">前 3 层 / 0</td><td class="num">0 / 前 3 层</td></tr>
+          <tr><td>路由打分 / route scale ⓒ</td><td class="num">√softplus / 1.5</td><td class="num">√softplus / 2.5</td><td class="num">sigmoid / 2.5</td></tr>
+          <tr><td>MTP 深度</td><td class="num">1</td><td class="num">1</td><td class="num">1</td></tr>
+          <tr><td>mHC 扩展 \(n_{hc}\) / Sinkhorn 迭代</td><td class="num">4 / 20</td><td class="num">4 / 20</td><td class="num">—</td></tr>
+          <tr><td>词表 ⓒ</td><td class="num">129280</td><td class="num">129280</td><td class="num">129280</td></tr>
+          <tr><td>RoPE ⓒ</td><td class="num" colspan="2">θ=10⁴；压缩层 θ=1.6×10⁵ + YaRN（×16，原长 65536）</td><td class="num">YaRN ×40</td></tr>
+          <tr><td>训练 token</td><td class="num">32T</td><td class="num">33T</td><td class="num">V3.1 基座 + 约 0.94T 续训</td></tr>
+          <tr><td>最大 batch（token）</td><td class="num">75.5M</td><td class="num">94.4M</td><td class="num"></td></tr>
+          <tr><td>峰值 / 末尾学习率</td><td class="num">2.7e-4 / 2.7e-5</td><td class="num">2.0e-4 / 2.0e-5</td><td class="num"></td></tr>
+          <tr><td>学习率调度</td><td class="num" colspan="2">线性 warmup 2000 步，长时间恒定，末尾余弦衰减</td><td class="num"></td></tr>
+          <tr><td>AdamW（部分参数）</td><td class="num" colspan="2">β₁=0.9, β₂=0.95, ε=1e-20, wd=0.1</td><td class="num"></td></tr>
+          <tr><td>Muon（其余参数）</td><td class="num" colspan="2">momentum 0.95, wd 0.1, 更新 RMS 0.18</td><td class="num"></td></tr>
+          <tr><td>负载均衡</td><td class="num" colspan="2">偏置更新速度 0.001；序列级均衡损失 0.0001</td><td class="num"></td></tr>
+          <tr><td>MTP 损失权重</td><td class="num" colspan="2">0.3；学习率开始衰减时改为 0.1</td><td class="num"></td></tr>
+          <tr><td>序列长度</td><td class="num" colspan="2">4K → 16K → 64K → 1M</td><td class="num">128K</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>两个我顺手算的小事实：75.5M 恰好是 \(18432\times4096\)，94.4M 是 \(23040\times4096\)，即以 4K 序列计的整数个样本；Flash 在 75.5M 的 batch 下 32T token 大约对应 42 万步量级（前期 batch 更小，实际步数更多）。</p>
+
+      <h3>9.3 训练日程</h3>
+      <ul>
+        <li><strong>Batch size 调度</strong>：和 V3 一样从小 batch 逐渐增大，到 75.5M（Flash）/ 94.4M（Pro）后保持。</li>
+        <li><strong>长度扩展</strong>：从 4K 开始，逐步扩到 16K、64K、1M。预训练结束时模型已经原生支持 1M。</li>
+        <li><strong>稀疏注意力的引入</strong>：Flash 先用稠密注意力训练前 1T token，在序列长度到 64K 时引入稀疏注意力并保持到最后；引入时先用一个短阶段预热 CSA 里的 lightning indexer，再进入稀疏训练。Pro 的稠密阶段更长，引入方式相同（两阶段）。报告没说这里的「稠密」是指 CSA 不做 top-k（对全部压缩条目做注意力）还是连压缩都不做，也没说 indexer 预热用什么损失；V3.2 的做法见 2.4 节。</li>
+      </ul>
+
+      <h3>9.4 训练不稳定与两个「土办法」</h3>
+      <p>报告坦白训练万亿参数 MoE 时遇到了明显的不稳定，回滚只能暂时恢复、不能防止 loss spike 再次出现。他们的经验观察是：spike 总是和 MoE 层里的离群值（outlier）绑在一起，而路由机制本身似乎会加剧离群值的出现——离群值影响路由，路由又放大离群值。于是从两头下手：打断路由造成的恶性循环，以及直接压住异常值。</p>
+      <p><strong>Anticipatory Routing（预见式路由）。</strong>第 \(t\) 步用当前参数 \(\theta_t\) 计算特征，但路由下标用历史参数 \(\theta_{t-\Delta t}\) 计算。实现上，在第 \(t-\Delta t\) 步就预取第 \(t\) 步的数据，「提前」算好路由下标缓存起来——这正是名字的由来，也避免了加载两份参数。预计算只需要一次前向，通过精心编排流水线和 EP 通信的重叠，额外墙钟开销约 20%。更进一步，它不是一直开着：系统自动检测 loss spike，检测到时短暂回滚并打开预见式路由，跑一段时间后切回正常训练，所以总开销可以忽略，也不损害模型性能。</p>
+      <p><strong>SwiGLU Clamping。</strong>把 SwiGLU 的线性分支截断到 \([-10,10]\)，门控分支上界截断到 10（参考代码：<code>up.clamp(-10, 10)</code>，<code>gate.clamp(max=10)</code>，然后 \(\mathrm{SiLU}(\text{gate})\odot\text{up}\)）。这个做法来自 gpt-oss。Flash 和 Pro 全程都开着，报告说它能有效消除离群值、帮助稳定，且不损害性能。</p>
+      <p>报告自己承认，这两个技巧为什么有效，目前还没有完整的理论解释。</p>
+
+      <h3>9.5 基座模型评测</h3>
+      <p>报告表 1，三者在同一内部框架、同一设置下评测（差距不超过 0.3 视为持平）：</p>
+      <div class="table-wrap">
+      <table class="tight">
+        <thead><tr><th>类别</th><th>基准（指标）</th><th>shots</th><th class="num">V3.2-Base</th><th class="num">V4-Flash-Base</th><th class="num">V4-Pro-Base</th></tr></thead>
+        <tbody>
+          <tr><td></td><td>激活 / 总参数</td><td></td><td class="num">37B / 671B</td><td class="num">13B / 284B</td><td class="num">49B / 1.6T</td></tr>
+          <tr><td rowspan="12">世界知识</td><td>AGIEval (EM)</td><td>0</td><td class="num">80.1</td><td class="num">82.6</td><td class="num">83.1</td></tr>
+          <tr><td>MMLU (EM)</td><td>5</td><td class="num">87.8</td><td class="num">88.7</td><td class="num">90.1</td></tr>
+          <tr><td>MMLU-Redux (EM)</td><td>5</td><td class="num">87.5</td><td class="num">89.4</td><td class="num">90.8</td></tr>
+          <tr><td>MMLU-Pro (EM)</td><td>5</td><td class="num">65.5</td><td class="num">68.3</td><td class="num">73.5</td></tr>
+          <tr><td>MMMLU (EM)</td><td>5</td><td class="num">87.9</td><td class="num">88.8</td><td class="num">90.3</td></tr>
+          <tr><td>C-Eval (EM)</td><td>5</td><td class="num">90.4</td><td class="num">92.1</td><td class="num">93.1</td></tr>
+          <tr><td>CMMLU (EM)</td><td>5</td><td class="num">88.9</td><td class="num">90.4</td><td class="num">90.8</td></tr>
+          <tr><td>MultiLoKo (EM)</td><td>5</td><td class="num">38.7</td><td class="num">42.2</td><td class="num">51.1</td></tr>
+          <tr><td>Simple-QA verified (EM)</td><td>25</td><td class="num">28.3</td><td class="num">30.1</td><td class="num">55.2</td></tr>
+          <tr><td>SuperGPQA (EM)</td><td>5</td><td class="num">45.0</td><td class="num">46.5</td><td class="num">53.9</td></tr>
+          <tr><td>FACTS Parametric (EM)</td><td>25</td><td class="num">27.1</td><td class="num">33.9</td><td class="num">62.6</td></tr>
+          <tr><td>TriviaQA (EM)</td><td>5</td><td class="num">83.3</td><td class="num">82.8</td><td class="num">85.6</td></tr>
+          <tr><td rowspan="5">语言与推理</td><td>BBH (EM)</td><td>3</td><td class="num">87.6</td><td class="num">86.9</td><td class="num">87.5</td></tr>
+          <tr><td>DROP (F1)</td><td>1</td><td class="num">88.2</td><td class="num">88.6</td><td class="num">88.7</td></tr>
+          <tr><td>HellaSwag (EM)</td><td>0</td><td class="num">86.4</td><td class="num">85.7</td><td class="num">88.0</td></tr>
+          <tr><td>WinoGrande (EM)</td><td>0</td><td class="num">78.9</td><td class="num">79.5</td><td class="num">81.5</td></tr>
+          <tr><td>CLUEWSC (EM)</td><td>5</td><td class="num">83.5</td><td class="num">82.2</td><td class="num">85.2</td></tr>
+          <tr><td rowspan="6">代码与数学</td><td>BigCodeBench (Pass@1)</td><td>3</td><td class="num">63.9</td><td class="num">56.8</td><td class="num">59.2</td></tr>
+          <tr><td>HumanEval (Pass@1)</td><td>0</td><td class="num">62.8</td><td class="num">69.5</td><td class="num">76.8</td></tr>
+          <tr><td>GSM8K (EM)</td><td>8</td><td class="num">91.1</td><td class="num">90.8</td><td class="num">92.6</td></tr>
+          <tr><td>MATH (EM)</td><td>4</td><td class="num">60.5</td><td class="num">57.4</td><td class="num">64.5</td></tr>
+          <tr><td>MGSM (EM)</td><td>8</td><td class="num">81.3</td><td class="num">85.7</td><td class="num">84.4</td></tr>
+          <tr><td>CMath (EM)</td><td>3</td><td class="num">92.6</td><td class="num">93.6</td><td class="num">90.9</td></tr>
+          <tr><td>长上下文</td><td>LongBench-V2 (EM)</td><td>1</td><td class="num">40.2</td><td class="num">44.7</td><td class="num">51.5</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>最显眼的是知识类：Simple-QA verified 从 28.3 到 55.2，FACTS Parametric 从 27.1 到 62.6，几乎翻倍——总参数从 671B 涨到 1.6T，能记住的东西多了。Flash 用 13B 激活就在多数项上超过 37B 激活的 V3.2，但 BigCodeBench、MATH 这类推理密集项反而低于 V3.2，激活参数少的代价在这里。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="post">10. 后训练：专家 RL + 多教师在线蒸馏</h2>
+      <h3>10.1 流程</h3>
+      <p>V4 的后训练大体沿用 V3.2，但有一个关键替换：V3.2 最后的<strong>混合 RL 阶段</strong>（把推理、agent、人类对齐放进同一个 RL）被整个换成了<strong>在线策略蒸馏（On-Policy Distillation，OPD）</strong>。流程分两步：</p>
+      <ol>
+        <li><strong>培养专家</strong>：对每个目标领域（数学、代码、agent、指令遵循……），从基座出发先做该领域的 SFT，再用 GRPO 做 RL，奖励按该领域的成功标准设计。得到一组各自擅长一个领域的专家模型。</li>
+        <li><strong>合并</strong>：训练一个统一的学生模型，在它自己生成的轨迹上，按 token 最小化它与各专家之间的反向 KL。报告说这一步用了十多个教师。</li>
+      </ol>
+
+      <h3>10.2 专家阶段的 GRPO</h3>
+      <p>报告说 RL 用 GRPO，超参与之前的工作（R1、V3.2）保持接近，没有重新写公式。这里按 V3.2 报告里的版本记一下。对问题 \(q\)，从旧策略采样一组 \(G\) 个回答 \(\{o_i\}\)，目标是</p>
+      $$\mathcal J(\theta)=\mathbb E\Bigg[\frac1G\sum_{i=1}^G\frac1{|o_i|}\sum_{t=1}^{|o_i|}\Big(\min\big(r_{i,t}\hat A_{i,t},\ \mathrm{clip}(r_{i,t},1-\varepsilon,1+\varepsilon)\hat A_{i,t}\big)M_{i,t}-\beta\,\mathbb D_{\mathrm{KL}}\big(\pi_\theta\,\|\,\pi_{\mathrm{ref}}\big)\Big)\Bigg],$$
+      <p>其中 \(r_{i,t}=\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})/\pi_{\mathrm{old}}(o_{i,t}\mid q,o_{i,\lt t})\) 是重要性比；优势用组内相对奖励 \(\hat A_{i,t}=R_i-\mathrm{mean}(R_1,\dots,R_G)\)，不需要价值网络。V3.2 在此之上加了四个稳定 RL 的做法：</p>
+      <ul>
+        <li><strong>无偏 KL 估计</strong>：样本来自 \(\pi_{\mathrm{old}}\) 而不是 \(\pi_\theta\)，所以给 K3 估计器乘上重要性比 \(\frac{\pi_\theta}{\pi_{\mathrm{old}}}\big(\frac{\pi_{\mathrm{ref}}}{\pi_\theta}-\log\frac{\pi_{\mathrm{ref}}}{\pi_\theta}-1\big)\)，使梯度无偏；某些领域（如数学）KL 罚项可以很弱甚至去掉。</li>
+        <li><strong>离策略序列掩码</strong> \(M_{i,t}\)：如果一条回答优势为负，且旧策略与当前策略在这条序列上的平均对数比超过阈值 \(\delta\)，就整条掩掉——偏离太远的负样本容易误导优化。</li>
+        <li><strong>Keep Routing</strong>：训练时强制使用采样时推理框架给出的专家路由，避免同一输入在训练和推理里走不同专家。</li>
+        <li><strong>Keep Sampling Mask</strong>：采样时用了 top-p/top-k 截断，就把截断掩码保留下来用在 \(\pi_\theta\) 上，让两边的动作空间一致。</li>
+      </ul>
+
+      <h3>10.3 推理强度、奖励模型与对话格式</h3>
+      <p><strong>三档推理强度。</strong>同一个模型支持 Non-think、Think High、Think Max。它们来自不同 RL 配置训出来的专家：每档用不同的长度惩罚和上下文窗口，输出的推理长度因此不同。格式上，Non-think 直接输出 <code>&lt;/think&gt;</code> 加回答；High 输出 <code>&lt;think&gt;</code> 推理 <code>&lt;/think&gt;</code> 加总结；Max 在此之外还在 system prompt 开头注入一段指令，大意是「推理强度拉满、不许走捷径：彻底分解问题、找根因，对所有路径、边界情况和对抗情形压力测试，把每个中间步骤、考虑过的备选方案和被否定的假设都写出来」。评测时三档的上下文窗口分别是 8K、128K、384K。</p>
+      <p><strong>生成式奖励模型（GRM）。</strong>容易验证的任务用规则或测试用例；难以验证的任务，传统做法是 RLHF 训一个标量奖励模型。V4 不再用标量奖励模型，而是准备带评分细则（rubric）的 RL 数据，用生成式奖励模型给轨迹打分。关键是<strong>对 GRM 本身也做 RL</strong>，而且 actor 自己就充当 GRM，评判能力和生成能力一起优化。报告说这样只需要少量多样的人工标注就能获得稳健的打分。</p>
+      <p><strong>工具调用格式。</strong>新格式用一个特殊 token <code>|DSML|</code> 加 XML 风格的标签：<code>&lt;|DSML|tool_calls&gt;</code> 包住若干 <code>&lt;|DSML|invoke name="…"&gt;</code>，每个参数用 <code>&lt;|DSML|parameter name="…" string="true|false"&gt;</code> 标出——字符串参数原样写、<code>string="true"</code>，其他类型写 JSON、<code>string="false"</code>。报告说 XML 格式比 JSON 嵌套更少出现转义错误，减少了工具调用失败。</p>
+      <p><strong>交错思考（interleaved thinking）。</strong>V3.2 的策略是：工具调用轮次之间保留推理内容，但一来新的用户消息就清掉之前所有推理。V4 借着 1M 上下文改成：在有工具调用的场景，推理内容在整段对话里<strong>全部保留</strong>，跨用户消息也不清；在普通对话场景仍沿用旧策略，新用户消息到来时丢弃之前的推理。用用户消息模拟工具交互的 agent 框架（如 Terminus）触发不了前一条路径，报告仍建议它们用 non-think 模式。</p>
+      <p><strong>Quick Instruction。</strong>聊天产品在生成回答前要做一堆辅助判断（要不要搜索、意图识别、生成搜索词……），通常交给另一个小模型，但小模型不能复用主模型已算好的 KV cache，要重新 prefill。V4 的做法是在输入序列末尾直接追加专用的特殊 token，每个对应一个辅助任务，复用已有 KV cache，而且像生成搜索词、判断权威性需求、判断领域这些任务可以并行。报告列了 <code>&lt;|action|&gt;</code>（是否需要搜索）、<code>&lt;|title|&gt;</code>（生成对话标题）、<code>&lt;|query|&gt;</code>（生成搜索词）、<code>&lt;|authority|&gt;</code>（对来源权威性的需求）、<code>&lt;|domain|&gt;</code>（领域）、<code>&lt;|extracted_url|&gt;</code> + <code>&lt;|read_url|&gt;</code>（某个 URL 是否要抓取阅读）。好处是降低首 token 延迟，也省掉维护一个额外小模型的工程成本。</p>
+
+      <h3>10.4 多教师 OPD</h3>
+      <p>给定 \(N\) 个专家 \(\{\pi_{E_1},\dots,\pi_{E_N}\}\)，OPD 的目标是</p>
+      $$\mathcal L_{\mathrm{OPD}}(\theta)=\sum_{i=1}^Nw_i\cdot\mathbb D_{\mathrm{KL}}\big(\pi_\theta\,\|\,\pi_{E_i}\big),$$
+      <p>\(w_i\) 是各专家的权重，通常按重要性定。这里有两个要点。</p>
+      <p><strong>一，反向 KL、在线采样。</strong>\(\mathbb D_{\mathrm{KL}}(\pi_\theta\|\pi_E)=\mathbb E_{y\sim\pi_\theta}[\log\pi_\theta(y)-\log\pi_E(y)]\) 的期望在学生分布下取，所以轨迹必须由学生自己生成（on-policy）。这和普通 SFT 式蒸馏（在教师生成的数据上做前向 KL / 交叉熵）不同：学生在自己会走到的状态上被纠正，不会出现训练时没见过的分布偏移。反向 KL 还有「寻模」的性质：学生倾向于集中在教师概率高的区域，而不是去覆盖教师的全部分布。在实际训练中，学生遇到数学题时，主要是数学专家的 KL 在起作用；遇到代码题时则是代码专家——不同专家的能力在 logits 层面汇总到一套参数里，绕开了权重合并或混合 RL 常见的性能退化。</p>
+      <p><strong>二，全词表 KL 而不是单 token 估计。</strong>以前的工作通常把每个位置的 KL 简化为只看采样到的那个 token，再复用 RL 框架：把 \(\mathrm{sg}\big[\log\frac{\pi_E(y_t\mid x,y_{\lt t})}{\pi_\theta(y_t\mid x,y_{\lt t})}\big]\) 当作每个 token 的优势，代入策略梯度。这很省资源，但梯度方差大、训练不稳。V4 改为在每个位置对整个词表精确计算 KL。对学生 logits \(\mathbf z\) 求导很干净（记 \(p=\pi_\theta,\ q=\pi_E\)，\(\ell_v=\log p_v-\log q_v\)，\(\mathrm{KL}_t=\sum_vp_v\ell_v\)）：</p>
+      $$\frac{\partial\,\mathrm{KL}_t}{\partial z_v}=p_v\big(\ell_v-\mathrm{KL}_t\big).$$
+      <p>推导：\(\partial p_u/\partial z_v=p_u(\delta_{uv}-p_v)\)，所以 \(\partial\mathrm{KL}_t/\partial z_v=\sum_up_u(\delta_{uv}-p_v)(\ell_u+1)=p_v(\ell_v+1)-p_v(\mathrm{KL}_t+1)\)。每个位置的梯度都是一个确定的 129280 维向量，不再依赖采到哪个 token，方差自然小得多（前缀仍是学生采样来的，这部分随机性还在）。</p>
+
+      <h3>10.5 让全词表 OPD 跑得动</h3>
+      <p>十几个教师、每个可能上万亿参数、词表 12.9 万，直接把所有教师的 logits 存下来是不可能的。V4 的做法：</p>
+      <ul>
+        <li>教师权重放在集中式分布式存储里，前向时按需加载，用类似 ZeRO 的参数分片减轻 I/O 和内存压力；</li>
+        <li>前向时只缓存教师<strong>最后一层隐藏状态</strong>，训练时再取出来过一遍对应教师的输出头，现场重建完整 logits。按 Pro 的尺寸，一个位置的隐藏状态是 7168 维，logits 是 129280 维，存储少约 18 倍，重算只多一个矩阵乘；</li>
+        <li>按教师编号给训练样本排序，保证每个 mini-batch 里每个教师的输出头只加载一次、显存里同一时刻最多一个教师头；所有加载/卸载在后台异步进行；</li>
+        <li>教师与学生 logits 之间的精确 KL 用专门的 TileLang kernel 计算，避免动态显存分配。</li>
+      </ul>
+
+      <h3>10.6 FP4 量化感知训练（QAT）</h3>
+      <p>后训练阶段引入 QAT，让模型（包括教师和参考模型）适应量化带来的精度损失。量化格式是 <strong>MXFP4</strong>：每 32 个元素一组，共享一个 8 位的 2 的幂次缩放因子（E8M0），每个元素是 4 位 E2M1 浮点，能表示 \(\pm\{0,0.5,1,1.5,2,3,4,6\}\)。作用在两处：</p>
+      <ol>
+        <li><strong>MoE 专家权重</strong>：显存的主要占用者。我粗算了一下，Pro 主干约 1.55T 个路由专家参数，FP8 存要约 1.55 TB，MXFP4（每元素 4 bit + 每 32 个元素 8 bit 的 scale）约 0.82 TB。</li>
+        <li><strong>CSA indexer 的 QK 路径</strong>：QK 激活在 FP4 下缓存、读取、相乘，加速长上下文下的打分。同时把索引分数 \(I_{:,:}\) 从 FP32 量化到 BF16，top-k 选择器提速 2 倍，KV 条目的召回率保持 99.7%。</li>
+      </ol>
+      <p>专家权重的 QAT 流程：优化器维护 FP32 主权重，前向时先量化到 FP4，再<strong>反量化到 FP8</strong> 参与计算。这一步反量化是无损的：E4M3 比 E2M1 多 2 个指数位、动态范围大得多，只要每个 FP8 量化块（128×128）里各个 FP4 子块（1×32）的 scale 之比不超过某个阈值，细粒度的 scale 信息就能被 FP8 的指数范围完全吸收；他们验证了当前权重满足这个条件。于是整个 QAT 可以完全复用现有的 FP8 训练框架。反向时，梯度对前向用的那份 FP8 权重计算，直接传回 FP32 主权重——等价于对量化操作使用直通估计器（STE），也省掉了对转置权重重新量化。</p>
+      <p>在推理和 RL rollout 阶段（不需要反向），直接使用真正的 FP4 权重，而不是模拟量化。这保证采样时的模型行为与线上部署完全一致，同时真正减少了显存读取和占用。indexer 的 QK 路径同样处理。</p>
+
+      <h3>10.7 Rollout 服务、百万 token RL 与沙箱</h3>
+      <p><strong>可抢占、容错的 rollout。</strong>集群有全局抢占式调度器，任何任务随时可能被抢占，硬件故障也很常见。V4 给每个生成请求维护一个 token 粒度的预写日志（WAL）：每生成一个 token 就追加进去。被抢占时暂停推理引擎、保存未完成请求的 KV cache；恢复时用 WAL 和 KV cache 接着解码；即使遇到致命硬件错误，也能用 WAL 里的 token 重新 prefill 重建 KV cache。</p>
+      <p>报告特别指出：<strong>把未完成的请求从头重新生成在数学上是错的</strong>，会引入长度偏差。原因是短回答更可能在中断前就生成完，长回答更可能被打断；如果被打断的统统重来，最终收集到的样本会系统性地偏短。如果推理栈是批不变且确定的（8.4 节），用相同随机种子重新生成也是正确的，但要多花一遍解码，远不如 WAL 高效。</p>
+      <p><strong>百万 token 的 RL/OPD。</strong>把 rollout 数据拆成轻量的元数据和重量的逐 token 字段。分发时先加载全部元数据做全局 shuffle 和打包布局计算；逐 token 字段通过共享内存数据加载器加载（节点内不重复），在 mini-batch 粒度用完即释放；设备上同时存放几个 mini-batch 由负载动态决定。</p>
+      <p><strong>DSec 沙箱。</strong>为 agent 的训练和评测，DeepSeek 做了一个生产级沙箱平台 DeepSeek Elastic Compute（DSec）：三个 Rust 组件（API 网关 Apiserver、每台机器上的代理 Edge、集群监控 Watcher），用自定义 RPC 互连，构建在 3FS 分布式文件系统上，单集群管理数十万个并发沙箱。设计要点：</p>
+      <ul>
+        <li>一套 Python SDK 背后四种执行载体：Function Call（预热容器池，无冷启动）、Container（兼容 Docker，EROFS 按需加载镜像）、microVM（Firecracker，VM 级隔离）、fullVM（QEMU，任意操作系统），切换只改一个参数；</li>
+        <li>分层存储快速加载镜像：容器的基础镜像和提交作为 3FS 上只读的 EROFS 层挂成 overlay 的下层，元数据放本地盘，数据块按需从 3FS 拉取；microVM 用 overlaybd 格式，只读基础层在 3FS 上共享，写入落本地写时复制层，快照可链式叠加，毫秒级恢复；</li>
+        <li>高密度：减少虚拟化环境里重复的页缓存、做内存回收以安全超分；缓解容器运行时的自旋锁竞争，降低单沙箱 CPU 开销；</li>
+        <li>轨迹日志：为每个沙箱维护全局有序的命令与结果日志，用于训练任务被抢占后的快进恢复（重放已完成命令的缓存结果，避免非幂等操作被重复执行）、细粒度溯源和确定性重放。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="eval">11. 评测结果</h2>
+      <h3>11.1 设置</h3>
+      <ul>
+        <li>知识与推理：温度 1.0，Non-think / High / Max 的上下文窗口为 8K / 128K / 384K。数学题用「逐步推理并把答案放进 \boxed{}」的模板；Pro-Max 做数学时换成要求给出严格证明的模板。</li>
+        <li>Codeforces 是内部基准：14 场 Div.1 比赛共 114 题（2025 年 5 月到 11 月）。每题生成 32 个候选，每次随机无放回抽 10 个排成提交顺序，用专家构造的测试判定；解出的题按「同样失败次数下解出该题的人类选手得分中位数」计分，换算成排名和 rating，取所有抽样与排列下的期望，再对 14 场取平均。</li>
+        <li>形式化数学：Lean v4.28.0-rc1 下的 agent 设置，可用编译器和语义 tactic 搜索，最多 500 次工具调用；另有一个更重的流程，先生成自然语言解答并自我验证筛选，再作为指导交给形式化 agent 证明。两种设置都要求严格验证器 Comparator 通过。</li>
+        <li>代码 agent（SWE 系列、Terminal-Bench）：内部框架，只提供 bash 和文件编辑两个工具，最多 500 步、512K 上下文。搜索 agent（BrowseComp、HLE w/ tools）：内部框架，网页搜索 + Python，同样 500 步、512K；BrowseComp 沿用 V3.2 的「discard-all」上下文管理。</li>
+        <li>1M 上下文：OpenAI MRCR 和 CorpusQA。Claude Opus 4.6 和 Gemini 3.1 Pro 由他们重新统一配置评测；GPT-5.4 因 API 大量无响应没有评。K2.6 和 GLM-5.1 的部分格子因 API 太忙而空缺。</li>
+      </ul>
+
+      <h3>11.2 与闭源/开源模型对比（报告表 6）</h3>
+      <div class="table-wrap">
+      <table class="tight">
+        <thead><tr><th>基准（指标）</th><th class="num">Opus-4.6 Max</th><th class="num">GPT-5.4 xHigh</th><th class="num">Gemini-3.1-Pro High</th><th class="num">K2.6 Thinking</th><th class="num">GLM-5.1 Thinking</th><th class="num">DS-V4-Pro Max</th></tr></thead>
+        <tbody>
+          <tr><td>MMLU-Pro (EM)</td><td class="num">89.1</td><td class="num">87.5</td><td class="num">91.0</td><td class="num">87.1</td><td class="num">86.0</td><td class="num">87.5</td></tr>
+          <tr><td>SimpleQA-Verified (Pass@1)</td><td class="num">46.2</td><td class="num">45.3</td><td class="num">75.6</td><td class="num">36.9</td><td class="num">38.1</td><td class="num">57.9</td></tr>
+          <tr><td>Chinese-SimpleQA (Pass@1)</td><td class="num">76.4</td><td class="num">76.8</td><td class="num">85.9</td><td class="num">75.9</td><td class="num">75.0</td><td class="num">84.4</td></tr>
+          <tr><td>GPQA Diamond (Pass@1)</td><td class="num">91.3</td><td class="num">93.0</td><td class="num">94.3</td><td class="num">90.5</td><td class="num">86.2</td><td class="num">90.1</td></tr>
+          <tr><td>HLE (Pass@1)</td><td class="num">40.0</td><td class="num">39.8</td><td class="num">44.4</td><td class="num">36.4</td><td class="num">34.7</td><td class="num">37.7</td></tr>
+          <tr><td>LiveCodeBench (Pass@1)</td><td class="num">88.8</td><td class="num">-</td><td class="num">91.7</td><td class="num">89.6</td><td class="num">-</td><td class="num">93.5</td></tr>
+          <tr><td>Codeforces (Rating)</td><td class="num">-</td><td class="num">3168</td><td class="num">3052</td><td class="num">-</td><td class="num">-</td><td class="num">3206</td></tr>
+          <tr><td>HMMT 2026 Feb (Pass@1)</td><td class="num">96.2</td><td class="num">97.7</td><td class="num">94.7</td><td class="num">92.7</td><td class="num">89.4</td><td class="num">95.2</td></tr>
+          <tr><td>IMOAnswerBench (Pass@1)</td><td class="num">75.3</td><td class="num">91.4</td><td class="num">81.0</td><td class="num">86.0</td><td class="num">83.8</td><td class="num">89.8</td></tr>
+          <tr><td>Apex (Pass@1)</td><td class="num">34.5</td><td class="num">54.1</td><td class="num">60.9</td><td class="num">24.0</td><td class="num">11.5</td><td class="num">38.3</td></tr>
+          <tr><td>Apex Shortlist (Pass@1)</td><td class="num">85.9</td><td class="num">78.1</td><td class="num">89.1</td><td class="num">75.5</td><td class="num">72.4</td><td class="num">90.2</td></tr>
+          <tr><td>MRCR 1M (MMR)</td><td class="num">92.9</td><td class="num">-</td><td class="num">76.3</td><td class="num">-</td><td class="num">-</td><td class="num">83.5</td></tr>
+          <tr><td>CorpusQA 1M (ACC)</td><td class="num">71.7</td><td class="num">-</td><td class="num">53.8</td><td class="num">-</td><td class="num">-</td><td class="num">62.0</td></tr>
+          <tr><td>Terminal Bench 2.0 (Acc)</td><td class="num">65.4</td><td class="num">75.1</td><td class="num">68.5</td><td class="num">66.7</td><td class="num">63.5</td><td class="num">67.9</td></tr>
+          <tr><td>SWE Verified (Resolved)</td><td class="num">80.8</td><td class="num">-</td><td class="num">80.6</td><td class="num">80.2</td><td class="num">-</td><td class="num">80.6</td></tr>
+          <tr><td>SWE Pro (Resolved)</td><td class="num">57.3</td><td class="num">57.7</td><td class="num">54.2</td><td class="num">58.6</td><td class="num">58.4</td><td class="num">55.4</td></tr>
+          <tr><td>SWE Multilingual (Resolved)</td><td class="num">77.5</td><td class="num">-</td><td class="num">-</td><td class="num">76.7</td><td class="num">73.3</td><td class="num">76.2</td></tr>
+          <tr><td>BrowseComp (Pass@1)</td><td class="num">83.7</td><td class="num">82.7</td><td class="num">85.9</td><td class="num">83.2</td><td class="num">79.3</td><td class="num">83.4</td></tr>
+          <tr><td>HLE w/ tools (Pass@1)</td><td class="num">53.1</td><td class="num">52.0</td><td class="num">51.6</td><td class="num">54.0</td><td class="num">50.4</td><td class="num">48.2</td></tr>
+          <tr><td>GDPval-AA (Elo)</td><td class="num">1619</td><td class="num">1674</td><td class="num">1314</td><td class="num">1482</td><td class="num">1535</td><td class="num">1554</td></tr>
+          <tr><td>MCPAtlas Public (Pass@1)</td><td class="num">73.8</td><td class="num">67.2</td><td class="num">69.2</td><td class="num">66.6</td><td class="num">71.8</td><td class="num">73.6</td></tr>
+          <tr><td>Toolathlon (Pass@1)</td><td class="num">47.2</td><td class="num">54.6</td><td class="num">48.8</td><td class="num">50.0</td><td class="num">40.7</td><td class="num">51.8</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>报告自己的解读：知识上 SimpleQA-Verified 比其他开源模型高出约 20 个点，但仍落后 Gemini-3.1-Pro；推理上超过所有开源模型，略逊于 GPT-5.4 和 Gemini-3.1-Pro，自评落后前沿闭源模型约 3～6 个月；Codeforces 3206 分，报告说在人类选手中排第 23；agent 上与 K2.6、GLM-5.1 相当、落后闭源；MRCR 1M 超过 Gemini-3.1-Pro、不及 Opus 4.6。另外，在 Terminal-Bench 2.0 的 Verified 子集上 V4-Pro 约 72.0。</p>
+
+      <h3>11.3 两个尺寸、三档强度（报告表 7）</h3>
+      <div class="table-wrap">
+      <table class="tight">
+        <thead><tr><th>基准（指标）</th><th class="num">Flash Non-Think</th><th class="num">Flash High</th><th class="num">Flash Max</th><th class="num">Pro Non-Think</th><th class="num">Pro High</th><th class="num">Pro Max</th></tr></thead>
+        <tbody>
+          <tr><td>MMLU-Pro (EM)</td><td class="num">83.0</td><td class="num">86.4</td><td class="num">86.2</td><td class="num">82.9</td><td class="num">87.1</td><td class="num">87.5</td></tr>
+          <tr><td>SimpleQA-Verified</td><td class="num">23.1</td><td class="num">28.9</td><td class="num">34.1</td><td class="num">45.0</td><td class="num">46.2</td><td class="num">57.9</td></tr>
+          <tr><td>Chinese-SimpleQA</td><td class="num">71.5</td><td class="num">73.2</td><td class="num">78.9</td><td class="num">75.8</td><td class="num">77.7</td><td class="num">84.4</td></tr>
+          <tr><td>GPQA Diamond</td><td class="num">71.2</td><td class="num">87.4</td><td class="num">88.1</td><td class="num">72.9</td><td class="num">89.1</td><td class="num">90.1</td></tr>
+          <tr><td>HLE</td><td class="num">8.1</td><td class="num">29.4</td><td class="num">34.8</td><td class="num">7.7</td><td class="num">34.5</td><td class="num">37.7</td></tr>
+          <tr><td>LiveCodeBench (Pass@1-COT)</td><td class="num">55.2</td><td class="num">88.4</td><td class="num">91.6</td><td class="num">56.8</td><td class="num">89.8</td><td class="num">93.5</td></tr>
+          <tr><td>Codeforces (Rating)</td><td class="num">-</td><td class="num">2816</td><td class="num">3052</td><td class="num">-</td><td class="num">2919</td><td class="num">3206</td></tr>
+          <tr><td>HMMT 2026 Feb</td><td class="num">40.8</td><td class="num">91.9</td><td class="num">94.8</td><td class="num">31.7</td><td class="num">94.0</td><td class="num">95.2</td></tr>
+          <tr><td>IMOAnswerBench</td><td class="num">41.9</td><td class="num">85.1</td><td class="num">88.4</td><td class="num">35.3</td><td class="num">88.0</td><td class="num">89.8</td></tr>
+          <tr><td>Apex</td><td class="num">1.0</td><td class="num">19.1</td><td class="num">33.0</td><td class="num">0.4</td><td class="num">27.4</td><td class="num">38.3</td></tr>
+          <tr><td>Apex Shortlist</td><td class="num">9.3</td><td class="num">72.1</td><td class="num">85.7</td><td class="num">9.2</td><td class="num">85.5</td><td class="num">90.2</td></tr>
+          <tr><td>MRCR 1M (MMR)</td><td class="num">37.5</td><td class="num">76.9</td><td class="num">78.7</td><td class="num">44.7</td><td class="num">83.3</td><td class="num">83.5</td></tr>
+          <tr><td>CorpusQA 1M (ACC)</td><td class="num">15.5</td><td class="num">59.3</td><td class="num">60.5</td><td class="num">35.6</td><td class="num">56.5</td><td class="num">62.0</td></tr>
+          <tr><td>Terminal Bench 2.0</td><td class="num">49.1</td><td class="num">56.6</td><td class="num">56.9</td><td class="num">59.1</td><td class="num">63.3</td><td class="num">67.9</td></tr>
+          <tr><td>SWE Verified</td><td class="num">73.7</td><td class="num">78.6</td><td class="num">79.0</td><td class="num">73.6</td><td class="num">79.4</td><td class="num">80.6</td></tr>
+          <tr><td>SWE Pro</td><td class="num">49.1</td><td class="num">52.3</td><td class="num">52.6</td><td class="num">52.1</td><td class="num">54.4</td><td class="num">55.4</td></tr>
+          <tr><td>SWE Multilingual</td><td class="num">69.7</td><td class="num">70.2</td><td class="num">73.3</td><td class="num">69.8</td><td class="num">74.1</td><td class="num">76.2</td></tr>
+          <tr><td>BrowseComp</td><td class="num">-</td><td class="num">53.5</td><td class="num">73.2</td><td class="num">-</td><td class="num">80.4</td><td class="num">83.4</td></tr>
+          <tr><td>HLE w/ tools</td><td class="num">-</td><td class="num">40.3</td><td class="num">45.1</td><td class="num">-</td><td class="num">44.7</td><td class="num">48.2</td></tr>
+          <tr><td>MCPAtlas Public</td><td class="num">64.0</td><td class="num">67.4</td><td class="num">69.0</td><td class="num">69.4</td><td class="num">74.2</td><td class="num">73.6</td></tr>
+          <tr><td>GDPval-AA (Elo)</td><td class="num">-</td><td class="num">-</td><td class="num">1395</td><td class="num">-</td><td class="num">-</td><td class="num">1554</td></tr>
+          <tr><td>Toolathlon</td><td class="num">40.7</td><td class="num">43.5</td><td class="num">47.8</td><td class="num">46.3</td><td class="num">49.0</td><td class="num">51.8</td></tr>
+        </tbody>
+      </table>
+      </div>
+      <p>几个规律：Flash 和 Pro 的差距主要在知识（SimpleQA-Verified 34.1 vs 57.9）和难的 agent 任务（Terminal Bench 56.9 vs 67.9）；给足思考预算后，推理题上 Flash-Max 和 Pro-Max 差距不大（HMMT 94.8 vs 95.2）。报告图 9 显示 MRCR 8-needle 在 128K 以内很稳，超过 128K 后开始下降。报告图 10 还显示，在 HLE 上 V4-Pro 达到同样分数所用的 token 比 V3.2 少。</p>
+      <p>形式化数学（报告图 8）：在 Putnam-2025 的「重算力、形式与非形式混合」设置下，V4 拿到满分 120/120；在 Putnam-200 Pass@8 的轻量设置下也超过 Seed-Prover 等此前的系统。</p>
+
+      <h3>11.4 真实任务</h3>
+      <ul>
+        <li><strong>中文写作</strong>：功能性写作对 Gemini-3.1-Pro 的总胜率 62.7% vs 34.1%；创意写作在指令遵循上胜率 60.0%、写作质量上 77.5%；但在最难的复杂指令与多轮写作上，Claude Opus 4.5 以 52.0% vs 45.9% 领先。</li>
+        <li><strong>搜索</strong>：网页/App 的 non-think 模式用检索增强（RAG），thinking 模式用 agentic 搜索。V4-Pro 对 V3.2 的 RAG 搜索问答，总计 28.1% 胜、10.4% 负、61.5% 平；agentic 搜索对 RAG 是 61.7% 胜、18.3% 负，平均工具调用 16.2 次，prefill 13649 vs 10453 token，输出 1526 vs 1308 token，只贵一点。</li>
+        <li><strong>白领任务</strong>：30 个中文专业任务（13 个行业），人工盲评，V4-Pro-Max 对 Opus-4.6-Max 的不输率 63%；强在任务完成度和内容质量，弱在格式约束遵循、长文压缩成短摘要和幻灯片视觉设计。</li>
+        <li><strong>代码 agent</strong>：从 50 多位内部工程师收集约 200 个真实研发任务，筛出 30 个。通过率：Haiku 4.5 13%、Sonnet 4.5 47%、V4-Pro-Max 67%、Opus 4.5 70%、Opus 4.5 Thinking 73%、Opus 4.6 Thinking 80%。对 85 位内部用户的调查：52% 认为可以作为默认主力代码模型，39% 倾向于是，不到 9% 认为不行。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="summary">12. 小结与我的看法</h2>
+      <p>把新东西按「从 V3/V3.2 出发改了什么」列一遍：</p>
+      <ol>
+        <li><strong>注意力</strong>：MLA 的潜向量 → 512 维 shared-KV（K=V）MQA；在序列维度上压缩（CSA 4 倍重叠压缩、HCA 128 倍）；DSA 从选 token 变成选压缩块，top-k 变小；加滑窗分支、attention sink、Q/KV RMSNorm、部分 RoPE + 输出反旋转、分组输出投影。</li>
+        <li><strong>残差</strong>：mHC，4 路残差流 + Sinkhorn 投影到双随机矩阵。</li>
+        <li><strong>MoE</strong>：√softplus 打分，前 3 层 Hash 路由，去掉节点限制，激活 6 个更大的专家，SwiGLU clamp。</li>
+        <li><strong>优化</strong>：Muon（混合 Newton–Schulz、RMS 0.18、Nesterov），不需要 QK-Clip；预见式路由处理 loss spike。</li>
+        <li><strong>系统</strong>：wave 化的 MegaMoE；TileLang；批不变 + 确定性 kernel；Muon 的混合 ZeRO；压缩注意力的两阶段 CP；张量级重计算；异构 KV cache 和磁盘缓存。</li>
+        <li><strong>后训练</strong>：专家 SFT + GRPO → 多教师全词表 OPD；GRM 由 actor 自己担任并被 RL；三档推理强度；DSML 工具格式；跨轮保留推理；Quick Instruction；FP4 QAT；WAL rollout；DSec 沙箱。</li>
+      </ol>
+      <p>我自己的几点看法：</p>
+      <ul>
+        <li>最核心的思路是「<strong>先压缩、再稀疏</strong>」。V3.2 证明了「用便宜的打分器挑选」可行，但 indexer 仍是 \(O(n)\) 每 token；V4 先在序列维度上做可学习的池化，让打分对象少一个数量级，然后再挑。把 DSA 的成本从 \(n\) 降到 \(n/4\)，再配上 FP4，是能在 1M 上省下来的关键。</li>
+        <li>shared-KV、512 维头、分组输出投影这一组设计，本质上是承认「解码时的 MLA 就是 MQA」，把它变成原生结构，省掉 \(W^{UK}/W^{UV}\) 的分解；代价转移到了输出投影上，再用分组低秩补回来。</li>
+        <li>报告自己在结论里也承认架构「相对复杂」：为了降低风险保留了很多初步验证过的组件和技巧，未来要做更系统的研究，把架构精简到最本质的部分。Anticipatory Routing 和 SwiGLU clamp 的原理也还没弄清。这份报告里几乎没有消融实验，很多设计（比如 CSA/HCA 的交替比例、√softplus）只给结论不给对比，读的时候要记住这一点。</li>
+        <li>工程部分的分量不亚于架构：确定性和批不变被当成一等公民，直接服务于 RL 的正确性（WAL 那段关于长度偏差的论证很值得记住）。</li>
+      </ul>
+      <p>报告提到的未来方向：进一步精简架构、研究训练稳定性的基础问题、在 MoE 和稀疏注意力之外探索新的稀疏维度（比如更稀疏的嵌入模块）、低延迟架构、长程多轮 agent 任务、多模态，以及更好的数据构造与合成。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="refs">13. 参考</h2>
+      <ul>
+        <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2606.19348">DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence</a>, arXiv 2606.19348, 2026。本文结构对应其 §2（架构：§2.1 继承部分、§2.2 mHC、§2.3 CSA/HCA、§2.4 Muon）、§3（基础设施）、§4（预训练）、§5（后训练与评测）。</li>
+        <li>模型卡、config 与参考推理代码：<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">huggingface.co/deepseek-ai/DeepSeek-V4-Pro</a>（<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/inference">inference/</a>）、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash</a>。</li>
+        <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2512.02556">DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models</a>, 2025（DSA §2.1，GRPO 的改进 §3.1）。</li>
+        <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>, 2024（MLA、DeepSeekMoE、无辅助损失均衡、MTP）；<a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>（MLA 的提出）。</li>
+        <li>Z. Xie et al. <a href="https://arxiv.org/abs/2512.24880">mHC: Manifold-Constrained Hyper-Connections</a>, 2026；D. Zhu et al. Hyper-Connections, ICLR 2025。</li>
+        <li>K. Jordan et al. Muon: An optimizer for hidden layers in neural networks, 2024；J. Liu et al. <a href="https://arxiv.org/abs/2502.16982">Muon is Scalable for LLM Training</a>, 2025。</li>
+        <li>Y. Gu et al. MiniLLM, ICLR 2024；K. Lu and Thinking Machines Lab, <a href="https://thinkingmachines.ai/blog/on-policy-distillation">On-Policy Distillation</a>, 2025。</li>
+        <li>MegaMoE：<a href="https://github.com/deepseek-ai/DeepGEMM/pull/304">DeepGEMM PR #304</a>；TileLang（Wang et al., ICLR 2026）；B. D. Rouhani et al. Microscaling Data Formats for Deep Learning, 2023（MXFP4）。</li>
+      </ul>
+      <p style="font-size:14px;color:var(--text-faint)">文中的图都是我按报告内容重画的示意图；计算器里的成本模型和参数计数是我根据 config 推算的，假设写在各自旁边。</p>
+    </article>
+
+    <nav class="series-pager" data-series="reports"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const el = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) {
+        if (k === 'text') e.textContent = attrs[k];
+        else e.setAttribute(k, attrs[k]);
+      }
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const $ = (id) => document.getElementById(id);
+    const segInit = (id, cb) => {
+      const box = $(id);
+      box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => {
+        box.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        cb(b.dataset.v);
+      }));
+      return () => box.querySelector('button[aria-pressed="true"]').dataset.v;
+    };
+    const mulberry = (a) => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+    const gauss = (r) => { let u = 0, v = 0; while (u === 0) u = r(); while (v === 0) v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
+
+    /* ---------- Fig 2: overlapping compression ---------- */
+    (() => {
+      const g = $('cmp-tokens');
+      const x0 = 70, w = 30, gap = 4;
+      for (let j = 0; j < 16; j++) {
+        const blk = Math.floor(j / 4);
+        el('rect', { x: x0 + j * (w + gap), y: 8, width: w, height: 22, rx: 4, style: 'fill:var(--bg-soft);stroke:var(--border)' }, g);
+        el('text', { x: x0 + j * (w + gap) + w / 2, y: 24, 'text-anchor': 'middle', 'font-size': 11, class: 'mono', text: j }, g);
+        if (j % 4 === 0) el('text', { x: x0 + j * (w + gap) + 2 * (w + gap) - gap / 2, y: 46, 'text-anchor': 'middle', 'font-size': 11, class: 'soft', text: '块 ' + blk }, g);
+      }
+      [1, 2, 3].forEach((i, r) => {
+        const y = 62 + r * 36;
+        el('text', { x: 10, y: y + 15, 'font-size': 12.5, text: '条目 ' + i }, g);
+        const xa = x0 + 4 * i * (w + gap), xb = x0 + 4 * (i - 1) * (w + gap), span = 4 * (w + gap) - gap;
+        el('rect', { x: xb, y, width: span, height: 20, rx: 4, style: 'fill:var(--accent-soft);stroke:var(--accent)' }, g);
+        el('text', { x: xb + span / 2, y: y + 14, 'text-anchor': 'middle', 'font-size': 11, text: 'C^b（上一块）' }, g);
+        el('rect', { x: xa, y, width: span, height: 20, rx: 4, style: 'fill:color-mix(in srgb, var(--accent-2) 16%, transparent);stroke:var(--accent-2)' }, g);
+        el('text', { x: xa + span / 2, y: y + 14, 'text-anchor': 'middle', 'font-size': 11, text: 'C^a（本块）' }, g);
+      });
+    })();
+
+    /* ---------- Fig 4: EP waves ---------- */
+    (() => {
+      const g = $('ep-waves');
+      const comm = 'fill:color-mix(in srgb, var(--accent-2) 22%, transparent);stroke:var(--accent-2)';
+      const comp = 'fill:var(--accent-soft);stroke:var(--accent)';
+      el('text', { x: 10, y: 106, 'font-size': 11.5, class: 'soft', text: '通信流' }, g);
+      el('text', { x: 10, y: 146, 'font-size': 11.5, class: 'soft', text: '计算流' }, g);
+      const bar = (x, w, y, st, t) => { el('rect', { x, y, width: w, height: 20, style: st }, g); el('text', { x: x + w / 2, y: y + 14, 'text-anchor': 'middle', 'font-size': 10, text: t }, g); };
+      [[70, 'D1'], [100, 'D2'], [137, 'D3'], [174, 'C1'], [248, 'C2'], [322, 'C3']].forEach(([x, t]) => bar(x, 30, 92, comm, t));
+      for (let k = 0; k < 3; k++) { bar(100 + k * 74, 37, 132, comp, 'L1·' + (k + 1)); bar(137 + k * 74, 37, 132, comp, 'L2·' + (k + 1)); }
+      el('path', { d: 'M352 60 V160', style: 'stroke:var(--text-faint);stroke-dasharray:3 3' }, g);
+      el('path', { d: 'M470 10 V160', style: 'stroke:var(--text-faint);stroke-dasharray:3 3' }, g);
+      el('text', { x: 356, y: 72, 'font-size': 11, class: 'soft', text: 'wave 化结束' }, g);
+      el('text', { x: 474, y: 50, 'font-size': 11, class: 'soft', text: '朴素结束' }, g);
+    })();
+
+    /* ---------- Demo: visibility in CSA / HCA ---------- */
+    (() => {
+      const N = 64, M = 4, MH = 16, WIN = 8, K = 4, D = 6;
+      const svg = $('vis-svg'), slider = $('vis-t'), out = $('vis-t-out'), ro = $('vis-readout');
+      let seed = 7, toks, P;
+      const gen = () => {
+        const r = mulberry(seed);
+        toks = Array.from({ length: N }, () => Array.from({ length: D }, () => gauss(r)));
+        P = [0, 1].map(() => Array.from({ length: D }, () => Array.from({ length: D }, () => gauss(r) / Math.sqrt(D))));
+      };
+      const mv = (A, x) => A.map((row) => row.reduce((s, a, j) => s + a * x[j], 0));
+      const dot = (a, b) => a.reduce((s, v, i) => s + v * b[i], 0);
+      const key = (i) => { const lo = Math.max(0, M * (i - 1)), hi = M * (i + 1); const k = new Array(D).fill(0); for (let j = lo; j < hi; j++) for (let c = 0; c < D; c++) k[c] += toks[j][c] / (hi - lo); return k; };
+      const x0 = 10, cw = 10;
+      const tokX = (j) => x0 + j * cw;
+      function draw() {
+        const t = +slider.value; out.textContent = t;
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        const visC = Math.floor((t + 1) / M), visH = Math.floor((t + 1) / MH);
+        const scores = [];
+        for (let i = 0; i < visC; i++) { const k = key(i); scores.push(P.reduce((s, Ph) => s + Math.max(0, dot(mv(Ph, toks[t]), k)), 0)); }
+        const order = scores.map((s, i) => i).sort((a, b) => scores[b] - scores[a]);
+        const sel = new Set(order.slice(0, K));
+        const maxS = Math.max(1e-6, ...scores);
+        el('text', { x: x0, y: 14, 'font-size': 12.5, text: 'CSA：索引分数（只有完整块可见）' }, svg);
+        for (let i = 0; i < N / M; i++) {
+          const x = tokX(M * i) + 2, w = M * cw - 4;
+          if (i < visC) {
+            const h = Math.max(2, 46 * scores[i] / maxS);
+            el('rect', { x, y: 70 - h, width: w, height: h, rx: 2, style: sel.has(i) ? 'fill:var(--accent)' : 'fill:var(--text-faint);opacity:0.55' }, svg);
+          } else {
+            el('rect', { x, y: 68, width: w, height: 2, style: 'fill:var(--border)' }, svg);
+          }
+          const lo = Math.max(0, M * (i - 1)), hi = M * (i + 1);
+          const y = 78 + (i % 2) * 10;
+          const st = i >= visC ? 'fill:var(--border);opacity:0.6' : sel.has(i) ? 'fill:var(--accent)' : 'fill:var(--text-faint);opacity:0.6';
+          el('rect', { x: tokX(lo) + 1, y, width: (hi - lo) * cw - 2, height: 7, rx: 3, style: st }, svg);
+        }
+        const covSel = new Set(), covVis = new Set();
+        for (let i = 0; i < visC; i++) for (let j = Math.max(0, M * (i - 1)); j < M * (i + 1); j++) { covVis.add(j); if (sel.has(i)) covSel.add(j); }
+        const tokRow = (y, colorFn) => { for (let j = 0; j < N; j++) el('rect', { x: tokX(j) + 0.5, y, width: cw - 1, height: 14, rx: 2, style: colorFn(j) }, svg); };
+        const inWin = (j) => j <= t && j > t - WIN;
+        tokRow(102, (j) => j > t ? 'fill:var(--bg-soft);opacity:0.5' : inWin(j) ? 'fill:var(--accent-2)' : covSel.has(j) ? 'fill:var(--accent);opacity:0.75' : covVis.has(j) ? 'fill:var(--text-faint);opacity:0.45' : 'fill:var(--border)');
+        el('text', { x: x0, y: 140, 'font-size': 11, class: 'soft', text: '↑ 每个原始 token 的去向（CSA 层）' }, svg);
+        el('text', { x: x0, y: 168, 'font-size': 12.5, text: 'HCA：每 16 个 token 一个条目，全部可见条目都参与' }, svg);
+        for (let jb = 0; jb < N / MH; jb++) {
+          const st = jb < visH ? 'fill:var(--accent)' : 'fill:var(--border);opacity:0.6';
+          el('rect', { x: tokX(MH * jb) + 1, y: 178, width: MH * cw - 2, height: 9, rx: 3, style: st }, svg);
+        }
+        tokRow(194, (j) => j > t ? 'fill:var(--bg-soft);opacity:0.5' : inWin(j) ? 'fill:var(--accent-2)' : j < visH * MH ? 'fill:var(--accent);opacity:0.75' : 'fill:var(--border)');
+        el('text', { x: x0, y: 232, 'font-size': 11, class: 'soft', text: '↑ 每个原始 token 的去向（HCA 层）' }, svg);
+        for (let j = 0; j < N; j += 8) el('text', { x: tokX(j) + cw / 2, y: 252, 'text-anchor': 'middle', 'font-size': 10, class: 'mono', text: j }, svg);
+        const qx = tokX(t) + cw / 2;
+        el('path', { d: `M${qx} 262 l-6 10 h12 z`, style: 'fill:var(--text)' }, svg);
+        el('text', { x: Math.min(Math.max(qx, 40), 620), y: 290, 'text-anchor': 'middle', 'font-size': 12, text: 'query t = ' + t }, svg);
+        const nC = Math.min(K, visC) + Math.min(t + 1, WIN), nH = visH + Math.min(t + 1, WIN);
+        ro.innerHTML = '';
+        [['CSA 参与 softmax 的 KV', nC + '（' + Math.min(K, visC) + ' 压缩 + ' + Math.min(t + 1, WIN) + ' 滑窗）'],
+         ['HCA 参与 softmax 的 KV', nH + '（' + visH + ' 压缩 + ' + Math.min(t + 1, WIN) + ' 滑窗）'],
+         ['稠密注意力', (t + 1) + ' 个 token']].forEach(([k, v]) => {
+          const d = document.createElement('div'); d.innerHTML = '<span class="k"></span><span class="v" style="font-size:15px"></span>';
+          d.children[0].textContent = k; d.children[1].textContent = v; ro.appendChild(d);
+        });
+      }
+      gen(); draw();
+      slider.addEventListener('input', draw);
+      $('vis-seed').addEventListener('click', () => { seed = Math.floor(Math.random() * 1e6); gen(); draw(); });
+      let timer = null;
+      const playBtn = $('vis-play');
+      playBtn.addEventListener('click', () => {
+        if (reduceMotion) { slider.value = (+slider.value + 4) % N; draw(); return; }
+        if (timer) { clearInterval(timer); timer = null; playBtn.textContent = '▶ 播放'; return; }
+        playBtn.textContent = '❚❚ 暂停';
+        timer = setInterval(() => { slider.value = (+slider.value + 1) % N; draw(); }, 280);
+      });
+    })();
+
+    /* ---------- Demo: KV cache / FLOPs ---------- */
+    (() => {
+      const MODELS = [
+        { key: 'v32', name: 'V3.2', color: 'var(--text-soft)' },
+        { key: 'pro', name: 'V4-Pro', color: 'var(--accent)' },
+        { key: 'flash', name: 'V4-Flash', color: 'var(--accent-2)' },
+      ];
+      const V4 = {
+        pro: { L: 61, csa: 30, hca: 31, swa: 0, H: 128, topk: 1024, act: 49e9 },
+        flash: { L: 43, csa: 21, hca: 20, swa: 2, H: 64, topk: 512, act: 13e9 },
+      };
+      function cost(key, n, eq) {
+        if (key === 'v32') {
+          const L = 61;
+          const kvMain = L * n * 640, kvIdx = L * n * 128;
+          const lin = 74e9, core = L * 128 * Math.min(n, 2048) * 2 * 1088, idx = L * 64 * 128 * 2 * n;
+          const w = eq ? [1, 2, 1] : [1, 1, 1];
+          return { kv: [kvMain, kvIdx, 0], fl: [lin * w[0], idx * w[2], core * w[1]] };
+        }
+        const c = V4[key];
+        const nc = Math.floor(n / 4), nhh = Math.floor(n / 128), win = Math.min(n, 128);
+        const kvMain = c.csa * nc * 576 + c.hca * nhh * 576, kvIdx = c.csa * nc * 64, kvWin = c.L * win * 576;
+        const lin = 2 * c.act;
+        const core = c.csa * c.H * (Math.min(nc, c.topk) + win) * 2048 + c.hca * c.H * (nhh + win) * 2048 + c.swa * c.H * win * 2048;
+        const idx = c.csa * 64 * 128 * 2 * nc;
+        const w = eq ? [1, 2, 0.5] : [1, 1, 1];
+        return { kv: [kvMain, kvIdx, kvWin], fl: [lin * w[0], idx * w[2], core * w[1]] };
+      }
+      const sum = (a) => a.reduce((x, y) => x + y, 0);
+      const fmtN = (n) => n >= 1048576 ? (n / 1048576).toFixed(n % 1048576 ? 2 : 0) + 'M' : Math.round(n / 1024) + 'K';
+      const slider = $('cost-n'), outN = $('cost-n-out'), chart = $('cost-chart'), ro = $('cost-readout'), bk = $('cost-bk');
+      const getMetric = segInit('cost-metric', draw), getEq = segInit('cost-eq', draw);
+      function draw() {
+        const n = Math.round(Math.pow(2, +slider.value));
+        outN.textContent = fmtN(n);
+        const metric = getMetric(), eq = getEq() === 'eq';
+        const val = (k, nn) => { const c = cost(k, nn, eq); return metric === 'kv' ? sum(c.kv) / 1e9 : sum(c.fl) / 1e12; };
+        while (chart.firstChild) chart.removeChild(chart.firstChild);
+        const X0 = 52, X1 = 620, Y0 = 220, Y1 = 16, NMAX = 1048576;
+        const raw = Math.max(...MODELS.map((m) => val(m.key, NMAX)));
+        const p10 = Math.pow(10, Math.floor(Math.log10(raw / 4)));
+        const step = [1, 1.5, 2, 2.5, 3, 4, 5, 6, 8, 10].map((m) => m * p10).find((st) => st * 4 >= raw);
+        const ymax = step * 4;
+        const px = (nn) => X0 + (X1 - X0) * nn / NMAX, py = (v) => Y0 - (Y0 - Y1) * v / ymax;
+        for (let i = 0; i <= 4; i++) {
+          const v = ymax * i / 4, y = py(v);
+          el('path', { d: `M${X0} ${y} H${X1}`, style: 'stroke:var(--border)' }, chart);
+          el('text', { x: X0 - 6, y: y + 4, 'text-anchor': 'end', 'font-size': 11, style: 'fill:var(--text-faint)', text: +v.toFixed(3) }, chart);
+        }
+        [0, 256, 512, 768, 1024].forEach((k) => el('text', { x: px(k * 1024), y: Y0 + 16, 'text-anchor': 'middle', 'font-size': 11, style: 'fill:var(--text-faint)', text: k + 'K' }, chart));
+        el('text', { x: X0, y: 12, 'font-size': 11.5, style: 'fill:var(--text-soft)', text: metric === 'kv' ? '累计 KV cache（GB）' : '单 token FLOPs（T，' + (eq ? '等效 FP8' : '原始') + '）' }, chart);
+        el('text', { x: X1, y: Y0 + 34, 'text-anchor': 'end', 'font-size': 11, style: 'fill:var(--text-faint)', text: '上下文长度' }, chart);
+        MODELS.forEach((m, mi) => {
+          let d = '';
+          for (let i = 0; i <= 64; i++) { const nn = Math.max(1, Math.round(NMAX * i / 64)); d += (i ? 'L' : 'M') + px(nn).toFixed(1) + ' ' + py(val(m.key, nn)).toFixed(1); }
+          el('path', { d, style: `fill:none;stroke:${m.color};stroke-width:2.2` }, chart);
+          el('rect', { x: X0 + 10 + mi * 92, y: 24, width: 12, height: 4, style: `fill:${m.color}` }, chart);
+          el('text', { x: X0 + 26 + mi * 92, y: 30, 'font-size': 11.5, text: m.name }, chart);
+        });
+        el('path', { d: `M${px(n)} ${Y1} V${Y0}`, style: 'stroke:var(--text);stroke-dasharray:4 3' }, chart);
+        const vals = MODELS.map((m) => val(m.key, n));
+        ro.innerHTML = '';
+        const unit = metric === 'kv' ? ' GB' : ' TFLOPs';
+        const add = (k, v) => { const d = document.createElement('div'); d.innerHTML = '<span class="k"></span><span class="v"></span>'; d.children[0].textContent = k; d.children[1].textContent = v; ro.appendChild(d); };
+        const fmtV = (v) => v >= 100 ? v.toFixed(0) : v >= 1 ? v.toFixed(2) : v.toFixed(3);
+        add('V3.2', fmtV(vals[0]) + unit);
+        add('V4-Pro', fmtV(vals[1]) + unit + '（' + (100 * vals[1] / vals[0]).toFixed(1) + '%）');
+        add('V4-Flash', fmtV(vals[2]) + unit + '（' + (100 * vals[2] / vals[0]).toFixed(1) + '%）');
+        if (metric === 'kv') add('GQA8 BF16 基线（61 层）', fmtV(61 * n * 4096 / 1e9) + ' GB');
+        bk.innerHTML = '';
+        const segs = metric === 'kv' ? [['主 KV（CSA/HCA 或 MLA）', 'var(--accent)'], ['indexer key', 'var(--accent-2)'], ['滑窗 KV', 'var(--text-faint)']]
+          : [['线性层', 'var(--accent)'], ['indexer', 'var(--accent-2)'], ['核心注意力', 'var(--text-faint)']];
+        const parts = MODELS.map((m) => { const c = cost(m.key, n, eq); return metric === 'kv' ? c.kv.map((x) => x / 1e9) : c.fl.map((x) => x / 1e12); });
+        const mx = Math.max(...parts.map(sum));
+        MODELS.forEach((m, i) => {
+          const row = document.createElement('div'); row.className = 'bk-row';
+          const lab = document.createElement('span'); lab.textContent = m.name;
+          const tr = document.createElement('div'); tr.className = 'bk-track';
+          parts[i].forEach((p, j) => { const s = document.createElement('span'); s.style.width = (100 * p / mx) + '%'; s.style.background = segs[j][1]; s.title = segs[j][0] + ': ' + fmtV(p); tr.appendChild(s); });
+          const v = document.createElement('span'); v.className = 'bk-val'; v.textContent = fmtV(sum(parts[i]));
+          row.append(lab, tr, v); bk.appendChild(row);
+        });
+        const lg = document.createElement('div'); lg.className = 'legend';
+        lg.innerHTML = segs.map(([t, c]) => '<span><i style="background:' + c + '"></i>' + t + '</span>').join('');
+        bk.appendChild(lg);
+      }
+      slider.addEventListener('input', draw);
+      draw();
+    })();
+
+    /* ---------- Demo: Sinkhorn ---------- */
+    (() => {
+      const n = 4;
+      let rng = mulberry(11), raw;
+      const tSl = $('sk-t'), sSl = $('sk-s'), mat = $('sk-mat'), ro = $('sk-readout');
+      const newRaw = () => { raw = Array.from({ length: n }, () => Array.from({ length: n }, () => gauss(rng))); };
+      const sinkhorn = (B, iters) => {
+        let M = B.map((r) => r.map(Math.exp));
+        for (let t = 0; t < iters; t++) {
+          const cs = Array.from({ length: n }, (_, j) => M.reduce((s, r) => s + r[j], 0));
+          M = M.map((r) => r.map((v, j) => v / cs[j]));
+          M = M.map((r) => { const s = r.reduce((a, b) => a + b, 0); return r.map((v) => v / s); });
+        }
+        return M;
+      };
+      const matmul = (A, B) => A.map((r) => B[0].map((_, j) => r.reduce((s, v, k) => s + v * B[k][j], 0)));
+      const specNorm = (M) => {
+        let v = Array.from({ length: M[0].length }, (_, i) => 1 + 0.1 * i);
+        let lam = 0;
+        for (let it = 0; it < 200; it++) {
+          const u = M.map((r) => r.reduce((s, x, j) => s + x * v[j], 0));
+          const w = v.map((_, j) => M.reduce((s, r, i) => s + r[j] * u[i], 0));
+          const nw = Math.hypot(...w); if (nw === 0) return 0;
+          v = w.map((x) => x / nw); lam = nw;
+        }
+        return Math.sqrt(lam);
+      };
+      function draw() {
+        const t = +tSl.value, s = +sSl.value;
+        $('sk-t-out').textContent = t; $('sk-s-out').textContent = s.toFixed(1);
+        const B = raw.map((r) => r.map((x) => x * s));
+        const M = sinkhorn(B, t);
+        const rs = M.map((r) => r.reduce((a, b) => a + b, 0));
+        const cs = Array.from({ length: n }, (_, j) => M.reduce((a, r) => a + r[j], 0));
+        const mx = Math.max(...M.flat());
+        mat.innerHTML = '';
+        const cell = (txt, bg, cls) => { const d = document.createElement('div'); d.textContent = txt; if (bg !== null) d.style.background = 'color-mix(in srgb, var(--accent) ' + bg + '%, transparent)'; if (cls) d.className = cls; mat.appendChild(d); };
+        for (let i = 0; i < n; i++) { for (let j = 0; j < n; j++) cell(M[i][j] >= 100 ? M[i][j].toExponential(1) : M[i][j].toFixed(3), Math.round(70 * M[i][j] / mx), ''); cell('Σ ' + rs[i].toFixed(3), null, 'sum'); }
+        for (let j = 0; j < n; j++) cell('Σ ' + cs[j].toFixed(3), null, 'sum');
+        cell('', null, 'sum');
+        const dev = Math.max(...rs.map((x) => Math.abs(x - 1)), ...cs.map((x) => Math.abs(x - 1)));
+        ro.innerHTML = '';
+        [['行/列和与 1 的最大偏差', dev < 1e-4 ? dev.toExponential(1) : dev.toFixed(4)], ['谱范数 ‖M‖₂', specNorm(M).toFixed(4)], ['状态', t === 0 ? 'exp(B̃)，未投影' : dev < 1e-3 ? '≈ 双随机' : '收敛中']].forEach(([k, v]) => {
+          const d = document.createElement('div'); d.innerHTML = '<span class="k"></span><span class="v"></span>'; d.children[0].textContent = k; d.children[1].textContent = v; ro.appendChild(d);
+        });
+      }
+      newRaw(); draw();
+      tSl.addEventListener('input', draw); sSl.addEventListener('input', draw);
+      $('sk-new').addEventListener('click', () => { newRaw(); draw(); $('sk-stack-out').textContent = ''; });
+      $('sk-stack').addEventListener('click', () => {
+        const r = mulberry(Math.floor(Math.random() * 1e6)), s = +sSl.value;
+        const prodNorm = (gen) => {
+          let P = Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => +(i === j))), logS = 0;
+          for (let l = 0; l < 122; l++) {
+            P = matmul(gen(), P);
+            const f = Math.hypot(...P.flat()); if (!(f > 0)) return { log: -Infinity };
+            P = P.map((row) => row.map((x) => x / f)); logS += Math.log(f);
+          }
+          return { log: logS + Math.log(specNorm(P)) };
+        };
+        const hc = prodNorm(() => Array.from({ length: n }, (_, i) => Array.from({ length: n }, (_, j) => (i === j ? 1 : 0) + 0.15 * gauss(r))));
+        const mhc = prodNorm(() => sinkhorn(Array.from({ length: n }, () => Array.from({ length: n }, () => s * gauss(r))), 20));
+        const fmt = (o) => { const l10 = o.log / Math.LN10; return Math.abs(l10) < 3 ? Math.exp(o.log).toFixed(3) : '10^' + l10.toFixed(1); };
+        $('sk-stack-out').textContent = '无约束：‖∏B‖₂ ≈ ' + fmt(hc) + '　｜　mHC：‖∏B‖₂ ≈ ' + fmt(mhc);
+      });
+    })();
+
+    /* ---------- Demo: params + EP ---------- */
+    (() => {
+      const BASE = {
+        flash: { d: 4096, V: 129280, L: 43, H: 64, c: 512, qr: 1024, g: 8, orank: 1024, E: 256, k: 6, f: 2048, IH: 64, IC: 128, n: 4,
+          ratios: [0, 0, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4, 128, 4] },
+        pro: { d: 7168, V: 129280, L: 61, H: 128, c: 512, qr: 1536, g: 16, orank: 1024, E: 384, k: 6, f: 3072, IH: 64, IC: 128, n: 4, ratios: null },
+      };
+      BASE.pro.ratios = [128, 128]; for (let i = 2; i < 61; i++) BASE.pro.ratios.push(i % 2 === 0 ? 4 : 128);
+      let preset = 'pro';
+      const eS = $('moe-e'), kS = $('moe-k'), fS = $('moe-f');
+      function count(cfg) {
+        const { d, V, L, H, c, qr, g, orank, E, k, f, IH, IC, n } = cfg;
+        const attn = (r) => {
+          let p = d * qr + qr + qr * H * c + d * c + c + (H * c / g) * (g * orank) + g * orank * d + H;
+          if (r) { const co = r === 4 ? 2 : 1; p += 2 * d * co * c + r * co * c + c; if (r === 4) p += qr * IH * IC + d * IH + 2 * d * 2 * IC + 4 * 2 * IC + IC; }
+          return p;
+        };
+        const expert = 3 * d * f, mix = (2 + n) * n, hc = 2 * (mix * n * d + mix + 3);
+        let A = 0; for (let i = 0; i < L; i++) A += attn(cfg.ratios[i]);
+        const r = {
+          emb: V * d, head: V * d + d + n * n * d + n + 1, attn: A, hc: L * (hc + 2 * d),
+          routed: L * E * expert, shared: L * expert, gate: L * (E * d + E),
+        };
+        r.total = r.emb + r.head + r.attn + r.hc + r.routed + r.shared + r.gate;
+        r.actRouted = L * k * expert;
+        r.active = r.head + r.attn + r.hc + r.actRouted + r.shared + L * E * d;
+        return r;
+      }
+      const B = (x) => x >= 1e12 ? (x / 1e12).toFixed(3) + 'T' : x >= 1e9 ? (x / 1e9).toFixed(1) + 'B' : (x / 1e6).toFixed(1) + 'M';
+      function draw() {
+        const cfg = Object.assign({}, BASE[preset], { E: +eS.value, k: +kS.value, f: +fS.value });
+        $('moe-e-out').textContent = cfg.E; $('moe-k-out').textContent = cfg.k; $('moe-f-out').textContent = cfg.f;
+        const r = count(cfg);
+        const ro = $('moe-readout'); ro.innerHTML = '';
+        [['总参数（主干）', B(r.total)], ['激活参数（不含嵌入）', B(r.active)], ['激活比例', (100 * r.active / r.total).toFixed(2) + '%'], ['每 token MoE FLOPs / 层', B(2 * 3 * cfg.d * cfg.f * (cfg.k + 1)).replace('B', 'G').replace('M', 'M')]].forEach(([k, v]) => {
+          const d = document.createElement('div'); d.innerHTML = '<span class="k"></span><span class="v"></span>'; d.children[0].textContent = k; d.children[1].textContent = v; ro.appendChild(d);
+        });
+        const rows = [['嵌入表', r.emb, 0], ['输出头（含 mHC 出口）', r.head, r.head], ['注意力（全部层）', r.attn, r.attn], ['mHC + RMSNorm', r.hc, r.hc], ['路由专家', r.routed, r.actRouted], ['共享专家', r.shared, r.shared], ['门控', r.gate, cfg.L * cfg.E * cfg.d]];
+        $('moe-table').innerHTML = '<thead><tr><th>部分</th><th class="num">总量</th><th class="num">每 token 激活</th></tr></thead><tbody>' +
+          rows.map(([a, b, c]) => '<tr><td>' + a + '</td><td class="num">' + B(b) + '</td><td class="num">' + (c ? B(c) : '—') + '</td></tr>').join('') + '</tbody>';
+        drawEP();
+      }
+      function drawEP() {
+        const C = +$('ep-c').value, Bw = +$('ep-b').value, f = +fS.value;
+        $('ep-c-out').textContent = C; $('ep-b-out').textContent = Bw;
+        const ratio = C * 1e12 / (Bw * 1e9), thr = 2 * f, need = C * 1e12 / thr / 1e9;
+        const ro = $('ep-readout'); ro.innerHTML = '';
+        [['C / B（FLOPs/字节）', ratio.toFixed(0)], ['阈值 2d', thr], ['所需最低带宽', need.toFixed(0) + ' GB/s'], ['结论', ratio <= thr ? '通信可被完全隐藏' : '带宽成为瓶颈']].forEach(([k, v]) => {
+          const d = document.createElement('div'); d.innerHTML = '<span class="k"></span><span class="v" style="font-size:16px"></span>'; d.children[0].textContent = k; d.children[1].textContent = v; ro.appendChild(d);
+        });
+      }
+      segInit('moe-preset', (v) => { preset = v; eS.value = BASE[v].E; kS.value = BASE[v].k; fS.value = BASE[v].f; draw(); });
+      [eS, kS, fS].forEach((s) => s.addEventListener('input', draw));
+      [$('ep-c'), $('ep-b')].forEach((s) => s.addEventListener('input', drawEP));
+      draw();
+    })();
+
+    /* ---------- Demo: Newton–Schulz ---------- */
+    (() => {
+      const A = [3.4445, -4.775, 2.0315], Bc = [2, -1.5, 0.5];
+      const f = (x, c) => c[0] * x + c[1] * x ** 3 + c[2] * x ** 5;
+      const svg = $('ns-svg'), kS = $('ns-k'), ro = $('ns-readout');
+      const getMode = segInit('ns-mode', draw);
+      const coef = (mode, i) => mode === 'a' ? A : mode === 'b' ? Bc : (i < 8 ? A : Bc);
+      const run = (x, k, mode) => { for (let i = 0; i < k; i++) x = f(x, coef(mode, i)); return x; };
+      function draw() {
+        const k = +kS.value, mode = getMode(); $('ns-k-out').textContent = k;
+        while (svg.firstChild) svg.removeChild(svg.firstChild);
+        const X0 = 50, X1 = 620, Y0 = 240, Y1 = 14, LMIN = -4, YMAX = 1.4;
+        const px = (l) => X0 + (X1 - X0) * (l - LMIN) / (0 - LMIN), py = (y) => Y0 - (Y0 - Y1) * Math.min(Math.max(y, 0), YMAX) / YMAX;
+        [0, 0.5, 1, 1.4].forEach((y) => { el('path', { d: `M${X0} ${py(y)} H${X1}`, style: y === 1 ? 'stroke:var(--accent-2);stroke-dasharray:5 4' : 'stroke:var(--border)' }, svg); el('text', { x: X0 - 6, y: py(y) + 4, 'text-anchor': 'end', 'font-size': 11, style: 'fill:var(--text-faint)', text: y }, svg); });
+        [-4, -3, -2, -1, 0].forEach((l) => el('text', { x: px(l), y: Y0 + 16, 'text-anchor': 'middle', 'font-size': 11, style: 'fill:var(--text-faint)', text: '1e' + l }, svg));
+        let d = '';
+        for (let i = 0; i <= 400; i++) { const l = LMIN + (0 - LMIN) * i / 400; d += (i ? 'L' : 'M') + px(l).toFixed(1) + ' ' + py(run(Math.pow(10, l), k, mode)).toFixed(1); }
+        el('path', { d, style: 'fill:none;stroke:var(--accent);stroke-width:2.2' }, svg);
+        el('text', { x: X1, y: Y0 + 34, 'text-anchor': 'end', 'font-size': 11, style: 'fill:var(--text-faint)', text: '输入奇异值 σ（对数）' }, svg);
+        const rng = (lo) => { let mn = Infinity, mx = -Infinity; for (let i = 0; i <= 2000; i++) { const x = run(Math.pow(10, lo * (1 - i / 2000)), k, mode); mn = Math.min(mn, x); mx = Math.max(mx, x); } return mn.toFixed(4) + ' ～ ' + mx.toFixed(4); };
+        ro.innerHTML = '';
+        const desc = mode === 'hyb' ? (k <= 8 ? '第 ' + k + ' 步，仍在快速阶段' : '已进入精修阶段 (2, −1.5, 0.5)') : '';
+        [['σ ∈ [1e-3, 1] 的输出范围', rng(-3)], ['σ ∈ [1e-4, 1] 的输出范围', rng(-4)], ['说明', desc || (mode === 'a' ? '只用快速系数：振荡不收敛到 1' : '只用精修系数：小奇异值每步只翻倍')]].forEach(([kk, v]) => {
+          const dd = document.createElement('div'); dd.innerHTML = '<span class="k"></span><span class="v" style="font-size:15px"></span>'; dd.children[0].textContent = kk; dd.children[1].textContent = v; ro.appendChild(dd);
+        });
+      }
+      kS.addEventListener('input', draw);
+      draw();
+    })();
+  })();
+  </script>
+</body>
+</html>
