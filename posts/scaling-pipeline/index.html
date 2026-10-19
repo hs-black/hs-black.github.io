@@ -1,0 +1,1275 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>流水线并行：从 GPipe 到 DualPipe · Zunzhe Zhang</title>
+  <meta name="description" content="一套可交互的幻灯片：从切层和气泡讲起，推导 AFAB、1F1B、交错、Zero Bubble 与 DualPipe 的气泡、显存与通信，附可拖动的调度模拟器。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    :root { --pp-w: #0f9d8a; --pp-idle: color-mix(in srgb, var(--text-faint) 14%, transparent); }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --pp-w: #34d1b8; } }
+    :root[data-theme="dark"] { --pp-w: #34d1b8; }
+
+    .slide.tight { padding: 44px 64px; gap: 16px; justify-content: flex-start; }
+    .slide h3 { margin: 0; font-size: 30px; }
+    .slide .two { display: grid; grid-template-columns: 1fr 1fr; gap: 36px; align-items: start; }
+    .slide .two.wide-left { grid-template-columns: 1.25fr 1fr; }
+    .slide .card { padding: 18px 22px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); box-shadow: var(--shadow); font-size: 22px; }
+    .slide .card h4 { margin: 0 0 8px; font-size: 22px; color: var(--accent); }
+    .slide .card p + p { margin-top: 8px; }
+    .slide .tag { display: inline-block; padding: 1px 10px; border-radius: 999px; font-size: 16px; background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    .slide .note { font-size: 18px; color: var(--text-faint); }
+    .slide .mono { font-family: var(--font-mono); }
+    .slide .eq { font-size: 26px; }
+    .slide .katex-display { margin: 6px 0; }
+    .slide ul.tight li + li { margin-top: 0.2em; }
+    .slide .s22 { font-size: 22px; }
+    .slide .s24 { font-size: 24px; }
+    .slide pre { margin: 0; padding: 14px 18px; border-radius: 12px; background: var(--code-bg); font-size: 17px; line-height: 1.45; overflow: hidden; }
+    .slide code { font-family: var(--font-mono); font-size: 0.85em; }
+    .slide table.t { border-collapse: collapse; font-size: 20px; width: 100%; }
+    .slide table.t th, .slide table.t td { padding: 7px 10px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+    .slide table.t th { color: var(--text-soft); font-weight: 600; font-size: 18px; }
+    .slide table.t td.num { font-family: var(--font-mono); }
+    .slide svg.fig { width: 100%; height: auto; display: block; }
+    .slide svg text { font-family: var(--font-sans); }
+    .key { display: inline-flex; gap: 14px; flex-wrap: wrap; font-size: 16px; color: var(--text-soft); align-items: center; }
+    .key i { display: inline-block; width: 18px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+
+    /* Gantt widget */
+    .gv { display: flex; flex-direction: column; gap: 6px; padding: 12px 18px !important; }
+    .gv .gv-ctrls { display: flex; flex-wrap: wrap; gap: 6px 18px; align-items: center; font-size: 17px; }
+    .gv .gv-ctrls label { display: inline-flex; gap: 8px; align-items: center; color: var(--text-soft); }
+    .gv .gv-ctrls input[type="range"] { width: 120px; height: 22px; }
+    .gv .gv-ctrls output { min-width: 2.2em; color: var(--text); }
+    .gv .seg button { font-size: 17px !important; padding: 4px 12px !important; }
+    .gv .btn { font-size: 17px !important; padding: 5px 14px !important; }
+    .gv svg { width: 100%; height: auto; display: block; }
+    .gv .gv-read { display: flex; flex-wrap: wrap; gap: 6px; font-size: 14px; }
+    .gv .gv-read > div { padding: 3px 10px; border-radius: 8px; background: var(--bg-soft); }
+    .gv .gv-read b { display: block; font-family: var(--font-mono); font-size: 17px; color: var(--text); }
+    .gv .gv-read span { color: var(--text-faint); }
+    .gv .gv-msg { font-size: 14px; color: var(--accent-2); }
+    .gv .gv-msg:empty { display: none; }
+    .gv-cell { cursor: pointer; }
+
+    .calc { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 26px; font-size: 19px; }
+    .calc label { display: grid; grid-template-columns: 9em 1fr 5.5em; align-items: center; gap: 10px; color: var(--text-soft); }
+    .calc input[type="range"] { width: 100% !important; }
+    .calc output { font-family: var(--font-mono); color: var(--text); text-align: right; }
+    .bigread { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; }
+    .bigread > div { flex: 1; min-width: 180px; padding: 10px 14px; border-radius: 12px; background: var(--bg-soft); font-size: 16px; color: var(--text-faint); }
+    .bigread b { display: block; font-family: var(--font-mono); font-size: 26px; color: var(--text); }
+    .series-pager { margin-top: 0; font-size: 20px; width: 860px; }
+  </style>
+</head>
+<body class="deck-page">
+  <main class="deck"><div class="stage">
+
+    <!-- 1 -->
+    <section class="slide center">
+      <div class="kicker rise">大模型规模化训练 · 流水线并行</div>
+      <h1 class="rise" style="--d: 1">流水线并行：从 GPipe 到 DualPipe</h1>
+      <p class="muted rise" style="--d: 2">切层、气泡、在途激活，以及把气泡一点点挤掉的几代调度</p>
+      <p class="small muted rise" style="--d: 4">按 → 或点击翻页 · 带 <span class="tag">交互</span> 的页面可以直接拖动</p>
+    </section>
+
+    <!-- 2 -->
+    <section class="slide">
+      <div class="kicker">路线</div>
+      <h2>这套幻灯片讲什么</h2>
+      <div class="two s24">
+        <ol class="tight" style="margin:0; padding-left:1.2em">
+          <li class="fragment">为什么要按层切模型，切完之后多了什么通信</li>
+          <li class="fragment">气泡（bubble）：定义与 \((p-1)/m\) 的推导</li>
+          <li class="fragment">AFAB / GPipe：先全前向再全反向，显存随 \(m\) 涨</li>
+          <li class="fragment">1F1B：气泡不变，在途激活封顶为 \(p\)</li>
+        </ol>
+        <ol class="tight" start="5" style="margin:0; padding-left:1.2em">
+          <li class="fragment">交错（interleaved）：每卡 \(v\) 段，气泡 \(\div v\)，通信 \(\times v\)</li>
+          <li class="fragment">Zero Bubble：把反向拆成 B 和 W，用 W 填洞</li>
+          <li class="fragment">DualPipe：双向喂数据，再把 EP 的 all-to-all 藏进计算</li>
+          <li class="fragment">一个能拖动所有参数的调度模拟器 + 选型</li>
+        </ol>
+      </div>
+      <p class="note fragment">记号：\(p\) 流水线级数（卡数），\(m\) 每步的 micro-batch 数，\(v\) 每卡的模型段数；\(t_f, t_b\) 是一个 micro-batch 在一级上的前向、反向耗时。</p>
+    </section>
+
+    <!-- 3 -->
+    <section class="slide">
+      <div class="kicker">动机</div>
+      <h2>单节点装不下模型时</h2>
+      <div class="two wide-left">
+        <div class="s24">
+          <p class="fragment">张量并行（TP）在每层里通信好几次，只适合节点内 NVLink；一跨节点，带宽掉一个数量级。</p>
+          <p class="fragment" style="margin-top:14px">但 70B 量级的模型，光训练状态就超过一个 8 卡节点：混合精度 + Adam 每个参数约 16 字节（bf16 权重 2 + bf16 梯度 2 + fp32 主权重 4 + Adam 两个矩 8）。</p>
+          <p class="fragment" style="margin-top:14px">流水线并行（PP）的思路最朴素：<span class="accent">把层切开</span>，第 1–10 层放卡 0，第 11–20 层放卡 1……每张卡只存 \(1/p\) 的层。</p>
+        </div>
+        <div class="card fragment">
+          <h4>账算一下（Llama 3 70B 的形状）</h4>
+          <p class="mono" style="font-size:19px">80 层, d=8192<br>70×10⁹ × 16 B ≈ 1.12 TB<br>8 × 80 GB = 640 GB &lt; 1.12 TB</p>
+          <p>切成 \(p=8\) 级（每级 10 层）后，每卡的权重 + 梯度 + 优化器状态 ≈ 140 GB；再配上 ZeRO-1 把优化器状态按 DP 切开，就装得下了。</p>
+          <p class="note">激活值是另一回事——后面会看到它才是 PP 调度的主角。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 4 -->
+    <section class="slide">
+      <div class="kicker">切层</div>
+      <h2>每一级是一段连续的层</h2>
+      <svg class="fig" viewBox="0 0 1080 300" role="img" aria-label="4 张卡各存放连续的 4 层，前向传激活，反向传梯度">
+        <defs>
+          <marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
+          <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+        </defs>
+        <g font-size="18" fill="var(--text)">
+          <g transform="translate(20,40)">
+            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
+            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 0 · stage 0</text>
+            <rect x="20" y="44" width="180" height="22" rx="5" fill="var(--bg-soft)"/><text x="110" y="61" text-anchor="middle" font-size="15">embedding</text>
+            <rect x="20" y="72" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="87" text-anchor="middle" font-size="15">layer 1–4</text>
+            <text x="110" y="150" text-anchor="middle" font-size="15" fill="var(--text-soft)">存：这几层的 W、梯度、优化器状态</text>
+          </g>
+          <g transform="translate(290,40)">
+            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
+            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 1 · stage 1</text>
+            <rect x="20" y="58" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="73" text-anchor="middle" font-size="15">layer 5–8</text>
+          </g>
+          <g transform="translate(560,40)">
+            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
+            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 2 · stage 2</text>
+            <rect x="20" y="58" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="73" text-anchor="middle" font-size="15">layer 9–12</text>
+          </g>
+          <g transform="translate(830,40)">
+            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
+            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 3 · stage 3</text>
+            <rect x="20" y="58" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="73" text-anchor="middle" font-size="15">layer 13–16</text>
+            <rect x="20" y="86" width="180" height="22" rx="5" fill="var(--bg-soft)"/><text x="110" y="102" text-anchor="middle" font-size="15">LM head + loss</text>
+          </g>
+          <g stroke-width="3" fill="none">
+            <path d="M244 110 H284" stroke="var(--accent)" marker-end="url(#ar1)"/>
+            <path d="M514 110 H554" stroke="var(--accent)" marker-end="url(#ar1)"/>
+            <path d="M784 110 H824" stroke="var(--accent)" marker-end="url(#ar1)"/>
+            <path d="M284 150 H244" stroke="var(--accent-2)" marker-end="url(#ar2)"/>
+            <path d="M554 150 H514" stroke="var(--accent-2)" marker-end="url(#ar2)"/>
+            <path d="M824 150 H784" stroke="var(--accent-2)" marker-end="url(#ar2)"/>
+          </g>
+          <text x="20" y="250" font-size="17" fill="var(--accent)">→ 前向：send 激活 [b, s, h]</text>
+          <text x="20" y="278" font-size="17" fill="var(--accent-2)">← 反向：send 对激活的梯度 [b, s, h]</text>
+          <text x="560" y="250" font-size="17" fill="var(--text-soft)">首尾两级多了 embedding / LM head，</text>
+          <text x="560" y="278" font-size="17" fill="var(--text-soft)">实践中常给它们少分一层来配平</text>
+        </g>
+      </svg>
+      <p class="s22 fragment">通信只发生在级与级的边界，而且是<span class="accent">点对点</span>（send/recv）：一个 micro-batch 过一次边界只传一份 \([b,s,h]\) 张量。对比 TP 每层都要做 all-reduce，PP 对带宽的要求低得多——这正是它适合跨节点的原因。</p>
+    </section>
+
+    <!-- 5 -->
+    <section class="slide">
+      <div class="kicker">数据怎么流</div>
+      <h2>前向一路往右，反向一路往左</h2>
+      <div class="two">
+<pre><code># 第 i 级（伪代码，Scaling Book 版本的意译）
+x = recv(from=i-1) if i &gt; 0 else batch
+acts = []
+for layer in my_layers:
+    acts.append(x)          # 留给反向用
+    x = layer(x)
+if i &lt; p-1: send(x, to=i+1)
+else:       loss = L(x); g = dL/dx
+
+g = recv(from=i+1) if i &lt; p-1 else g
+for layer, a in reversed(zip(my_layers, acts)):
+    g, dW = layer.vjp(a, g)  # 对输入、对权重求导
+    accumulate(dW)
+if i &gt; 0: send(g, to=i-1)</code></pre>
+        <div class="s22">
+          <p class="fragment">第 \(i\) 级的反向，必须等第 \(i+1\) 级把梯度传回来；而第 \(i+1\) 级的前向，必须等第 \(i\) 级把激活传过来。</p>
+          <p class="fragment" style="margin-top:12px">所以一个 batch 只走一遍时，<span class="accent-2">任意时刻只有一张卡在干活</span>。</p>
+          <p class="fragment" style="margin-top:12px">还要注意 <code>acts</code>：前向时存下来、反向时才释放的激活值。一个 micro-batch 的前向做完、反向没做的这段时间，它就「在途」（in flight），占着显存。后面所有调度都在和这两件事较劲：<b>空闲</b>和<b>在途激活</b>。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 6 -->
+    <section class="slide tight" id="s-naive">
+      <div class="kicker">最朴素的做法</div>
+      <h2>一个 batch 走一遍：大部分时间在等</h2>
+      <div class="widget gv" data-interactive data-sched="afab" data-p="4" data-m="1" data-ctrls="p" data-anim="1"></div>
+      <p class="s22">灰色格子就是<span class="accent">气泡</span>。紫色是前向 F，橙色是反向（这里按 \(t_b \approx 2t_f\) 画）。\(p\) 级的情况下，每张卡只有 \(1/p\) 的时间在算。</p>
+    </section>
+
+    <!-- 7 -->
+    <section class="slide">
+      <div class="kicker">量化气泡</div>
+      <h2>气泡时间与气泡率</h2>
+      <div class="s24">
+        <p class="fragment">理想情况下（完美并行），一级处理一个 batch 只要 \(t_{id} = t_f + t_b\)。</p>
+        <p class="fragment" style="margin-top:10px">实际上，每张卡都要等前面 \(p-1\) 级的前向，再等后面 \(p-1\) 级的反向：</p>
+        <div class="fragment eq">$$t_{pb} = (p-1)\,(t_f + t_b)$$</div>
+        <p class="fragment">两种常见的「气泡大小」口径，别混：</p>
+        <div class="two fragment" style="margin-top:6px">
+          <div class="card"><h4>相对理想时间（Megatron / Playbook）</h4>$$r_{bubble} = \frac{t_{pb}}{t_{id}}$$<p class="s22">一个 batch 时 \(= p-1\)：比理想慢了 \(p-1\) 倍的时间。</p></div>
+          <div class="card"><h4>占总时间的比例（GPipe）</h4>$$\frac{t_{pb}}{t_{pb}+t_{id}}$$<p class="s22">一个 batch 时 \(=(p-1)/p\)，即空闲占比。</p></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- 8 -->
+    <section class="slide">
+      <div class="kicker">第一把工具</div>
+      <h2>把 batch 切成 micro-batch</h2>
+      <div class="two wide-left s24">
+        <div>
+          <p class="fragment">把一个 batch 切成 \(m\) 份。卡 1 在处理 micro-batch 1 的时候，卡 0 已经可以开始 micro-batch 2 了。</p>
+          <p class="fragment" style="margin-top:12px">数学上这就是<span class="accent">梯度累积</span>：每个 micro-batch 的梯度加起来，等全部 \(m\) 个做完再做一次优化器 step——结果和直接用整个 batch 一样（同步语义，不引入权重版本不一致）。</p>
+          <p class="fragment" style="margin-top:12px">代价：每步结束要等流水线排空（pipeline flush），然后所有级同步地做 optimizer step。</p>
+        </div>
+        <div class="card fragment">
+          <h4>和全局 batch 的关系</h4>
+          $$m = \frac{B}{b\cdot d}$$
+          <p class="s22">\(B\) 全局 batch（样本数），\(b\) micro-batch 大小，\(d\) 数据并行度。\(B\) 往往由优化需求定死，所以 \(m\) 不能想多大就多大——这条约束贯穿后面所有讨论。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 9 -->
+    <section class="slide tight" id="s-afab">
+      <div class="kicker">AFAB / GPipe</div>
+      <h2>All-Forward-All-Backward</h2>
+      <div class="widget gv" data-interactive data-sched="afab" data-p="4" data-m="8" data-ctrls="p,m" data-anim="1"></div>
+      <p class="s22">先把 \(m\) 个 micro-batch 的前向全做完，再做全部反向。实现最简单：训练循环仍然是「前向 → 反向」两段。点一个格子可以高亮那个 micro-batch 走过的路径。</p>
+    </section>
+
+    <!-- 10 -->
+    <section class="slide">
+      <div class="kicker">AFAB 的气泡</div>
+      <h2>气泡被 \(m\) 摊薄</h2>
+      <div class="s24">
+        <p class="fragment">开头仍然是 \(p-1\) 个前向的爬坡，结尾仍然是 \(p-1\) 个反向的退坡，气泡的绝对量没变：\(t_{pb} = (p-1)(t_f+t_b)\)。</p>
+        <p class="fragment" style="margin-top:10px">但理想时间变成了 \(m\) 倍：\(t_{id} = m(t_f+t_b)\)。于是</p>
+        <div class="fragment">$$r_{bubble} = \frac{(p-1)(t_f+t_b)}{m\,(t_f+t_b)} = \frac{p-1}{m},\qquad \text{空闲占比} = \frac{p-1}{m+p-1}$$</div>
+        <p class="fragment">GPipe 论文的说法是气泡开销 \(O\!\left(\frac{K-1}{M+K-1}\right)\)（\(K\) 分区数，\(M\) micro-batch 数），实验里 \(M \ge 4K\) 时气泡几乎可以忽略。</p>
+        <p class="fragment" style="margin-top:10px">例：\(p=8\)：\(m=8\) 时 \(r=0.875\)（空闲 47%）；\(m=32\) 时 \(r\approx0.22\)（空闲 18%）；\(m=64\) 时空闲 10%。</p>
+      </div>
+    </section>
+
+    <!-- 11 -->
+    <section class="slide">
+      <div class="kicker">AFAB 的代价</div>
+      <h2>所有 micro-batch 的激活同时在途</h2>
+      <div class="two wide-left s22">
+        <div>
+          <p class="fragment">反向要用前向存下的激活。AFAB 里第一个反向开始之前，\(m\) 个 micro-batch 的前向都做完了——<span class="accent-2">每张卡要同时存 \(m\) 份本级激活</span>。</p>
+          <p class="fragment" style="margin-top:10px">每层激活的经典估算（Korthikanti et al.，16-bit 激活、无 TP/SP、无重计算）：</p>
+          <div class="fragment">$$M_{layer} \approx s\,b\,h\left(34 + \frac{5\,a\,s}{h}\right)\ \text{bytes}$$</div>
+          <p class="fragment">\(5as/h\) 那项是注意力分数矩阵；用 FlashAttention 不落地这块后，约剩 \(34\,sbh\)。</p>
+        </div>
+        <div class="card fragment">
+          <h4>按 70B 形状估一下（示意）</h4>
+          <p class="mono" style="font-size:18px">s=4096, b=1, h=8192<br>34·s·b·h ≈ 1.14 GB / 层 / mb<br>p=8 → 每级 10 层 ≈ 11.4 GB / mb</p>
+          <p>AFAB、\(m=32\)：每卡约 <b>365 GB</b>，不可能。<br>所以「加大 \(m\) 摊薄气泡」在 AFAB 里直接撞上显存墙。</p>
+          <p class="note">34sbh 是 GPT 式结构（4h MLP、MHA）的估算，Llama 的 SwiGLU/GQA 会略有出入，这里只看量级。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 12 -->
+    <section class="slide">
+      <div class="kicker">GPipe 的补丁</div>
+      <h2>重计算（re-materialization）</h2>
+      <div class="s24">
+        <p class="fragment">GPipe 前向时只存<span class="accent">每级边界的输入</span>，反向前把本级前向再算一遍，重建中间激活。</p>
+        <div class="fragment">$$\text{峰值激活} = O\!\left(N + \frac{L}{K}\cdot\frac{N}{M}\right)$$</div>
+        <p class="fragment s22">（GPipe 论文的记号：\(N\) batch 大小，\(N/M\) micro-batch 大小，\(L/K\) 每个分区的层数。第一项是所有 micro-batch 的边界输入，第二项是正在反向的那一个 micro-batch 的完整中间激活。）</p>
+        <p class="fragment" style="margin-top:10px">代价是每个 micro-batch 多一次前向：按 \(t_b \approx 2t_f\)，计算量从 \(3t_f\) 涨到 \(4t_f\)，约 +33%。Zero Bubble 论文引用的经验数字是约 20% 的开销。</p>
+        <p class="fragment" style="margin-top:10px">Megatron 的折中：选择性地每 1–2 层存一个检查点，存 \(c\) 个检查点时显存 \(c\cdot A^{in} + \frac{l}{c}A^{mid}\)，在 \(c=\sqrt{l\,A^{mid}/A^{in}}\) 处最小。</p>
+      </div>
+    </section>
+
+    <!-- 13 -->
+    <section class="slide">
+      <div class="kicker">1F1B</div>
+      <h2>尽早开始反向</h2>
+      <div class="s24">
+        <p class="fragment">问题出在「所有前向做完才开始反向」。只要最后一级做完某个 micro-batch 的前向，它就可以立刻做那个 micro-batch 的反向，把激活释放掉。</p>
+        <p class="fragment" style="margin-top:12px">第 \(r\) 级（从 0 数）的程序分三段：</p>
+        <ol class="tight s22 fragment" style="margin-top:6px">
+          <li><b>warm-up</b>：先做 \(p-r-1\) 个前向（越靠前的级做得越多）；</li>
+          <li><b>steady</b>：一个前向、一个反向交替（one-forward-one-backward）；</li>
+          <li><b>cool-down</b>：把剩下 \(p-r-1\) 个 micro-batch 的反向做完。</li>
+        </ol>
+        <p class="fragment" style="margin-top:12px">最早出现在 PipeDream（异步版本，靠 weight stashing 保存多版本权重）；带 flush 的同步版本叫 PipeDream-Flush，就是 Megatron-LM 默认的调度。</p>
+      </div>
+    </section>
+
+    <!-- 14 -->
+    <section class="slide tight" id="s-1f1b">
+      <div class="kicker">1F1B · 交互</div>
+      <h2>看它的时间线</h2>
+      <div class="widget gv" data-interactive data-sched="1f1b" data-p="4" data-m="8" data-ctrls="p,m" data-anim="1"></div>
+      <p class="s22">右侧小柱是播放光标所在时刻每张卡的<span class="accent">在途激活</span>（前向已做、反向未做的 micro-batch 数），播放结束后显示每卡的峰值。拖大 \(m\)：气泡率下降，而在途激活的峰值始终是 \(p\)。</p>
+    </section>
+
+    <!-- 15 -->
+    <section class="slide">
+      <div class="kicker">1F1B 的账</div>
+      <h2>气泡没变，显存封顶</h2>
+      <div class="two s22">
+        <div>
+          <h3 class="fragment">为什么气泡一样大</h3>
+          <p class="fragment" style="margin-top:8px">对第 0 级：它在 \((p-1)\) 个前向之后才能收到第一个反向；结尾最后一个反向要等后面 \(p-1\) 级依次退回来。不管中间怎么排，开头和结尾的等待都在。数一下就是 \((p-1)(t_f+t_b)\)，于是仍然</p>
+          <div class="fragment">$$r_{bubble} = \frac{p-1}{m}$$</div>
+        </div>
+        <div>
+          <h3 class="fragment">但在途激活从 \(m\) 降到 \(p\)</h3>
+          <p class="fragment" style="margin-top:8px">第 \(r\) 级最多同时有 \(p-r\) 个 micro-batch 在途（warm-up 的 \(p-r-1\) 个 + steady 里刚做完前向的 1 个），与 \(m\) 无关。</p>
+          <p class="fragment" style="margin-top:8px">所以 1F1B 的真正收益是：<span class="accent">可以放心加大 \(m\)</span>，由此间接压低气泡。</p>
+          <p class="fragment" style="margin-top:8px">副作用：显存不均，第 0 级最重（再加上 embedding）。Llama 3 论文专门提到这个问题。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 16 -->
+    <section class="slide">
+      <div class="kicker">实测</div>
+      <h2>Playbook 里 1F1B 的扩展性</h2>
+      <div class="s24">
+        <p class="fragment">Playbook 在自家集群上测了 1F1B：当 \(m \le p-1\) 时，气泡非常伤，PP 越大性能越差；当 \(m=32 \gg p-1\) 时小 PP 度的性能明显改善，但 PP 很大时仍然受限。</p>
+        <p class="fragment" style="margin-top:12px">一个值得记住的对比：micro-batch 较少时，从 1 个节点（\(p=8\)）扩到 2 个节点（\(p=16\)），性能只降了约 <b>14%</b>；而张量并行在类似的跨节点场景通常降约 <b>43%</b>。</p>
+        <p class="fragment" style="margin-top:12px">结论和直觉一致：PP 的 p2p 流量小，碰到较慢的节点间网络时比 TP 更扛得住；它的主要敌人是气泡，不是带宽。</p>
+        <p class="note fragment">数字来自 Ultra-Scale Playbook「One forward, one backward」一节的基准，是他们的硬件和配置下的结果。</p>
+      </div>
+    </section>
+
+    <!-- 17 -->
+    <section class="slide">
+      <div class="kicker">PP × DP</div>
+      <h2>在固定 GPU 数和全局 batch 下</h2>
+      <div class="two wide-left s22">
+        <div>
+          <p class="fragment">Megatron-LM（2021）的分析：\(n\) 张卡、\(t=1\)，PP 度 \(p = n/d\)，每条流水线的 micro-batch 数 \(m = b'/d\)，其中 \(b' = B/b\)。代入：</p>
+          <div class="fragment">$$\frac{p-1}{m} = \frac{n/d - 1}{b'/d} = \frac{n-d}{b'}$$</div>
+          <p class="fragment">DP 度 \(d\) 越大，气泡越小；全局 batch 越大，气泡也越小。PP 只应该用到「模型装得下」为止，剩下的卡给 DP。</p>
+          <p class="fragment" style="margin-top:8px">micro-batch 大小 \(b\) 也有张力：\(b\) 大 → GEMM 算术强度高，但 \(m\) 小 → 气泡大。Megatron 用 \((b'/b+p-1)(t_f(b)+t_b(b))\) 估总时间来选 \(b\)。</p>
+        </div>
+        <div class="card fragment">
+          <h4>Megatron 的经验法则</h4>
+          <p>1. TP 用到单节点 GPU 数 \(g\) 为止；跨节点再用 PP。</p>
+          <p>2. 总模型并行度 \(t\cdot p\) 取刚好装得下模型的值，其余用 DP 扩。</p>
+          <p>3. 最优 micro-batch 大小取决于模型的吞吐/显存特性和 \(p, d, B\)。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 18 -->
+    <section class="slide">
+      <div class="kicker">交错调度</div>
+      <h2>每张卡放多段不连续的层</h2>
+      <svg class="fig" viewBox="0 0 1080 250" role="img" aria-label="交错放置：16 层分成 8 段，卡 0 放第 1 和第 5 段">
+        <g font-size="16" fill="var(--text)">
+          <text x="0" y="22" fill="var(--text-soft)">普通（v=1）</text>
+          <text x="0" y="142" fill="var(--text-soft)">交错（v=2）</text>
+        </g>
+        <g id="interleave-fig"></g>
+      </svg>
+      <p class="s22 fragment">把模型切成 \(v\cdot p\) 段（Megatron 叫 model chunk），第 \(k\) 段放在卡 \(k \bmod p\) 上。一个 micro-batch 的前向会<span class="accent">绕流水线转 \(v\) 圈</span>（Playbook 叫 looping pipeline）。例：16 层、4 卡、\(v=2\)：卡 0 放第 1–2 层和第 9–10 层。</p>
+    </section>
+
+    <!-- 19 -->
+    <section class="slide">
+      <div class="kicker">交错的气泡</div>
+      <h2>气泡 \(\div\,v\)，通信 \(\times\,v\)</h2>
+      <div class="s24">
+        <p class="fragment">每一段只有原来 \(1/v\) 的层，所以一段的前向/反向时间是 \(t_f/v,\ t_b/v\)。爬坡和退坡仍然是 \(p-1\) 步，但每步变短了：</p>
+        <div class="fragment">$$t^{int}_{pb} = \frac{(p-1)(t_f+t_b)}{v},\qquad r_{bubble} = \frac{1}{v}\cdot\frac{p-1}{m}$$</div>
+        <p class="fragment">代价一：每个 micro-batch 跨越的级边界从 \(p-1\) 个变成 \(vp-1\) 个，<span class="accent-2">p2p 通信量约 \(\times v\)</span>。Megatron 用 scatter/gather 优化抵消：发送端把张量按 TP 度 \(t\) 切开，各走一块 IB 网卡，接收端用 NVLink all-gather 还原，每对相邻级间的 IB 流量降为 \(bsh/t\)。</p>
+        <p class="fragment" style="margin-top:8px">代价二：Megatron 的实现要求 \(m\) 是 \(p\) 的整数倍；第 0 级的在途激活也会略多于 \(p\)（下一页模拟器可以看到，\(p=4,v=2\) 时是 5.5 份）。</p>
+      </div>
+    </section>
+
+    <!-- 20 -->
+    <section class="slide tight" id="s-int">
+      <div class="kicker">交错 1F1B · 交互</div>
+      <h2>拖 \(v\) 看气泡缩小</h2>
+      <div class="widget gv" data-interactive data-sched="int" data-p="4" data-m="8" data-v="2" data-ctrls="p,m,v,c" data-anim="1"></div>
+      <p class="s22">颜色深浅区分同一张卡上的不同段。把「p2p 延迟」拉起来：每跨一次级边界多等 \(c\)，交错因为跨边界次数多，受伤更重。这就是「通信 \(\times v\)」在时间线上的样子。</p>
+    </section>
+
+    <!-- 21 -->
+    <section class="slide">
+      <div class="kicker">深度优先 vs 广度优先</div>
+      <h2>同一时刻先做哪个？</h2>
+      <div class="two s22">
+        <div>
+          <p class="fragment">交错之后，一张卡上同时可能有「早的 micro-batch 在后面的段」和「晚的 micro-batch 在前面的段」两种活。</p>
+          <p class="fragment" style="margin-top:8px"><b>深度优先（DFS）</b>：优先让早的 micro-batch 走完，尽快关闭前向-反向环。Megatron 的交错调度以 \(p\) 个 micro-batch 为一组轮转。</p>
+          <p class="fragment" style="margin-top:8px"><b>广度优先（BFS）</b>：先让所有 micro-batch 过完这一段再进下一段。Lamy-Poirier 的 Breadth-First PP 论文指出，它和 FSDP 搭配很好：每段权重只需 all-gather 一次就服务所有 micro-batch，梯度 reduce 也能更好地和计算重叠。代价是在途激活接近 AFAB。</p>
+        </div>
+        <div>
+          <p class="fragment"><b>Llama 3 的做法</b>：把「同一段连续做几个 micro-batch」记为 \(N\)，DFS 对应 \(N=p\)，BFS 对应 \(N=m\)，Llama 3 让 \(N\) 可调，在两者之间找通信与显存的平衡点。</p>
+          <p class="fragment" style="margin-top:8px">他们还：首尾两级各少放一层 Transformer（首段只剩 embedding，末段只剩输出投影和 loss）来配平；用异步 p2p；主动释放不再用的张量。气泡率写作 \(\frac{PP-1}{V\cdot M}\)。</p>
+          <p class="note fragment" style="margin-top:8px">在下一页的模拟器里，交错模式有一个 \(N\) 滑块（这里实现的是 \(N\ge p\) 且 \(m\) 为 \(N\) 倍数的版本），把 \(N\) 拉到 \(m\) 能看到峰值激活变大。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 22 -->
+    <section class="slide tight" id="s-dfsbfs">
+      <div class="kicker">DFS ↔ BFS · 交互</div>
+      <h2>\(N\) 从 \(p\) 拉到 \(m\)</h2>
+      <div class="widget gv" data-interactive data-sched="int" data-p="4" data-m="16" data-v="2" data-n="4" data-ctrls="v,N" data-anim="1"></div>
+      <p class="s22">气泡几乎不变，峰值在途激活随 \(N\) 增大（\(N=m\) 时退化成「交错版 AFAB」）。BFS 换来的是 FSDP 下权重聚合次数更少——这部分收益模拟器里看不到。</p>
+    </section>
+
+    <!-- 23 -->
+    <section class="slide">
+      <div class="kicker">PP 的通信</div>
+      <h2>p2p 流量有多小？</h2>
+      <div class="two wide-left s22">
+        <div>
+          <p class="fragment">每个 micro-batch、每个级边界：前向 send 一份激活 \([b,s,h]\)，反向 send 一份同形状的梯度。bf16 下各 \(2bsh\) 字节。Playbook 记一张卡收+发合计 \(4\cdot s\cdot b\cdot h\) 字节 / micro-batch（前向、反向各 \(2sbh\)）。</p>
+          <p class="fragment" style="margin-top:8px">能否被计算藏住？下一级在这段时间要算 \(l\) 层，前向每层约 \(24bsh^2\) FLOPs（只算矩阵乘，GPT 式 4h MLP）：</p>
+          <div class="fragment">$$\frac{t_{comm}}{t_{comp}} \approx \frac{2bsh / BW}{24\,bsh^2\,l / F} = \frac{F}{12\,h\,l\,BW}$$</div>
+          <p class="fragment">和 \(b, s\) 无关，只看 \(h\)、每级层数、算力/带宽比。Playbook 的版本是 \(\frac{F}{32\,h\,l\,BW}\)，常数取法不同，结论一样。</p>
+        </div>
+        <div class="widget fragment" data-interactive id="commcalc">
+          <div class="calc" style="grid-template-columns:1fr">
+            <label>hidden h <input type="range" id="cc-h" min="1024" max="16384" step="1024" value="8192"><output id="cc-h-o"></output></label>
+            <label>每级层数 l <input type="range" id="cc-l" min="1" max="40" step="1" value="10"><output id="cc-l-o"></output></label>
+            <label>算力 F (TFLOPs) <input type="range" id="cc-f" min="100" max="2500" step="50" value="989"><output id="cc-f-o"></output></label>
+            <label>p2p 带宽 (GB/s) <input type="range" id="cc-bw" min="5" max="450" step="5" value="50"><output id="cc-bw-o"></output></label>
+          </div>
+          <div class="bigread"><div>t_comm / t_comp<b id="cc-r"></b></div><div>每 mb 每边界 (s=4096,b=1)<b id="cc-v"></b></div></div>
+          <p class="note" style="margin-top:6px">默认：H100 稠密 bf16 峰值 989 TFLOPs、单卡 50 GB/s 的 IB（400 Gb/s）。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 24 -->
+    <section class="slide">
+      <div class="kicker">Zero Bubble · 关键观察</div>
+      <h2>反向其实是两个矩阵乘</h2>
+      <div class="two wide-left">
+        <svg class="fig" viewBox="0 0 560 330" role="img" aria-label="线性层 y = xW 的反向分为对输入的梯度 B 和对权重的梯度 W">
+          <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"/></marker></defs>
+          <g font-size="19" fill="var(--text)">
+            <rect x="20" y="40" width="110" height="56" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="75" y="75" text-anchor="middle">x（上一层）</text>
+            <rect x="225" y="40" width="110" height="56" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="280" y="75" text-anchor="middle">F: y = xW</text>
+            <rect x="430" y="40" width="110" height="56" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="485" y="75" text-anchor="middle">y</text>
+            <path d="M132 68 H220" stroke="var(--text-soft)" stroke-width="2" marker-end="url(#ar3)"/>
+            <path d="M337 68 H425" stroke="var(--text-soft)" stroke-width="2" marker-end="url(#ar3)"/>
+            <rect x="430" y="170" width="110" height="56" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="485" y="204" text-anchor="middle">∂L/∂y</text>
+            <rect x="225" y="150" width="130" height="56" rx="10" fill="color-mix(in srgb, var(--accent-2) 16%, transparent)" stroke="var(--accent-2)"/><text x="290" y="184" text-anchor="middle">B: ∂L/∂y · Wᵀ</text>
+            <rect x="225" y="245" width="130" height="56" rx="10" fill="color-mix(in srgb, var(--pp-w) 16%, transparent)" stroke="var(--pp-w)"/><text x="290" y="279" text-anchor="middle">W: xᵀ · ∂L/∂y</text>
+            <rect x="20" y="150" width="110" height="56" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="75" y="184" text-anchor="middle">∂L/∂x</text>
+            <path d="M428 198 H360" stroke="var(--text-soft)" stroke-width="2" marker-end="url(#ar3)"/>
+            <path d="M428 210 Q390 270 360 272" stroke="var(--text-soft)" stroke-width="2" fill="none" marker-end="url(#ar3)"/>
+            <path d="M222 178 H135" stroke="var(--accent-2)" stroke-width="2.5" marker-end="url(#ar3)"/>
+            <text x="135" y="140" font-size="15" fill="var(--accent-2)">传给上一级 → 关键路径</text>
+            <text x="20" y="320" font-size="15" fill="var(--pp-w)">∂L/∂W 只在 optimizer step 前需要</text>
+          </g>
+        </svg>
+        <div class="s22" style="font-size:20px">
+          <p class="fragment">对 \(y = xW\)：反向要算两样东西。</p>
+          <p class="fragment" style="margin-top:8px"><span class="accent-2"><b>B</b></span>（backward for input）：\(\partial L/\partial x = \partial L/\partial y \cdot W^\top\)。上一级的反向等着它——在关键路径上。</p>
+          <p class="fragment" style="margin-top:8px"><span style="color:var(--pp-w)"><b>W</b></span>（backward for weights）：\(\partial L/\partial W = x^\top \partial L/\partial y\)。没人等它，只要在 optimizer step 前算完。</p>
+          <p class="fragment" style="margin-top:8px">框架习惯把两者打包成一个 backward（对 DP 很友好：第 \(i\) 层梯度的通信可以和第 \(i-1\) 层反向重叠），但在 PP 里这平白拉长了依赖链。Sea AI Lab 的 Zero Bubble（Qi et al.）把它们拆开调度：<b>W 可以放在同级 B 之后的任何位置</b>。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 25 -->
+    <section class="slide">
+      <div class="kicker">Zero Bubble · 账本</div>
+      <h2>F、B、W 各花多少</h2>
+      <div class="two s22">
+        <div>
+          <p class="fragment">每层只计矩阵乘、GPT 式结构（\(4h\) MLP，头维 \(h/a\)），Zero Bubble 论文的表 1：</p>
+          <table class="t fragment" style="margin-top:8px">
+            <tr><th>Pass</th><th>FLOPs</th><th>需保留的激活</th></tr>
+            <tr><td>F</td><td class="num">sbh(24h+4s)</td><td class="num">0</td></tr>
+            <tr><td>B</td><td class="num">sbh(24h+8s)</td><td class="num">sb(34h+5as)</td></tr>
+            <tr><td>W</td><td class="num">sbh(24h)</td><td class="num">32sbh</td></tr>
+          </table>
+          <p class="fragment" style="margin-top:10px">于是 \(T_W \lt T_F \lt T_B\)，\(T_B + T_W = 2T_F\)。</p>
+        </div>
+        <div>
+          <p class="fragment">记号：\(M_B\)/\(M_W\) 是一次 B/W 需要占着的激活显存。B 做完会释放一部分，但要为 W 留下 \(\partial L/\partial z\) 之类的东西，所以 \(M_W \lt M_B\)（但不小：没有 \(5as\) 项时 \(32/34\)）。</p>
+          <p class="fragment" style="margin-top:10px">为了画出手工调度，论文先假设 \(T_F = T_B = T_W\)。在这个假设下：1F1B 的完整反向 = B + W = 2 个单位，正好对应 \(t_b \approx 2t_f\)。</p>
+          <p class="fragment" style="margin-top:10px">注意记号陷阱：Zero Bubble 论文里 B 只指「对输入的反向」；DeepSeek-V3 的表格里 B 指<b>完整</b>反向。后面会两边换算。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 26 -->
+    <section class="slide tight" id="s-zbh1">
+      <div class="kicker">ZB-H1 · 交互</div>
+      <h2>显存不变，气泡变成 1/3</h2>
+      <div class="widget gv" data-interactive data-sched="zbh1" data-p="4" data-m="8" data-ctrls="p,m,TW" data-anim="1"></div>
+      <p class="s22">绿色是 W。ZB-H1 沿用 1F1B 的 warm-up，第 \(r\) 级把 W 推迟 \(r\) 轮开始，于是 B 能更早启动、尾部的空洞由迟到的 W 填上。在途激活峰值仍是 \(p\)。</p>
+    </section>
+
+    <!-- 27 -->
+    <section class="slide">
+      <div class="kicker">ZB-H1 的推导</div>
+      <h2>为什么正好少了 \(T_W\)</h2>
+      <div class="s22">
+        <p class="fragment">1F1B 里，第 0 级每次等待反向，等的是「后面 \(p-1\) 级各做一次完整反向」，即 \((p-1)(T_B+T_W)\) 的链条；拆开后链条上只剩 B，W 被挪到链条之外。</p>
+        <p class="fragment" style="margin-top:8px">而尾部，原先 1F1B 的退坡时间里各级在空等，现在用推迟的 W 填进去。论文给出的气泡（以及第 \(i\) 级（从 1 数）的峰值激活 \((p-i+1)M_B + (i-1)M_W\)）：</p>
+        <table class="t fragment" style="margin-top:8px; width:80%">
+          <tr><th>调度</th><th>气泡</th><th>峰值激活</th></tr>
+          <tr><td>1F1B</td><td class="num">(p−1)(T_F+T_B+T_W)</td><td class="num">p·M_B</td></tr>
+          <tr><td>ZB-H1</td><td class="num">(p−1)(T_F+T_B−T_W)</td><td class="num">p·M_B</td></tr>
+          <tr><td>ZB-H2</td><td class="num">(p−1)(T_F+T_B−2T_W)</td><td class="num">(2p−1)·M_B</td></tr>
+        </table>
+        <p class="fragment" style="margin-top:10px">\(T_F=T_B=T_W\) 时：1F1B 是 \(3(p-1)\)，ZB-H1 是 \((p-1)\)——正好 1/3；ZB-H2 是 0。</p>
+      </div>
+    </section>
+
+    <!-- 28 -->
+    <section class="slide tight" id="s-zbh2">
+      <div class="kicker">ZB-H2 · 交互</div>
+      <h2>多放前向，梯形变平行四边形</h2>
+      <div class="widget gv" data-interactive data-sched="zbh2" data-p="4" data-m="8" data-ctrls="p,m,TW" data-anim="1"></div>
+      <p class="s22">warm-up 里多做前向（第 \(r\) 级最多 \(2(p-r)-1\) 个在途），填掉第一个 B 之前的洞；W 往后挪，越靠后的级尾巴越长。单看一次迭代仍有起止的斜边，但看「稳态周期」：每张卡从第一个任务到最后一个任务之间<b>没有空隙</b>。</p>
+    </section>
+
+    <!-- 29 -->
+    <section class="slide">
+      <div class="kicker">真正做到零气泡</div>
+      <h2>绕开 optimizer step 的同步</h2>
+      <div class="two wide-left s22">
+        <div>
+          <p class="fragment">平行四边形要真正「零气泡」，下一次迭代第 0 级的前向必须能紧接着开始，不等最后一级做完——可惯例做法在 optimizer step 前有一次全流水线 all-reduce：<b>全局梯度范数</b>（梯度裁剪）和<b>全局 NaN/Inf 检查</b>（混合精度）。</p>
+          <p class="fragment" style="margin-top:8px">Zero Bubble 的办法是<span class="accent">事后验证</span>：每级从前一级收到部分归约的全局状态，合上自己的，传给下一级，并按这个部分状态先做 step；完整的全局状态在下一次迭代的 warm-up 中从最后一级传回第一级，若发现上一步不该那么更新（例如其实触发了裁剪或有 NaN），就回滚并重做。</p>
+          <p class="fragment" style="margin-top:8px">理由：这些全局检查绝大多数时候不起作用，为它每步同步一次不划算。</p>
+        </div>
+        <div class="card fragment">
+          <h4>模拟器里的两个「气泡」</h4>
+          <p><b>迭代内气泡</b>：迭代时长 − 每卡工作量，假设迭代末全局同步。</p>
+          <p><b>稳态气泡</b>：去掉同步、相邻迭代可以咬合时，周期 = 各卡「首个任务开始到最后任务结束」的最大跨度，减去工作量。</p>
+          <p class="note">对 1F1B 两者相同；对 ZB-H2，后者在 \(T_F=T_B=T_W\) 时为 0。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 30 -->
+    <section class="slide">
+      <div class="kicker">Zero Bubble · 落地</div>
+      <h2>自动调度与 ZB-V</h2>
+      <div class="two s22">
+        <div>
+          <p class="fragment">真实模型里 \(T_F, T_B, T_W\) 不相等，还有 p2p 通信时间 \(T_{comm}\)，手工调度会留下洞。论文的启发式：</p>
+          <ul class="tight fragment" style="margin-top:6px">
+            <li>warm-up 在显存上限内尽量多放 F；</li>
+            <li>之后 1F-1B 交替，出现大于 \(T_W\) 的空隙就塞 W，显存到上限时也用 W 回收；</li>
+            <li>F 和 B 用完后把剩余 W 依次做完。</li>
+          </ul>
+          <p class="fragment" style="margin-top:6px">也可写成整数线性规划（ILP）求解。实验里比较了 ZB-1p（激活上限 \(pM_B\)，与 1F1B 同）和 ZB-2p（\(2pM_B\)）；论文摘要的结论是：相近显存下吞吐比 1F1B 最多高 23%，放宽显存限制后最多高 31%。</p>
+        </div>
+        <div>
+          <p class="fragment"><b>ZB-V</b>：每卡恰好 2 段，段的分配走「V 形」：0→p−1 再 p−1→0（16 层 4 卡时卡 0 放 1–2 层和 15–16 层）。于是一个 micro-batch 的前向和反向都从同一张卡开始，第 0 级不必等反向从最后一级传回。</p>
+          <p class="fragment" style="margin-top:8px">在 \(T_F=T_B=T_W\) 下 ZB-V 以 \(pM_B\) 的峰值激活做到零气泡（约为 ZB-H2 的一半），且各卡显存天然均衡。</p>
+          <p class="note fragment" style="margin-top:8px">模拟器里的 ZB-H2 用的是「B 优先、F 受在途上限约束、空隙塞 W」的贪心，与论文启发式同一思路，不是逐格照抄论文图。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 31 -->
+    <section class="slide">
+      <div class="kicker">DualPipe · 动机</div>
+      <h2>DeepSeek-V3 的难处：通信和计算 1:1</h2>
+      <div class="two wide-left s22">
+        <div>
+          <p class="fragment">DeepSeek-V3 在 2048 张 H800 上训练：16 路 PP、64 路专家并行（EP，跨 8 个节点）、ZeRO-1 数据并行，<b>没用 TP</b>。</p>
+          <p class="fragment" style="margin-top:8px">跨节点 EP 意味着每个 MoE 层都有两次 all-to-all（dispatch 把 token 送到专家所在的卡，combine 再送回来）。报告里说这让计算:通信大约是 <b>1:1</b>——单纯减少气泡已经不够，必须把通信藏起来。</p>
+          <p class="fragment" style="margin-top:8px">DualPipe 的两个想法：①在一对「前向块 + 反向块」内部重叠计算和通信；②双向流水线，让每张卡总有一对可以重叠的前向/反向。</p>
+        </div>
+        <div class="card fragment">
+          <h4>硬件背景（报告中的数字）</h4>
+          <p>节点内 NVLink 160 GB/s，节点间 IB 50 GB/s，约 3.2 倍。</p>
+          <p>节点受限路由：每个 token 最多发往 4 个节点。先走 IB 到目标节点上同号卡，再经 NVLink 转发——IB 和 NVLink 的传输完全重叠。</p>
+          <p>只用 20 个 SM 就能吃满 IB 和 NVLink 带宽。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 32 -->
+    <section class="slide">
+      <div class="kicker">DualPipe · 块内重叠</div>
+      <h2>把一对前向/反向块拆开重排</h2>
+      <svg class="fig" viewBox="0 0 1100 280" role="img" aria-label="示意：前向块的注意力、dispatch、MLP、combine 与反向块的各部分交错在计算流和通信流上">
+        <g font-size="15" fill="var(--text)">
+          <text x="0" y="62" fill="var(--text-soft)">计算流</text>
+          <text x="0" y="142" fill="var(--text-soft)">通信流</text>
+          <g id="dp-overlap"></g>
+          <text x="80" y="210" font-size="15" fill="var(--text-soft)">示意图（不按比例）：前向块的 dispatch/combine 落在反向块的计算期间，反向块的 dispatch/combine 落在前向块的计算期间。</text>
+          <text x="80" y="236" font-size="15" fill="var(--text-soft)">实际实现还手工调节通信与计算各占多少 SM，并插入 PP 通信；DeepSeek 报告图 4 中 all-to-all 和 PP 通信都被完全隐藏。</text>
+        </g>
+      </svg>
+      <p class="s22 fragment">每个块分成四部分：<b>attention、all-to-all dispatch、MLP、all-to-all combine</b>；反向块里的 attention 和 MLP 再按 Zero Bubble 拆成 B 与 W。一个前向块和一个<b>不相关的</b>反向块（不同 micro-batch、不同方向）没有数据依赖，它们的计算可以去填对方的通信时间。</p>
+    </section>
+
+    <!-- 33 -->
+    <section class="slide">
+      <div class="kicker">DualPipe · 双向</div>
+      <h2>从流水线的两端同时喂数据</h2>
+      <svg class="fig" viewBox="0 0 1100 230" role="img" aria-label="双向流水线：一个方向从卡 0 流向卡 7，另一个方向从卡 7 流向卡 0">
+        <g id="dp-bidir" font-size="16" fill="var(--text)"></g>
+      </svg>
+      <div class="s22">
+        <p class="fragment">把模型切成 \(PP\) 段。卡 \(r\) 同时存<b>正向流水线的第 \(r\) 段</b>和<b>反向流水线的第 \(PP-1-r\) 段</b>——也就是存两份模型参数（\(2\times\)）。报告的解释：EP 很大时每卡的专家参数本来就很少，多一份不显著。</p>
+        <p class="fragment" style="margin-top:6px">\(m\) 个 micro-batch 对半分给两个方向。中间稳态里，每张卡交替执行「一个方向的前向 + 另一个方向的反向」，这一对正好可以做块内重叠。</p>
+      </div>
+    </section>
+
+    <!-- 34 -->
+    <section class="slide tight" id="s-dual">
+      <div class="kicker">DualPipe · 交互</div>
+      <h2>官方代码的调度，在这里重放</h2>
+      <div class="widget gv" data-interactive data-sched="dual" data-p="8" data-m="20" data-ctrls="p,m,TW" data-anim="1"></div>
+      <p class="s22">这张时间线由 <code>deepseek-ai/DualPipe</code> 中 <code>DualPipe.step()</code> 的 8 个阶段逐行移植生成（不建模通信）。半紫半橙的长格是重叠的 F&amp;B 对；浅色是反方向的 micro-batch（编号带 ′）。\(PP=8, m=20\) 时与报告图 5 的排布一致。</p>
+    </section>
+
+    <!-- 35 -->
+    <section class="slide">
+      <div class="kicker">DualPipe · 账本</div>
+      <h2>气泡、参数、激活</h2>
+      <div class="s22">
+        <p class="fragment">DeepSeek-V3 报告表 2（\(F\) 前向块，\(B\) <b>完整</b>反向块，\(W\) 权重反向块，\(F\&amp;B\) 一对重叠块的耗时）：</p>
+        <table class="t fragment" style="margin-top:8px">
+          <tr><th>方法</th><th>气泡</th><th>每卡参数</th><th>每卡激活</th></tr>
+          <tr><td>1F1B</td><td class="num">(PP−1)(F+B)</td><td>1×</td><td>PP</td></tr>
+          <tr><td>ZB1P</td><td class="num">(PP−1)(F+B−2W)</td><td>1×</td><td>PP</td></tr>
+          <tr><td>DualPipe</td><td class="num">(PP/2−1)(F&amp;B+B−3W)</td><td>2×</td><td>PP+1</td></tr>
+        </table>
+        <p class="fragment" style="margin-top:10px">换回 Zero Bubble 记号（\(B_{zb}\) 只是输入梯度）：ZB1P 一行 \(= (PP-1)(T_F+T_{B}-T_W)\)，就是 ZB-H1。不建模通信时 \(F\&amp;B = F + B\)；取 \(T_F=T_B^{zb}=T_W=1\)：1F1B 气泡 \(3(PP-1)\)，ZB1P \((PP-1)\)，DualPipe \((PP/2-1)\cdot 2 = PP-2\)。模拟器的结果与这三个式子一致。</p>
+        <p class="fragment" style="margin-top:6px">真正的收益在通信：前两者的 \(F\)、\(B\) 里还包着暴露的 all-to-all，而 DualPipe 的 \(F\&amp;B\) 把它藏了。另外：只要求 PP 级数和 micro-batch 数为偶数（代码里还要求 \(m \ge 2PP\)），不像 Chimera 要求 \(m\) 被级数整除；\(m\) 增大时气泡和激活都不再增长。</p>
+      </div>
+    </section>
+
+    <!-- 36 -->
+    <section class="slide">
+      <div class="kicker">后续</div>
+      <h2>DualPipeV：对半折叠</h2>
+      <div class="s24">
+        <p class="fragment">DualPipe 的两个方向是对称的。Sea AI Lab 在博客里提出「cut-in-half」：把它对折，得到一个 V 形调度（DualPipe 仓库里叫 DualPipeV）。</p>
+        <p class="fragment" style="margin-top:10px">按仓库 README 的表：同样 \(PP\) 个流水线段，DualPipeV 只用 \(PP/2\) 张卡，每卡 2 段（和 ZB-V 一样是 V 形放置），气泡与 DualPipe 相同 \((PP/2-1)(F\&amp;B+B-3W)\)，激活 \(PP+1\)。</p>
+        <p class="fragment" style="margin-top:10px">每卡参数仍是 2 段的量（README 表里记作 2×），但这 2 段是不同的层，整个系统只有一份模型，而不是 DualPipe 那样两份完整副本。</p>
+        <p class="note fragment" style="margin-top:10px">模拟器只实现了 DualPipe 本体；DualPipeV 的排布可以看仓库里的示意图。</p>
+      </div>
+    </section>
+
+    <!-- 37 -->
+    <section class="slide tight" id="s-sim">
+      <div class="kicker">调度模拟器 · 全部参数</div>
+      <h2 style="font-size:34px">自己拖：调度、p、m、v、N、T_F / T_B / T_W、通信延迟</h2>
+      <div class="widget gv" data-interactive data-sched="1f1b" data-p="6" data-m="12" data-v="2" data-h="230" data-ctrls="sched,p,m,v,N,TF,TB,TW,c" data-anim="0"></div>
+      <p class="note">点格子高亮一个 micro-batch；「单步」逐个事件推进，右侧柱是该时刻每卡的在途激活。时间单位为 T_F=1 时的一次前向。</p>
+    </section>
+
+    <!-- 38 -->
+    <section class="slide">
+      <div class="kicker">模拟器是怎么算的</div>
+      <h2>依赖 + 每卡程序顺序 = 时间线</h2>
+      <div class="two s22">
+        <div>
+          <p class="fragment">每种调度先生成「每张卡依次执行的任务列表」（AFAB、1F1B、交错按 Megatron 的规则；ZB-H1 按论文描述；DualPipe 逐行移植官方 <code>step()</code>）。</p>
+          <p class="fragment" style="margin-top:8px">然后按「尽早开始」模拟：任务开始时间 = max(本卡上一个任务结束, 依赖完成 + 跨卡延迟 \(c\))。依赖只有三种：</p>
+          <ul class="tight fragment" style="margin-top:4px">
+            <li>F(级 s) 依赖 F(级 s−1)；</li>
+            <li>B(级 s) 依赖 B(级 s+1)，最后一级依赖自己的 F；</li>
+            <li>W 依赖同级的 B。</li>
+          </ul>
+        </div>
+        <div>
+          <p class="fragment">ZB-H2 用时间步进的贪心：卡空闲时，B 可做就做 B；否则在途数未达 \(2(p-r)-1\) 且 F 可做就做 F；否则有待算的 W 就做 W。</p>
+          <p class="fragment" style="margin-top:8px">不建模的东西：通信与计算的带宽竞争、F&amp;B 重叠带来的收益（重叠块时长按 \(T_F+T_B+T_W\) 算）、首尾级的额外 embedding/loss、显存的绝对值。</p>
+          <p class="fragment" style="margin-top:8px">激活以「一级一个 micro-batch 的激活」为单位（交错时每段 \(1/v\)），待算 W 单独计数——它们也占显存（\(M_W\)），只是比 \(M_B\) 小。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 39 -->
+    <section class="slide">
+      <div class="kicker">汇总</div>
+      <h2>六种调度一张表</h2>
+      <table class="t" style="font-size:18px">
+        <tr><th>调度</th><th>气泡（同步，\(c=0\)）</th><th>峰值在途激活</th><th>p2p 次数/mb</th><th>约束 / 代价</th></tr>
+        <tr class="fragment"><td>AFAB (GPipe)</td><td class="num">(p−1)(t_f+t_b)</td><td class="num">m</td><td class="num">p−1</td><td>常配重计算</td></tr>
+        <tr class="fragment"><td>1F1B</td><td class="num">(p−1)(t_f+t_b)</td><td class="num">p</td><td class="num">p−1</td><td>需分级调度，首级显存最重</td></tr>
+        <tr class="fragment"><td>交错 1F1B</td><td class="num">(p−1)(t_f+t_b)/v</td><td class="num">≈p(1+(p−1)/(pv))</td><td class="num">vp−1</td><td>m 为 p 的倍数；通信 ×v</td></tr>
+        <tr class="fragment"><td>ZB-H1</td><td class="num">(p−1)(T_F+T_B−T_W)</td><td class="num">p</td><td class="num">p−1</td><td>拆 B/W；W 暂存占显存</td></tr>
+        <tr class="fragment"><td>ZB-H2</td><td class="num">(p−1)(T_F+T_B−2T_W)</td><td class="num">2p−1</td><td class="num">p−1</td><td>需绕过 optimizer 同步</td></tr>
+        <tr class="fragment"><td>DualPipe</td><td class="num">(p/2−1)(F&amp;B+B−3W)</td><td class="num">p+1</td><td class="num">p−1</td><td>2× 参数；p、m 偶数；为 EP 重叠而生</td></tr>
+      </table>
+      <p class="note">交错一行的峰值是 Korthikanti 等人对 Megatron 交错调度首级的估算，模拟器在 \(p=4,v=2\) 时给出 5.5，与之吻合。</p>
+    </section>
+
+    <!-- 40 -->
+    <section class="slide">
+      <div class="kicker">和其他并行怎么组合</div>
+      <h2>PP vs ZeRO-3，以及搭配</h2>
+      <div class="two wide-left s22">
+        <table class="t fragment">
+          <tr><th></th><th>ZeRO-3 (FSDP)</th><th>PP</th></tr>
+          <tr><td>每卡存</td><td>一层的一部分</td><td>完整的若干层</td></tr>
+          <tr><td>通信传</td><td>权重</td><td>激活</td></tr>
+          <tr><td>与模型的耦合</td><td>无关</td><td>无关</td></tr>
+          <tr><td>实现难点</td><td>切分与通信管理</td><td>高效调度</td></tr>
+          <tr><td>喜欢</td><td>大 mbs、长序列藏通信</td><td>大梯度累积藏气泡</td></tr>
+        </table>
+        <div>
+          <p class="fragment">两者都沿深度方向切模型；Playbook 指出它们可以组合但实践少见，因为要大幅加大全局 batch 才能摊薄两边的通信；若组合，ZeRO-3 应在整串 micro-batch 期间保留聚合好的权重。</p>
+          <p class="fragment" style="margin-top:8px">PP + ZeRO-1/2 没有新问题，DeepSeek-V3 就是 PP + ZeRO-1。TP（+SP）与 PP 互补：TP 放节点内，PP 放跨节点。Llama 3 405B 的组合是 [TP, CP, PP, DP] 由内到外。</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- 41 -->
+    <section class="slide">
+      <div class="kicker">选型</div>
+      <h2>怎么选调度</h2>
+      <ul class="s24">
+        <li class="fragment dim-after">先问要不要 PP：模型（+优化器状态）在 TP×ZeRO 下装得进节点，就别用 PP。</li>
+        <li class="fragment dim-after">要用就从 <b>1F1B</b> 起步，把 \(m\) 拉到 \(\gg p\)（\(m \ge 4p\) 是 GPipe 给的经验线）；受全局 batch 限制时提高 DP 度 \(d\) 或减小 \(p\)。</li>
+        <li class="fragment dim-after">\(m\) 拉不大、而节点间带宽尚可：上 <b>交错</b>，\(v=2\)–4；注意 \(m\) 要是 \(p\) 的倍数，通信 \(\times v\)。</li>
+        <li class="fragment dim-after">框架支持拆 B/W：<b>ZB-H1 / ZB-1p</b> 几乎是免费午餐（显存同 1F1B）；显存有余量再考虑 ZB-2p / ZB-V。</li>
+        <li class="fragment dim-after">大规模跨节点 MoE、通信与计算同量级：<b>DualPipe / DualPipeV</b> 的价值主要在藏 all-to-all。</li>
+        <li class="fragment dim-after">任何调度都别忘了首尾级配平（少放一层）和显存最重的那一级。</li>
+      </ul>
+    </section>
+
+    <!-- 42 -->
+    <section class="slide">
+      <div class="kicker">参考</div>
+      <h2>参考资料</h2>
+      <ul class="s22 tight" style="column-count:2; column-gap:40px">
+        <li><a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a>：Pipeline Parallelism 各节、5D Parallelism、附录 PP communication analysis</li>
+        <li><a href="https://jax-ml.github.io/scaling-book/training/">Scaling Book · Training</a>：Pipelining 一节</li>
+        <li><a href="https://arxiv.org/abs/1811.06965">GPipe</a>（Huang et al., 2019）</li>
+        <li><a href="https://arxiv.org/abs/1806.03377">PipeDream</a>（Harlap et al., 2018）</li>
+        <li><a href="https://arxiv.org/abs/2104.04473">Megatron-LM 2021</a>（Narayanan et al.）：PipeDream-Flush、交错调度、scatter/gather</li>
+        <li><a href="https://arxiv.org/abs/2211.05953">Breadth-First Pipeline Parallelism</a>（Lamy-Poirier）</li>
+        <li><a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>：§3.3.2 Pipeline parallelism improvements</li>
+        <li><a href="https://arxiv.org/abs/2401.10241">Zero Bubble Pipeline Parallelism</a>（Qi et al.）</li>
+        <li><a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>：§3.2.1–3.2.2</li>
+        <li><a href="https://github.com/deepseek-ai/DualPipe">deepseek-ai/DualPipe</a>（调度代码与 DualPipeV）</li>
+        <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（激活估算）</li>
+      </ul>
+      <p class="note">图都是按原文描述重画的；模拟器的计时是理想化的，数字只用来理解趋势。</p>
+    </section>
+
+    <!-- 43 -->
+    <section class="slide center">
+      <div class="kicker rise">系列 · 大模型规模化训练</div>
+      <h2 class="rise" style="--d: 1">下一站：MoE 与专家并行</h2>
+      <p class="muted rise" style="--d: 2">DualPipe 要藏的 all-to-all，到底在传什么</p>
+      <nav class="series-pager rise" style="--d: 3" data-series="scaling"></nav>
+      <p class="small muted rise" style="--d: 4"><a href="/blog/">← 回到博客</a></p>
+    </section>
+
+  </div></main>
+
+  <script src="/assets/slides.js"></script>
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    // ---------------- schedules ----------------
+    function afab(p, m) {
+      const R = [];
+      for (let r = 0; r < p; r++) {
+        const ops = [];
+        for (let i = 0; i < m; i++) ops.push({ t: 'F', dir: 0, st: r, mb: i });
+        for (let i = 0; i < m; i++) ops.push({ t: 'BW', dir: 0, st: r, mb: i });
+        R.push(ops);
+      }
+      return { ranks: R, S: p, v: 1 };
+    }
+    function ofob(p, m) {
+      const R = [];
+      for (let r = 0; r < p; r++) {
+        const ops = [], warm = Math.min(p - r - 1, m);
+        let f = 0, b = 0;
+        for (; f < warm; f++) ops.push({ t: 'F', dir: 0, st: r, mb: f });
+        while (f < m) { ops.push({ t: 'F', dir: 0, st: r, mb: f++ }); ops.push({ t: 'BW', dir: 0, st: r, mb: b++ }); }
+        while (b < m) ops.push({ t: 'BW', dir: 0, st: r, mb: b++ });
+        R.push(ops);
+      }
+      return { ranks: R, S: p, v: 1 };
+    }
+    // Megatron-style interleaved 1F1B; N = micro-batches per group (N = p is Megatron's DFS).
+    function interleaved(p, m, v, N) {
+      const order = [];
+      for (let g0 = 0; g0 < m; g0 += N) {
+        const g1 = Math.min(m, g0 + N);
+        for (let c = 0; c < v; c++) for (let i = g0; i < g1; i++) order.push([c, i]);
+      }
+      const total = order.length, R = [];
+      for (let r = 0; r < p; r++) {
+        const ops = [], warm = Math.min(total, (p - r - 1) * 2 + (v - 1) * N);
+        const fo = (k) => ({ t: 'F', dir: 0, st: order[k][0] * p + r, mb: order[k][1], ch: order[k][0] });
+        const bo = (k) => ({ t: 'BW', dir: 0, st: (v - 1 - order[k][0]) * p + r, mb: order[k][1], ch: v - 1 - order[k][0] });
+        let f = 0, b = 0;
+        for (; f < warm; f++) ops.push(fo(f));
+        while (f < total) { ops.push(fo(f++)); ops.push(bo(b++)); }
+        while (b < total) ops.push(bo(b++));
+        R.push(ops);
+      }
+      return { ranks: R, S: p * v, v };
+    }
+    // ZB-H1 as described in the Zero Bubble paper: 1F1B warm-up, stage r delays its W by r rounds.
+    function zbh1(p, m) {
+      const R = [];
+      for (let r = 0; r < p; r++) {
+        const ops = [], warm = Math.min(p - r - 1, m), wq = [];
+        let f = 0, b = 0, i = 0;
+        const B = () => { ops.push({ t: 'B', dir: 0, st: r, mb: b }); wq.push(b++); };
+        const W = () => ops.push({ t: 'W', dir: 0, st: r, mb: wq.shift() });
+        for (; f < warm; f++) ops.push({ t: 'F', dir: 0, st: r, mb: f });
+        while (f < m) { ops.push({ t: 'F', dir: 0, st: r, mb: f++ }); B(); if (i++ >= r) W(); }
+        while (b < m) { B(); W(); }
+        while (wq.length) W();
+        R.push(ops);
+      }
+      return { ranks: R, S: p, v: 1 };
+    }
+    // Port of DualPipe.step() from github.com/deepseek-ai/DualPipe (num_ranks = p, num_chunks = m).
+    function dualpipe(p, m) {
+      const R = [], nh = p / 2, half = m / 2;
+      for (let r = 0; r < p; r++) {
+        const ops = [], sec = r >= nh ? 1 : 0, hr = Math.min(r, p - 1 - r);
+        const mid = r === nh - 1 || r === nh;
+        const fid = [0, 0], bid = [0, 0], wq = [];
+        const st = (d) => (d === 0 ? r : p - 1 - r);
+        const Fo = (ph) => { const d = ph ^ sec; return { dir: d, st: st(d), mb: fid[d]++ }; };
+        const Bo = (ph) => { const d = ph ^ sec; return { dir: d, st: st(d), mb: bid[d]++ }; };
+        const F = (ph) => ops.push(Object.assign({ t: 'F' }, Fo(ph)));
+        const Bk = (ph, zb) => {
+          const o = Bo(ph);
+          if (zb) { ops.push(Object.assign({ t: 'B' }, o)); wq.push(o); } else ops.push(Object.assign({ t: 'BW' }, o));
+        };
+        const FB = (p0, p1) => { const f = Fo(p0), b = Bo(p1); ops.push({ t: 'FB', f, b, dir: f.dir, st: f.st, mb: f.mb }); };
+        const W = () => ops.push(Object.assign({ t: 'W' }, wq.shift()));
+        for (let i = 0; i < (nh - hr - 1) * 2; i++) F(0);                 // step 1: nF0
+        for (let i = 0; i < hr + 1; i++) { F(0); F(1); }                    // step 2: nF0F1
+        for (let i = 0; i < nh - hr - 1; i++) { Bk(1, true); W(); F(1); }  // step 3: nB1W1F1
+        const s4 = half - p + hr + 1;                                       // step 4: nF0B1F1B0
+        for (let i = 0; i < s4; i++) {
+          if (i === 0 && mid) { F(0); Bk(1, false); } else FB(0, 1);
+          FB(1, 0);
+        }
+        for (let i = 0; i < nh - hr - 1; i++) { Bk(1, false); FB(1, 0); }  // step 5: nB1F1B0
+        let zb = false; const s6 = hr + 1;                                  // step 6: nB1B0
+        for (let i = 0; i < s6; i++) {
+          if (i === Math.floor(s6 / 2) && hr % 2 === 1) zb = true;
+          Bk(1, zb);
+          if (i === Math.floor(s6 / 2) && hr % 2 === 0) zb = true;
+          Bk(0, zb);
+        }
+        for (let i = 0; i < nh - hr - 1; i++) { W(); Bk(0, true); }        // step 7: nWB0
+        for (let i = 0; i < hr + 1; i++) W();                               // step 8: nW
+        R.push(ops);
+      }
+      return { ranks: R, S: p, v: 1, dual: true };
+    }
+
+    // ASAP simulation of fixed per-rank programs.
+    function simulate(sch, T) {
+      const { ranks, S, v } = sch, p = ranks.length, done = new Map();
+      const key = (k, d, s, mb) => k + d + '.' + s + '.' + mb;
+      const pos = new Array(p).fill(0), free = new Array(p).fill(0), out = ranks.map(() => []);
+      const rankOf = (d, s) => (sch.dual ? (d === 0 ? s : p - 1 - s) : s % p);
+      const dur = (t) => ({ F: T.F, B: T.B, W: T.W, BW: T.B + T.W, FB: T.F + T.B + T.W }[t] / v);
+      function deps(o, r) {
+        const list = [];
+        const fd = (x) => { if (x.st > 0) list.push([key('F', x.dir, x.st - 1, x.mb), rankOf(x.dir, x.st - 1)]); };
+        const bd = (x) => {
+          if (x.st < S - 1) list.push([key('B', x.dir, x.st + 1, x.mb), rankOf(x.dir, x.st + 1)]);
+          else list.push([key('F', x.dir, x.st, x.mb), r]);
+        };
+        if (o.t === 'F') fd(o); else if (o.t === 'B' || o.t === 'BW') bd(o);
+        else if (o.t === 'W') list.push([key('B', o.dir, o.st, o.mb), r]);
+        else { fd(o.f); bd(o.b); }
+        return list;
+      }
+      let left = ranks.reduce((a, x) => a + x.length, 0), prog = true;
+      while (left && prog) {
+        prog = false;
+        for (let r = 0; r < p; r++) {
+          while (pos[r] < ranks[r].length) {
+            const o = ranks[r][pos[r]];
+            let ready = free[r], ok = true;
+            for (const [k, rr] of deps(o, r)) {
+              if (!done.has(k)) { ok = false; break; }
+              ready = Math.max(ready, done.get(k) + (rr !== r ? T.c : 0));
+            }
+            if (!ok) break;
+            const e = ready + dur(o.t);
+            out[r].push({ o, s: ready, e });
+            free[r] = e;
+            if (o.t === 'F') done.set(key('F', o.dir, o.st, o.mb), e);
+            if (o.t === 'B' || o.t === 'BW') done.set(key('B', o.dir, o.st, o.mb), e);
+            if (o.t === 'FB') { done.set(key('F', o.f.dir, o.f.st, o.f.mb), e); done.set(key('B', o.b.dir, o.b.st, o.b.mb), e); }
+            pos[r]++; left--; prog = true;
+          }
+        }
+      }
+      if (left) return null;
+      return out;
+    }
+    // ZB-H2: time-stepped greedy (B first; F while in-flight < 2(p-r)-1; else W).
+    function zbh2(p, m, T) {
+      const dt = 0.25, eps = 1e-9;
+      const dF = Array.from({ length: p }, () => new Array(m).fill(Infinity));
+      const dB = Array.from({ length: p }, () => new Array(m).fill(Infinity));
+      const nf = new Array(p).fill(0), nb = new Array(p).fill(0), wq = Array.from({ length: p }, () => []);
+      const free = new Array(p).fill(0), rows = Array.from({ length: p }, () => []);
+      let left = p * m * 3, t = 0;
+      while (left > 0 && t < 1e5) {
+        for (let r = 0; r < p; r++) {
+          if (free[r] > t + eps) continue;
+          const fR = nf[r] < m && (r === 0 || dF[r - 1][nf[r]] + T.c <= t + eps);
+          const bR = nb[r] < nf[r] && (r === p - 1 ? dF[r][nb[r]] <= t + eps : dB[r + 1][nb[r]] + T.c <= t + eps);
+          let e;
+          if (bR) { e = t + T.B; dB[r][nb[r]] = e; rows[r].push({ o: { t: 'B', dir: 0, st: r, mb: nb[r] }, s: t, e }); wq[r].push(nb[r]); nb[r]++; }
+          else if (fR && nf[r] - nb[r] < 2 * (p - r) - 1) { e = t + T.F; dF[r][nf[r]] = e; rows[r].push({ o: { t: 'F', dir: 0, st: r, mb: nf[r] }, s: t, e }); nf[r]++; }
+          else if (wq[r].length) { e = t + T.W; rows[r].push({ o: { t: 'W', dir: 0, st: r, mb: wq[r].shift() }, s: t, e }); }
+          else continue;
+          free[r] = e; left--;
+        }
+        t += dt;
+      }
+      return rows;
+    }
+
+    function metrics(rows, v) {
+      const a = 1 / v, p = rows.length;
+      let mk = 0, per = 0, busy = 0, pkA = 0, pkW = 0;
+      const pkR = [];
+      rows.forEach((row) => {
+        let act = 0, w = 0, mine = 0;
+        row.forEach(({ o, s, e }) => {
+          busy += e - s;
+          if (o.t === 'F') act += a; else if (o.t === 'B') { act -= a; w += a; }
+          else if (o.t === 'BW') act -= a; else if (o.t === 'W') w -= a;
+          else { act += a; mine = Math.max(mine, act); act -= a; }
+          mine = Math.max(mine, act); pkW = Math.max(pkW, w);
+        });
+        pkR.push(mine); pkA = Math.max(pkA, mine);
+        mk = Math.max(mk, row[row.length - 1].e);
+        per = Math.max(per, row[row.length - 1].e - row[0].s);
+      });
+      const work = busy / p;
+      return { mk, per, work, pkA, pkW, pkR, bub: mk - work, bubS: per - work };
+    }
+    function inflightAt(row, t, v) {
+      let act = 0;
+      const a = 1 / v;
+      for (const { o, s, e } of row) {
+        if (o.t === 'F' && e <= t + 1e-9) act += a;
+        if ((o.t === 'B' || o.t === 'BW') && e <= t + 1e-9) act -= a;
+        if (o.t === 'FB') { if (s <= t) act += a; if (e <= t + 1e-9) act -= a; }
+      }
+      return Math.max(0, act);
+    }
+
+    // ---------------- Gantt widget ----------------
+    const NAMES = { afab: 'AFAB', '1f1b': '1F1B', int: '交错', zbh1: 'ZB-H1', zbh2: 'ZB-H2', dual: 'DualPipe' };
+    const fmt = (x, d = 2) => (Math.abs(x - Math.round(x)) < 1e-6 ? String(Math.round(x)) : x.toFixed(d));
+    const SVGNS = 'http://www.w3.org/2000/svg';
+    const views = [];
+
+    function makeView(root) {
+      const st = {
+        sched: root.dataset.sched, p: +root.dataset.p, m: +root.dataset.m, v: +(root.dataset.v || 2), N: +(root.dataset.n || root.dataset.p),
+        TF: 1, TB: 1, TW: 1, c: 0,
+      };
+      const ctrls = (root.dataset.ctrls || '').split(',').filter(Boolean);
+      const anim = root.dataset.anim === '1';
+      const ranges = {
+        p: ['级数 p', 2, 16, 1], m: ['micro-batch m', 1, 48, 1], v: ['段数 v', 1, 4, 1], N: ['组大小 N', 1, 48, 1],
+        TF: ['T_F', 0.5, 2, 0.25], TB: ['T_B', 0.5, 2, 0.25], TW: ['T_W', 0.25, 2, 0.25], c: ['p2p 延迟 c', 0, 1, 0.25],
+      };
+      let html = '<div class="gv-ctrls">';
+      if (ctrls.includes('sched')) {
+        html += '<div class="seg" role="group" aria-label="调度">' + Object.keys(NAMES).map((k) =>
+          '<button type="button" data-s="' + k + '" aria-pressed="' + (k === st.sched) + '">' + NAMES[k] + '</button>').join('') + '</div>';
+      }
+      ctrls.filter((c) => ranges[c]).forEach((c) => {
+        const [lab, lo, hi, step] = ranges[c];
+        html += '<label data-c="' + c + '">' + lab + ' <input type="range" min="' + lo + '" max="' + hi + '" step="' + step + '" value="' + st[c] + '" data-k="' + c + '"><output></output></label>';
+      });
+      html += '<span style="flex:1"></span><span style="display:inline-flex;gap:6px"><button type="button" class="btn" data-a="play">▶ 播放</button><button type="button" class="btn" data-a="step">单步</button><button type="button" class="btn" data-a="end">⏭</button></span></div>';
+      html += '<svg viewBox="0 0 1000 300" preserveAspectRatio="xMidYMid meet"></svg>';
+      html += '<div class="gv-read"></div><div class="gv-msg"></div>';
+      root.innerHTML = html;
+      const svg = root.querySelector('svg'), read = root.querySelector('.gv-read'), msg = root.querySelector('.gv-msg');
+      let rows = null, M = null, cursor = Infinity, events = [], raf = 0, hl = null, vEff = 1, H = 300;
+
+      function normalize() {
+        const s = st.sched;
+        if (s === 'dual') {
+          if (st.p % 2) st.p += 1;
+          if (st.m % 2) st.m += 1;
+          st.m = Math.max(st.m, 2 * st.p);
+        }
+        if (s === 'int') {
+          st.N = Math.max(st.p, Math.min(st.N, st.m));
+          if (st.m % st.N) st.m = Math.ceil(st.m / st.N) * st.N;
+          if (st.m > 48) { st.m = Math.floor(48 / st.N) * st.N; }
+        }
+      }
+      function compute() {
+        normalize();
+        const T = { F: st.TF, B: st.TB, W: st.TW, c: st.c };
+        const s = st.sched;
+        let sch = null;
+        vEff = 1;
+        if (s === 'zbh2') rows = zbh2(st.p, st.m, T);
+        else {
+          if (s === 'afab') sch = afab(st.p, st.m);
+          else if (s === '1f1b') sch = ofob(st.p, st.m);
+          else if (s === 'int') { sch = interleaved(st.p, st.m, st.v, st.N); vEff = st.v; }
+          else if (s === 'zbh1') sch = zbh1(st.p, st.m);
+          else sch = dualpipe(st.p, st.m);
+          rows = simulate(sch, T);
+        }
+        if (!rows) { msg.textContent = '这个参数组合在当前实现里会死锁。'; return; }
+        M = metrics(rows, vEff);
+        const set = new Set();
+        rows.forEach((row) => row.forEach(({ s: a, e }) => { set.add(+a.toFixed(6)); set.add(+e.toFixed(6)); }));
+        events = [...set].sort((a, b) => a - b);
+        let note = '';
+        if (s === 'dual') note = 'DualPipe 要求 p、m 为偶数且 m ≥ 2p（已自动调整）。';
+        if (s === 'int') note = '交错：m 需为 N 的倍数、N ≥ p（已自动调整）；N = p 即 Megatron 的深度优先。';
+        if (s === 'zbh2') note = 'ZB-H2 由贪心生成：B 优先，F 受在途上限 2(p−r)−1 约束，空隙塞 W。';
+        msg.textContent = note;
+      }
+      function theory() {
+        const p = st.p, m = st.m, F = st.TF, B = st.TB, W = st.TW, s = st.sched;
+        if (s === 'afab' || s === '1f1b') return [(p - 1) * (F + B + W), '(p−1)(T_F+T_B+T_W)'];
+        if (s === 'int') return [(p - 1) * (F + B + W) / st.v, '(p−1)(T_F+T_B+T_W)/v'];
+        if (s === 'zbh1') return [(p - 1) * (F + B - W), '(p−1)(T_F+T_B−T_W)'];
+        if (s === 'zbh2') return [Math.max(0, (p - 1) * (F + B - 2 * W)), '(p−1)(T_F+T_B−2T_W)（稳态）'];
+        return [(p / 2 - 1) * ((F + B + W) + (B + W) - 3 * W), '(p/2−1)(F&B+B_full−3W)'];
+      }
+      function color(o, part) {
+        const t = part || o.t;
+        if (t === 'F') return 'var(--accent)';
+        if (t === 'W') return 'var(--pp-w)';
+        return 'var(--accent-2)';
+      }
+      function draw() {
+        svg.innerHTML = '';
+        if (!rows) return;
+        const p = rows.length, L = 64, R = 70, W = 1000 - L - R;
+        const rh = Math.max(11, Math.min(34, Math.floor((+root.dataset.h || 210) / p)));
+        H = rh * p + 30;
+        svg.setAttribute('viewBox', '0 0 1000 ' + H);
+        const sc = W / M.mk;
+        let s = '';
+        for (let r = 0; r < p; r++) {
+          const y = r * rh;
+          s += '<rect x="' + L + '" y="' + (y + 1) + '" width="' + W + '" height="' + (rh - 2) + '" fill="var(--pp-idle)"/>';
+          s += '<text x="' + (L - 8) + '" y="' + (y + rh / 2 + 5) + '" text-anchor="end" font-size="' + Math.min(15, rh - 2) + '" fill="var(--text-soft)">GPU ' + r + '</text>';
+        }
+        const fs = Math.min(14, rh - 6);
+        rows.forEach((row, r) => {
+          const y = r * rh;
+          row.forEach(({ o, s: a, e }, idx) => {
+            if (a >= cursor - 1e-9) return;
+            const x = L + a * sc, w = Math.max(0.5, (Math.min(e, cursor) - a) * sc);
+            const rev = o.dir === 1;
+            const op = o.ch !== undefined ? (0.55 + 0.45 * (1 - o.ch / Math.max(1, vEff - 1))) : (rev ? 0.55 : 1);
+            const mbKey = o.dir + ':' + o.mb;
+            const isHl = hl && (hl === mbKey || (o.t === 'FB' && hl === o.b.dir + ':' + o.b.mb));
+            const dim = hl && !isHl ? 0.18 : 1;
+            const g = '<g class="gv-cell" data-k="' + mbKey + '" opacity="' + (op * dim).toFixed(2) + '">';
+            if (o.t === 'FB') {
+              const fw = (st.TF / (st.TF + st.TB + st.TW)) * (e - a) * sc;
+              s += g + '<rect x="' + x + '" y="' + (y + 1) + '" width="' + Math.min(w, fw) + '" height="' + (rh - 2) + '" fill="var(--accent)"/>';
+              if (w > fw) s += '<rect x="' + (x + fw) + '" y="' + (y + 1) + '" width="' + (w - fw) + '" height="' + (rh - 2) + '" fill="var(--accent-2)"/>';
+            } else {
+              s += g + '<rect x="' + x + '" y="' + (y + 1) + '" width="' + w + '" height="' + (rh - 2) + '" fill="' + color(o) + '"/>';
+            }
+            s += '<rect x="' + x + '" y="' + (y + 1) + '" width="' + w + '" height="' + (rh - 2) + '" fill="none" stroke="var(--surface)" stroke-width="1"/>';
+            if ((e - a) * sc > fs * 1.25 && fs >= 9 && e <= cursor) {
+              const lab = o.mb + (rev ? '′' : '');
+              s += '<text x="' + (x + w / 2) + '" y="' + (y + rh / 2 + fs * 0.36) + '" text-anchor="middle" font-size="' + fs + '" fill="#fff" pointer-events="none">' + lab + '</text>';
+            }
+            if (isHl && o.t === 'FB' && hl === o.b.dir + ':' + o.b.mb) s += '<rect x="' + x + '" y="' + (y + 1) + '" width="' + w + '" height="' + (rh - 2) + '" fill="none" stroke="var(--text)" stroke-width="2"/>';
+            s += '</g>';
+          });
+        });
+        // cursor & in-flight bars
+        if (isFinite(cursor) && cursor < M.mk) {
+          const cx = L + cursor * sc;
+          s += '<line x1="' + cx + '" x2="' + cx + '" y1="0" y2="' + (rh * p) + '" stroke="var(--text)" stroke-width="1.5" stroke-dasharray="4 3"/>';
+        }
+        const tc = isFinite(cursor) ? cursor : M.mk;
+        const maxA = Math.max(1, M.pkA);
+        rows.forEach((row, r) => {
+          const val = isFinite(cursor) ? inflightAt(row, tc, vEff) : M.pkR[r];
+          const y = r * rh, bw = 40 * (val / maxA);
+          s += '<rect x="' + (1000 - R + 8) + '" y="' + (y + 3) + '" width="40" height="' + (rh - 6) + '" fill="var(--bg-soft)"/>';
+          s += '<rect x="' + (1000 - R + 8) + '" y="' + (y + 3) + '" width="' + bw + '" height="' + (rh - 6) + '" fill="var(--accent)" opacity="0.7"/>';
+          if (rh >= 16) s += '<text x="' + (1000 - 4) + '" y="' + (y + rh / 2 + 5) + '" text-anchor="end" font-size="12" fill="var(--text-soft)">' + fmt(val, 1) + '</text>';
+        });
+        const yb = rh * p + 20;
+        s += '<text x="' + L + '" y="' + yb + '" font-size="13" fill="var(--text-faint)">时间 →（单位 = T_F；' + fmt(M.mk) + ' 共计）</text>';
+        s += '<text x="' + (1000 - R + 8) + '" y="' + yb + '" font-size="12" fill="var(--text-faint)">' + (isFinite(cursor) ? '在途' : '峰值在途') + '</text>';
+        svg.innerHTML = s;
+      }
+      function readout() {
+        if (!rows) { read.innerHTML = ''; return; }
+        const tid = M.work, [th, thf] = theory();
+        const cells = [
+          ['迭代时长', fmt(M.mk)],
+          ['气泡 t_pb', fmt(M.bub)],
+          ['t_pb / t_id', fmt(M.bub / tid, 3)],
+          ['空闲占比', (100 * M.bub / M.mk).toFixed(1) + '%'],
+          ['稳态气泡', fmt(M.bubS)],
+          ['峰值在途激活', fmt(M.pkA, 2)],
+          ['峰值待算 W', fmt(M.pkW, 2)],
+          ['公式（c=0）' + thf, fmt(th)],
+        ];
+        read.innerHTML = cells.map(([k, v]) => '<div><span>' + k + '</span><b>' + v + '</b></div>').join('');
+      }
+      function syncCtrls() {
+        root.querySelectorAll('input[data-k]').forEach((inp) => {
+          const k = inp.dataset.k;
+          inp.value = st[k];
+          inp.nextElementSibling.textContent = fmt(st[k]);
+          const lab = inp.parentElement;
+          let show = true;
+          if ((k === 'v' || k === 'N') && st.sched !== 'int') show = false;
+          lab.style.display = show ? '' : 'none';
+          if (k === 'p') inp.step = st.sched === 'dual' ? 2 : 1;
+        });
+        root.querySelectorAll('[data-s]').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.s === st.sched)));
+      }
+      function full() { compute(); syncCtrls(); draw(); readout(); }
+      function stop() { cancelAnimationFrame(raf); raf = 0; root.querySelector('[data-a="play"]').textContent = '▶ 播放'; }
+      function play() {
+        if (!rows) return;
+        if (reduce) { cursor = Infinity; draw(); return; }
+        if (!isFinite(cursor) || cursor >= M.mk) cursor = 0;
+        root.querySelector('[data-a="play"]').textContent = '⏸ 暂停';
+        let last = performance.now();
+        const speed = M.mk / 6000; // whole timeline in ~6 s
+        const tick = (now) => {
+          cursor += (now - last) * speed; last = now;
+          if (cursor >= M.mk) { cursor = Infinity; draw(); stop(); return; }
+          draw();
+          raf = requestAnimationFrame(tick);
+        };
+        raf = requestAnimationFrame(tick);
+      }
+      root.addEventListener('input', (e) => {
+        const k = e.target.dataset.k;
+        if (!k) return;
+        st[k] = +e.target.value;
+        stop(); cursor = Infinity; hl = null; full();
+      });
+      root.addEventListener('click', (e) => {
+        e.stopPropagation();
+        const b = e.target.closest('button');
+        if (b && b.dataset.s) { st.sched = b.dataset.s; stop(); cursor = Infinity; hl = null; full(); return; }
+        if (b && b.dataset.a === 'play') { if (raf) stop(); else play(); return; }
+        if (b && b.dataset.a === 'step') {
+          stop();
+          if (!isFinite(cursor) || cursor >= M.mk) cursor = 0;
+          const nx = events.find((x) => x > cursor + 1e-9);
+          cursor = nx === undefined || nx >= M.mk ? Infinity : nx;
+          draw(); return;
+        }
+        if (b && b.dataset.a === 'end') { stop(); cursor = Infinity; draw(); return; }
+        const cell = e.target.closest('.gv-cell');
+        if (cell) { hl = hl === cell.dataset.k ? null : cell.dataset.k; draw(); }
+        else if (e.target.closest('svg')) { hl = null; draw(); }
+      });
+      full();
+      return {
+        root,
+        enter() { stop(); hl = null; if (anim && !reduce) { cursor = 0; draw(); setTimeout(() => { if (root.closest('.slide').classList.contains('is-active')) play(); }, 500); } else { cursor = Infinity; draw(); } },
+        leave() { stop(); },
+      };
+    }
+    document.querySelectorAll('.gv').forEach((el) => views.push(makeView(el)));
+
+    // ---------------- static figures ----------------
+    (function interleaveFig() {
+      const g = document.getElementById('interleave-fig');
+      let s = '';
+      const cols = ['var(--accent)', 'var(--accent-2)', 'var(--pp-w)', 'var(--text-soft)'];
+      for (let L = 0; L < 16; L++) {
+        const x = 130 + L * 58;
+        const gpu1 = Math.floor(L / 4), gpu2 = Math.floor(L / 2) % 4;
+        s += '<rect x="' + x + '" y="34" width="52" height="40" rx="6" fill="' + cols[gpu1] + '" opacity="0.85"/>';
+        s += '<text x="' + (x + 26) + '" y="60" text-anchor="middle" font-size="15" fill="#fff">' + (L + 1) + '</text>';
+        s += '<rect x="' + x + '" y="154" width="52" height="40" rx="6" fill="' + cols[gpu2] + '" opacity="' + (L < 8 ? 0.85 : 0.55) + '"/>';
+        s += '<text x="' + (x + 26) + '" y="180" text-anchor="middle" font-size="15" fill="#fff">' + (L + 1) + '</text>';
+      }
+      for (let k = 0; k < 4; k++) {
+        s += '<rect x="' + (130 + k * 232) + '" y="92" width="14" height="14" rx="3" fill="' + cols[k] + '"/><text x="' + (150 + k * 232) + '" y="104" font-size="15" fill="var(--text-soft)">GPU ' + k + '</text>';
+      }
+      s += '<text x="130" y="226" font-size="15" fill="var(--text-soft)">第 1–8 层构成第一圈（深色），第 9–16 层是第二圈（浅色）：micro-batch 依次经过 GPU 0→1→2→3→0→1→2→3。</text>';
+      g.innerHTML = s;
+    })();
+    (function overlapFig() {
+      const g = document.getElementById('dp-overlap');
+      const comp = [['F: attn', 'var(--accent)', 70], ['B: MLP(B)', 'var(--accent-2)', 70], ['B: MLP(W)', 'var(--pp-w)', 60], ['F: MLP', 'var(--accent)', 70], ['B: attn(B)', 'var(--accent-2)', 70], ['B: attn(W)', 'var(--pp-w)', 60]];
+      const comm = [['B: combine', 'var(--accent-2)', 70, 0], ['F: dispatch', 'var(--accent)', 70, 140], ['B: dispatch', 'var(--accent-2)', 70, 270], ['F: combine', 'var(--accent)', 70, 410]];
+      let s = '', x = 80;
+      const k = 2.05;
+      comp.forEach(([t, c, w]) => { s += '<rect x="' + x + '" y="36" width="' + w * k + '" height="40" rx="6" fill="' + c + '" opacity="0.9"/><text x="' + (x + w * k / 2) + '" y="61" text-anchor="middle" fill="#fff">' + t + '</text>'; x += w * k + 4; });
+      comm.forEach(([t, c, w, x0]) => { const xx = 80 + x0 * k; s += '<rect x="' + xx + '" y="116" width="' + w * k + '" height="40" rx="6" fill="none" stroke="' + c + '" stroke-width="2" stroke-dasharray="6 4"/><text x="' + (xx + w * k / 2) + '" y="141" text-anchor="middle" fill="var(--text)">' + t + '</text>'; });
+      g.innerHTML = s;
+    })();
+    (function bidirFig() {
+      const g = document.getElementById('dp-bidir');
+      let s = '';
+      for (let r = 0; r < 8; r++) {
+        const x = 40 + r * 130;
+        s += '<rect x="' + x + '" y="60" width="110" height="90" rx="10" fill="var(--surface)" stroke="var(--border)"/>';
+        s += '<text x="' + (x + 55) + '" y="50" text-anchor="middle" fill="var(--text-soft)">GPU ' + r + '</text>';
+        s += '<rect x="' + (x + 10) + '" y="72" width="90" height="28" rx="6" fill="var(--accent)" opacity="0.85"/><text x="' + (x + 55) + '" y="92" text-anchor="middle" fill="#fff" font-size="15">→ 段 ' + r + '</text>';
+        s += '<rect x="' + (x + 10) + '" y="110" width="90" height="28" rx="6" fill="var(--accent)" opacity="0.5"/><text x="' + (x + 55) + '" y="130" text-anchor="middle" fill="#fff" font-size="15">← 段 ' + (7 - r) + '</text>';
+      }
+      s += '<path d="M40 180 H1060" stroke="var(--accent)" stroke-width="3" marker-end="url(#ar1)"/><text x="40" y="205" fill="var(--accent)">正方向 micro-batch：GPU 0 进，GPU 7 算 loss</text>';
+      s += '<path d="M1060 24 H40" stroke="var(--accent)" stroke-width="3" opacity="0.55" marker-end="url(#ar1)"/><text x="1060" y="18" text-anchor="end" fill="var(--text-soft)">反方向 micro-batch：GPU 7 进，GPU 0 算 loss</text>';
+      g.innerHTML = s;
+    })();
+
+    // ---------------- p2p comm calculator ----------------
+    (function commCalc() {
+      const $ = (id) => document.getElementById(id);
+      const ids = ['cc-h', 'cc-l', 'cc-f', 'cc-bw'];
+      function upd() {
+        const h = +$('cc-h').value, l = +$('cc-l').value, F = +$('cc-f').value * 1e12, BW = +$('cc-bw').value * 1e9;
+        $('cc-h-o').textContent = h; $('cc-l-o').textContent = l; $('cc-f-o').textContent = $('cc-f').value; $('cc-bw-o').textContent = $('cc-bw').value;
+        const r = F / (12 * h * l * BW);
+        $('cc-r').textContent = r < 0.01 ? r.toExponential(1) : r.toFixed(3);
+        $('cc-v').textContent = (2 * 4096 * h / 1e6).toFixed(0) + ' MB';
+      }
+      ids.forEach((i) => $(i).addEventListener('input', upd));
+      upd();
+    })();
+
+    document.addEventListener('slidechange', (e) => {
+      views.forEach((v) => { if (e.detail.slide.contains(v.root)) v.enter(); else v.leave(); });
+    });
+  })();
+  </script>
+</body>
+</html>

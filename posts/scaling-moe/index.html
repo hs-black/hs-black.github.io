@@ -1,0 +1,813 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MoE 与专家并行 · Zunzhe Zhang</title>
+  <meta name="description" content="从路由器讲起：top-k、softmax 与 sigmoid 门控、容量与丢 token、负载均衡损失的推导、z-loss、细粒度与共享专家、无辅助损失均衡，再到专家并行的 all-to-all、通信量和与 DP/TP/PP 的组合。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    :root { --moe-3: #0f9d8a; }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --moe-3: #34d1b8; } }
+    :root[data-theme="dark"] { --moe-3: #34d1b8; }
+    .prose svg.fig { width: 100%; height: auto; display: block; margin: 8px 0; }
+    .prose svg text { font-family: var(--font-sans); }
+    figure figcaption { font-size: 14px; color: var(--text-faint); margin-top: 4px; }
+    .demo svg { width: 100%; height: auto; display: block; }
+    .demo .row-btns { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    .demo .sub { font-size: 13px; color: var(--text-faint); }
+    .demo .two-charts { display: grid; grid-template-columns: 1fr; gap: 10px; }
+    @media (min-width: 720px) { .demo .two-charts { grid-template-columns: 1.4fr 1fr; } }
+    .ep-stage { font-size: 15px; min-height: 3.2em; margin-top: 6px; color: var(--text-soft); }
+    .ep-tok { transition: transform 0.7s cubic-bezier(0.2, 0.7, 0.2, 1), opacity 0.4s; }
+    @media (prefers-reduced-motion: reduce) { .ep-tok { transition: none; } }
+    .prose table td.num { font-family: var(--font-mono); font-size: 14px; }
+    .formula-note { font-size: 14px; color: var(--text-faint); }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>MoE 与专家并行</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>这一篇把混合专家（Mixture of Experts, MoE）从头讲到分布式训练：路由器怎么选专家，为什么要限制每个专家的容量，负载均衡的辅助损失是怎么来的、梯度往哪推，DeepSeek 系列的细粒度专家、共享专家和无辅助损失的偏置均衡在解决什么问题；然后是专家并行（EP）：两次 all-to-all 到底传了多少字节，节点受限路由为什么能省带宽，EP 怎么和 DP、TP、PP 拼在一起。中间有三个可以拖的演示：一个路由器模拟器、一个 EP 数据流的单步动画和一个 all-to-all 成本计算器。</p>
+      <p>上一篇的 <a href="/posts/scaling-pipeline/">流水线并行</a> 最后讲到 DualPipe 是为了藏住 MoE 的 all-to-all，这一篇就是在补那个 all-to-all 的来龙去脉。</p>
+
+      <nav class="toc" aria-label="目录">
+        <b>目录</b>
+        <ol>
+          <li><a href="#dense-to-sparse">从稠密 FFN 到 MoE</a></li>
+          <li><a href="#router">路由器：打分、top-k、加权求和</a></li>
+          <li><a href="#gate-fn">softmax 门控还是 sigmoid 门控</a></li>
+          <li><a href="#capacity">专家容量与丢 token</a></li>
+          <li><a href="#aux-loss">负载均衡辅助损失：推导与梯度</a></li>
+          <li><a href="#zloss">Router z-loss 与数值稳定</a></li>
+          <li><a href="#deepseekmoe">细粒度专家与共享专家</a></li>
+          <li><a href="#loss-free">无辅助损失的负载均衡</a></li>
+          <li><a href="#router-demo">演示：路由器模拟器</a></li>
+          <li><a href="#ep">专家并行：dispatch 与 combine</a></li>
+          <li><a href="#comm">通信量与节点受限路由</a></li>
+          <li><a href="#ep-calc">演示：EP all-to-all 成本计算器</a></li>
+          <li><a href="#combine">EP 与 DP、TP、PP 的组合</a></li>
+          <li><a href="#gemm">专家计算：padding、block-sparse 与 grouped GEMM</a></li>
+          <li><a href="#infer">推理部署中的 EP（DeepSeek-V3）</a></li>
+          <li><a href="#flops">总参数、激活参数与 FLOPs</a></li>
+          <li><a href="#tricks">其他稳定训练的技巧</a></li>
+          <li><a href="#summary">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="dense-to-sparse">从稠密 FFN 到 MoE</h2>
+      <p>先回顾一下 Transformer 块里的前馈网络（FFN，也叫 MLP）。对每个 token 的隐状态 \(u \in \mathbb{R}^h\)，现代 LLM 常用 SwiGLU 形式：</p>
+      $$\mathrm{FFN}(u) = W_{down}\,\big(\mathrm{SiLU}(W_{gate}\,u) \odot W_{up}\,u\big),\quad W_{gate}, W_{up} \in \mathbb{R}^{f\times h},\ W_{down}\in\mathbb{R}^{h\times f}$$
+      <p>三块矩阵共 \(3hf\) 个参数，前向每个 token 约 \(2\cdot 3hf = 6hf\) 次浮点运算（一次乘加记 2 FLOPs）。FFN 有个关键性质：<b>它逐 token 独立</b>，不同 token 之间没有交互（交互都在注意力里）。这就给了「不同 token 走不同参数」的空间。</p>
+      <p>MoE 把一个 FFN 换成 \(E\) 个结构相同的 FFN（称为<b>专家</b>，expert），再加一个小小的<b>路由器</b>（router，也叫 gating network）。每个 token 只被送到其中 \(k\) 个专家，输出是这 \(k\) 个专家输出的加权和：</p>
+      $$h'_t = u_t + \sum_{i=1}^{E} g_{i,t}\,\mathrm{FFN}_i(u_t),\qquad g_{i,t}=0\ \text{对未选中的专家}$$
+      <p>于是参数量涨了约 \(E\) 倍，而每个 token 的计算只涨了 \(k\) 倍。Scaling Book 把 \(E/k\) 叫作稀疏度（sparsity），并说常见取值在 8 到 64 之间；DeepSeek-V3 是 \(E=256\)、\(k=8\)。这种「参数多、但每个输入只用一小部分」的思路叫条件计算（conditional computation），在神经网络里的现代版本来自 Shazeer 等人 2017 年的 Sparsely-Gated MoE。</p>
+
+      <figure>
+        <svg class="fig" viewBox="0 0 760 290" role="img" aria-label="MoE 层：路由器为每个 token 选出 k 个专家，输出加权求和">
+          <defs><marker id="m-ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-soft)"/></marker></defs>
+          <g font-size="14" fill="var(--text)">
+            <rect x="20" y="120" width="90" height="44" rx="8" fill="var(--surface)" stroke="var(--border)"/><text x="65" y="147" text-anchor="middle">token uₜ</text>
+            <rect x="160" y="120" width="110" height="44" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="215" y="140" text-anchor="middle">路由器</text><text x="215" y="156" text-anchor="middle" font-size="12" fill="var(--text-soft)">sᵢ = σ(uᵀeᵢ)</text>
+            <path d="M112 142 H155" stroke="var(--text-soft)" stroke-width="1.6" marker-end="url(#m-ar)"/>
+            <g id="moe-experts"></g>
+            <rect x="620" y="120" width="120" height="44" rx="8" fill="var(--surface)" stroke="var(--border)"/><text x="680" y="140" text-anchor="middle">Σ gᵢ·FFNᵢ(u)</text><text x="680" y="156" text-anchor="middle" font-size="12" fill="var(--text-soft)">+ 残差</text>
+          </g>
+        </svg>
+        <figcaption>一个 \(E=8\)、\(k=2\) 的 MoE 层：路由器给 8 个专家打分，只有得分最高的 2 个（实线）真正参与计算，它们的输出按门控值加权求和。</figcaption>
+      </figure>
+
+      <p>为什么值得这么做？因为在训练 FLOPs 固定时，更多参数通常意味着更低的 loss。MoE 让我们用同样的每 token 计算量撑起大得多的参数量。代价全在系统侧：参数显存变大、每个专家拿到的 batch 变小（Shazeer 等人称为 shrinking batch problem）、路由会不均衡、专家分布在不同卡上时要搬运 token。后面基本都在处理这些代价。</p>
+      <p>shrinking batch 值得算一下。一张卡上 \(T\) 个 token、\(E\) 个专家、top-\(k\)，均匀路由时每个专家只拿到 \(Tk/E\) 个 token。专家的矩阵乘形状是 \([Tk/E,\ h]\times[h,\ d_e]\)，算术强度（每读一字节权重做多少 FLOPs）正比于这个行数。稠密模型里每个 FFN 吃满 \(T\) 行，MoE 里只有 \(Tk/E\) 行：以 \(E/k=32\) 为例，同样的 \(T\) 下专家 GEMM 的行数只有稠密的 1/32，很容易掉进带宽受限区。解法只有一个：让每个专家看到更多 token——把很多数据并行副本的 token 汇聚到同一个专家上，这正是后面专家并行的出发点。</p>
+
+      <h2 id="router">路由器：打分、top-k、加权求和</h2>
+      <p>路由器本身就是一个线性层。设一批里有 \(T\) 个 token，隐状态堆成 \(U \in \mathbb{R}^{T\times h}\)，路由器参数 \(W_r \in \mathbb{R}^{h\times E}\)（第 \(i\) 列 \(e_i\) 可以看成专家 \(i\) 的「质心」向量），得到路由 logits：</p>
+      $$H = U W_r \in \mathbb{R}^{T\times E},\qquad H_{t,i} = u_t^\top e_i$$
+      <p>然后三步：</p>
+      <ol>
+        <li><b>打分</b>：把 logits 变成亲和度（affinity）\(s_{i,t}\)，用 softmax 或 sigmoid（下一节讨论）。</li>
+        <li><b>选 top-k</b>：对每个 token 取分数最高的 \(k\) 个专家，记为集合 \(\mathcal{T}_t\)。</li>
+        <li><b>加权</b>：门控值 \(g_{i,t}\) 由选中专家的分数得到（可能再归一化），未选中的为 0；输出 \(\sum_{i\in\mathcal{T}_t} g_{i,t}\mathrm{FFN}_i(u_t)\)。</li>
+      </ol>
+      <p>路由器怎么学？top-k 选择本身不可导，但<b>门控值 \(g_{i,t}\) 是可导的</b>：输出对 \(g_{i,t}\) 的梯度是 \(\mathrm{FFN}_i(u_t)\) 与上游梯度的内积，再经 softmax/sigmoid 传回 \(W_r\)。所以路由器学的是「被选中的专家里，谁该多给权重」，而谁被选中这件事只通过分数的相对大小间接地被改变。Switch Transformer 论文也强调了这一点：门控值让路由器可导。</p>
+      <p>写成式子：设上游传回的梯度为 \(\delta_t = \partial \mathcal{L}/\partial h'_t\)，则</p>
+      $$\frac{\partial \mathcal{L}}{\partial g_{i,t}} = \delta_t^\top\,\mathrm{FFN}_i(u_t)\quad (i\in\mathcal{T}_t),$$
+      <p>再乘上 \(\partial g/\partial H\) 传到 logits、传到 \(W_r\) 和 \(u_t\)。直观地说：如果专家 \(i\) 的输出方向与「让 loss 下降的方向」一致（\(\delta^\top \mathrm{FFN}_i\lt 0\)），它的门控值就被调大，进而它在这类 token 上的 logit 被调高，下次更可能被选中。未被选中的专家完全拿不到这种信号，这也是坍缩的根源之一：没被选中就没有机会证明自己。</p>
+      <p>Shazeer 2017 的版本是 noisy top-k：在 logits 上加一个可学习幅度的高斯噪声再取 top-k，未选中的位置置为 \(-\infty\) 后再 softmax：</p>
+      $$G(x)=\mathrm{Softmax}(\mathrm{KeepTopK}(H(x),k)),\quad H(x)_i = (xW_g)_i + \mathcal{N}(0,1)\cdot\mathrm{Softplus}((xW_{noise})_i)$$
+      <p>噪声的作用是帮助负载均衡（让分数接近的专家都有机会被选到）。他们当时猜测 \(k>1\) 是必要的，否则路由器没有「比较两个专家」的梯度信号；Switch Transformer 反过来证明 \(k=1\) 也能工作，而且路由计算更省、每个专家的容量可以减半、通信更少。GShard 用 top-2，并对第二个专家做随机路由：以正比于其（归一化后）门控值 \(g_2\) 的概率才真正派发，门控值很小时干脆省掉，节省容量。</p>
+      <p>从张量形状的角度看一次 MoE 前向（单卡、不考虑并行）：</p>
+<pre><code>U       : [T, h]          # 本批 token
+logits  = U @ W_r          # [T, E]
+s       = score(logits)    # [T, E]  softmax / sigmoid
+idx, w  = topk(s, k)       # [T, k] 专家编号, [T, k] 门控值（可能归一化）
+# 按专家分组：把 T*k 个 (token, 专家) 对按专家编号排序
+perm    = argsort(idx.flatten())
+X       = U[perm // k]     # [T*k, h]  每个专家的输入连续存放
+Y       = grouped_ffn(X, counts_per_expert)   # [T*k, h]
+out     = zeros(T, h).index_add(0, perm // k, Y * w.flatten()[perm, None])</code></pre>
+      <p>这个「排序—按专家分组算—按原顺序加回去」的结构，后面做专家并行时只是把中间那步换成跨卡的 all-to-all。</p>
+
+      <h2 id="gate-fn">softmax 门控还是 sigmoid 门控</h2>
+      <p>打分函数有几种常见组合，差别在<b>在哪一步归一化</b>：</p>
+      <div class="table-wrap">
+      <table>
+        <tr><th>做法</th><th>公式</th><th>代表</th></tr>
+        <tr><td>先 softmax 再 top-k（不再归一化）</td><td>\(s=\mathrm{softmax}(H)\)，\(g_i = s_i\ (i\in\mathcal{T})\)</td><td>Switch（k=1）、DeepSeekMoE、DeepSeek-V2</td></tr>
+        <tr><td>先 softmax 再 top-k，再在选中者间归一化</td><td>\(g_i = s_i/\sum_{j\in\mathcal{T}}s_j\)</td><td>GShard 的 top-2</td></tr>
+        <tr><td>先 top-k 再 softmax</td><td>\(g=\mathrm{softmax}(\mathrm{TopK}(H))\)</td><td>Shazeer 2017、Mixtral</td></tr>
+        <tr><td>sigmoid，再在选中者间归一化</td><td>\(s_i=\sigma(u^\top e_i)\)，\(g_i = s_i/\sum_{j\in\mathcal{T}}s_j\)</td><td>DeepSeek-V3</td></tr>
+      </table>
+      </div>
+      <p>后两种「选中者之间归一化」在数学上是一回事吗？先 top-k 再 softmax 等价于对选中的 logits 做 softmax，即 \(g_i = e^{H_i}/\sum_{j\in\mathcal{T}}e^{H_j}\)；先 softmax 再在选中者间归一化，\(e^{H_i}/Z\) 除以 \(\sum_{j\in\mathcal T} e^{H_j}/Z\)，结果完全相同。区别只在<b>不归一化</b>的那一类：门控值之和小于 1，且受未选中专家分数的影响。</p>
+      <p>softmax 和 sigmoid 的本质区别是<b>专家之间是否竞争</b>。softmax 的分数和为 1，一个专家分数上升必然压低其他专家；sigmoid 对每个专家独立打分，\(s_i \in (0,1)\) 只取决于 \(u^\top e_i\)。DeepSeek-V3 报告只说「与 V2 略有不同，V3 用 sigmoid 计算亲和度，并在选中的分数之间归一化得到门控值」，没有给出消融。我的理解是：专家数到 256 这么多时，softmax 的分数会非常小、彼此强耦合；sigmoid 让每个专家的分数有自己的尺度，同时后面那个只用于选择的偏置项（第 8 节）加在一个与其他专家解耦的分数上也更自然。这是推测，不是报告的结论。</p>
+      <p>还有一个容易混的概念：<b>Expert Choice</b> 路由（Zhou et al., 2022）反过来让每个专家挑 top-C 个 token，天然均衡；但一个 token 被谁选中取决于同一批里其他 token（包括序列中后面的 token），对自回归语言模型来说等于泄露了未来信息。DeepSeek 的无辅助损失论文专门把这点列为它不采用 Expert Choice 的原因。</p>
+
+      <h2 id="capacity">专家容量与丢 token</h2>
+      <p>路由是数据相关的：同一批里，有的专家可能被几百个 token 选中，有的一个都没有。但加速器（尤其 TPU/XLA 这种静态形状的编译器）希望每个专家的输入是固定形状 \([C, h]\)。于是有了<b>专家容量</b>（expert capacity）：</p>
+      $$C = \left\lceil \mathrm{CF}\cdot\frac{T\cdot k}{E} \right\rceil$$
+      <p>\(T k/E\) 是完全均衡时每个专家应收到的分配数，\(\mathrm{CF}\)（capacity factor）是留出的余量。Switch Transformer 的公式写的是 \(k=1\) 的形式：(tokens per batch / number of experts) × capacity factor；GShard 是 top-2，每组的容量 \(2N/(G\cdot E)\)。</p>
+      <ul>
+        <li>某个专家收到超过 \(C\) 个分配时，多出来的被<b>丢弃</b>（dropped tokens）：这个 token 在该专家处不计算，若它所有选中的专家都满了，就只通过残差连接原样进入下一层。GShard 的实现是维护一个计数器，按 token 顺序依次填入专家缓冲区。</li>
+        <li>收到不足 \(C\) 个时，剩下的位置是<b>padding</b>，照样算、白算。</li>
+      </ul>
+      <p>所以 CF 是一个直接的权衡：CF 大，丢得少，但计算和通信（固定形状的 buffer 要整块传）都变多；CF 小则反之。具体地，所有专家的槽位总数是 \(E\cdot C \approx \mathrm{CF}\cdot Tk\)，即专家计算量和 all-to-all 的数据量都按 CF 倍放大。举个数：\(T=4096\)、\(E=64\)、\(k=8\)、\(\mathrm{CF}=1.25\)，均衡负载是 \(4096\times8/64=512\)，容量 \(C=640\)；若最热门的专家收到 900 个分配，就要丢 260 个，而冷门专家可能只用了 300 个槽、白算 340 个。Switch 论文的经验是丢 token 的比例要低（他们观察到通常 &lt;1%），而且只要辅助损失系数足够，负载就足够均衡。</p>
+      <p>后来的工作逐渐走向不丢 token（dropless）：MegaBlocks 把 MoE 计算重写成 block-sparse 矩阵乘，GPU 上处理变长的专家输入，「既不丢 token 也不浪费在 padding 上」；DeepSeek-V2 训练时用的是<b>设备级</b>丢 token：先算出每个设备的平均计算预算（相当于设备级 CF = 1.0），在超预算的设备上丢掉亲和度最低的 token，并保证约 10% 的训练序列的 token 永远不丢；DeepSeek-V3 则说由于负载均衡做得好，训练和推理<b>都不丢 token</b>。</p>
+      <p>还有一个细节：top-k 时丢谁？GShard 的算法先为所有 token 的第一选择占位，再处理第二选择，这样容量紧张时优先保住每个 token 的首选专家。下面的模拟器也按这个顺序（先所有 token 的第 1 选择，再第 2 选择……）。</p>
+
+      <h2 id="aux-loss">负载均衡辅助损失：推导与梯度</h2>
+      <p>不加约束地训练，路由器很容易<b>坍缩</b>（routing collapse）：某几个专家早期碰巧分数高、被选得多、于是被训练得更好、于是分数更高……最后大部分专家几乎没有 token。坍缩有两重坏处：参数浪费，以及专家分布在多张卡上时，最忙的那张卡决定整步的时间。</p>
+      <h3>从「想要什么」开始</h3>
+      <p>设 \(f_i\) 是这批 \(T\) 个 token 中被分配给专家 \(i\) 的比例。完全均衡时 \(f_i = 1/E\)。一个自然的目标是最小化 \(\sum_i f_i^2\)：在 \(\sum_i f_i = 1\) 的约束下，由柯西–施瓦茨不等式</p>
+      $$\Big(\sum_i f_i\Big)^2 \le E\sum_i f_i^2 \;\Rightarrow\; \sum_i f_i^2 \ge \frac{1}{E},$$
+      <p>等号当且仅当所有 \(f_i\) 相等。问题是 \(f_i\) 由 top-k 计数得来，<b>对参数不可导</b>。GShard 的做法（Switch 继承并简化）是把平方中的一个 \(f_i\) 换成可导的近似——路由器分给专家 \(i\) 的平均概率 \(P_i\)：</p>
+      $$P_i = \frac{1}{T}\sum_{t} s_{i,t},\qquad \mathcal{L}_{aux} = \alpha\cdot E\cdot \sum_{i=1}^{E} f_i\, P_i$$
+      <p>为什么不干脆用 \(\sum_i P_i^2\)，它本身就可导？因为 \(P\) 是「平均概率」，而真正决定负载的是 argmax/top-k 的计数。路由器完全可以让每个 token 的概率分布都接近均匀（\(P_i\approx 1/E\)），但在 top-k 时总是同一个专家以微弱优势胜出——\(\sum P_i^2\) 很小，负载却完全坍缩。这正是 Shazeer 2017 区分 importance（概率和）和 load（实际分到的样本数）的原因。\(f_iP_i\) 的写法把真实负载 \(f\) 作为「权重」，梯度只推 \(P\)，两者兼顾。</p>
+      <p>这就是 Switch Transformer 的负载均衡损失（GShard 里写作 \(\frac1E\sum_e \frac{c_e}{S} m_e\)，是同一个东西差一个常数）。乘 \(E\) 是为了让完全均衡时损失恒为 \(\alpha\)，不随专家数变化：\(E\cdot\sum_i \frac1E\cdot\frac1E = 1\)。Switch 用 \(\alpha = 10^{-2}\)，并说在 \(10^{-1}\) 到 \(10^{-5}\) 之间扫过，\(10^{-2}\) 既能很快均衡又不干扰主损失。</p>
+      <h3>梯度往哪推</h3>
+      <p>\(f\) 当作常数（它没有梯度），只有 \(P\) 传梯度。对 softmax 打分 \(s_{\cdot,t}=\mathrm{softmax}(H_{t,\cdot})\)，利用 \(\partial s_i/\partial H_k = s_i(\delta_{ik}-s_k)\)：</p>
+      $$\frac{\partial}{\partial H_{t,k}}\sum_i f_i P_i = \frac{1}{T}\sum_i f_i\, s_{i,t}(\delta_{ik} - s_{k,t}) = \frac{1}{T}\, s_{k,t}\Big(f_k - \sum_i f_i s_{i,t}\Big)$$
+      <p>读法：对每个 token，括号里是「专家 \(k\) 的负载」减去「这个 token 的分数加权的平均负载」。<b>负载高于平均的专家，其 logit 被往下推；低于平均的被往上推</b>，推的力度与该 token 给它的分数 \(s_{k,t}\) 成正比。这就是一个平滑版的「谁忙就压谁」。</p>
+      <p>举个小例子：\(E=4\)，这一批负载 \(f=(0.55, 0.25, 0.10, 0.10)\)，某个 token 的分数 \(s=(0.4, 0.3, 0.2, 0.1)\)。加权平均负载 \(\sum_i f_i s_i = 0.22+0.075+0.02+0.01=0.325\)。对四个 logit 的梯度（忽略 \(1/T\)）分别是 \(0.4\times0.225=0.090\)、\(0.3\times(-0.075)=-0.0225\)、\(0.2\times(-0.225)=-0.045\)、\(0.1\times(-0.225)=-0.0225\)。梯度下降减去它们：专家 1 的 logit 被压低，其余三个被抬高，而且专家 3 比专家 4 抬得多——因为这个 token 本来就更偏向专家 3，把它「让」给专家 3 的代价最小。</p>
+      <p>DeepSeek-V3 用 sigmoid 打分、\(P_i\) 用归一化后的 \(s'_{i,t}=s_{i,t}/\sum_j s_{j,t}\)。同样推一下：\(\partial \log s'_i/\partial H_k = \delta_{ik}(1-s_i) - s'_k(1-s_k)\)，于是</p>
+      $$\frac{\partial}{\partial H_{t,k}}\sum_i f_i P_i = \frac{1}{T}\, s'_{k,t}\,(1-s_{k,t})\Big(f_k - \sum_i f_i s'_{i,t}\Big),$$
+      <p>结构和 softmax 版本一样，只是多了 sigmoid 的饱和因子 \(1-s_{k,t}\)：分数已经接近 1 的专家，logit 的梯度很小。下面的模拟器两种都按这两个式子实现。</p>
+      <p>注意副作用：这个梯度直接改的是 logits，也就改了门控值 \(g\)，而 \(g\) 是乘在专家输出上的——均衡的压力和语言建模的目标在同一组参数上拉扯。\(\alpha\) 太大，模型质量下降；太小，均衡不住。DeepSeek 的无辅助损失论文把这叫作负载均衡与性能之间的两难（dilemma）。</p>
+      <h3>各家的变体</h3>
+      <ul>
+        <li><b>Shazeer 2017</b>：两个损失，importance loss \(w\cdot \mathrm{CV}(\mathrm{Importance}(X))^2\)（Importance 是每个专家的门控值之和，CV 是变异系数），外加一个基于噪声的平滑 load 估计的 \(\mathrm{CV}^2\) 损失；因为只均衡 importance 时，可能「一个专家收到少量大权重的样本、另一个收到大量小权重的样本」。</li>
+        <li><b>DeepSeekMoE / V2</b>：专家级 \(\mathcal{L}_{ExpBal}=\alpha_1\sum_i f_iP_i\)，其中 \(f_i = \frac{N'}{K'T}\sum_t \mathbb{1}(t\ \text{选}\ i)\)（\(N'\) 路由专家数、\(K'\) 激活的路由专家数），这样均衡时 \(f_i=1\)。另加<b>设备级</b>损失 \(\alpha_2\sum_d f'_dP'_d\)：\(f'_d\) 是设备 \(d\) 上专家 \(f\) 的平均，\(P'_d\) 是设备上专家 \(P\) 的和。他们的思路是：为了算力均衡，只需要设备之间均衡，不必逐专家严格均衡；所以专家级系数设小（防坍缩），设备级系数设大。V2 又加了<b>通信均衡损失</b> \(\alpha_3\sum_d f''_dP''_d\)，其中 \(f''_d = \frac{D}{MT}\sum_t \mathbb{1}(t\ \text{发往设备}\ d)\)，让每个设备<b>接收</b>的 token 数也接近 \(MT\)。</li>
+        <li><b>DeepSeek-V3</b>：主力换成下面的无辅助损失偏置，只保留一个极小（\(\alpha=0.0001\)）的<b>序列级</b>平衡损失，在单条序列内防止极端不均衡：\(f_i\)、\(P_i\) 都只在一条序列的 \(T\) 个 token 上统计，且 \(P_i\) 用归一化后的 sigmoid 分数 \(s'_{i,t}=s_{i,t}/\sum_j s_{j,t}\)。</li>
+      </ul>
+
+      <h2 id="zloss">Router z-loss 与数值稳定</h2>
+      <p>ST-MoE（Zoph et al., 2022）发现，在最大规模上，即使按 Switch 的建议把路由器放在 float32 里计算，训练仍然会不稳定。他们提出 router z-loss：</p>
+      $$\mathcal{L}_z = \frac{1}{T}\sum_{t=1}^{T}\Big(\log\sum_{j=1}^{E} e^{H_{t,j}}\Big)^2$$
+      <p>它惩罚的是每个 token 路由 logits 的 log-sum-exp（softmax 的归一化常数的对数）的平方。梯度是</p>
+      $$\frac{\partial \mathcal{L}_z}{\partial H_{t,k}} = \frac{2}{T}\,\mathrm{LSE}(H_{t,\cdot})\cdot \mathrm{softmax}(H_{t,\cdot})_k,$$
+      <p>只要 LSE 为正，所有 logits 都被往下压，且分数越大压得越多——效果就是把 logits 的整体尺度控制在小范围内。为什么这有用？因为 bfloat16 只有 7 位尾数，数越大舍入误差越大，而指数函数会把小的输入误差放大。ST-MoE 给的例子：10 个 logit 等于 128、一个等于 128.5，在 bfloat16 里 128.5 可能被舍入成 128，softmax 输出就从 \(\frac{1}{1+10e^{-0.5}}\approx 0.142\) 变成 \(\frac{1}{11}\approx 0.091\)。他们也解释了为什么不直接裁剪 logits：裁剪发生在舍入之后，本身就是一种更大的不连续。</p>
+      <p>总损失写成 \(\mathcal{L} = \mathcal{L}_{CE} + c_B\mathcal{L}_B + c_z\mathcal{L}_z\)，他们扫参后取 \(c_z = 0.001\)，在他们的实验里稳定了全部 3 次运行且质量没有下降（而 Adafactor 的 update clipping 虽然也稳定，但质量掉得很厉害）。</p>
+
+      <h2 id="deepseekmoe">细粒度专家与共享专家</h2>
+      <p>DeepSeekMoE（Dai et al., 2024）从「专家专精程度」的角度提了两点改动，后来贯穿 DeepSeek-V2、V3。</p>
+      <h3>细粒度切分（fine-grained expert segmentation）</h3>
+      <p>如果专家数少，一个专家要接收各种各样的 token，被迫学很杂的知识。于是把每个专家的 FFN 中间维度切成 \(1/m\)，专家数变成 \(mN\)，同时激活数变成 \(mK\)——参数总量、每 token 计算量都不变，但组合空间暴涨。论文的例子：\(N=16\)、top-2 只有 \(\binom{16}{2}=120\) 种组合；每个专家切成 4 份后 top-8，有 \(\binom{64}{8}=4{,}426{,}165{,}368\) 种。</p>
+      <h3>共享专家隔离（shared expert isolation）</h3>
+      <p>不同专家往往都需要一些通用知识（语法、常见模式），于是每个都学一份，造成冗余。DeepSeekMoE 单独拿出 \(K_s\) 个<b>共享专家</b>，每个 token 必经、不经路由器；为保持计算量不变，路由专家的激活数相应减少 \(K_s\)。V3 的形式：</p>
+      $$h'_t = u_t + \sum_{i=1}^{N_s}\mathrm{FFN}^{(s)}_i(u_t) + \sum_{i=1}^{N_r} g_{i,t}\,\mathrm{FFN}^{(r)}_i(u_t)$$
+      <p>论文也注明共享专家的雏形来自 Rajbhandari 等人（DeepSpeed-MoE），只是那边出于工程考虑，这边是从算法角度出发。</p>
+      <figure>
+        <svg class="fig" viewBox="0 0 760 250" role="img" aria-label="传统 top-2、细粒度 top-8、细粒度加共享专家三种结构对比">
+          <g id="fg-fig" font-size="13" fill="var(--text)"></g>
+        </svg>
+        <figcaption>三种结构参数量与每 token 计算量都相同：(a) 16 个专家选 2；(b) 每个专家切 4 份，64 个选 8；(c) 再拿出 1 个（切分后的）专家作为共享专家，路由部分 63 选 7。深色为被激活的专家。</figcaption>
+      </figure>
+      <p>实际配置（来自各自技术报告）：</p>
+      <div class="table-wrap">
+      <table>
+        <tr><th>模型</th><th>共享</th><th>路由专家</th><th>每 token 激活</th><th>专家中间维度</th><th>总参 / 激活</th></tr>
+        <tr><td>Mixtral 8x7B</td><td>0</td><td>8</td><td>2</td><td>14336</td><td>47B / 13B</td></tr>
+        <tr><td>DeepSeek-V2</td><td>2</td><td>160</td><td>6</td><td>1536</td><td>236B / 21B</td></tr>
+        <tr><td>DeepSeek-V3</td><td>1</td><td>256</td><td>8</td><td>2048</td><td>671B / 37B</td></tr>
+      </table>
+      </div>
+      <p class="formula-note">DeepSeek-V2 的总参/激活取自其摘要；V3 中前 3 层仍是稠密 FFN，其余层为 MoE。</p>
+
+      <h2 id="loss-free">无辅助损失的负载均衡</h2>
+      <p>DeepSeek 的 Wang et al.（2024）提出 Loss-Free Balancing，V3 把它作为主要的均衡手段。思路是：既然辅助损失的问题在于它通过梯度改动了门控值，那就<b>不走梯度</b>，直接给每个专家一个偏置 \(b_i\)，只用于选择：</p>
+      $$g'_{i,t} = \begin{cases} s_{i,t}, & s_{i,t} + b_i \in \mathrm{Topk}\big(\{s_{j,t}+b_j\}_{j},\,K\big) \\ 0, & \text{otherwise}\end{cases}$$
+      <p>关键是：<b>门控值仍然用原始的 \(s_{i,t}\)</b>，偏置只影响谁进 top-k。偏置的更新规则（论文 Algorithm 1）：每个 batch 训练完，统计每个专家分到的 token 数 \(c_i\) 及其平均 \(\bar c\)，</p>
+      $$e_i = \bar c - c_i,\qquad b_i \leftarrow b_i + u\cdot\mathrm{sign}(e_i)$$
+      <p>超载的专家偏置减小、欠载的增大，每步固定走 \(u\)。论文对比了 \(u=0.0001\)（早期收敛慢）、\(0.001\)、\(0.01\)（后期偏置抖动、均衡变差），选 \(0.001\)；也试过 \(b_i \leftarrow b_i + u\,e_i\) 和乘性偏置，均衡略好或相近，但困惑度没有更好，所以保留 sign 版本。V3 中把这个步长叫 bias update speed \(\gamma\)，前 14.3T token 用 \(0.001\)，最后 500B token 设为 0。</p>
+      <p>我自己的理解是把它看成一个简单的反馈控制器：目标是「每个专家的负载等于平均」，\(b_i\) 是控制量，sign 更新相当于固定步长的积分控制——负载持续偏高，偏置就持续下降，直到稳定在一个能抵消该专家「天然受欢迎程度」的值附近，然后在附近以 \(\pm u\) 抖动。也可以把 \(b_i\) 看成约束 \(c_i \le \bar c\) 的对偶变量（拉格朗日乘子），sign 更新就是对偶上升的一种粗糙版本。这个视角能解释论文观察到的现象：\(u\) 太小，收敛慢；\(u\) 太大，稳态抖动大。还有一点：偏置是加在<b>分数</b>上的，它的合适量级取决于分数的尺度。sigmoid 分数在 \((0,1)\) 上分布较开，0.001 量级的步长足够；如果是 256 个专家的 softmax，分数本身只有 \(10^{-3}\) 量级，同样的步长意义完全不同（在下面的模拟器里切到 softmax 也能看到偏置法收敛变慢）。</p>
+      <p>两个细节值得注意：</p>
+      <ul>
+        <li>用的是<b>上一个 batch</b> 的负载统计，而不是当前序列的——用当前序列会让一个 token 的路由依赖同序列后面的 token，泄露未来信息（这正是 Expert Choice 的问题）。</li>
+        <li>它是 <b>batch 级</b>的均衡，比序列级约束更宽松：允许某个领域的序列集中用某些专家。V3 报告观察到无辅助损失的模型专家在不同领域上的专精更明显；他们还验证了一个 batch 级的辅助损失在达到相近的 batch 级均衡时，验证 loss 和无辅助损失方法相同（1B 模型 2.253 对 2.253，序列级辅助损失为 2.258）。batch 级均衡的风险是单条序列或小 batch 内不均衡、以及推理时的领域偏移，前者靠大规模 EP+DP 带来的大 micro-batch 缓解，后者靠推理时部署冗余专家。</li>
+      </ul>
+      <p>论文用 MaxVio 衡量均衡程度：\(\mathrm{MaxVio} = \frac{\max_i \mathrm{Load}_i - \overline{\mathrm{Load}}}{\overline{\mathrm{Load}}}\)，即最忙的专家比平均超出多少。他们报告 1B / 3B 模型上 Loss-Free 的全局 MaxVio 为 0.04，辅助损失方法分别为 0.72 / 0.52，同时困惑度更低。</p>
+
+      <h2 id="router-demo">演示：路由器模拟器</h2>
+      <p>下面是一个小的路由器：\(T\) 个 token 的隐状态是随机向量，\(E\) 个专家各有一个随机质心，亲和度 logits 是两者的内积，再加上一个「专家受欢迎程度」偏斜项（拖 skew 让前面的专家天然更受欢迎，模拟坍缩的早期）。上半部分是这一批的路由结果：每个专家的负载柱、容量线和被丢掉的分配。下半部分可以选一种均衡方法跑若干「训练步」（每步换一批新 token）：</p>
+      <ul>
+        <li><b>辅助损失</b>：给每个专家一个可学习的 logit 偏移 \(\theta_i\)，按上面推出的梯度 \(\frac{1}{T}\sum_t s_{k,t}(f_k-\sum_i f_i s_{i,t})\)（sigmoid 时用对应的式子）做梯度下降。它会改变门控值。</li>
+        <li><b>无辅助损失偏置</b>：\(b_i \leftarrow b_i + \gamma\,\mathrm{sign}(\bar c - c_i)\)，只影响选择，门控值不变。</li>
+      </ul>
+      <p>所有数据都是随机生成的示意，但每个数（容量、丢弃数、\(\sum f_iP_i\)、z-loss、MaxVio、梯度和偏置更新）都按上文的公式真实计算。演示里的步数远少于真实训练，所以 \(\gamma\) 默认取得比论文的 0.001 大。</p>
+
+      <div class="demo" id="router-demo-box">
+        <div class="demo-label">路由器模拟器</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>token 数 T</span><input type="range" id="rd-T" min="64" max="2048" step="64" value="512"><output id="rd-T-o"></output></label>
+          <label class="ctrl"><span>专家数 E</span><input type="range" id="rd-E" min="4" max="64" step="4" value="16"><output id="rd-E-o"></output></label>
+          <label class="ctrl"><span>top-k</span><input type="range" id="rd-k" min="1" max="8" step="1" value="2"><output id="rd-k-o"></output></label>
+          <label class="ctrl"><span>容量因子 CF</span><input type="range" id="rd-cf" min="0.5" max="4.0" step="0.05" value="1.25"><output id="rd-cf-o"></output></label>
+          <label class="ctrl"><span>偏斜 skew</span><input type="range" id="rd-skew" min="0" max="3" step="0.1" value="1.2"><output id="rd-skew-o"></output></label>
+        </div>
+        <div class="row-btns">
+          <span class="sub">打分：</span>
+          <div class="seg" id="rd-gate"><button type="button" data-v="softmax" aria-pressed="false">softmax</button><button type="button" data-v="sigmoid" aria-pressed="true">sigmoid</button></div>
+          <span class="sub">容量：</span>
+          <div class="seg" id="rd-drop"><button type="button" data-v="cap" aria-pressed="true">按 CF 截断</button><button type="button" data-v="dropless" aria-pressed="false">不丢（dropless）</button></div>
+          <button type="button" class="btn" id="rd-new">换一批 token</button>
+        </div>
+        <svg id="rd-bars" viewBox="0 0 680 230" role="img" aria-label="每个专家的负载柱状图"></svg>
+        <div class="readout" id="rd-read"></div>
+        <hr style="border:none;border-top:1px solid var(--border);margin:16px 0 10px">
+        <div class="row-btns">
+          <span class="sub">均衡方法：</span>
+          <div class="seg" id="rd-method"><button type="button" data-v="none" aria-pressed="false">不均衡</button><button type="button" data-v="aux" aria-pressed="false">辅助损失</button><button type="button" data-v="bias" aria-pressed="true">无辅助损失偏置</button></div>
+        </div>
+        <div class="ctrls">
+          <label class="ctrl"><span>辅助损失 学习率×α</span><input type="range" id="rd-lr" min="0.5" max="40" step="0.5" value="10"><output id="rd-lr-o"></output></label>
+          <label class="ctrl"><span>偏置步长 γ</span><input type="range" id="rd-gamma" min="0.001" max="0.05" step="0.001" value="0.01"><output id="rd-gamma-o"></output></label>
+        </div>
+        <div class="row-btns">
+          <button type="button" class="btn primary" id="rd-run">跑 200 步</button>
+          <button type="button" class="btn" id="rd-step">单步</button>
+          <button type="button" class="btn" id="rd-reset">重置参数</button>
+          <span class="sub" id="rd-stepn"></span>
+        </div>
+        <div class="two-charts">
+          <svg id="rd-curve" viewBox="0 0 420 200" role="img" aria-label="MaxVio 随训练步的变化"></svg>
+          <svg id="rd-bias" viewBox="0 0 300 200" role="img" aria-label="每个专家的偏置或 logit 偏移"></svg>
+        </div>
+        <p class="sub">左：每步 batch 的 MaxVio（紫）与「门控值偏移」（橙，\(\frac1T\sum_t\sum_i |s_{i,t}(\theta)-s_{i,t}(0)|\)，衡量均衡手段改了多少门控分数）。右：每个专家当前的 \(b_i\)（偏置法）或 \(\theta_i\)（辅助损失法）。所有数值为示意。</p>
+      </div>
+
+      <p>可以试试：把 skew 拉到 2 以上、选「不均衡」看 MaxVio 很高、丢弃很多；切到「无辅助损失偏置」跑 200 步，MaxVio 降下来而橙线一直是 0；切到「辅助损失」也能降下来，但橙线随之上升——它是靠改门控分数实现均衡的。再把 CF 调到 1.0 附近，即使平均均衡，随机波动也会造成丢弃；选 dropless 则不丢，但最忙专家的负载（决定这一步的时间）就是 MaxVio 所描述的那部分开销。</p>
+
+      <h2 id="ep">专家并行：dispatch 与 combine</h2>
+      <p>专家多了以后，所有专家的参数放不进一张卡，自然的做法是把专家分到不同的卡上：<b>专家并行</b>（Expert Parallelism, EP）。Playbook 的说法很直接：既然各专家的 FFN 完全独立，就把每个专家放在不同的 worker 上；相比 TP 它轻得多，不需要切矩阵乘，只需要把 token 的隐状态送到对的专家那里。</p>
+      <p>设 EP 组有 \(P\) 张卡，每卡放 \(E/P\) 个专家。注意力等非 MoE 部分在这 \(P\) 张卡上是<b>数据并行</b>的：每张卡处理自己那份 token。于是一个 MoE 层的流程是：</p>
+      <ol>
+        <li><b>路由</b>：每张卡对本地 \(T\) 个 token 算路由，得到 \(T\cdot k\) 个 (token, 专家) 分配。</li>
+        <li><b>permute</b>：按目标专家（从而按目标卡）排序，同一目标卡的数据在内存里连续。</li>
+        <li><b>dispatch（all-to-all）</b>：每张卡把发往卡 \(j\) 的那段发给卡 \(j\)。之后每张卡持有所有卡发来的、属于自己专家的 token。</li>
+        <li><b>专家计算</b>：本地 \(E/P\) 个专家各自处理收到的变长批次（grouped GEMM，见后文）。</li>
+        <li><b>combine（all-to-all）</b>：把结果按原路发回 token 所在的卡。</li>
+        <li><b>unpermute + 加权求和</b>：恢复原顺序，乘门控值，把 \(k\) 个专家的输出加起来，再加残差。</li>
+      </ol>
+      <p>Switch 论文用 Mesh-TensorFlow 的张量写法描述过这一步：路由得到 \([n, B/n, E, C]\) 的二值派发张量，与 \([n, B/n, d]\) 的输入做 einsum 得到 \([n, E, C, d]\)（按第一维 \(n\) 分片），然后一次 all-to-all 把分片维从 \(n\) 换成 \(E\)。GShard 的 Algorithm 2 也是同样的结构：<code>dispatch_mask</code> einsum → 专家 FFN → <code>combine_weights</code> einsum。Scaling Book 的说法更抽象：all-to-all 就是「把一个下标从一个轴挪到另一个轴」的重分片 \(A[I_X, J]\to A[I, J_X]\)。</p>
+      <p>下面这个小动画用 4 张卡、每卡 2 个专家、top-1 的设置，逐步走一遍。</p>
+      <div class="demo" id="ep-demo">
+        <div class="demo-label">EP 数据流（单步）</div>
+        <svg id="ep-svg" viewBox="0 0 680 300" role="img" aria-label="4 张卡之间的 token dispatch 与 combine 动画"></svg>
+        <div class="row-btns">
+          <button type="button" class="btn" id="ep-prev">← 上一步</button>
+          <button type="button" class="btn primary" id="ep-next">下一步 →</button>
+          <button type="button" class="btn" id="ep-shuffle">换一批路由</button>
+          <span class="sub" id="ep-n"></span>
+        </div>
+        <div class="ep-stage" id="ep-stage"></div>
+      </div>
+
+      <h3>写成代码是什么样</h3>
+      <p>在 PyTorch 里，一个最朴素的 EP 前向大致如下（省略共享专家和数值细节）。注意 dispatch 之前多了一次<b>小的 all-to-all</b>：每张卡发往每个目标卡的 token 数是动态的，接收方必须先知道每段有多长才能分配缓冲区。</p>
+<pre><code># 每张卡：U [T, h]，本卡持有专家 [r*E_loc, (r+1)*E_loc)
+idx, w   = router(U)                       # [T, k], [T, k]
+flat     = idx.flatten()                   # T*k 个分配
+order    = flat.argsort()                  # 按专家（也就按目标卡）排序
+X        = U[order // k]                   # permute: [T*k, h]
+send_cnt = bincount(flat // E_loc, P)      # 发往每张卡的数量 [P]
+recv_cnt = all_to_all(send_cnt)            # 先交换计数（小）
+Xr       = all_to_all_v(X, send_cnt, recv_cnt)      # dispatch: [sum(recv_cnt), h]
+Yr       = grouped_ffn(Xr, tokens_per_local_expert) # 本卡 E_loc 个专家
+Y        = all_to_all_v(Yr, recv_cnt, send_cnt)     # combine: 原路返回 [T*k, h]
+out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])</code></pre>
+      <p>反向时自动微分会把两次 <code>all_to_all_v</code> 反过来各做一次：combine 的反向是把输出梯度按 dispatch 的方向发出去，dispatch 的反向是把输入梯度按 combine 的方向发回来。所以每个 MoE 层每个训练步共 4 次大的 all-to-all，它们都在关键路径上：下一层的计算要等这一层的 combine 完成。这就是为什么 DeepSeek 要把一个 micro-batch 的 all-to-all 和<b>另一个</b> micro-batch 的计算重叠（DualPipe 里一对前向/反向块，推理里两个 micro-batch 交叠），单个 micro-batch 内部很难藏。</p>
+      <p>还有一个容易忽略的点：同一张卡上，路由到本卡专家的那部分分配其实不用经过网络，<code>all_to_all_v</code> 会把它当成本地拷贝；而一个 token 选了同一张远端卡上的两个专家时，朴素实现会发两份，更好的实现只发一份、在接收端复制——V3 的「每个目标节点只过一次 IB」是同一思路在节点层面的版本。</p>
+
+      <h2 id="comm">通信量与节点受限路由</h2>
+      <h3>每层传多少字节</h3>
+      <p>设每卡本地 \(T\) 个 token、隐维 \(h\)、每元素 \(b\) 字节。dispatch 时每张卡要发出 \(T\cdot k\) 份 \(h\) 维向量（一个 token 选了 \(k\) 个专家就要发 \(k\) 份，除非落在同一张卡上可以去重）。路由均匀时，目标在其他卡上的比例是 \((P-1)/P\)：</p>
+      $$V_{dispatch} \approx T\cdot k\cdot h\cdot b\cdot\frac{P-1}{P}\ \text{bytes / GPU},\qquad V_{combine}\ \text{同量级}$$
+      <p>前向一次 dispatch 一次 combine，反向再各一次（梯度沿相反方向走），所以每个 MoE 层每步共 4 次 all-to-all。拿 DeepSeek-V3 的形状感受一下：\(h=7168\)、\(k=8\)，每个 token 每层 dispatch 约 \(8\times7168 = 57{,}344\) 个数——这比 PP 在级边界上每 token 传一份 \(h\) 维向量多了一个量级，而且<b>每一个 MoE 层都要传</b>。</p>
+      <p>和计算比呢？专家计算每个分配 \(6\,h\,d_e\) FLOPs（SwiGLU，\(d_e\) 是专家中间维度）。在节点间带宽 \(BW\) 上传 \(k h b\) 字节需要 \(khb/BW\)，计算 \(k\cdot 6hd_e/F\)，比值</p>
+      $$\frac{t_{comm}}{t_{comp}} \approx \frac{b\cdot F}{6\,d_e\cdot BW}\quad(\text{每份副本都跨节点时})$$
+      <p>与 \(h\)、\(k\)、\(T\) 都无关，只看<b>专家有多「细」</b>（\(d_e\) 越小越吃亏）和算力/带宽比。细粒度专家（\(d_e=2048\)）让这个比值变差，这就是 DeepSeek-V3 报告说跨节点 EP 让计算:通信接近 1:1 的原因。</p>
+      <p>在 TPU 的环状/环面网络上，Scaling Book 给出 AllToAll 的代价约是同等数据量 AllGather 的 1/4（双向环）：每个分片不必绕环一圈，平均只走 \(N/4\) 跳。它也提醒：只有当数据/序列分片轴与专家分片轴是同一个轴时，这两次 AllToAll 才会出现。</p>
+      <h3>设备受限与节点受限路由</h3>
+      <p>细粒度专家让 \(k\) 变大，一个 token 的 \(k\) 个专家可能散落在很多卡、很多节点上。DeepSeek-V2 的<b>设备受限路由</b>：对每个 token，先选出包含最高亲和度专家的 \(M\) 个设备，再只在这些设备的专家里做 top-k；他们发现 \(M\ge 3\) 时效果与不受限的 top-k 大致相当，V2 用 \(M=3\)。</p>
+      <p>DeepSeek-V3 换成<b>节点受限路由</b>：每个 token 最多发往 \(M=4\) 个节点，节点的选择依据是「该节点上专家的最高 \(K_r/M\) 个亲和度之和」。配合的通信实现是：</p>
+      <ul>
+        <li>一个 token 先经 IB 发到每个目标节点上<b>与自己同号</b>的那张卡（每个目标节点只发一次，不管该节点上选了几个专家），到达后再经 NVLink 转发给真正持有专家的卡；</li>
+        <li>NVLink 160 GB/s 约是 IB 50 GB/s 的 3.2 倍，所以 IB 和 NVLink 的传输可以完全重叠。报告据此算出：每个 token 平均可以在每个节点选 3.2 个专家而不增加 NVLink 的开销，于是在同样的通信成本下最多能选 \(4\times3.2\approx 13\) 个专家（实际用 8 个）；</li>
+        <li>dispatch/combine 内核用 warp specialization 把 20 个 SM 分成 10 个通信通道，分别处理 IB 发送、IB→NVLink 转发、NVLink 接收；只用 20 个 SM 就能吃满 IB 和 NVLink 带宽。DeepSeek 后来开源的 DeepEP 就是这类 EP all-to-all 内核的库。</li>
+      </ul>
+      <p>这样跨节点流量的上界从「每 token \(k\) 份」变成「每 token 至多 \(M\) 份」。下面的计算器把这两种情况都算出来。</p>
+
+      <h2 id="ep-calc">演示：EP all-to-all 成本计算器</h2>
+      <p>估算一个 MoE 层前向的 dispatch + combine 时间和专家计算时间。模型：路由均匀随机；「节点受限 + 每节点去重」时，每个 token 跨 IB 的份数取「\(k\) 个专家落在的不同远端节点数」的期望（并截断到 \(M\)）；NVLink 上按每份分配都转发一次计。时间取 IB 与 NVLink 中较慢者（假设二者重叠，如 V3 的做法），计算只算路由专家与共享专家的矩阵乘。这是一个量级估算，不是任何系统的实测。</p>
+      <div class="demo" id="ep-calc-box">
+        <div class="demo-label">EP all-to-all 成本计算器</div>
+        <div class="row-btns">
+          <span class="sub">预设：</span>
+          <div class="seg" id="ec-preset"><button type="button" data-v="dsv3" aria-pressed="true">DeepSeek-V3 形状</button><button type="button" data-v="mixtral" aria-pressed="false">Mixtral 8x7B 形状</button></div>
+        </div>
+        <div class="ctrls">
+          <label class="ctrl"><span>隐维 h</span><input type="range" id="ec-h" min="1024" max="16384" step="512" value="7168"><output id="ec-h-o"></output></label>
+          <label class="ctrl"><span>专家中间维 d_e</span><input type="range" id="ec-de" min="256" max="16384" step="256" value="2048"><output id="ec-de-o"></output></label>
+          <label class="ctrl"><span>路由专家 E</span><input type="range" id="ec-E" min="8" max="512" step="8" value="256"><output id="ec-E-o"></output></label>
+          <label class="ctrl"><span>每 token 激活 k</span><input type="range" id="ec-k" min="1" max="16" step="1" value="8"><output id="ec-k-o"></output></label>
+          <label class="ctrl"><span>共享专家数</span><input type="range" id="ec-s" min="0" max="4" step="1" value="1"><output id="ec-s-o"></output></label>
+          <label class="ctrl"><span>EP 大小 P</span><input type="range" id="ec-P" min="8" max="256" step="8" value="64"><output id="ec-P-o"></output></label>
+          <label class="ctrl"><span>节点上限 M</span><input type="range" id="ec-M" min="1" max="32" step="1" value="4"><output id="ec-M-o"></output></label>
+          <label class="ctrl"><span>每卡 token 数 T</span><input type="range" id="ec-T" min="512" max="32768" step="512" value="8192"><output id="ec-T-o"></output></label>
+          <label class="ctrl"><span>IB GB/s（每卡）</span><input type="range" id="ec-ib" min="10" max="100" step="5" value="50"><output id="ec-ib-o"></output></label>
+          <label class="ctrl"><span>NVLink GB/s</span><input type="range" id="ec-nv" min="100" max="900" step="20" value="160"><output id="ec-nv-o"></output></label>
+          <label class="ctrl"><span>有效算力 TFLOPs</span><input type="range" id="ec-F" min="100" max="2000" step="50" value="800"><output id="ec-F-o"></output></label>
+        </div>
+        <div class="row-btns">
+          <span class="sub">dispatch 精度：</span>
+          <div class="seg" id="ec-prec"><button type="button" data-v="1" aria-pressed="true">FP8（1 B）</button><button type="button" data-v="2" aria-pressed="false">BF16（2 B）</button></div>
+          <span class="sub">combine 固定 BF16</span>
+        </div>
+        <div class="readout" id="ec-read"></div>
+        <svg id="ec-bar" viewBox="0 0 680 120" role="img" aria-label="通信与计算时间对比条"></svg>
+        <p class="sub">每节点 8 卡。「朴素」指不做节点限制、也不按节点去重（每份分配单独过 IB）。默认的有效算力 800 TFLOPs 是我假设的一个 FP8 矩阵乘可达值，不是报告中的数字；改它看比值怎么变。</p>
+      </div>
+      <p>默认参数下（V3 形状、64 路 EP、M=4、IB 50 GB/s）可以看到：朴素方案的 IB 时间约是专家计算的 3 倍；节点受限 + 去重把 IB 份数从约 7 份压到 4 份以下，通信时间仍与计算同量级——这和报告「约 1:1」的说法一致，也解释了 DualPipe 为什么要专门安排计算和通信的重叠。把 \(d_e\) 拉大（粗专家），比值迅速下降。</p>
+
+      <h2 id="combine">EP 与 DP、TP、PP 的组合</h2>
+      <p>只用 EP 有个问题：EP 只作用在 MoE 层，注意力等其他层没被切分。如果 \(P\) 张卡只是 EP 而在非 MoE 部分处理同一批 token，那就是重复计算。所以 EP 几乎总是和数据并行<b>共用一组卡</b>：非 MoE 部分这组卡是 DP（各自处理不同 token），MoE 部分同一组卡变成 EP。Shazeer 2017 当时的说法是「标准层和门控网络按常规数据并行分布，但每个专家只保留一份共享副本，每个专家收到的是所有数据并行批次中相关样本的合集」——这样还顺带缓解了 shrinking batch：每个专家的有效 batch 变成 \(kTP/E\)，随 DP 规模增长。Playbook 也提到，正因为 EP 在输入处理上与 DP 相似，有些实现把 EP 视为 DP 的一个子集。</p>
+      <p>于是梯度同步也要分开看：</p>
+      <ul>
+        <li>非专家参数（注意力、路由器、共享专家、embedding）在整个 DP 组上 all-reduce；</li>
+        <li>专家参数只有在<b>持有同一专家的副本</b>之间才需要同步。如果 DP 度是 \(D\)、EP 度是 \(P\)（\(P\mid D\)），每个专家有 \(D/P\) 个副本，梯度只在这 \(D/P\) 张卡之间 all-reduce。</li>
+      </ul>
+      <p>和其他维度：</p>
+      <ul>
+        <li><b>TP</b>：可以在专家内部再做 TP（expert TP，把每个专家的 \(d_e\) 切开），代价是每个专家的 GEMM 变得更小更碎；细粒度专家本来就小，所以 DeepSeek-V3 干脆不用 TP。Playbook 的 5D 总结把 EP 和 CP 都看作与 TP 互补、可以无特殊问题地组合。</li>
+        <li><b>PP</b>：MoE 层按层分到不同流水级，每级内部再做 EP。DeepSeek-V3：16 路 PP × 64 路 EP（跨 8 个节点）× ZeRO-1 DP，2048 张 H800；V2 是 16 路 zero-bubble PP × 8 路 EP × ZeRO-1 DP。</li>
+        <li><b>拓扑</b>：all-to-all 对带宽敏感，EP 组优先放在高带宽域内；放不下时（V3 的 64 路跨 8 节点）就需要节点受限路由和精心写的内核。Playbook 也特别提到 V3 的「每个 token 至多 M 个节点」就是为了尽量把流量留在节点内。</li>
+      </ul>
+      <h3>负载不均在 EP 下的真实代价</h3>
+      <p>单卡时负载不均只是浪费 padding；EP 下它直接变成<b>等待</b>。一层 MoE 的专家计算时间由最忙的那张卡决定，其他卡算完就空等下一次 all-to-all。若某张卡的负载是平均的 \(1+\mathrm{MaxVio}\) 倍，这一层专家计算的效率上限就是</p>
+      $$\eta = \frac{\overline{\text{load}}}{\max \text{load}} = \frac{1}{1+\mathrm{MaxVio}}.$$
+      <p>MaxVio = 0.5 意味着专家部分只有 67% 的效率；all-to-all 也一样，接收最多的卡决定传输完成的时间（这就是 V2 那个「通信均衡损失」要管接收端的原因）。另外，接收缓冲区的大小也由最坏情况决定：dropless 时一张卡可能收到远超平均的 token，显存必须按峰值预留，或者用动态分配。卡越多，batch 越大，统计上越容易均衡；这也是 V3 说 batch 级均衡的缺点「被大规模 EP + DP 带来的大 micro-batch 天然缓解」的意思。</p>
+      <h3>低精度通信</h3>
+      <p>dispatch 的数据量和精度成正比。DeepSeek-V3 把 MoE up-projection 之前的激活量化为 FP8 再 dispatch（与 up-projection 的 FP8 前向计算正好衔接，缩放因子取 2 的整数次幂），反向时 down-projection 之前的激活梯度也同样处理；而前向和反向的 combine 都保留 BF16，以保护训练精度的关键部分。所以 dispatch 每元素 1 字节、combine 2 字节——计算器里默认就是这个设置。</p>
+
+      <h2 id="gemm">专家计算：padding、block-sparse 与 grouped GEMM</h2>
+      <p>dispatch 之后，每张卡上有 \(E/P\) 个专家，每个专家拿到的 token 数不同（比如 37、0、210、96……）。怎么算？</p>
+      <ol>
+        <li><b>逐专家循环</b>：对每个专家调一次矩阵乘。简单，但专家多、每个专家的 token 少时，kernel 启动开销和小 GEMM 的低利用率很要命。</li>
+        <li><b>padding 到容量</b>：每个专家固定 \(C\) 个槽，堆成 \([E_{local}, C, h]\) 的批量矩阵乘（bmm）。形状静态、很快，但溢出要丢、空槽白算——这就是 CF 那套逻辑的由来。</li>
+        <li><b>block-sparse（MegaBlocks）</b>：把「所有专家的 FFN」看成一个块对角稀疏矩阵乘，token 数是 block 大小的倍数即可，不丢 token，也几乎不 padding。论文报告端到端比 Tutel 上的 MoE 训练最多快 40%。</li>
+        <li><b>grouped GEMM</b>：一次 kernel 调用里做一组形状各不相同的 GEMM（每个专家一组 \([n_e, h]\times[h, d_e]\)），由 kernel 内部按 tile 调度。只需要知道每个专家的 token 数和偏移，这正是 permute 之后天然得到的。现在主流框架的 MoE 层大多走这条路。</li>
+      </ol>
+      <p>SwiGLU 专家的一次前向在 grouped GEMM 下是三次分组矩阵乘：gate 和 up（可以合并为一个 \([h, 2d_e]\) 的分组 GEMM），逐元素 SiLU·乘，再一次 down。反向同样是分组 GEMM，对输入和对权重各一组——和流水线那篇讲的 B/W 拆分对得上。</p>
+
+      <h2 id="infer">推理部署中的 EP（DeepSeek-V3）</h2>
+      <p>虽然这一篇讲训练，但 V3 报告里推理部署的 EP 很能说明「均衡」和「每个专家的 batch」这两个问题，顺带记下来：</p>
+      <ul>
+        <li><b>预填充（prefill）</b>：最小部署单元 4 节点 32 卡。注意力用 TP4 + SP，配合 DP8；MoE 部分用 EP32，保证每个专家处理的 batch 足够大。all-to-all 沿用训练时的做法（先 IB 跨节点，再 NVLink 节点内转发）。</li>
+        <li><b>冗余专家</b>：为了每张卡处理的 token 数大致相同，把高负载专家复制部署。高负载专家根据线上统计周期性（例如每 10 分钟）调整，然后在节点内重新排布专家，尽量在不增加跨节点 all-to-all 的前提下均衡各卡负载。预填充阶段设 32 个冗余专家，每卡除原有 8 个专家外再放 1 个冗余专家。</li>
+        <li><b>解码（decoding）</b>：把共享专家当作一个总被选中的「重负载」路由专家，于是每个 token 选 9 个专家。最小单元 40 节点 320 卡：注意力 TP4 + SP、DP80，MoE 用 EP320，每卡只放一个专家，其中 64 张卡负责冗余专家和共享专家；dispatch/combine 用 IB 上的直接点对点传输以降低延迟。</li>
+        <li><b>两个 micro-batch 交叠</b>：预填充时同时处理两个计算量相近的 micro-batch，一个的注意力和 MoE 与另一个的 dispatch/combine 重叠——和训练里 DualPipe 的块内重叠是同一个想法。</li>
+      </ul>
+      <p>报告还提到在探索「动态冗余」：每卡放更多专家（例如 16 个），每步只激活其中 9 个，在每层 all-to-all 之前即时计算全局最优的路由方案。这是一种在部署侧而不是训练侧解决均衡问题的思路。</p>
+
+      <h2 id="flops">总参数、激活参数与 FLOPs</h2>
+      <p>训练的 FLOPs 只和<b>激活参数</b>有关：每 token 约 \(6N_{active}\)（前向 2、反向 4），再加注意力的序列相关项。显存则和<b>总参数</b>有关。用 V3 的形状核对一下报告的 671B / 37B（下面是我按公式算的）：</p>
+      <ul>
+        <li>每个专家：\(3\times7168\times2048 \approx 44.0\text{M}\) 参数。</li>
+        <li>每个 MoE 层的专家参数：\((256+1)\times 44.0\text{M}\approx 11.3\text{B}\)；58 个 MoE 层（61 层减去前 3 个稠密层）共约 \(656\text{B}\)。</li>
+        <li>每 token 激活的专家参数：\((8+1)\times44.0\text{M}\times58 \approx 23\text{B}\)；剩下的 14B 左右来自 MLA 注意力、3 个稠密 FFN、embedding 和输出层等，合起来 37B 左右。</li>
+      </ul>
+      <p>Mixtral 同理：\(32\times 8\times 3\times4096\times14336\approx 45\text{B}\) 专家参数，激活 2 个约 11.3B，加注意力约 1.3B 和 embedding，总 47B、激活 13B，与论文一致。</p>
+      <p>推理时 MoE 的账反过来更难看。Scaling Book 第 4 章的一道题：int8 权重的 MoE 在 TPU v5e 上要算力受限，需要 \(\frac{2kBDF}{EDF} > 240\)，即 \(B > 120\cdot E/k\)；对 DeepSeek（\(E=256, k=8\)）是 \(B > 3840\) 个 token——每一步要把所有专家的权重读一遍，却只有 \(k/E\) 的 token 用到每个专家。这也是为什么 MoE 推理特别依赖大 batch 和大规模 EP。</p>
+
+      <h2 id="tricks">其他稳定训练的技巧</h2>
+      <ul>
+        <li><b>选择性精度</b>（Switch）：只把路由器的输入和计算放到 float32，算完的 dispatch/combine 张量再转回 bfloat16，这样 all-to-all 不必传 float32。Switch 报告纯 bfloat16 的模型发散了，而选择性精度在速度几乎不变的情况下恢复了 float32 的稳定性。</li>
+        <li><b>更小的初始化</b>（Switch）：把权重初始化尺度 \(s\) 从 1.0 降到 0.1（截断正态 \(\sigma=\sqrt{s/n}\)），质量更好、方差更小。</li>
+        <li><b>专家 dropout</b>（Switch 微调）：参数远多于等 FLOPs 的稠密模型，在小的下游任务上更易过拟合，可以在专家内部用更高的 dropout。</li>
+        <li><b>router z-loss</b>（ST-MoE），以及它建议的把所有被指数化的张量放到 float32。</li>
+        <li><b>噪声</b>（Shazeer 2017）与 <b>随机路由</b>（GShard）：早期的均衡手段，现在较少用。</li>
+      </ul>
+
+      <h2 id="summary">小结</h2>
+      <ul>
+        <li>MoE 用路由器把每个 token 送到 \(k\) 个专家，参数涨 \(E\) 倍、计算只涨 \(k\) 倍；路由器的梯度只通过门控值流动。</li>
+        <li>容量 \(C=\mathrm{CF}\cdot Tk/E\) 换来静态形状，代价是丢 token 和 padding；block-sparse / grouped GEMM 让不丢 token 成为常态。</li>
+        <li>辅助损失 \(\alpha E\sum f_iP_i\) 用 \(P\) 代替不可导的 \(f\)，梯度把高负载专家的 logit 往下推，但也扰动了门控值；z-loss 管 logits 的尺度。</li>
+        <li>DeepSeek 路线：细粒度 + 共享专家提高专精度；只用于选择的偏置 \(b_i\) 做 batch 级均衡，只留极小的序列级损失兜底。</li>
+        <li>EP 与 DP 共用卡，两次 all-to-all（前向）+ 两次（反向）；通信/计算比约 \(bF/(6d_eBW)\)，细专家跨节点时与计算同量级，靠节点受限路由、按节点去重、专用内核和 DualPipe 式重叠压下去。</li>
+      </ul>
+      <p>下一篇是 5D 并行：把 DP、TP、CP、PP、EP 放到同一张卡阵上，怎么排它们的顺序和大小。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Ultra-Scale Playbook：<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Expert Parallelism 与 5D Parallelism in a Nutshell 两节</a></li>
+        <li>Scaling Book：<a href="https://jax-ml.github.io/scaling-book/transformers/">All the Transformer Math（Sparsity and Mixture-of-Experts，及第 8 题）</a>；<a href="https://jax-ml.github.io/scaling-book/sharding/">Sharded Matrices（AllToAll）</a>；<a href="https://jax-ml.github.io/scaling-book/training/">Training</a></li>
+        <li>Shazeer et al., 2017. <a href="https://arxiv.org/abs/1701.06538">Outrageously Large Neural Networks: The Sparsely-Gated Mixture-of-Experts Layer</a></li>
+        <li>Lepikhin et al., 2020. <a href="https://arxiv.org/abs/2006.16668">GShard</a>（§2.2 Algorithm 1、§3.1 Algorithm 2）</li>
+        <li>Fedus et al., 2021. <a href="https://arxiv.org/abs/2101.03961">Switch Transformers</a>（§2.1–2.4、§5）</li>
+        <li>Zoph et al., 2022. <a href="https://arxiv.org/abs/2202.08906">ST-MoE</a>（router z-loss，§3）</li>
+        <li>Gale et al., 2022. <a href="https://arxiv.org/abs/2211.15841">MegaBlocks</a></li>
+        <li>Dai et al., 2024. <a href="https://arxiv.org/abs/2401.06066">DeepSeekMoE</a>（§3）</li>
+        <li>DeepSeek-AI, 2024. <a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>（§2.2：设备受限路由、三种均衡损失、设备级丢 token）</li>
+        <li>Wang et al., 2024. <a href="https://arxiv.org/abs/2408.15664">Auxiliary-Loss-Free Load Balancing Strategy for Mixture-of-Experts</a></li>
+        <li>DeepSeek-AI, 2024. <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>（§2.1.2、§3.2、§4.2、§4.5.3）</li>
+        <li>Jiang et al., 2024. <a href="https://arxiv.org/abs/2401.04088">Mixtral of Experts</a></li>
+        <li><a href="https://github.com/deepseek-ai/DeepEP">deepseek-ai/DeepEP</a></li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const $ = (id) => document.getElementById(id);
+    function rng(seed) { return () => { seed |= 0; seed = (seed + 0x6D2B79F5) | 0; let t = Math.imul(seed ^ (seed >>> 15), 1 | seed); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296; }; }
+    function gauss(r) { let u = 0, v = 0; while (!u) u = r(); v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+    function segBind(id, cb) {
+      const el = $(id);
+      el.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        cb(b.dataset.v);
+      });
+      return () => el.querySelector('[aria-pressed="true"]').dataset.v;
+    }
+
+    // ---------- static figures ----------
+    (function moeFig() {
+      const g = $('moe-experts'); let s = '';
+      const chosen = [2, 5];
+      for (let i = 0; i < 8; i++) {
+        const y = 20 + i * 32, on = chosen.includes(i);
+        s += '<rect x="330" y="' + y + '" width="210" height="26" rx="6" fill="' + (on ? 'var(--accent)' : 'var(--surface)') + '" stroke="' + (on ? 'var(--accent)' : 'var(--border)') + '"/>';
+        s += '<text x="435" y="' + (y + 18) + '" text-anchor="middle" font-size="13" fill="' + (on ? '#fff' : 'var(--text-faint)') + '">FFN ' + (i + 1) + (on ? (i === 2 ? '  g=0.62' : '  g=0.38') : '') + '</text>';
+        s += '<path d="M272 142 L326 ' + (y + 13) + '" stroke="var(--text-soft)" stroke-width="' + (on ? 1.8 : 0.8) + '" ' + (on ? '' : 'stroke-dasharray="3 3" opacity="0.5"') + ' fill="none"/>';
+        if (on) s += '<path d="M542 ' + (y + 13) + ' L616 142" stroke="var(--accent)" stroke-width="1.8" fill="none" marker-end="url(#m-ar)"/>';
+      }
+      g.innerHTML = s;
+    })();
+    (function fgFig() {
+      const g = $('fg-fig'); let s = '';
+      const panel = (x0, title, n, w, active, shared) => {
+        s += '<text x="' + x0 + '" y="20" font-size="17" font-weight="600">' + title + '</text>';
+        const cols = n === 16 ? 4 : 8, cw = n === 16 ? 52 : 26, ch = n === 16 ? 40 : 20;
+        for (let i = 0; i < n; i++) {
+          const x = x0 + (i % cols) * (cw + 3), y = 32 + Math.floor(i / cols) * (ch + 3);
+          const isS = shared && i < shared, on = active.includes(i);
+          const fill = isS ? 'var(--moe-3)' : on ? 'var(--accent)' : 'var(--bg-soft)';
+          s += '<rect x="' + x + '" y="' + y + '" width="' + cw + '" height="' + ch + '" rx="3" fill="' + fill + '" stroke="var(--border)"/>';
+        }
+      };
+      panel(10, '(a) 16 选 2', 16, 52, [3, 10], 0);
+      panel(262, '(b) 64 选 8', 64, 26, [2, 9, 14, 21, 30, 41, 50, 61], 0);
+      panel(514, '(c) 1 共享 + 63 选 7', 64, 26, [0, 9, 17, 22, 33, 40, 52, 58], 1);
+      s += '<rect x="514" y="232" width="14" height="10" fill="var(--moe-3)"/><text x="532" y="241" font-size="14" fill="var(--text-soft)">共享专家（每个 token 必经）</text>';
+      s += '<rect x="262" y="232" width="14" height="10" fill="var(--accent)"/><text x="280" y="241" font-size="14" fill="var(--text-soft)">被路由选中</text>';
+      g.innerHTML = s;
+    })();
+
+    // ---------- router simulator ----------
+    const R = {
+      D: 16, seed: 7, step: 0, hist: [], running: 0,
+      bias: [], theta: [],
+    };
+    const rdIds = ['T', 'E', 'k', 'cf', 'skew', 'lr', 'gamma'];
+    const val = (n) => +$('rd-' + n).value;
+    const gateMode = segBind('rd-gate', () => { resetParams(); route(); });
+    const dropMode = segBind('rd-drop', () => route());
+    const method = segBind('rd-method', () => { resetParams(); route(); });
+    let centroids = [], pop = [];
+    function initExperts() {
+      const E = val('E'), r = rng(12345 + E);
+      centroids = Array.from({ length: E }, () => Array.from({ length: R.D }, () => gauss(r) / Math.sqrt(R.D)));
+      pop = Array.from({ length: E }, (_, i) => (E === 1 ? 0 : 1 - (2 * i) / (E - 1)));
+    }
+    function resetParams() {
+      const E = val('E');
+      R.bias = new Array(E).fill(0); R.theta = new Array(E).fill(0); R.step = 0; R.hist = [];
+    }
+    function batch(seed) {
+      const T = val('T'), E = val('E'), skew = val('skew'), r = rng(seed);
+      const logits = new Array(T);
+      for (let t = 0; t < T; t++) {
+        const u = Array.from({ length: R.D }, () => gauss(r));
+        const row = new Array(E);
+        for (let i = 0; i < E; i++) { let d = 0; const c = centroids[i]; for (let j = 0; j < R.D; j++) d += u[j] * c[j]; row[i] = 1.6 * d + skew * pop[i]; }
+        logits[t] = row;
+      }
+      return logits;
+    }
+    function scores(row, theta) {
+      const E = row.length, z = row.map((x, i) => x + theta[i]);
+      if (gateMode() === 'softmax') { const m = Math.max(...z); const e = z.map((x) => Math.exp(x - m)); const s = e.reduce((a, b) => a + b, 0); return e.map((x) => x / s); }
+      return z.map((x) => 1 / (1 + Math.exp(-x)));
+    }
+    function evaluate(logits) {
+      const T = logits.length, E = logits[0].length, k = Math.min(val('k'), E);
+      const S = logits.map((row) => scores(row, R.theta));
+      const S0 = method() === 'aux' ? logits.map((row) => scores(row, new Array(E).fill(0))) : null;
+      const sel = S.map((s) => s.map((x, i) => [x + R.bias[i], i]).sort((a, b) => b[0] - a[0]).slice(0, k).map((p) => p[1]));
+      const cnt = new Array(E).fill(0); sel.forEach((ix) => ix.forEach((i) => cnt[i]++));
+      // capacity with first-choice priority
+      const C = Math.ceil(val('cf') * T * k / E), dropless = dropMode() === 'dropless';
+      const kept = new Array(E).fill(0); let dropped = 0; const tokOK = new Array(T).fill(0);
+      for (let r = 0; r < k; r++) for (let t = 0; t < T; t++) {
+        const i = sel[t][r];
+        if (dropless || kept[i] < C) { kept[i]++; tokOK[t]++; } else dropped++;
+      }
+      const fullyDropped = tokOK.filter((x) => x === 0).length;
+      // aux-loss stats: f_i normalized so uniform = 1 (DeepSeek form); P_i from normalized scores
+      const f = cnt.map((c) => (E / (k * T)) * c);
+      const P = new Array(E).fill(0);
+      const Sn = S.map((s) => { const z = s.reduce((a, b) => a + b, 0); return s.map((x) => x / z); });
+      Sn.forEach((s) => s.forEach((x, i) => { P[i] += x / T; }));
+      const aux = f.reduce((a, x, i) => a + x * P[i], 0);
+      let zl = 0; logits.forEach((row) => { const z = row.map((x, i) => x + R.theta[i]); const m = Math.max(...z); const lse = m + Math.log(z.reduce((a, x) => a + Math.exp(x - m), 0)); zl += lse * lse / T; });
+      const mean = (T * k) / E, maxVio = (Math.max(...cnt) - mean) / mean;
+      let shift = 0;
+      if (S0) S.forEach((s, t) => s.forEach((x, i) => { shift += Math.abs(x - S0[t][i]) / T; }));
+      return { S, Sn, sel, cnt, kept, C, dropped, fullyDropped, f, P, aux, zl, maxVio, mean, shift, T, E, k };
+    }
+    function update(ev) {
+      const E = ev.E, m = method();
+      if (m === 'bias') {
+        const g = val('gamma');
+        for (let i = 0; i < E; i++) R.bias[i] += g * Math.sign(ev.mean - ev.cnt[i]);
+      } else if (m === 'aux') {
+        const lr = val('lr') * 0.3, soft = gateMode() === 'softmax';
+        const grad = new Array(E).fill(0);
+        ev.S.forEach((s, t) => {
+          const sn = ev.Sn[t];
+          const avg = sn.reduce((a, x, i) => a + ev.f[i] * x, 0);
+          for (let i = 0; i < E; i++) grad[i] += (soft ? sn[i] : sn[i] * (1 - s[i])) * (ev.f[i] - avg) / ev.T;
+        });
+        for (let i = 0; i < E; i++) R.theta[i] -= lr * grad[i];
+      }
+    }
+    let cur = null;
+    function route() {
+      rdIds.forEach((n) => { const v = val(n); $('rd-' + n + '-o').textContent = n === 'gamma' ? v.toFixed(3) : (n === 'cf' ? v.toFixed(2) : v); });
+      $('rd-k').max = Math.min(8, val('E'));
+      cur = evaluate(batch(R.seed * 7919 + R.step));
+      drawBars(cur); drawCurve(); drawBias();
+      $('rd-stepn').textContent = '第 ' + R.step + ' 步';
+    }
+    function drawBars(ev) {
+      const E = ev.E, W = 680, H = 230, L = 40, B = 30, plotW = W - L - 10, plotH = H - B - 14;
+      const ymax = Math.max(ev.C, ...ev.cnt) * 1.1 || 1, bw = plotW / E;
+      let s = '';
+      for (let g = 0; g <= 4; g++) { const v = ymax * g / 4, y = 14 + plotH - plotH * g / 4; s += '<line x1="' + L + '" x2="' + (W - 10) + '" y1="' + y + '" y2="' + y + '" stroke="var(--border)"/><text x="' + (L - 6) + '" y="' + (y + 4) + '" text-anchor="end" font-size="11" fill="var(--text-faint)">' + Math.round(v) + '</text>'; }
+      ev.cnt.forEach((c, i) => {
+        const x = L + i * bw + bw * 0.12, w = bw * 0.76, keptH = plotH * ev.kept[i] / ymax, allH = plotH * c / ymax;
+        s += '<rect x="' + x + '" y="' + (14 + plotH - keptH) + '" width="' + w + '" height="' + keptH + '" fill="var(--accent)" rx="2"/>';
+        if (c > ev.kept[i]) s += '<rect x="' + x + '" y="' + (14 + plotH - allH) + '" width="' + w + '" height="' + (allH - keptH) + '" fill="var(--accent-2)" rx="2"/>';
+        if (E <= 32 || i % 4 === 0) s += '<text x="' + (x + w / 2) + '" y="' + (H - 12) + '" text-anchor="middle" font-size="10" fill="var(--text-faint)">' + i + '</text>';
+      });
+      const yc = 14 + plotH - plotH * ev.C / ymax, ym = 14 + plotH - plotH * ev.mean / ymax;
+      if (dropMode() !== 'dropless') s += '<line x1="' + L + '" x2="' + (W - 10) + '" y1="' + yc + '" y2="' + yc + '" stroke="var(--accent-2)" stroke-width="2" stroke-dasharray="6 4"/><text x="' + (W - 12) + '" y="' + (yc - 5) + '" text-anchor="end" font-size="12" fill="var(--accent-2)">容量 C = ' + ev.C + '</text>';
+      s += '<line x1="' + L + '" x2="' + (W - 10) + '" y1="' + ym + '" y2="' + ym + '" stroke="var(--text-soft)" stroke-width="1" stroke-dasharray="2 3"/><text x="' + (L + 4) + '" y="' + (ym - 4) + '" font-size="11" fill="var(--text-soft)">均衡 Tk/E = ' + ev.mean.toFixed(1) + '</text>';
+      s += '<text x="' + L + '" y="' + (H - 1) + '" font-size="11" fill="var(--text-faint)">专家编号（紫：被处理的分配，橙：超出容量被丢弃）</text>';
+      $('rd-bars').innerHTML = s;
+      const cells = [
+        ['分配总数 T·k', ev.T * ev.k],
+        ['丢弃的分配', ev.dropped + '（' + (100 * ev.dropped / (ev.T * ev.k)).toFixed(1) + '%）'],
+        ['完全被丢的 token', ev.fullyDropped],
+        ['MaxVio', ev.maxVio.toFixed(2)],
+        ['Σ fᵢPᵢ（均衡=1）', ev.aux.toFixed(3)],
+        ['z-loss', ev.zl.toFixed(2)],
+        ['padding 槽位', dropMode() === 'dropless' ? '—' : ev.kept.reduce((a, x) => a + (ev.C - x), 0)],
+      ];
+      $('rd-read').innerHTML = cells.map(([k, v]) => '<div><span class="k">' + k + '</span><span class="v">' + v + '</span></div>').join('');
+    }
+    function drawCurve() {
+      const W = 420, H = 200, L = 34, plotW = W - L - 8, plotH = H - 40;
+      let s = '<text x="' + L + '" y="12" font-size="12" fill="var(--text-soft)">MaxVio / 门控值偏移 vs 训练步</text>';
+      const hs = R.hist, n = Math.max(200, hs.length);
+      const ymax = Math.max(1, ...hs.map((h) => Math.max(h.v, h.sh))) * 1.05;
+      for (let g = 0; g <= 2; g++) { const y = 20 + plotH - plotH * g / 2; s += '<line x1="' + L + '" x2="' + (W - 8) + '" y1="' + y + '" y2="' + y + '" stroke="var(--border)"/><text x="' + (L - 4) + '" y="' + (y + 4) + '" text-anchor="end" font-size="10" fill="var(--text-faint)">' + (ymax * g / 2).toFixed(1) + '</text>'; }
+      const path = (key, col) => { if (!hs.length) return ''; return '<polyline fill="none" stroke="' + col + '" stroke-width="2" points="' + hs.map((h, i) => (L + plotW * i / (n - 1)).toFixed(1) + ',' + (20 + plotH - plotH * h[key] / ymax).toFixed(1)).join(' ') + '"/>'; };
+      s += path('v', 'var(--accent)') + path('sh', 'var(--accent-2)');
+      s += '<text x="' + L + '" y="' + (H - 6) + '" font-size="10" fill="var(--text-faint)">0</text><text x="' + (W - 8) + '" y="' + (H - 6) + '" text-anchor="end" font-size="10" fill="var(--text-faint)">' + n + ' 步</text>';
+      $('rd-curve').innerHTML = s;
+    }
+    function drawBias() {
+      const W = 300, H = 200, E = val('E'), m = method();
+      const arr = m === 'aux' ? R.theta : R.bias;
+      const amax = Math.max(1e-6, ...arr.map(Math.abs));
+      let s = '<text x="6" y="12" font-size="12" fill="var(--text-soft)">' + (m === 'aux' ? 'θᵢ（改变门控）' : 'bᵢ（只用于选择）') + '  max|·|=' + amax.toFixed(3) + '</text>';
+      const y0 = 105, bw = (W - 12) / E;
+      s += '<line x1="6" x2="' + (W - 6) + '" y1="' + y0 + '" y2="' + y0 + '" stroke="var(--border)"/>';
+      arr.forEach((b, i) => { const h = 80 * b / amax; s += '<rect x="' + (6 + i * bw + bw * 0.15) + '" y="' + (h > 0 ? y0 - h : y0) + '" width="' + bw * 0.7 + '" height="' + Math.abs(h) + '" fill="' + (b > 0 ? 'var(--moe-3)' : 'var(--accent-2)') + '"/>'; });
+      s += '<text x="6" y="' + (H - 6) + '" font-size="10" fill="var(--text-faint)">专家 0（最受欢迎）→ ' + (E - 1) + '</text>';
+      $('rd-bias').innerHTML = s;
+    }
+    function doStep() {
+      const ev = evaluate(batch(R.seed * 7919 + R.step));
+      R.hist.push({ v: ev.maxVio, sh: ev.shift });
+      update(ev);
+      R.step++;
+    }
+    function stopRun() { if (R.running) { cancelAnimationFrame(R.running); R.running = 0; $('rd-run').textContent = '跑 200 步'; } }
+    $('rd-run').addEventListener('click', () => {
+      if (R.running) { stopRun(); return; }
+      if (reduce) { for (let i = 0; i < 200; i++) doStep(); route(); return; }
+      let left = 200; $('rd-run').textContent = '暂停';
+      const tick = () => { for (let j = 0; j < 4 && left > 0; j++, left--) doStep(); route(); if (left > 0) R.running = requestAnimationFrame(tick); else stopRun(); };
+      R.running = requestAnimationFrame(tick);
+    });
+    $('rd-step').addEventListener('click', () => { stopRun(); doStep(); route(); });
+    $('rd-reset').addEventListener('click', () => { stopRun(); resetParams(); route(); });
+    $('rd-new').addEventListener('click', () => { R.seed++; route(); });
+    rdIds.forEach((n) => $('rd-' + n).addEventListener('input', () => {
+      stopRun();
+      if (n === 'E') { initExperts(); resetParams(); }
+      if (n === 'T' || n === 'skew' || n === 'k') { R.hist = []; }
+      route();
+    }));
+    initExperts(); resetParams(); route();
+
+    // ---------- EP step-through ----------
+    (function epDemo() {
+      const svg = $('ep-svg');
+      const G = 4, perG = 4, EPG = 2, W = 680;
+      const colW = W / G;
+      const expCol = ['var(--accent)', 'var(--accent-2)', 'var(--moe-3)', 'var(--text-soft)'];
+      let seed = 3, toks = [], step = 0;
+      const stages = [
+        '① 初始：每张卡上有 4 个本地 token（灰）。注意力等非 MoE 层在这里按数据并行各算各的。',
+        '② 路由：每张卡的路由器给本地 token 选专家（这里 top-1）。颜色 = 目标专家所在的卡，小字是专家编号（每卡 2 个专家）。',
+        '③ permute：按目标卡排序，发往同一张卡的 token 在内存中连续，形成 all-to-all 的发送缓冲区。',
+        '④ dispatch all-to-all：每张卡把第 j 段发给卡 j。之后每张卡持有所有卡发来的、属于本卡专家的 token（数量不一定相同）。',
+        '⑤ 专家计算：本卡的 2 个专家用 grouped GEMM 处理各自收到的 token（方块变成实心表示已算完）。',
+        '⑥ combine all-to-all：结果沿原路发回 token 的来源卡。',
+        '⑦ unpermute + 加权：恢复原顺序，乘以门控值，加回残差。反向传播时梯度会沿 ⑥→④ 的反方向再走两次 all-to-all。',
+      ];
+      function shuffle() {
+        const r = rng(seed);
+        toks = [];
+        for (let g = 0; g < G; g++) for (let j = 0; j < perG; j++) {
+          const e = Math.floor(r() * G * EPG);
+          toks.push({ src: g, idx: j, e, dst: Math.floor(e / EPG) });
+        }
+      }
+      function layout() {
+        // positions for each stage
+        const pos = toks.map(() => ({}));
+        const slotX = (g, k) => g * colW + 20 + k * 36;
+        // stage 0-1: original order
+        toks.forEach((t, i) => { pos[i][0] = pos[i][1] = [slotX(t.src, t.idx), 60]; });
+        // stage 2: sorted by dst within src
+        for (let g = 0; g < G; g++) {
+          const mine = toks.map((t, i) => [t, i]).filter(([t]) => t.src === g).sort((a, b) => a[0].dst - b[0].dst || a[0].e - b[0].e);
+          mine.forEach(([t, i], k) => { pos[i][2] = [slotX(g, k), 60]; });
+        }
+        // stage 3-4: at dst, grouped by expert, ordered by src
+        for (let g = 0; g < G; g++) {
+          const recv = toks.map((t, i) => [t, i]).filter(([t]) => t.dst === g).sort((a, b) => a[0].e - b[0].e || a[0].src - b[0].src);
+          recv.forEach(([t, i], k) => { const row = Math.floor(k / 4), col = k % 4; pos[i][3] = pos[i][4] = [slotX(g, col), 170 + row * 34]; });
+        }
+        toks.forEach((t, i) => { pos[i][5] = pos[i][2]; pos[i][6] = pos[i][0]; });
+        return pos;
+      }
+      function draw() {
+        const pos = layout();
+        let s = '';
+        for (let g = 0; g < G; g++) {
+          const x = g * colW + 6;
+          s += '<rect x="' + x + '" y="8" width="' + (colW - 12) + '" height="284" rx="10" fill="var(--surface)" stroke="var(--border)"/>';
+          s += '<text x="' + (x + 10) + '" y="30" font-size="14" font-weight="600" fill="var(--text)">GPU ' + g + '</text>';
+          s += '<text x="' + (x + 10) + '" y="48" font-size="11" fill="var(--text-faint)">本地 token</text>';
+          s += '<line x1="' + (x + 8) + '" x2="' + (x + colW - 20) + '" y1="110" y2="110" stroke="var(--border)" stroke-dasharray="3 3"/>';
+          s += '<text x="' + (x + 10) + '" y="135" font-size="11" fill="var(--text-faint)">专家 ' + (g * EPG) + '、' + (g * EPG + 1) + ' 的输入</text>';
+          s += '<rect x="' + (x + 8) + '" y="148" width="' + (colW - 28) + '" height="2" fill="' + expCol[g] + '" opacity="0.6"/>';
+        }
+        toks.forEach((t, i) => {
+          const [x, y] = pos[i][Math.min(step, 6)];
+          const colored = step >= 1, done = step >= 4;
+          const fill = !colored ? 'var(--bg-soft)' : (done && step >= 4 ? expCol[t.dst] : 'none');
+          s += '<g class="ep-tok" style="transform: translate(' + x + 'px,' + y + 'px)">';
+          s += '<rect width="30" height="28" rx="5" fill="' + fill + '" stroke="' + (colored ? expCol[t.dst] : 'var(--border)') + '" stroke-width="2.5"/>';
+          s += '<text x="15" y="13" text-anchor="middle" font-size="10" fill="' + (done ? '#fff' : 'var(--text)') + '">' + t.src + '.' + t.idx + '</text>';
+          if (colored) s += '<text x="15" y="24" text-anchor="middle" font-size="9" fill="' + (done ? '#fff' : 'var(--text-soft)') + '">E' + t.e + '</text>';
+          s += '</g>';
+        });
+        svg.innerHTML = s;
+        $('ep-stage').textContent = stages[step];
+        $('ep-n').textContent = '步骤 ' + (step + 1) + ' / ' + stages.length;
+        const sent = toks.filter((t) => t.dst !== t.src).length;
+        if (step === 3) $('ep-stage').textContent += '（这次 16 个 token 里有 ' + sent + ' 个跨卡，均匀路由时期望是 16×3/4 = 12。）';
+      }
+      $('ep-next').addEventListener('click', () => { step = Math.min(6, step + 1); animateTo(); });
+      $('ep-prev').addEventListener('click', () => { step = Math.max(0, step - 1); animateTo(); });
+      $('ep-shuffle').addEventListener('click', () => { seed++; shuffle(); step = 1; draw(); });
+      function animateTo() {
+        const before = [...svg.querySelectorAll('.ep-tok')].map((g) => g.style.transform);
+        draw();
+        const gs = [...svg.querySelectorAll('.ep-tok')];
+        if (reduce || before.length !== gs.length) return;
+        gs.forEach((g, i) => { const target = g.style.transform; g.style.transition = 'none'; g.style.transform = before[i]; g.getBoundingClientRect(); g.style.transition = ''; g.style.transform = target; });
+      }
+      shuffle(); draw();
+    })();
+
+    // ---------- EP cost calculator ----------
+    (function epCalc() {
+      const ids = ['h', 'de', 'E', 'k', 's', 'P', 'M', 'T', 'ib', 'nv', 'F'];
+      const v = (n) => +$('ec-' + n).value;
+      const presets = {
+        dsv3: { h: 7168, de: 2048, E: 256, k: 8, s: 1, P: 64, M: 4 },
+        mixtral: { h: 4096, de: 14336, E: 8, k: 2, s: 0, P: 8, M: 1 },
+      };
+      const prec = segBind('ec-prec', upd);
+      segBind('ec-preset', (p) => { Object.entries(presets[p]).forEach(([k, x]) => { $('ec-' + k).value = x; }); upd(); });
+      function logC(n, r) { if (r < 0 || r > n) return -Infinity; let s = 0; for (let i = 0; i < r; i++) s += Math.log(n - i) - Math.log(i + 1); return s; }
+      function upd() {
+        ids.forEach((n) => { $('ec-' + n + '-o').textContent = $('ec-' + n).value; });
+        const h = v('h'), de = v('de'), E = v('E'), k = Math.min(v('k'), E), s = v('s'), P = Math.min(v('P'), E), T = v('T');
+        const gpn = 8, nodes = Math.max(1, Math.ceil(P / gpn)), M = Math.min(v('M'), nodes);
+        const bd = +prec(), bc = 2, IB = v('ib') * 1e9, NV = v('nv') * 1e9, F = v('F') * 1e12;
+        // expected number of distinct nodes hit by k experts drawn without replacement from E (E/nodes per node)
+        const per = E / nodes;
+        const pMiss = Math.exp(logC(E - per, k) - logC(E, k));
+        const distinct = nodes * (1 - (isFinite(pMiss) ? pMiss : 0));
+        const remoteNodes = nodes > 1 ? Math.min(M, distinct) * (nodes - 1) / nodes : 0;
+        const ibCopies = remoteNodes;                         // per token, node-limited + dedup
+        const naiveIB = nodes > 1 ? k * (P - Math.min(P, gpn)) / P : 0; // per token, every copy crosses IB if on another node
+        const nvCopies = k * (1 - 1 / Math.min(P, gpn));       // forwarded inside node (approx.)
+        const ibBytes = T * ibCopies * h * (bd + bc), naiveBytes = T * naiveIB * h * (bd + bc), nvBytes = T * nvCopies * h * (bd + bc);
+        const tIB = ibBytes / IB, tNaive = naiveBytes / IB, tNV = nvBytes / NV;
+        const tComm = Math.max(tIB, tNV), tCommNaive = Math.max(tNaive, tNV);
+        const flops = T * (k + s) * 6 * h * de, tComp = flops / F;
+        const ms = (x) => (x * 1e3).toFixed(2) + ' ms';
+        const totalExpert = (E + s) * 3 * h * de, activeExpert = (k + s) * 3 * h * de;
+        const cells = [
+          ['节点数 / 每 token 远端节点', nodes + ' / ' + ibCopies.toFixed(2)],
+          ['IB 字节/卡（受限+去重）', (ibBytes / 1e6).toFixed(0) + ' MB'],
+          ['IB 字节/卡（朴素）', (naiveBytes / 1e6).toFixed(0) + ' MB'],
+          ['IB 时间（受限+去重）', ms(tIB)],
+          ['IB 时间（朴素）', ms(tNaive)],
+          ['NVLink 时间', ms(tNV)],
+          ['专家计算时间', ms(tComp)],
+          ['通信/计算（受限+去重）', (tComm / tComp).toFixed(2)],
+          ['通信/计算（朴素）', (tCommNaive / tComp).toFixed(2)],
+          ['每层专家参数 总/激活', (totalExpert / 1e9).toFixed(2) + 'B / ' + (activeExpert / 1e6).toFixed(0) + 'M'],
+        ];
+        $('ec-read').innerHTML = cells.map(([a, b]) => '<div><span class="k">' + a + '</span><span class="v">' + b + '</span></div>').join('');
+        const mx = Math.max(tComm, tCommNaive, tComp), W = 680, sc = (W - 170) / mx;
+        const bar = (y, lab, t, col) => '<text x="0" y="' + (y + 15) + '" font-size="12" fill="var(--text-soft)">' + lab + '</text><rect x="165" y="' + y + '" width="' + Math.max(1, t * sc) + '" height="20" rx="4" fill="' + col + '"/>';
+        $('ec-bar').innerHTML = bar(6, '通信（朴素）', tCommNaive, 'var(--accent-2)') + bar(40, '通信（受限+去重）', tComm, 'var(--accent)') + bar(74, '专家计算', tComp, 'var(--moe-3)') +
+          '<text x="0" y="114" font-size="11" fill="var(--text-faint)">前向一层：dispatch + combine；反向的通信与计算都约为前向的 2 倍，比值相近。</text>';
+      }
+      ids.forEach((n) => $('ec-' + n).addEventListener('input', upd));
+      upd();
+    })();
+  })();
+  </script>
+</body>
+</html>
