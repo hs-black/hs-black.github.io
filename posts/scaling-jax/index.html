@@ -78,8 +78,8 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p>这个系列前面都在纸上算：显存账本、roofline、集合通信的耗时、每种并行什么时候被通信卡住。这一篇落到两个动手的问题上：<strong>怎么把一个分片方案写成代码</strong>，以及<strong>跑起来以后怎么知道它是不是按预期在跑</strong>。前者我用 JAX 讲，因为 JAX 把「数组怎么分片」做成了显式的一等概念，写出来几乎就是前几篇的记号；后者讲 profiler，JAX/TPU 和 PyTorch/GPU 两边都讲，最后落到一件事：在一条时间线上把计算、通信、空闲分开。</p>
-      <p>JAX 的分片 API 这两年变化很快，下面用的是新写法（JAX 0.11：<code>jax.make_mesh</code> 带 <code>axis_types</code>、<code>jax.set_mesh</code>、<code>jax.shard_map</code>、<code>jax.P</code>），老代码里常见的 <code>jax.experimental.shard_map</code>、<code>Mesh(mesh_utils.create_device_mesh(...))</code> 是同一套概念。没有 TPU/GPU 也能跟着跑：用 <code>jax.config.update("jax_num_cpu_devices", 8)</code> 模拟 8 个 CPU 设备，分片和通信的语义完全一样，只是 CPU 上的时间没有参考意义。</p>
+      <p>在纸上算好的分片方案，要落成代码才跑得起来；跑起来以后，还得有办法确认<strong>它是不是按预期在跑</strong>。前一半 JAX 做得最干净：它把「数组怎么分片」做成了显式的一等概念，代码写出来几乎就是纸上的记号 \(A[I_X, J]\)。后一半靠 profiler，不管是 JAX/TPU 还是 PyTorch/GPU，要做的都是同一件事：在一条时间线上把计算、通信、空闲分开。</p>
+      <p>JAX 的分片 API 这两年变化很快，这里的代码用的是新写法（JAX 0.11：<code>jax.make_mesh</code> 带 <code>axis_types</code>、<code>jax.set_mesh</code>、<code>jax.shard_map</code>、<code>jax.P</code>），老代码里常见的 <code>jax.experimental.shard_map</code>、<code>Mesh(mesh_utils.create_device_mesh(...))</code> 是同一套概念。没有 TPU/GPU 也能跟着跑：用 <code>jax.config.update("jax_num_cpu_devices", 8)</code> 模拟 8 个 CPU 设备，分片和通信的语义完全一样，只是 CPU 上的时间没有参考意义。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -126,7 +126,7 @@ print(compiled.as_text())               # 3. 优化后的 HLO（融合、布局�
           </tbody>
         </table>
       </div>
-      <p>三种模式共享同一套描述分片的词汇：mesh、PartitionSpec、NamedSharding。先把它们讲清楚。</p>
+      <p>三种模式共享同一套描述分片的词汇：mesh、PartitionSpec、NamedSharding。</p>
 
       <h2 id="mesh">设备网格</h2>
       <p>Mesh 是给设备起名字的方式：把 \(N\) 个设备排成一个多维数组，每一维有一个名字。</p>
@@ -145,7 +145,7 @@ print(mesh.devices)                              # 4×2 的设备数组</code></
         <li><code>axis_types</code>：每个轴用哪种模式（Auto / Explicit；手动模式在 <code>shard_map</code> 里临时进入）。目前的版本里不写时默认是 Explicit，为了读代码的人不用猜，最好显式写出来。</li>
         <li><code>jax.set_mesh</code>：设定当前 mesh，于是后面可以直接写 <code>jax.P('X', 'Y')</code> 而不必每次带上 mesh。</li>
       </ul>
-      <p>在 TPU 上，<code>make_mesh</code> 会按物理拓扑排列设备，让 mesh 的相邻元素在 ICI 上也相邻；GPU 上同理会尽量让内层轴落在同一台机器里。上一篇讲的「哪个并行轴放内层」在 JAX 里就落实为：<strong>mesh 形状里最后一维变化最快</strong>，比如 <code>jax.make_mesh((dp, pp, tp), ('dp', 'pp', 'tp'))</code> 让 tp 轴在最内层。</p>
+      <p>在 TPU 上，<code>make_mesh</code> 会按物理拓扑排列设备，让 mesh 的相邻元素在 ICI 上也相邻；GPU 上同理会尽量让内层轴落在同一台机器里。<a href="/posts/scaling-5d/">5D 并行</a>里「哪个并行轴放内层」的原则，在 JAX 里就落实为：<strong>mesh 形状里最后一维变化最快</strong>，比如 <code>jax.make_mesh((dp, pp, tp), ('dp', 'pp', 'tp'))</code> 让 tp 轴在最内层。</p>
 
       <h2 id="pspec">PartitionSpec 和 NamedSharding</h2>
       <p><code>PartitionSpec</code>（简写 <code>P</code>）为数组的<strong>每一个维度</strong>写一项，说这一维沿哪些 mesh 轴切开：</p>
@@ -170,7 +170,7 @@ for s in xs.addressable_shards[:3]:
 # cpu:1 (slice(0, 4), slice(4, 8)) (4, 4)
 # cpu:2 (slice(4, 8), slice(0, 4)) (4, 4)
 jax.debug.visualize_array_sharding(xs)       # 在终端里画出哪个设备持有哪块（需要 rich）</code></pre>
-      <p>下面的演示把这件事画出来。选一个数组形状、一个 mesh 和一个 spec，左边是数组被切成的块（颜色相同 = 同一块），右边是 mesh 上每个设备持有哪一块。</p>
+      <p>选一个数组形状、一个 mesh 和一个 spec：左边是数组被切成的块（颜色相同 = 同一块），右边是 mesh 上每个设备持有哪一块。</p>
 
       <div class="demo" id="ps-demo">
         <div class="demo-label">PartitionSpec 游乐场</div>
@@ -201,7 +201,7 @@ jax.debug.visualize_array_sharding(xs)       # 在终端里画出哪个设备持
       </ul>
 
       <h3>分片矩阵乘法要什么通信</h3>
-      <p>本系列《集合通信与分片矩阵乘法》一篇推过，分片矩阵乘法 \(C = A\cdot B\) 按「收缩维有没有被切」分成几种情形。这里换成 PartitionSpec 的语言复述一遍，后面看 HLO 时会用到：</p>
+      <p>分片矩阵乘法 \(C = A\cdot B\) 按「收缩维有没有被切」分成几种情形（推导见<a href="/posts/scaling-collectives/">集合通信与分片矩阵乘法</a>），用 PartitionSpec 的语言写是：</p>
       <ol>
         <li><strong>收缩维都没切</strong>：\(A[I_X, J]\cdot B[J, K_Y] \to C[I_X, K_Y]\)，各算各的，不需要通信。</li>
         <li><strong>只有一边的收缩维被切</strong>：\(A[I, J_X]\cdot B[J, K]\)，先 all-gather 把 \(A\) 的收缩维拼完整，再按情形 1 算。</li>
@@ -237,7 +237,7 @@ out = jit_matmul(In, W)</code></pre>
     hidden = jnp.einsum('bd,df->bf', x, W_in)
     hidden = jax.lax.with_sharding_constraint(hidden, jax.P('X', 'Y'))  # 强制隐层沿 (batch→X, F→Y) 切
     return jnp.einsum('bf,fd->bd', hidden, W_out)</code></pre>
-      <p>在自动模式下，很大一部分并行编程的功夫都花在这种「控制中间结果的分片」上。它的问题也很明显：你可以给每个中间变量都加约束，还是不确定编译器最终会做什么。这种做法常被戏称为 compiler tickling（「挠编译器痒痒」），不是一个愉快的编程模型。下面两种模式就是为了解决这个问题。</p>
+      <p>在自动模式下，很大一部分并行编程的功夫都花在这种「控制中间结果的分片」上。它的问题也很明显：你可以给每个中间变量都加约束，还是不确定编译器最终会做什么。这种做法常被戏称为 compiler tickling（「挠编译器痒痒」），不是一个愉快的编程模型。显式模式和 shard_map 就是为了解决这个问题。</p>
 
       <h2 id="explicit">显式模式：把分片写进类型</h2>
       <p>显式模式把分片传播从编译器挪到 JAX 自己：每个 JAX 操作有一条分片规则，从输入分片算出输出分片，结果成为数组<strong>类型</strong>的一部分，追踪时就能看到。</p>
@@ -332,7 +332,7 @@ def dp_step(w, x, y):
     g = jax.grad(loss)(w_local, x, y)                      # 只含本设备数据的梯度
     g = jax.lax.pmean(g, ('X', 'Y'))                       # 显式 all-reduce 求平均
     return w - 0.1 * g</code></pre>
-      <p>新版 shard_map 会跟踪每个值是「在轴上各不相同」（varying）还是「在轴上相同」（invariant）。<code>w</code> 按 <code>P()</code> 传入，是 invariant 的。如果直接对它求梯度，JAX 会在反向自动插入一次 psum（因为前向里隐含了一次从 invariant 到 varying 的广播，它的转置就是求和），得到的已经是<strong>所有设备梯度之和</strong>。在 8 个设备上，它正好是单设备平均梯度的 8 倍；如果再 <code>pmean</code> 一次，就会把学习率放大 8 倍而不报错。先 <code>pcast</code> 成 varying 再求导，梯度就是纯本地的，通信完全由自己写出来，语义清楚。下一节的集合矩阵乘法里，初始化累加器也用了 <code>pcast(..., to='varying')</code>，原因相同。</p>
+      <p>新版 shard_map 会跟踪每个值是「在轴上各不相同」（varying）还是「在轴上相同」（invariant）。<code>w</code> 按 <code>P()</code> 传入，是 invariant 的。如果直接对它求梯度，JAX 会在反向自动插入一次 psum（因为前向里隐含了一次从 invariant 到 varying 的广播，它的转置就是求和），得到的已经是<strong>所有设备梯度之和</strong>。在 8 个设备上，它正好是单设备平均梯度的 8 倍；如果再 <code>pmean</code> 一次，就会把学习率放大 8 倍而不报错。先 <code>pcast</code> 成 varying 再求导，梯度就是纯本地的，通信完全由自己写出来，语义清楚。集合矩阵乘法的代码初始化累加器时也用了 <code>pcast(..., to='varying')</code>，原因相同。</p>
 
       <h2 id="cmm">例子：集合矩阵乘法</h2>
       <p>来看一个 shard_map 真正赚到性能的例子。要算 \(A[B_X, D_Y]\cdot_D W[D, F_Y]\to \text{Out}[B_X, F_Y]\)：激活沿 \(D\) 切（比如上一层用了 reduce-scatter 的 TP），权重沿 \(F\) 切。朴素做法是情形 2：</p>
@@ -386,7 +386,7 @@ jit_sharded_f = jax.jit(jax.shard_map(
       <p>效果如何？在 TPU 上 profile 这个例子：默认 jit 版本 311 µs，开头有一个阻塞的大 AllGather；集合矩阵乘法版本 244 µs，profile 里看不到 AllGather 了，全是有用的计算；作为参照，收缩维不切时的纯矩阵乘是 224 µs，已经很接近。同样的思路可以做 reduce-scatter 一侧（对应 MLP 的下投影，边累加边把部分结果往下传），也可以让数据同时向两个方向传，把每一步的通信再减半，都适合拿来练手。</p>
 
       <h2 id="xla">Profiling 之前：XLA 编译栈</h2>
-      <p>读 profile 前先要知道 profile 里的名字从哪来，所以先把软件栈从上到下过一遍：</p>
+      <p>profile 里的名字来自编译栈中的某一层。从上到下：</p>
 
       <figure class="fig">
         <svg viewBox="0 0 640 200" role="img" aria-label="JAX 到 TPU 的编译栈">
@@ -437,7 +437,7 @@ with jax.profiler.trace("/tmp/tensorboard"):        # 这个 with 块里的执�
         <li><strong>参数</strong>：输入 <code>%fusion.32</code>，形状 <code>bf16[32,32,8192]</code>。顺着参数往上找，就能知道谁喂给了谁。</li>
         <li><code>calls=%all-reduce-scatter.3</code>：这个 fusion 实际上是一次 reduce-scatter（最后一维 8192 → 4096，说明沿它切了 2 份）。</li>
       </ul>
-      <p>布局里的 tiling 稍微展开一下。<code>f32[3,5]{1,0:T(2,2)}</code>：<code>1,0</code> 从右往左读，表示维度 0 最主要、维度 1 最次要，即物理上还是 [3, 5] 的行优先；<code>T(2,2)</code> 表示按 2×2 的小块存放，块内行优先。因为要凑整块，数组被填充成 [4, 6]，内存是原来的 24/15 = 1.6 倍。大数组上常见的 <code>T(8,128)(2,1)</code> 是两级分块：外层 (8, 128)，内层 (2, 1)，后者是给 bf16 用的，保证每次读取是 4 字节的倍数。分块会影响数据进出 VMEM 的效率，XLA 有时会在程序中间插入「重新分块 / 重新布局」的 copy，开销不一定小。</p>
+      <p>看一个 tiling 的小例子，<code>f32[3,5]{1,0:T(2,2)}</code>：<code>1,0</code> 从右往左读，表示维度 0 最主要、维度 1 最次要，即物理上还是 [3, 5] 的行优先；<code>T(2,2)</code> 表示按 2×2 的小块存放，块内行优先。因为要凑整块，数组被填充成 [4, 6]，内存是原来的 24/15 = 1.6 倍。大数组上常见的 <code>T(8,128)(2,1)</code> 是两级分块：外层 (8, 128)，内层 (2, 1)，后者是给 bf16 用的，保证每次读取是 4 字节的倍数。分块会影响数据进出 VMEM 的效率，XLA 有时会在程序中间插入「重新分块 / 重新布局」的 copy，开销不一定小。</p>
 
       <h3>Graph Viewer</h3>
       <p>复杂的 fusion 在 Graph Viewer 里画成图，鼠标悬停往往能看到定义它的代码行。多盯着 HLO 图看，练习把 HLO op 对应回自己的代码，是熟悉 profile 最快的办法。</p>
@@ -518,7 +518,7 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
           </ul>
         </li>
       </ol>
-      <p>下面的演示用一个 4 层的小模型画出三种重叠：DDP 的梯度 all-reduce 与反向重叠、FSDP 的参数 all-gather 预取、TP 的集合矩阵乘法。可以开关重叠，调节「通信占 SM 导致的计算变慢」，或者在前向结束后插一次 CPU 同步，看步时和三类时间怎么变。</p>
+      <p>这是一个 4 层小模型上的三种重叠：DDP 的梯度 all-reduce 与反向重叠、FSDP 的参数 all-gather 预取、TP 的集合矩阵乘法。开关重叠，调节「通信占 SM 导致的计算变慢」，或者在前向结束后插一次 CPU 同步，看步时和三类时间怎么变。</p>
 
       <div class="demo" id="tl-demo">
         <div class="demo-label">trace 查看器（数据为示意）</div>

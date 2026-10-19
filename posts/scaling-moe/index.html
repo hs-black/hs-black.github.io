@@ -49,8 +49,7 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p>这一篇把混合专家（Mixture of Experts, MoE）从头讲到分布式训练：路由器怎么选专家，为什么要限制每个专家的容量，负载均衡的辅助损失是怎么来的、梯度往哪推，DeepSeek 系列的细粒度专家、共享专家和无辅助损失的偏置均衡在解决什么问题；然后是专家并行（EP）：两次 all-to-all 到底传了多少字节，节点受限路由为什么能省带宽，EP 怎么和 DP、TP、PP 拼在一起。中间有三个可以拖的演示：一个路由器模拟器、一个 EP 数据流的单步动画和一个 all-to-all 成本计算器。</p>
-      <p>上一篇的 <a href="/posts/scaling-pipeline/">流水线并行</a> 最后讲到 DualPipe 是为了藏住 MoE 的 all-to-all，这一篇就是在补那个 all-to-all 的来龙去脉。</p>
+      <p>DeepSeek-V3 有 671B 参数，每个 token 却只用到其中 37B：每层 256 个专家，路由器只挑 8 个。混合专家（Mixture of Experts, MoE）就这样把参数量和计算量拆开了。账单落在两处：路由必须均衡，否则大部分专家闲着、最忙的那张卡拖慢所有人；专家分到不同的卡上之后，每层前向要做两次 all-to-all，把 token 送过去再取回来。<a href="/posts/scaling-pipeline/">流水线并行</a>里的 DualPipe 费那么大劲去重叠的，正是这两次 all-to-all。</p>
 
       <nav class="toc" aria-label="目录">
         <b>目录</b>
@@ -107,7 +106,7 @@
       $$H = U W_r \in \mathbb{R}^{T\times E},\qquad H_{t,i} = u_t^\top e_i$$
       <p>然后三步：</p>
       <ol>
-        <li><b>打分</b>：把 logits 变成亲和度（affinity）\(s_{i,t}\)，用 softmax 或 sigmoid（下一节讨论）。</li>
+        <li><b>打分</b>：把 logits 变成亲和度（affinity）\(s_{i,t}\)，用 softmax 或 sigmoid。</li>
         <li><b>选 top-k</b>：对每个 token 取分数最高的 \(k\) 个专家，记为集合 \(\mathcal{T}_t\)。</li>
         <li><b>加权</b>：门控值 \(g_{i,t}\) 由选中专家的分数得到（可能再归一化），未选中的为 0；输出 \(\sum_{i\in\mathcal{T}_t} g_{i,t}\mathrm{FFN}_i(u_t)\)。</li>
       </ol>
@@ -128,7 +127,7 @@ perm    = argsort(idx.flatten())
 X       = U[perm // k]     # [T*k, h]  每个专家的输入连续存放
 Y       = grouped_ffn(X, counts_per_expert)   # [T*k, h]
 out     = zeros(T, h).index_add(0, perm // k, Y * w.flatten()[perm, None])</code></pre>
-      <p>\(T\cdot k\) 个 (token, 专家) 对展平后，第 \(j\) 个对属于 token \(\lfloor j/k \rfloor\)，所以 <code>perm // k</code> 就是排序后每一行对应的 token 编号。这个「排序—按专家分组算—按原顺序加回去」的结构，后面做专家并行时只是把中间那步换成跨卡的 all-to-all。</p>
+      <p>\(T\cdot k\) 个 (token, 专家) 对展平后，第 \(j\) 个对属于 token \(\lfloor j/k \rfloor\)，所以 <code>perm // k</code> 就是排序后每一行对应的 token 编号。这个「排序—按专家分组算—按原顺序加回去」的结构，到了专家并行只是把中间那步换成跨卡的 all-to-all。</p>
 
       <h2 id="gate-fn">softmax 门控还是 sigmoid 门控</h2>
       <p>打分函数有几种常见组合，差别在<b>在哪一步归一化</b>：</p>
@@ -216,7 +215,7 @@ out     = zeros(T, h).index_add(0, perm // k, Y * w.flatten()[perm, None])</code
       <p class="formula-note">Mixtral 每层都是 MoE；DeepSeek-V2 的第 1 层、V3 的前 3 层仍是稠密 FFN，其余层为 MoE。</p>
 
       <h2 id="loss-free">无辅助损失的负载均衡</h2>
-      <p>辅助损失的毛病上一节已经说了：均衡的压力通过梯度作用在门控值上，和语言建模目标互相拉扯。DeepSeek 的 Wang et al.（2024）提出 Loss-Free Balancing，V3 把它作为主要的均衡手段。思路是：既然辅助损失的问题在于它通过梯度改动了门控值，那就<b>不走梯度</b>，直接给每个专家一个偏置 \(b_i\)，只用于选择：</p>
+      <p>辅助损失的毛病在于：均衡的压力通过梯度作用在门控值上，和语言建模目标互相拉扯。DeepSeek 的 Wang et al.（2024）提出 Loss-Free Balancing，V3 把它作为主要的均衡手段。思路是：既然辅助损失的问题在于它通过梯度改动了门控值，那就<b>不走梯度</b>，直接给每个专家一个偏置 \(b_i\)，只用于选择：</p>
       $$g'_{i,t} = \begin{cases} s_{i,t}, & s_{i,t} + b_i \in \mathrm{Topk}\big(\{s_{j,t}+b_j\}_{j},\,K\big) \\ 0, & \text{otherwise}\end{cases}$$
       <p>关键是：<b>门控值仍然用原始的 \(s_{i,t}\)</b>，偏置只影响谁进 top-k。偏置的更新规则：每个 batch 训练完，统计每个专家分到的 token 数 \(c_i\) 及其平均 \(\bar c\)，</p>
       $$e_i = \bar c - c_i,\qquad b_i \leftarrow b_i + u\cdot\mathrm{sign}(e_i)$$
@@ -230,7 +229,7 @@ out     = zeros(T, h).index_add(0, perm // k, Y * w.flatten()[perm, None])</code
       <p>衡量均衡程度可以用 MaxVio：\(\mathrm{MaxVio} = \frac{\max_i \mathrm{Load}_i - \overline{\mathrm{Load}}}{\overline{\mathrm{Load}}}\)，即最忙的专家比平均超出多少。实验里 1B / 3B 模型上 Loss-Free 的全局 MaxVio 为 0.04，辅助损失方法分别为 0.72 / 0.52，同时困惑度更低。</p>
 
       <h2 id="router-demo">演示：路由器模拟器</h2>
-      <p>下面是一个小的路由器：\(T\) 个 token 的隐状态是随机向量，\(E\) 个专家各有一个随机质心，亲和度 logits 是两者的内积，再加上一个「专家受欢迎程度」偏斜项（拖 skew 让前面的专家天然更受欢迎，模拟坍缩的早期）。上半部分是这一批的路由结果：每个专家的负载柱、容量线和被丢掉的分配。下半部分可以选一种均衡方法跑若干「训练步」（每步换一批新 token）：</p>
+      <p>这个路由器很小：\(T\) 个 token 的隐状态是随机向量，\(E\) 个专家各有一个随机质心，亲和度 logits 是两者的内积，再加上一个「专家受欢迎程度」偏斜项（拖 skew 让前面的专家天然更受欢迎，模拟坍缩的早期）。上半部分是这一批的路由结果：每个专家的负载柱、容量线和被丢掉的分配。下半部分可以选一种均衡方法跑若干「训练步」（每步换一批新 token）：</p>
       <ul>
         <li><b>辅助损失</b>：给每个专家一个可学习的 logit 偏移 \(\theta_i\)，按上面推出的梯度 \(\frac{1}{T}\sum_t s_{k,t}(f_k-\sum_i f_i s_{i,t})\)（sigmoid 时用对应的式子）做梯度下降。它会改变门控值。</li>
         <li><b>无辅助损失偏置</b>：\(b_i \leftarrow b_i + \gamma\,\mathrm{sign}(\bar c - c_i)\)，只影响选择，门控值不变。</li>
@@ -280,19 +279,19 @@ out     = zeros(T, h).index_add(0, perm // k, Y * w.flatten()[perm, None])</code
       <p>可以试试：把 skew 拉到 2 以上、选「不均衡」看 MaxVio 很高、丢弃很多；切到「无辅助损失偏置」跑 200 步，MaxVio 降下来而橙线一直是 0；切到「辅助损失」也能降下来，但橙线随之上升——它是靠改门控分数实现均衡的。再把 CF 调到 1.0 附近，即使平均均衡，随机波动也会造成丢弃；选 dropless 则不丢，但最忙专家的负载（决定这一步的时间）就是 MaxVio 所描述的那部分开销。</p>
 
       <h2 id="ep">专家并行：dispatch 与 combine</h2>
-      <p>到这里讲的都是单卡上的 MoE。专家多了以后，所有专家的参数放不进一张卡，而且前面算过，单卡上每个专家分到的 token 太少。两个问题有同一个解法：把专家分到不同的卡上，再把各卡的 token 汇集到专家所在的卡，这就是<b>专家并行</b>（Expert Parallelism, EP）。因为各专家的 FFN 完全独立，EP 比 TP 轻得多：不需要切矩阵乘，只需要把 token 的隐状态送到对的专家那里，算完再送回来。</p>
+      <p>专家多了以后，所有专家的参数放不进一张卡，而且前面算过，单卡上每个专家分到的 token 太少。两个问题有同一个解法：把专家分到不同的卡上，再把各卡的 token 汇集到专家所在的卡，这就是<b>专家并行</b>（Expert Parallelism, EP）。因为各专家的 FFN 完全独立，EP 比 TP 轻得多：不需要切矩阵乘，只需要把 token 的隐状态送到对的专家那里，算完再送回来。</p>
       <p>设 EP 组有 \(P\) 张卡，每卡放 \(E/P\) 个专家。注意力等非 MoE 部分在这 \(P\) 张卡上是<b>数据并行</b>的：每张卡处理自己那份 token。于是一个 MoE 层的流程是：</p>
       <ol>
         <li><b>路由</b>：每张卡对本地 \(T\) 个 token 算路由，得到 \(T\cdot k\) 个 (token, 专家) 分配。</li>
         <li><b>permute</b>：按目标专家（从而按目标卡）排序，同一目标卡的数据在内存里连续。</li>
         <li><b>dispatch（all-to-all）</b>：每张卡把发往卡 \(j\) 的那段发给卡 \(j\)。之后每张卡持有所有卡发来的、属于自己专家的 token。</li>
-        <li><b>专家计算</b>：本地 \(E/P\) 个专家各自处理收到的变长批次（grouped GEMM，见后文）。</li>
+        <li><b>专家计算</b>：本地 \(E/P\) 个专家各自处理收到的变长批次（grouped GEMM）。</li>
         <li><b>combine（all-to-all）</b>：把结果按原路发回 token 所在的卡。</li>
         <li><b>unpermute + 加权求和</b>：恢复原顺序，乘门控值，把 \(k\) 个专家的输出加起来，再加残差。</li>
       </ol>
-      <p>all-to-all 是这里唯一的新通信原语，值得多说两句。\(P\) 张卡，每张卡把自己的数据切成 \(P\) 块，第 \(j\) 块发给卡 \(j\)；同时从每张卡各收一块。把「卡 \(i\) 要发给卡 \(j\) 的那块」记作 \(X_{ij}\)，排成一个 \(P\times P\) 的方阵：发之前卡 \(i\) 持有第 \(i\) 行，发之后卡 \(j\) 持有第 \(j\) 列——all-to-all 就是一次分块矩阵转置。用分片的记号写，就是把一个下标的分片轴挪到另一个下标上：\(A[I_X, J]\to A[I, J_X]\)。在 MoE 里，\(I\) 是 token、\(J\) 是专家：dispatch 之前按 token 分片（每卡一份 token），之后按专家分片（每卡一组专家）。</p>
+      <p>all-to-all 是这里唯一的新通信原语。\(P\) 张卡，每张卡把自己的数据切成 \(P\) 块，第 \(j\) 块发给卡 \(j\)；同时从每张卡各收一块。把「卡 \(i\) 要发给卡 \(j\) 的那块」记作 \(X_{ij}\)，排成一个 \(P\times P\) 的方阵：发之前卡 \(i\) 持有第 \(i\) 行，发之后卡 \(j\) 持有第 \(j\) 列——all-to-all 就是一次分块矩阵转置。用分片的记号写，就是把一个下标的分片轴挪到另一个下标上：\(A[I_X, J]\to A[I, J_X]\)。在 MoE 里，\(I\) 是 token、\(J\) 是专家：dispatch 之前按 token 分片（每卡一份 token），之后按专家分片（每卡一组专家）。</p>
       <p>带容量的实现（GShard、Switch）写得更「张量化」：路由先产生一个形状为 \([\text{token}, E, C]\) 的 0/1 派发张量（token \(t\) 去专家 \(e\) 的第 \(c\) 个槽位），和输入做一次 einsum 得到 \([E, C, h]\) 的专家输入，然后用 all-to-all 把分片维从 token 换成专家；combine 是反过来乘一个带门控值的 \([\text{token}, E, C]\) 张量。每块的大小因此是固定的，这正是容量存在的工程原因。</p>
-      <p>下面这个小动画用 4 张卡、每卡 2 个专家、top-1 的设置，逐步走一遍。</p>
+      <p>4 张卡、每卡 2 个专家、top-1，点「下一步」看一个 MoE 层的数据怎么走：</p>
       <div class="demo" id="ep-demo">
         <div class="demo-label">EP 数据流（单步）</div>
         <svg id="ep-svg" viewBox="0 0 680 300" role="img" aria-label="4 张卡之间的 token dispatch 与 combine 动画"></svg>
@@ -403,7 +402,7 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
       <p>SwiGLU 专家的一次前向在 grouped GEMM 下是三次分组矩阵乘：gate 和 up（可以合并为一个 \([h, 2d_e]\) 的分组 GEMM），逐元素 SiLU·乘，再一次 down。反向同样是分组 GEMM，对输入和对权重各一组——和流水线那篇讲的 B/W 拆分对得上。</p>
 
       <h2 id="infer">推理部署中的 EP（DeepSeek-V3）</h2>
-      <p>这一篇讲的是训练，但推理部署把「均衡」和「每个专家的 batch」这两个问题放大得更明显：推理时 batch 由线上流量决定，没法靠调超参解决。DeepSeek-V3 的部署方案是个好例子：</p>
+      <p>推理部署把「均衡」和「每个专家的 batch」这两个问题放大得更明显：推理时 batch 由线上流量决定，没法靠调超参解决。DeepSeek-V3 的部署方案是个好例子：</p>
       <ul>
         <li><b>prefill</b>：最小部署单元 4 节点 32 卡。注意力用 TP4 + SP，配合 DP8；MoE 部分用 EP32，保证每个专家处理的 batch 足够大。all-to-all 沿用训练时的做法（先 IB 跨节点，再 NVLink 节点内转发）。</li>
         <li><b>冗余专家</b>：为了每张卡处理的 token 数大致相同，把高负载专家复制部署。高负载专家根据线上统计周期性（例如每 10 分钟）调整，然后在节点内重新排布专家，尽量在不增加跨节点 all-to-all 的前提下均衡各卡负载。prefill 阶段设 32 个冗余专家，每卡除原有 8 个专家外再放 1 个冗余专家。</li>
@@ -443,7 +442,6 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
         <li>DeepSeek 路线：细粒度 + 共享专家提高专精度；只用于选择的偏置 \(b_i\) 做 batch 级均衡，只留极小的序列级损失兜底。</li>
         <li>EP 与 DP 共用卡，两次 all-to-all（前向）+ 两次（反向）；通信/计算比约 \(bF/(6d_eBW)\)，细专家跨节点时与计算同量级，靠节点受限路由、按节点去重、专用内核和 DualPipe 式重叠压下去。</li>
       </ul>
-      <p>下一篇是 5D 并行：把 DP、TP、CP、PP、EP 放到同一张卡阵上，怎么排它们的顺序和大小。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <p>想系统了解大规模训练里的各种并行，推荐 Ultra-Scale Playbook；想从 TPU 和分片的角度看 MoE 的通信与推理成本，推荐 Scaling Book 的相关章节。</p>

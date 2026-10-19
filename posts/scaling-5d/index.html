@@ -94,7 +94,7 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p>前面几篇把每一种并行单独拆开讲过了：数据并行和 ZeRO、张量并行和序列并行、上下文并行、流水线并行、专家并行。真正训练一个大模型时，没有人只用其中一种。Llama 3 405B 用了四种，DeepSeek-V3 用了三种，而且偏偏没用张量并行。这一篇回答两个问题：这五个轴（加上 ZeRO 的三个等级）放在一起时<strong>各自负责什么、互相怎么摆</strong>；给定模型、序列长度、batch 和一堆 GPU，<strong>怎么挑出一个好配置</strong>。</p>
+      <p>Llama 3 405B 用了四种并行，DeepSeek-V3 用了三种，而且偏偏没用张量并行。真正训练一个大模型时，没有人只用数据并行、张量并行、上下文并行、流水线并行、专家并行里的一种。难处在组合：这五个轴（加上 ZeRO 的三个等级）放在一起时<strong>各自负责什么、互相怎么摆</strong>；给定模型、序列长度、batch 和一堆 GPU，<strong>怎么挑出一个好配置</strong>。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -212,18 +212,18 @@
         <figcaption>图 1　五种并行各自沿哪一维切，以两张卡为例。</figcaption>
       </figure>
 
-      <p>切的维度不同，带来三件不同的事：<strong>省下哪部分显存</strong>、<strong>引入哪种通信</strong>、<strong>这次通信能不能藏在计算后面</strong>。选型就是在这三件事之间做交换。下面先把记号定下来，再一个轴一个轴地算。</p>
+      <p>切的维度不同，带来三件不同的事：<strong>省下哪部分显存</strong>、<strong>引入哪种通信</strong>、<strong>这次通信能不能藏在计算后面</strong>。选型就是在这三件事之间做交换。</p>
 
       <h2 id="notation">记号和一层的账本</h2>
       <p>先约定记号：隐藏维 \(h\)，层数 \(L\)，序列长度 \(s\)，micro-batch 大小（每张卡一次前向处理的序列数）\(b\)，注意力头数 \(a\)，词表 \(V\)，模型参数量 \(\Psi\)。并行度写作 \(t\)（TP）、\(c\)（CP）、\(p\)（PP）、\(d\)（DP）、\(e\)（EP），总卡数</p>
       $$N = t \cdot c \cdot p \cdot d.$$
-      <p>EP 一般不单独占一个因子，而是借用 DP（或 DP×CP）那一维的卡：在 MoE 层里，这些卡不再各自持有全部专家，而是分摊专家（后面细说）。</p>
+      <p>EP 一般不单独占一个因子，而是借用 DP（或 DP×CP）那一维的卡：在 MoE 层里，这些卡不再各自持有全部专家，而是分摊专家。</p>
       <p>一步训练的全局 batch（global batch size，GBS）按 token 计是</p>
       $$\text{GBS} = d \cdot b \cdot m \cdot s,$$
-      <p>其中 \(m\) 是梯度累积步数，对流水线来说也就是一步里的 micro-batch 个数。这个等式在后面会反复出现：<strong>GBS 通常由收敛性（scaling law、临界 batch size）事先定好，不能随便改</strong>，所以加大 \(d\) 就得减小 \(b\) 或 \(m\)；当 \(b \cdot m\) 已经是 1，DP 就不能再加了。</p>
+      <p>其中 \(m\) 是梯度累积步数，对流水线来说也就是一步里的 micro-batch 个数。这个等式是硬约束：<strong>GBS 通常由收敛性（scaling law、临界 batch size）事先定好，不能随便改</strong>，所以加大 \(d\) 就得减小 \(b\) 或 \(m\)；当 \(b \cdot m\) 已经是 1，DP 就不能再加了。</p>
       <p>显存方面，混合精度 + Adam 下每个参数大约要 16 字节：bf16 参数 2、bf16 梯度 2、fp32 主权重 4、Adam 两个矩 8（如果梯度也用 fp32 累加，还要再加 4）。激活方面，在不做重算、用 FlashAttention（不存 \(s\times s\) 的注意力分数矩阵）的情况下，每层大约要存</p>
       $$m_\text{act} \approx 34\, s\, b\, h \ \text{字节}.$$
-      <p>算力方面，一个 token 前向 + 反向约 \(6\Psi\) FLOPs，加上注意力的 \(12 L h s^2\)（每条序列）。这些在本系列第一篇《训练的账本》里推过，这里直接用。</p>
+      <p>算力方面，一个 token 前向 + 反向约 \(6\Psi\) FLOPs，加上注意力的 \(12 L h s^2\)（每条序列），推导见<a href="/posts/scaling-memory/">训练的账本</a>。</p>
 
       <h2 id="each">逐个轴：切什么、通信什么、多贵</h2>
 
@@ -323,7 +323,7 @@
       <ul>
         <li>TP 每层通信 8 次、默认实现里无法与计算重叠，必须在 NVLink 里。实践中 TP 组几乎总是限制在一台机器之内（\(t \le 8\)）。</li>
         <li>CP 的 K/V 交换能和注意力重叠，但量随序列线性增长，通常也放在节点内或紧挨着 TP。</li>
-        <li>EP 的 all-to-all 量不小，最好在节点内；跨节点时要靠路由约束和通信重叠（下文 DeepSeek-V3 的做法）。</li>
+        <li>EP 的 all-to-all 量不小，最好在节点内；跨节点时要靠路由约束和通信重叠（DeepSeek-V3 就是这么做的）。</li>
         <li>PP 只在边界传激活，量小，可以跨节点。</li>
         <li>DP / FSDP 在最外层：它的通信可以异步预取参数、异步规约梯度，最能容忍延迟。</li>
       </ul>
@@ -342,8 +342,8 @@ mesh = init_device_mesh("cuda", (dp, pp, cp, tp),
                         mesh_dim_names=("dp", "pp", "cp", "tp"))
 tp_group = mesh["tp"].get_group()   # 本卡所在的 TP 进程组
 dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre>
-      <p>JAX 的 <code>jax.make_mesh((dp, pp, cp, tp), ('dp', 'pp', 'cp', 'tp'))</code> 是同一个概念，下一篇会细讲。</p>
-      <p>EP 一般从 DP 维里「借」：把 DP 下标 \(i_d\) 再拆成 \((i_{ed}, i_e)\)，同一 \(i_{ed}\) 的 \(e\) 张卡组成一个 EP 组，分摊所有专家；不同 EP 组之间对专家参数做数据并行（expert-DP，大小 \(d/e\)）。下面的演示可以随便换顺序，看看每种组落在哪里。</p>
+      <p>JAX 的 <code>jax.make_mesh((dp, pp, cp, tp), ('dp', 'pp', 'cp', 'tp'))</code> 是同一个概念，见 <a href="/posts/scaling-jax/">JAX 分片编程</a>。</p>
+      <p>EP 一般从 DP 维里「借」：把 DP 下标 \(i_d\) 再拆成 \((i_{ed}, i_e)\)，同一 \(i_{ed}\) 的 \(e\) 张卡组成一个 EP 组，分摊所有专家；不同 EP 组之间对专家参数做数据并行（expert-DP，大小 \(d/e\)）。在下面的网格里换换顺序，看每种组落在哪里。</p>
 
       <div class="demo" id="mesh-demo">
         <div class="demo-label">设备网格可视化</div>
@@ -375,8 +375,8 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
       <p>换几种顺序试试：默认的 [TP, CP, PP, DP] 下，TP 组整组在一台机器内；把 DP 挪到最内层，TP 组就被拆到好几台机器上，原本走 NVLink 的每层通信全都要走网卡。这正是「顺序」这个超参数存在的原因。</p>
 
       <h2 id="thresholds">什么时候被通信卡住：每设备 batch 的门槛</h2>
-      <p>「放得下」只是第一关。卡多了以后，每张卡分到的计算变少，而通信量往往不变甚至变多，迟早会出现通信时间超过计算时间、卡在空等的情况。这一节把「什么时候开始空等」算成几个好记的门槛。</p>
-      <p>为了让算术干净，我们把 Transformer 简化成一摞 MLP 块（每块两个矩阵 \(W_\text{in}\in\mathbb{R}^{D\times F}\)、\(W_\text{out}\in\mathbb{R}^{F\times D}\)），因为 MLP 的矩阵占了绝大部分参数和 FLOPs。记号：\(B\) 是全局 batch 的 token 数，\(C\) 是每块芯片的 bf16 算力（FLOP/s），\(W\) 是互联带宽（字节/秒，双向合计），\(X\)、\(Y\) 分别是 FSDP 和 TP 的并行度。例子用 TPU v5p 的数字：它的芯片排成 3 维 torus，每个轴的带宽一样，算起来最干净；GPU 的版本放在下一节。</p>
+      <p>「放得下」只是第一关。卡多了以后，每张卡分到的计算变少，而通信量往往不变甚至变多，迟早会出现通信时间超过计算时间、卡在空等的情况。「什么时候开始空等」可以算成几个好记的门槛。</p>
+      <p>为了让算术干净，我们把 Transformer 简化成一摞 MLP 块（每块两个矩阵 \(W_\text{in}\in\mathbb{R}^{D\times F}\)、\(W_\text{out}\in\mathbb{R}^{F\times D}\)），因为 MLP 的矩阵占了绝大部分参数和 FLOPs。记号：\(B\) 是全局 batch 的 token 数，\(C\) 是每块芯片的 bf16 算力（FLOP/s），\(W\) 是互联带宽（字节/秒，双向合计），\(X\)、\(Y\) 分别是 FSDP 和 TP 的并行度。例子用 TPU v5p 的数字：它的芯片排成 3 维 torus，每个轴的带宽一样，算起来最干净。</p>
 
       <h3>DP / FSDP：每设备 batch 要大于 \(C/W\)</h3>
       <p>纯 DP 的前向没有通信，只看反向。每层有两个权重矩阵的梯度要 all-reduce，每个 \(DF\) 个参数、\(2DF\) 字节（bf16）。ring all-reduce 等于一次 reduce-scatter 加一次 all-gather，每一半都要让整份数据在链路上过一遍，所以时间约为 \(2\times\)字节数\(/W\)。于是：</p>
@@ -441,11 +441,11 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
       <ul>
         <li><strong>ZeRO-3 预取。</strong>一层有 \(P_\text{layer}\) 个参数，all-gather 时每张卡要收 \(2P_\text{layer}\cdot\frac{d-1}{d}\) 字节；这段时间要藏在当前层的前向后面（算第 \(i\) 层时预取第 \(i+1\) 层），一层前向约 \(2\,T\,P_\text{layer}\) FLOPs（\(T = s\cdot b\) 是这张卡一个 micro-batch 的 token 数）。比值约 \(\frac{\alpha}{T}\)：每张卡每个 micro-batch 的 token 数要大于 \(\alpha\)。</li>
         <li><strong>DP 梯度同步。</strong>梯度 all-reduce 每张卡收发约 \(2\cdot 2\Psi\) 字节，反向约 \(4T\Psi\) FLOPs，比值同样约 \(\frac{\alpha}{T}\)。开了梯度累积时，all-reduce 只能和<em>最后一个</em> micro-batch 的反向重叠（前面的 micro-batch 用 <code>no_sync</code> 跳过同步）。所以条件同样是每个 micro-batch 的 token 数大于 \(\alpha\) 量级；藏不住的部分每步只出现一次，会被 \(m\) 个 micro-batch 摊薄。</li>
-        <li><strong>TP。</strong>默认实现里 TP 的通信是暴露的；但如果把矩阵乘拆成块、边传边算（下一篇的「集合矩阵乘法」），就要看它能不能藏在下一个线性层后面。带 SP 时，线性层前要 all-gather 一份 \(s\,b\,h\) 的激活，每张卡收 \(2sbh\cdot\frac{t-1}{t}\) 字节；下一个线性层如果有 \(k h^2\) 个参数，每张卡的计算是 \(2sb\cdot kh^2/t\) FLOPs。比值是 \(\frac{(t-1)\,\alpha}{k\,h}\)，和 \(s\)、\(b\) 都无关，只看隐藏维、TP 度数和这个线性层有多「宽」（MLP 的上投影 \(k\approx 4\)，注意力的输出投影 \(k=1\)）。</li>
+        <li><strong>TP。</strong>默认实现里 TP 的通信是暴露的；但如果把矩阵乘拆成块、边传边算（即<a href="/posts/scaling-collectives/">集合矩阵乘法</a>），就要看它能不能藏在下一个线性层后面。带 SP 时，线性层前要 all-gather 一份 \(s\,b\,h\) 的激活，每张卡收 \(2sbh\cdot\frac{t-1}{t}\) 字节；下一个线性层如果有 \(k h^2\) 个参数，每张卡的计算是 \(2sb\cdot kh^2/t\) FLOPs。比值是 \(\frac{(t-1)\,\alpha}{k\,h}\)，和 \(s\)、\(b\) 都无关，只看隐藏维、TP 度数和这个线性层有多「宽」（MLP 的上投影 \(k\approx 4\)，注意力的输出投影 \(k=1\)）。</li>
         <li><strong>PP。</strong>每个 micro-batch 在段边界传一份 \(2sbh\) 字节的激活，下一段有 \(L_\text{next}\) 层，每层约 \(12h^2\) 个参数，前向约 \(24\,sbh^2 L_\text{next}\) FLOPs。比值是 \(\frac{\alpha}{12\, h\, L_\text{next}}\)，几乎总是远小于 1。</li>
       </ul>
       <p>代入 H100 SXM（bf16 稠密 989 TFLOP/s）：节点内 NVLink 单向 450 GB/s，\(\alpha \approx 2200\)；节点间 50 GB/s，\(\alpha \approx 19800\)。于是 \(h = 8192\)、\(t = 8\) 的 TP：节点内，MLP 上投影的比值约 \(7\times2200/(4\times8192)\approx 0.47\)，藏得住，输出投影约 1.9，藏不全；挪到节点间，两者分别约 4.2 和 17，通信是计算的好几倍。这就是「TP 不出节点」的定量版本。PP 跨节点时，比如每段 10 层，比值约 \(19800/(12\cdot8192\cdot10)\approx 0.02\)，完全不是问题。ZeRO-3 跨节点时要求每卡每个 micro-batch 约 2 万 token，4096 长的序列需要 \(b\ge 5\)，否则会有一部分 all-gather 暴露出来。</p>
-      <p>还有一个前提要说清楚：这些比值都假设通信和计算重叠时互不影响。在 GPU 上这不完全成立：NCCL 的通信 kernel 也要占用 SM，和计算 kernel 抢资源，重叠时计算会变慢。DeepSeek-V3 专门把通信限制在 20 个 SM 上，就是为了少抢计算的资源。</p>
+      <p>这些比值都假设通信和计算重叠时互不影响。在 GPU 上这不完全成立：NCCL 的通信 kernel 也要占用 SM，和计算 kernel 抢资源，重叠时计算会变慢。DeepSeek-V3 专门把通信限制在 20 个 SM 上，就是为了少抢计算的资源。</p>
 
       <h2 id="procedure">选配置的三步流程</h2>
       <p>有了上面这些代价和门槛，选配置可以按三步走。这不是算法，而是一个起点，最后总要在自己的集群上跑实验确认。</p>
@@ -560,7 +560,7 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
         <li>从 8K 卡到 16K 卡，GBS 保持 16M token 不变，DP 翻倍，每个 DP 组的 batch 从 32 降到 16。MFU 从 43% 掉到 41%，原因就是每组 batch 变小：micro-batch 数变少，PP 的 bubble 占比上升，DP 通信能藏的计算也变少了。这正是「GBS 固定、加卡变难」的实例。</li>
         <li>长上下文阶段把序列拉到 128K，用 CP=16 切序列，DP 相应降到 8。乘一下：8 × 16 × 16 × 8 = 16384。</li>
         <li>他们的 FSDP 切优化器状态和梯度，但前向之后不重新切分参数，以免反向时再 all-gather 一次（介于 ZeRO-2 和 ZeRO-3 之间）。</li>
-        <li>CP 用的是先 all-gather K/V 的实现（见上文），序列切成 2×CP 块做负载均衡。</li>
+        <li>CP 用的是先 all-gather K/V 的实现，序列切成 2×CP 块做负载均衡。</li>
         <li>他们专门做了显存估算器和性能预测工具来探索配置空间，也就是上面那个规划器的「正式版」。</li>
       </ul>
 
@@ -585,7 +585,6 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
         <li>GBS 是硬约束。卡越多，每卡分到的越少，越难藏住通信、bubble 越大。</li>
         <li>选型流程：先放得下一份模型，再凑够 GBS，最后在不碰到显存和通信瓶颈的前提下调吞吐；最终都要实测。</li>
       </ul>
-      <p>下一篇转到工具：用 JAX 写分片程序（mesh、PartitionSpec、shard_map），以及怎么读 profile，在时间线上分出计算、通信和空闲。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <ul>

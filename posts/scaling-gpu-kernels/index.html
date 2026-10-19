@@ -78,8 +78,8 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p>这个系列前面的文章都在「多卡」的层面上算账：参数、梯度、激活怎么切，通信能不能和计算重叠。这些分析默认了一件事——单张卡上的每个算子都跑得足够快。这篇往下走一层，看单张 GPU 内部：硬件长什么样，一个内核（kernel）是怎么被调度执行的，为什么同样的 FLOPs 有的算子能跑满、有的只能跑到峰值的零头，以及 FlashAttention 是怎么把这些知识用到极致的。</p>
-      <p>文中的硬件数字都以 H100 SXM 为准。前半篇建立直觉：数据从哪里来、要花多久、怎样少搬几次；后半篇把这些直觉一起用在注意力上，一步步推出 FlashAttention。</p>
+      <p>在 H100 上，一个形状合适的大矩阵乘能跑到接近峰值，一个 LayerNorm 却只能用到算力的零头；序列一长，标准注意力的大部分时间也花在搬数据上，而不是计算上。多卡并行的账默认单张卡上的每个算子都跑得足够快，这个前提成不成立，要看单张 GPU 内部：硬件长什么样，一个内核（kernel）怎么被调度执行，数据从哪里来、要花多久、怎样少搬几次。FlashAttention 就是把这些知识用到极致的结果。</p>
+      <p>硬件数字都以 H100 SXM 为准。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -107,7 +107,7 @@
       <h2 id="why">1. 为什么要关心内核</h2>
       <p>先看一组 H100 SXM 的数字：BF16 矩阵乘峰值约 \(9.9\times10^{14}\) FLOPs/s，HBM 带宽约 \(3.35\times10^{12}\) 字节/s。两者相除：</p>
       $$\frac{9.9\times 10^{14}\ \text{FLOPs/s}}{3.35\times 10^{12}\ \text{B/s}} \approx 295\ \text{FLOPs/B}.$$
-      <p>这个比值叫<strong>临界算术强度</strong>。一个算子每从 HBM 读写 1 字节，如果做不到大约 295 次浮点运算，那它的耗时就由搬数据决定，计算单元会闲着等。系列第二篇 <a href="/posts/scaling-roofline/">Roofline</a> 讲的就是这件事。</p>
+      <p>这个比值叫<strong>临界算术强度</strong>。一个算子每从 HBM 读写 1 字节，如果做不到大约 295 次浮点运算，那它的耗时就由搬数据决定，计算单元会闲着等。这就是 <a href="/posts/scaling-roofline/">Roofline</a> 模型的拐点。</p>
       <p>大多数非矩阵乘的算子离这个数差得很远。两个 FP32 向量相加：每个元素读 8 字节、写 4 字节、做 1 次加法，强度是 \(1/12\)。LayerNorm、softmax、GeLU、dropout、残差加法都差不多是这个量级。矩阵乘 \(C=AB\)（\(A\in\mathbb R^{M\times K}, B\in\mathbb R^{K\times N}\)）做 \(2MNK\) 次运算、最少搬 \(2(MK+KN+MN)\) 字节（BF16），当三个维度都是几千时强度能到上千——但这只是「最少」，内核写得不好，实际搬运量可以比这多几十倍。</p>
       <p>举个具体的例子。一个线性层 \(Y=XW\)，\(X\in\mathbb R^{B\times 4096}\)，\(W\in\mathbb R^{4096\times 8192}\)，BF16，在 H100 上：</p>
       <ul>
@@ -200,8 +200,8 @@
       <p>几个要点：</p>
       <ul>
         <li>从 HBM 到 SMEM，带宽差将近一个数量级，延迟也差一个多数量级。HBM 一次访问要等将近 500 个周期，这段时间里 Tensor Core 可以做几十万次运算。</li>
-        <li>L2 对程序员不可见、不可显式控制，但它决定了很多内核的实际 HBM 流量：多个 block 读同一块数据时，如果在 L2 里命中，就不用再走 HBM。后面分析矩阵乘和 FlashAttention 时会反复用到这一点。</li>
-        <li>寄存器是最快的存储，但每个 SM 只有 64K 个，所有常驻线程分着用。一个线程用的寄存器越多，SM 上能同时驻留的线程越少——这就是下一节的「占用率」。</li>
+        <li>L2 对程序员不可见、不可显式控制，但它决定了很多内核的实际 HBM 流量：多个 block 读同一块数据时，如果在 L2 里命中，就不用再走 HBM。矩阵乘和 FlashAttention 的实际流量都靠它。</li>
+        <li>寄存器是最快的存储，但每个 SM 只有 64K 个，所有常驻线程分着用。一个线程用的寄存器越多，SM 上能同时驻留的线程越少——这就是「占用率」问题。</li>
       </ul>
       <p>各代 GPU 的主要数字（矩阵乘吞吐均为稠密峰值）：</p>
       <div class="table-wrap">
@@ -340,7 +340,7 @@ def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, row_stride, D, eps, BLOCK_D: tl.constexp
     tl.store(y_ptr + row * row_stride + cols, y.to(y_ptr.dtype.element_ty), mask=mask)
 
 rmsnorm_kernel[(n_rows,)](x, w, y, x.stride(0), D, 1e-6, BLOCK_D=triton.next_power_of_2(D))</code></pre>
-      <p>整行读进寄存器一次，平方、求和、开方、乘权重都在片上完成，最后写一次。第 9 节会算这比 eager 省多少流量。</p>
+      <p>整行读进寄存器一次，平方、求和、开方、乘权重都在片上完成，最后写一次。</p>
 
       <h3>5.4 Triton：分块矩阵乘</h3>
       <p>矩阵乘是 Triton 的强项。下面是一个最小的分块实现（结构上和 Triton 官方教程一致，去掉了自动调优和 L2 分组）：</p>
@@ -369,8 +369,8 @@ def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
 grid = (triton.cdiv(M, 128), triton.cdiv(N, 128))
 matmul_kernel[grid](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1),
                     c.stride(0), c.stride(1), BM=128, BN=128, BK=32)</code></pre>
-      <p>每个 program 负责 C 的一个 \(128\times128\) 块，沿 K 方向每次取 A 的 \(128\times32\) 块和 B 的 \(32\times128\) 块，用 <code>tl.dot</code> 乘加到 FP32 累加器上。这就是第 7 节要推导的「分块」。Triton 编译器负责把块搬进共享内存、安排流水线、选 Tensor Core 指令。</p>
-      <p>Triton 也有边界：它的抽象停在 block 这一层，对共享内存的精确布局、SM 内的调度（比如 warp 专门化）控制有限。要榨干最后一截性能，就得下到 CUDA（或者 CUTLASS/CuTe 这类模板库）。下面几节的技术都是在 CUDA 层面讲的，但它们背后的道理同样决定 Triton 内核的快慢。</p>
+      <p>每个 program 负责 C 的一个 \(128\times128\) 块，沿 K 方向每次取 A 的 \(128\times32\) 块和 B 的 \(32\times128\) 块，用 <code>tl.dot</code> 乘加到 FP32 累加器上。这就是「分块」（第 7 节）。Triton 编译器负责把块搬进共享内存、安排流水线、选 Tensor Core 指令。</p>
+      <p>Triton 也有边界：它的抽象停在 block 这一层，对共享内存的精确布局、SM 内的调度（比如 warp 专门化）控制有限。要榨干最后一截性能，就得下到 CUDA（或者 CUTLASS/CuTe 这类模板库）。访存合并、分块、线程粗化这些技术在 CUDA 层面看得最清楚，但它们背后的道理同样决定 Triton 内核的快慢。</p>
 
       <h3>5.5 怎么知道内核慢在哪</h3>
       <p>写之前先测。常用的两层工具：</p>
@@ -542,7 +542,7 @@ C[localRow * N + localCol] = sum;</code></pre>
       </ul>
 
       <h2 id="fusion">9. 内核融合</h2>
-      <p>前面说过，GPU 和 CPU 是异步的，CPU 可以不停地往队列里塞内核。但每个内核都遵循同一个模式：从 HBM 读输入到 SM，计算，把输出写回 HBM。连续几个逐元素算子各自成一个内核时，中间结果就要在 HBM 和 SM 之间来回走好几趟，而计算本身几乎不花时间。</p>
+      <p>GPU 和 CPU 是异步的，CPU 可以不停地往队列里塞内核。但每个内核都遵循同一个模式：从 HBM 读输入到 SM，计算，把输出写回 HBM。连续几个逐元素算子各自成一个内核时，中间结果就要在 HBM 和 SM 之间来回走好几趟，而计算本身几乎不花时间。</p>
       <figure class="fig">
         <svg viewBox="0 0 760 210" role="img" aria-label="未融合：每个算子都读写 HBM；融合：一次读、一次写">
           <text x="10" y="20">未融合：3 个内核</text>
@@ -636,7 +636,7 @@ C[localRow * N + localCol] = sum;</code></pre>
         <li>取块大小 \(B_c=\lceil M/4d\rceil\)，\(B_r=\min(\lceil M/4d\rceil, d)\)。把 \(Q\) 切成 \(T_r=\lceil N/B_r\rceil\) 块，\(K,V\) 切成 \(T_c=\lceil N/B_c\rceil\) 块。在 HBM 中初始化 \(O=0\)、\(\ell=0\)、\(m=-\infty\)。</li>
         <li><strong>外层循环</strong> \(j=1..T_c\)：把 \(K_j,V_j\) 载入 SRAM。
           <ul>
-            <li><strong>内层循环</strong> \(i=1..T_r\)：载入 \(Q_i,O_i,\ell_i,m_i\)；片上算 \(S_{ij}=Q_iK_j^\top\)（\(B_r\times B_c\)）、行最大值、\(\tilde P_{ij}=\exp(S_{ij}-\tilde m_{ij})\)、行和；按上一节的公式更新 \(m_i,\ell_i\)，并更新 \(O_i\)；把 \(O_i,\ell_i,m_i\) 写回 HBM。</li>
+            <li><strong>内层循环</strong> \(i=1..T_r\)：载入 \(Q_i,O_i,\ell_i,m_i\)；片上算 \(S_{ij}=Q_iK_j^\top\)（\(B_r\times B_c\)）、行最大值、\(\tilde P_{ij}=\exp(S_{ij}-\tilde m_{ij})\)、行和；按在线 softmax 的公式更新 \(m_i,\ell_i\)，并更新 \(O_i\)；把 \(O_i,\ell_i,m_i\) 写回 HBM。</li>
           </ul>
         </li>
       </ol>
@@ -756,10 +756,10 @@ C[localRow * N + localCol] = sum;</code></pre>
         <li><strong>块量化</strong>：\(Q,K,V\) 每个 \(B_r\times d\) 或 \(B_c\times d\) 的块各有一个缩放因子，而不是整个张量一个。因为算法本来就按块处理，在 \(S\) 的块上乘回缩放因子几乎没有额外开销。</li>
         <li><strong>非相干处理</strong>（incoherent processing）：量化前把 \(Q\) 和 \(K\) 都乘以同一个随机正交矩阵 \(M\)。因为 \(MM^\top=I\)，\((QM)(KM)^\top=QK^\top\)，结果不变；但 \(QM\) 的每个元素是 \(Q\) 一行的随机线性组合，离群值被「摊开」了，量化误差变小。实际用随机 \(\pm1\) 对角阵乘 Hadamard 矩阵，\(O(d\log d)\) 就能算，还可以和 RoPE 融合。</li>
       </ul>
-      <p>这两点和下一篇讲的 FP8 训练里的细粒度缩放、离群值问题是同一回事。</p>
+      <p>这两点和 <a href="/posts/scaling-mixed-precision/">FP8 训练</a>里的细粒度缩放、离群值问题是同一回事。</p>
       <h3>15.6 结果</h3>
       <p>在 H100 SXM5 上，FA3 的 FP16 前向比 FA2 快 1.5–2.0 倍，最高 740 TFLOPs/s（约 75% 利用率），反向快 1.5–1.75 倍；FP8 接近 1.2 PFLOPs/s。在有离群值的情形下，带块量化和非相干处理的 FP8 FA3 比按张量量化的 FP8 基线数值误差低 2.6 倍。</p>
-      <p>最后提一点局限：FlashAttention 只支持固定的几种注意力模式；需要自定义掩码或分数修改时，可以看 PyTorch 的 FlexAttention，它用 torch.compile 为用户给的 <code>score_mod</code>/<code>mask_mod</code> 生成融合内核。</p>
+      <p>FlashAttention 的局限是只支持固定的几种注意力模式；需要自定义掩码或分数修改时，可以看 PyTorch 的 FlexAttention，它用 torch.compile 为用户给的 <code>score_mod</code>/<code>mask_mod</code> 生成融合内核。</p>
 
       <h2 id="summary">16. 小结</h2>
       <div class="table-wrap">
@@ -780,7 +780,6 @@ C[localRow * N + localCol] = sum;</code></pre>
         </table>
       </div>
       <p>实际工作中的顺序大概是：先用现成的（FlashAttention、cuBLAS、融合好的 Norm/RoPE/交叉熵内核），再用 torch.compile 收拾零散的逐元素算子；profiler 里还看到哪个算子明显低于它应有的 roofline，再考虑用 Triton 写；只有在 Triton 也表达不了的调度上（warp 专门化、精确的共享内存布局），才值得下到 CUDA/CUTLASS。</p>
-      <p>下一篇讲另一个能让 Tensor Core 更快的方向：数值格式。FP8 让 Tensor Core 吞吐再翻倍，代价是要管好范围和精度。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <p>想看更多实验和 profiler 截图，推荐读 Ultra-Scale Playbook 的 GPU 一章；想要更系统的硬件模型，推荐 Scaling Book 的 GPU 章节。</p>

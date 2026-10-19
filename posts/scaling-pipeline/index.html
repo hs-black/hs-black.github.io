@@ -116,7 +116,7 @@
           <h4>账算一下（Llama 3 70B 的形状）</h4>
           <p class="mono" style="font-size:19px">80 层, d=8192<br>70×10⁹ × 16 B ≈ 1.12 TB<br>8 × 80 GB = 640 GB &lt; 1.12 TB</p>
           <p>切成 \(p=8\) 级（每级 10 层）后，每卡的权重 + 梯度 + 优化器状态 ≈ 140 GB；再配上 ZeRO-1 把优化器状态按 DP 切开，就装得下了。</p>
-          <p class="note">激活值是另一回事——后面会看到它才是 PP 调度的主角。</p>
+          <p class="note">激活值是另一回事：它随 micro-batch 数和调度方式变化，才是 PP 调度真正要管的东西。</p>
         </div>
       </div>
     </section>
@@ -235,7 +235,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <div class="card fragment">
           <h4>和全局 batch 的关系</h4>
           $$m = \frac{B}{b\cdot d}$$
-          <p class="s22">\(B\) 全局 batch（样本数），\(b\) micro-batch 大小，\(d\) 数据并行度。\(B\) 往往由优化需求定死，所以 \(m\) 不能想多大就多大——这条约束贯穿后面所有讨论。</p>
+          <p class="s22">\(B\) 全局 batch（样本数），\(b\) micro-batch 大小，\(d\) 数据并行度。\(B\) 往往由优化需求定死，所以 \(m\) 不能想多大就多大。</p>
         </div>
       </div>
     </section>
@@ -332,7 +332,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
           <h3 class="fragment">但在途激活从 \(m\) 降到 \(p\)</h3>
           <p class="fragment" style="margin-top:8px">第 \(r\) 级最多同时有 \(p-r\) 个 micro-batch 在途（warm-up 的 \(p-r-1\) 个 + steady 里刚做完前向的 1 个），与 \(m\) 无关。</p>
           <p class="fragment" style="margin-top:8px">所以 1F1B 的真正收益是：<span class="accent">可以放心加大 \(m\)</span>，由此间接压低气泡。</p>
-          <p class="fragment" style="margin-top:8px">副作用：显存不均，第 0 级在途最多（再加上 embedding），最先撞到显存上限。Llama 3 训练时专门处理了这个问题（后面会讲）。</p>
+          <p class="fragment" style="margin-top:8px">副作用：显存不均，第 0 级在途最多（再加上 embedding），最先撞到显存上限。Llama 3 训练时为此给首尾两级各少放了一层。</p>
         </div>
       </div>
     </section>
@@ -503,7 +503,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <div>
           <p class="fragment">记号：\(M_B\)/\(M_W\) 是一次 B/W 需要占着的激活显存。B 做完会释放一部分，但要为 W 留下 \(\partial L/\partial z\) 之类的东西，所以 \(M_W \lt M_B\)（但不小：没有 \(5as\) 项时 \(32/34\)）。</p>
           <p class="fragment" style="margin-top:10px">为了画手工调度，先假设 \(T_F = T_B = T_W\)，每个都是 1 个单位。这时 1F1B 的完整反向 = B + W = 2 个单位，正好对应 \(t_b \approx 2t_f\)。</p>
-          <p class="fragment" style="margin-top:10px">记号提醒：这里的 B 只指「对输入的反向」；后面 DualPipe 那张表里的 B 指<b>完整</b>反向。到时候会换算。</p>
+          <p class="fragment" style="margin-top:10px">记号提醒：这里的 B 只指「对输入的反向」；DualPipe 那张表里的 B 指<b>完整</b>反向。</p>
         </div>
       </div>
     </section>
@@ -681,7 +681,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>依赖 + 每卡程序顺序 = 时间线</h2>
       <div class="two s22">
         <div>
-          <p class="fragment">每种调度先生成「每张卡依次执行的任务列表」（AFAB、1F1B、交错按 Megatron-LM 的规则；ZB-H1 按前面讲的「第 \(r\) 级推迟 \(r\) 轮做 W」；DualPipe 按开源实现 <code>step()</code> 的逻辑）。</p>
+          <p class="fragment">每种调度先生成「每张卡依次执行的任务列表」（AFAB、1F1B、交错按 Megatron-LM 的规则；ZB-H1 让「第 \(r\) 级推迟 \(r\) 轮做 W」；DualPipe 按开源实现 <code>step()</code> 的逻辑）。</p>
           <p class="fragment" style="margin-top:8px">然后按「尽早开始」模拟：任务开始时间 = max(本卡上一个任务结束, 依赖完成 + 跨卡延迟 \(c\))。依赖只有三种：</p>
           <ul class="tight fragment" style="margin-top:4px">
             <li>F(级 s) 依赖 F(级 s−1)；</li>
