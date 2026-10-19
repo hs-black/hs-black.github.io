@@ -84,7 +84,7 @@
     <!-- 2 -->
     <section class="slide">
       <div class="kicker">路线</div>
-      <h2>这套幻灯片讲什么</h2>
+      <h2>目录</h2>
       <div class="two s24">
         <ol class="tight" style="margin:0; padding-left:1.2em">
           <li class="fragment">为什么要按层切模型，切完之后多了什么通信</li>
@@ -176,7 +176,7 @@
       <div class="kicker">数据怎么流</div>
       <h2>前向一路往右，反向一路往左</h2>
       <div class="two">
-<pre><code># 第 i 级（伪代码，Scaling Book 版本的意译）
+<pre><code># 第 i 级的一次训练（伪代码）
 x = recv(from=i-1) if i &gt; 0 else batch
 acts = []
 for layer in my_layers:
@@ -214,10 +214,10 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <p class="fragment">理想情况下（完美并行），一级处理一个 batch 只要 \(t_{id} = t_f + t_b\)。</p>
         <p class="fragment" style="margin-top:10px">实际上，每张卡都要等前面 \(p-1\) 级的前向，再等后面 \(p-1\) 级的反向：</p>
         <div class="fragment eq">$$t_{pb} = (p-1)\,(t_f + t_b)$$</div>
-        <p class="fragment">两种常见的「气泡大小」口径，别混：</p>
+        <p class="fragment">「气泡有多大」有两种常见说法，读论文时别混：</p>
         <div class="two fragment" style="margin-top:6px">
-          <div class="card"><h4>相对理想时间（Megatron / Playbook）</h4>$$r_{bubble} = \frac{t_{pb}}{t_{id}}$$<p class="s22">一个 batch 时 \(= p-1\)：比理想慢了 \(p-1\) 倍的时间。</p></div>
-          <div class="card"><h4>占总时间的比例（GPipe）</h4>$$\frac{t_{pb}}{t_{pb}+t_{id}}$$<p class="s22">一个 batch 时 \(=(p-1)/p\)，即空闲占比。</p></div>
+          <div class="card"><h4>气泡率：相对理想时间</h4>$$r_{bubble} = \frac{t_{pb}}{t_{id}}$$<p class="s22">一个 batch 时 \(= p-1\)：多花了 \(p-1\) 倍的理想时间。后面默认用这个。</p></div>
+          <div class="card"><h4>空闲占比：占总时间</h4>$$\frac{t_{pb}}{t_{pb}+t_{id}}$$<p class="s22">一个 batch 时 \(=(p-1)/p\)，即每张卡有多少时间在等。</p></div>
         </div>
       </div>
     </section>
@@ -256,7 +256,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <p class="fragment">开头仍然是 \(p-1\) 个前向的爬坡，结尾仍然是 \(p-1\) 个反向的退坡，气泡的绝对量没变：\(t_{pb} = (p-1)(t_f+t_b)\)。</p>
         <p class="fragment" style="margin-top:10px">但理想时间变成了 \(m\) 倍：\(t_{id} = m(t_f+t_b)\)。于是</p>
         <div class="fragment">$$r_{bubble} = \frac{(p-1)(t_f+t_b)}{m\,(t_f+t_b)} = \frac{p-1}{m},\qquad \text{空闲占比} = \frac{p-1}{m+p-1}$$</div>
-        <p class="fragment">GPipe 论文的说法是气泡开销 \(O\!\left(\frac{K-1}{M+K-1}\right)\)（\(K\) 分区数，\(M\) micro-batch 数），实验里 \(M \ge 4K\) 时气泡几乎可以忽略。</p>
+        <p class="fragment">直觉：爬坡和退坡是固定成本，\(m\) 越大，中间「所有卡都在忙」的部分越长，固定成本被摊得越薄。GPipe 的实验里，\(m \ge 4p\) 时气泡已经几乎可以忽略。</p>
         <p class="fragment" style="margin-top:10px">例：\(p=8\)：\(m=8\) 时 \(r=0.875\)（空闲 47%）；\(m=32\) 时 \(r\approx0.22\)（空闲 18%）；\(m=64\) 时空闲 10%。</p>
       </div>
     </section>
@@ -273,10 +273,10 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
           <p class="fragment">\(5as/h\) 那项是注意力分数矩阵；用 FlashAttention 不落地这块后，约剩 \(34\,sbh\)。</p>
         </div>
         <div class="card fragment">
-          <h4>按 70B 形状估一下（示意）</h4>
+          <h4>按 70B 形状估一下</h4>
           <p class="mono" style="font-size:18px">s=4096, b=1, h=8192<br>34·s·b·h ≈ 1.14 GB / 层 / mb<br>p=8 → 每级 10 层 ≈ 11.4 GB / mb</p>
           <p>AFAB、\(m=32\)：每卡约 <b>365 GB</b>，不可能。<br>所以「加大 \(m\) 摊薄气泡」在 AFAB 里直接撞上显存墙。</p>
-          <p class="note">34sbh 是 GPT 式结构（4h MLP、MHA）的估算，Llama 的 SwiGLU/GQA 会略有出入，这里只看量级。</p>
+          <p class="note">34sbh 对应 GPT 式结构（4h MLP、多头注意力）；SwiGLU、GQA 会改变常数，不改变量级。</p>
         </div>
       </div>
     </section>
@@ -284,13 +284,13 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 12 -->
     <section class="slide">
       <div class="kicker">GPipe 的补丁</div>
-      <h2>重计算（re-materialization）</h2>
+      <h2>重计算（activation recomputation）</h2>
       <div class="s24">
-        <p class="fragment">GPipe 前向时只存<span class="accent">每级边界的输入</span>，反向前把本级前向再算一遍，重建中间激活。</p>
+        <p class="fragment">用时间换显存（GPipe 的做法）：前向只存<span class="accent">每级边界的输入</span>，反向前再把本级前向算一遍。</p>
         <div class="fragment">$$\text{峰值激活} = O\!\left(N + \frac{L}{K}\cdot\frac{N}{M}\right)$$</div>
-        <p class="fragment s22">（GPipe 论文的记号：\(N\) batch 大小，\(N/M\) micro-batch 大小，\(L/K\) 每个分区的层数。第一项是所有 micro-batch 的边界输入，第二项是正在反向的那一个 micro-batch 的完整中间激活。）</p>
-        <p class="fragment" style="margin-top:10px">代价是每个 micro-batch 多一次前向：按 \(t_b \approx 2t_f\)，计算量从 \(3t_f\) 涨到 \(4t_f\)，约 +33%。Zero Bubble 论文引用的经验数字是约 20% 的开销。</p>
-        <p class="fragment" style="margin-top:10px">Megatron 的折中：选择性地每 1–2 层存一个检查点，存 \(c\) 个检查点时显存 \(c\cdot A^{in} + \frac{l}{c}A^{mid}\)，在 \(c=\sqrt{l\,A^{mid}/A^{in}}\) 处最小。</p>
+        <p class="fragment s22">\(N\) 是 batch 大小，\(M\) 是 micro-batch 数（\(N/M\) 就是 micro-batch 大小），\(K\) 是级数，\(L/K\) 是每级层数。第一项是所有 micro-batch 的边界输入，第二项是正在反向的那一个 micro-batch 的完整中间激活。</p>
+        <p class="fragment" style="margin-top:10px">代价是每个 micro-batch 多一次前向：按 \(t_b \approx 2t_f\)，计算量从 \(3t_f\) 涨到 \(4t_f\)，理论上 +33%，实测一般在 20% 左右。</p>
+        <p class="fragment" style="margin-top:10px">折中：\(l\) 层里只存 \(c\) 个 checkpoint（各占 \(A^{in}\)），反向时一次重建一段 \(l/c\) 层（每层 \(A^{mid}\)）：显存 \(c A^{in} + \frac{l}{c}A^{mid}\)，在 \(c=\sqrt{l A^{mid}/A^{in}}\) 时最小。</p>
       </div>
     </section>
 
@@ -332,7 +332,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
           <h3 class="fragment">但在途激活从 \(m\) 降到 \(p\)</h3>
           <p class="fragment" style="margin-top:8px">第 \(r\) 级最多同时有 \(p-r\) 个 micro-batch 在途（warm-up 的 \(p-r-1\) 个 + steady 里刚做完前向的 1 个），与 \(m\) 无关。</p>
           <p class="fragment" style="margin-top:8px">所以 1F1B 的真正收益是：<span class="accent">可以放心加大 \(m\)</span>，由此间接压低气泡。</p>
-          <p class="fragment" style="margin-top:8px">副作用：显存不均，第 0 级最重（再加上 embedding）。Llama 3 论文专门提到这个问题。</p>
+          <p class="fragment" style="margin-top:8px">副作用：显存不均，第 0 级在途最多（再加上 embedding），最先撞到显存上限。Llama 3 训练时专门处理了这个问题（后面会讲）。</p>
         </div>
       </div>
     </section>
@@ -340,12 +340,11 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 16 -->
     <section class="slide">
       <div class="kicker">实测</div>
-      <h2>Playbook 里 1F1B 的扩展性</h2>
+      <h2>1F1B 的扩展性</h2>
       <div class="s24">
-        <p class="fragment">Playbook 在自家集群上测了 1F1B：当 \(m \le p-1\) 时，气泡非常伤，PP 越大性能越差；当 \(m=32 \gg p-1\) 时小 PP 度的性能明显改善，但 PP 很大时仍然受限。</p>
+        <p class="fragment">在 H100 集群上实测 1F1B：当 \(m \le p-1\) 时，气泡非常伤，PP 越大性能越差；当 \(m=32 \gg p-1\) 时小 PP 度的性能明显改善，但 PP 很大时仍然受限。</p>
         <p class="fragment" style="margin-top:12px">一个值得记住的对比：micro-batch 较少时，从 1 个节点（\(p=8\)）扩到 2 个节点（\(p=16\)），性能只降了约 <b>14%</b>；而张量并行在类似的跨节点场景通常降约 <b>43%</b>。</p>
         <p class="fragment" style="margin-top:12px">结论和直觉一致：PP 的 p2p 流量小，碰到较慢的节点间网络时比 TP 更扛得住；它的主要敌人是气泡，不是带宽。</p>
-        <p class="note fragment">数字来自 Ultra-Scale Playbook「One forward, one backward」一节的基准，是他们的硬件和配置下的结果。</p>
       </div>
     </section>
 
@@ -355,13 +354,13 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>在固定 GPU 数和全局 batch 下</h2>
       <div class="two wide-left s22">
         <div>
-          <p class="fragment">Megatron-LM（2021）的分析：\(n\) 张卡、\(t=1\)，PP 度 \(p = n/d\)，每条流水线的 micro-batch 数 \(m = b'/d\)，其中 \(b' = B/b\)。代入：</p>
+          <p class="fragment">卡数 \(n\) 固定、不用 TP 时，PP 度和 DP 度此消彼长：\(p = n/d\)。全局 batch 有 \(b' = B/b\) 个 micro-batch，分给 \(d\) 条流水线，每条 \(m = b'/d\)。代入气泡率：</p>
           <div class="fragment">$$\frac{p-1}{m} = \frac{n/d - 1}{b'/d} = \frac{n-d}{b'}$$</div>
           <p class="fragment">DP 度 \(d\) 越大，气泡越小；全局 batch 越大，气泡也越小。PP 只应该用到「模型装得下」为止，剩下的卡给 DP。</p>
-          <p class="fragment" style="margin-top:8px">micro-batch 大小 \(b\) 也有张力：\(b\) 大 → GEMM 算术强度高，但 \(m\) 小 → 气泡大。Megatron 用 \((b'/b+p-1)(t_f(b)+t_b(b))\) 估总时间来选 \(b\)。</p>
+          <p class="fragment" style="margin-top:8px">micro-batch 大小 \(b\) 也有张力：\(b\) 大 → GEMM 算术强度高，但 \(m\) 小 → 气泡大。总时间约为 \((b'/b+p-1)(t_f(b)+t_b(b))\)：前一个因子是「\(m\) 个 micro-batch 加 \(p-1\) 步爬坡」，后一个是单个 micro-batch 的耗时，扫一遍 \(b\) 取最小即可。</p>
         </div>
         <div class="card fragment">
-          <h4>Megatron 的经验法则</h4>
+          <h4>经验法则（Megatron-LM）</h4>
           <p>1. TP 用到单节点 GPU 数 \(g\) 为止；跨节点再用 PP。</p>
           <p>2. 总模型并行度 \(t\cdot p\) 取刚好装得下模型的值，其余用 DP 扩。</p>
           <p>3. 最优 micro-batch 大小取决于模型的吞吐/显存特性和 \(p, d, B\)。</p>
@@ -380,7 +379,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         </g>
         <g id="interleave-fig"></g>
       </svg>
-      <p class="s22 fragment">把模型切成 \(v\cdot p\) 段（Megatron 叫 model chunk），第 \(k\) 段放在卡 \(k \bmod p\) 上。一个 micro-batch 的前向会<span class="accent">绕流水线转 \(v\) 圈</span>（Playbook 叫 looping pipeline）。例：16 层、4 卡、\(v=2\)：卡 0 放第 1–2 层和第 9–10 层。</p>
+      <p class="s22 fragment">把模型切成 \(v\cdot p\) 段（model chunk），第 \(k\) 段放在卡 \(k \bmod p\) 上。一个 micro-batch 的前向会<span class="accent">绕流水线转 \(v\) 圈</span>，所以也叫 looping pipeline。例：16 层、4 卡、\(v=2\)：卡 0 放第 1–2 层和第 9–10 层。</p>
     </section>
 
     <!-- 19 -->
@@ -411,12 +410,12 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <div>
           <p class="fragment">交错之后，一张卡上同时可能有「早的 micro-batch 在后面的段」和「晚的 micro-batch 在前面的段」两种活。</p>
           <p class="fragment" style="margin-top:8px"><b>深度优先（DFS）</b>：优先让早的 micro-batch 走完，尽快关闭前向-反向环。Megatron 的交错调度以 \(p\) 个 micro-batch 为一组轮转。</p>
-          <p class="fragment" style="margin-top:8px"><b>广度优先（BFS）</b>：先让所有 micro-batch 过完这一段再进下一段。Lamy-Poirier 的 Breadth-First PP 论文指出，它和 FSDP 搭配很好：每段权重只需 all-gather 一次就服务所有 micro-batch，梯度 reduce 也能更好地和计算重叠。代价是在途激活接近 AFAB。</p>
+          <p class="fragment" style="margin-top:8px"><b>广度优先（BFS）</b>：先让所有 micro-batch 过完这一段再进下一段。它和 FSDP 搭配很好：每段权重只需 all-gather 一次就服务所有 micro-batch，梯度 reduce 也能更好地和计算重叠。代价是在途激活接近 AFAB。</p>
         </div>
         <div>
-          <p class="fragment"><b>Llama 3 的做法</b>：把「同一段连续做几个 micro-batch」记为 \(N\)，DFS 对应 \(N=p\)，BFS 对应 \(N=m\)，Llama 3 让 \(N\) 可调，在两者之间找通信与显存的平衡点。</p>
+          <p class="fragment"><b>Llama 3 的做法</b>：把「同一段连续做几个 micro-batch」记为 \(N\)，DFS 对应 \(N=p\)，BFS 对应 \(N=m\)，Llama 3 训练时让 \(N\) 可调，在两者之间找通信与显存的平衡点。</p>
           <p class="fragment" style="margin-top:8px">他们还：首尾两级各少放一层 Transformer（首段只剩 embedding，末段只剩输出投影和 loss）来配平；用异步 p2p；主动释放不再用的张量。气泡率写作 \(\frac{PP-1}{V\cdot M}\)。</p>
-          <p class="note fragment" style="margin-top:8px">在下一页的模拟器里，交错模式有一个 \(N\) 滑块（这里实现的是 \(N\ge p\) 且 \(m\) 为 \(N\) 倍数的版本），把 \(N\) 拉到 \(m\) 能看到峰值激活变大。</p>
+          <p class="note fragment" style="margin-top:8px">下一页的模拟器里，交错模式有一个 \(N\) 滑块（要求 \(N\ge p\)、\(m\) 为 \(N\) 的倍数），把 \(N\) 拉到 \(m\) 能看到峰值激活变大。</p>
         </div>
       </div>
     </section>
@@ -435,10 +434,10 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>p2p 流量有多小？</h2>
       <div class="two wide-left s22">
         <div>
-          <p class="fragment">每个 micro-batch、每个级边界：前向 send 一份激活 \([b,s,h]\)，反向 send 一份同形状的梯度。bf16 下各 \(2bsh\) 字节。Playbook 记一张卡收+发合计 \(4\cdot s\cdot b\cdot h\) 字节 / micro-batch（前向、反向各 \(2sbh\)）。</p>
+          <p class="fragment">每个 micro-batch、每个级边界：前向 send 一份激活 \([b,s,h]\)，反向 send 一份同形状的梯度。bf16 下各 \(2bsh\) 字节，一个 micro-batch 在一个边界上合计 \(4bsh\) 字节。</p>
           <p class="fragment" style="margin-top:8px">能否被计算藏住？下一级在这段时间要算 \(l\) 层，前向每层约 \(24bsh^2\) FLOPs（只算矩阵乘，GPT 式 4h MLP）：</p>
           <div class="fragment">$$\frac{t_{comm}}{t_{comp}} \approx \frac{2bsh / BW}{24\,bsh^2\,l / F} = \frac{F}{12\,h\,l\,BW}$$</div>
-          <p class="fragment">和 \(b, s\) 无关，只看 \(h\)、每级层数、算力/带宽比。Playbook 的版本是 \(\frac{F}{32\,h\,l\,BW}\)，常数取法不同，结论一样。</p>
+          <p class="fragment">\(b, s\) 约掉了，只剩 \(h\)、每级层数和算力/带宽比。代入默认值：H100、50 GB/s、\(h=8192\)、\(l=10\)，比值只有约 2%——p2p 通信很容易被计算藏住。</p>
         </div>
         <div class="widget fragment" data-interactive id="commcalc">
           <div class="calc" style="grid-template-columns:1fr">
@@ -481,7 +480,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
           <p class="fragment">对 \(y = xW\)：反向要算两样东西。</p>
           <p class="fragment" style="margin-top:8px"><span class="accent-2"><b>B</b></span>（backward for input）：\(\partial L/\partial x = \partial L/\partial y \cdot W^\top\)。上一级的反向等着它——在关键路径上。</p>
           <p class="fragment" style="margin-top:8px"><span style="color:var(--pp-w)"><b>W</b></span>（backward for weights）：\(\partial L/\partial W = x^\top \partial L/\partial y\)。没人等它，只要在 optimizer step 前算完。</p>
-          <p class="fragment" style="margin-top:8px">框架习惯把两者打包成一个 backward（对 DP 很友好：第 \(i\) 层梯度的通信可以和第 \(i-1\) 层反向重叠），但在 PP 里这平白拉长了依赖链。Sea AI Lab 的 Zero Bubble（Qi et al.）把它们拆开调度：<b>W 可以放在同级 B 之后的任何位置</b>。</p>
+          <p class="fragment" style="margin-top:8px">框架习惯把两者打包成一个 backward（对 DP 很友好：第 \(i\) 层梯度的通信可以和第 \(i-1\) 层反向重叠），但在 PP 里这平白拉长了依赖链。Sea AI Lab 的 Zero Bubble（Qi et al.）把它们拆开调度：<b>W 可以放在同级 B 之后的任何位置</b>，于是 W 成了可以随意挪动、用来填洞的「零件」。</p>
         </div>
       </div>
     </section>
@@ -492,19 +491,19 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>F、B、W 各花多少</h2>
       <div class="two s22">
         <div>
-          <p class="fragment">每层只计矩阵乘、GPT 式结构（\(4h\) MLP，头维 \(h/a\)），Zero Bubble 论文的表 1：</p>
+          <p class="fragment">一层 Transformer（GPT 式，\(4h\) MLP，\(a\) 个头），只计矩阵乘：</p>
           <table class="t fragment" style="margin-top:8px">
             <tr><th>Pass</th><th>FLOPs</th><th>需保留的激活</th></tr>
             <tr><td>F</td><td class="num">sbh(24h+4s)</td><td class="num">0</td></tr>
             <tr><td>B</td><td class="num">sbh(24h+8s)</td><td class="num">sb(34h+5as)</td></tr>
             <tr><td>W</td><td class="num">sbh(24h)</td><td class="num">32sbh</td></tr>
           </table>
-          <p class="fragment" style="margin-top:10px">于是 \(T_W \lt T_F \lt T_B\)，\(T_B + T_W = 2T_F\)。</p>
+          <p class="fragment" style="margin-top:10px">于是 \(T_W \lt T_F \lt T_B\)，\(T_B + T_W = 2T_F\)：B 和 W 合起来正是我们熟悉的「反向 ≈ 2 倍前向」。</p>
         </div>
         <div>
           <p class="fragment">记号：\(M_B\)/\(M_W\) 是一次 B/W 需要占着的激活显存。B 做完会释放一部分，但要为 W 留下 \(\partial L/\partial z\) 之类的东西，所以 \(M_W \lt M_B\)（但不小：没有 \(5as\) 项时 \(32/34\)）。</p>
-          <p class="fragment" style="margin-top:10px">为了画出手工调度，论文先假设 \(T_F = T_B = T_W\)。在这个假设下：1F1B 的完整反向 = B + W = 2 个单位，正好对应 \(t_b \approx 2t_f\)。</p>
-          <p class="fragment" style="margin-top:10px">注意记号陷阱：Zero Bubble 论文里 B 只指「对输入的反向」；DeepSeek-V3 的表格里 B 指<b>完整</b>反向。后面会两边换算。</p>
+          <p class="fragment" style="margin-top:10px">为了画手工调度，先假设 \(T_F = T_B = T_W\)，每个都是 1 个单位。这时 1F1B 的完整反向 = B + W = 2 个单位，正好对应 \(t_b \approx 2t_f\)。</p>
+          <p class="fragment" style="margin-top:10px">记号提醒：这里的 B 只指「对输入的反向」；后面 DualPipe 那张表里的 B 指<b>完整</b>反向。到时候会换算。</p>
         </div>
       </div>
     </section>
@@ -523,7 +522,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>为什么正好少了 \(T_W\)</h2>
       <div class="s22">
         <p class="fragment">1F1B 里，第 0 级每次等待反向，等的是「后面 \(p-1\) 级各做一次完整反向」，即 \((p-1)(T_B+T_W)\) 的链条；拆开后链条上只剩 B，W 被挪到链条之外。</p>
-        <p class="fragment" style="margin-top:8px">而尾部，原先 1F1B 的退坡时间里各级在空等，现在用推迟的 W 填进去。论文给出的气泡（以及第 \(i\) 级（从 1 数）的峰值激活 \((p-i+1)M_B + (i-1)M_W\)）：</p>
+        <p class="fragment" style="margin-top:8px">而尾部，原先 1F1B 的退坡时间里各级在空等，现在用推迟的 W 填进去。三种调度的账（ZB-H1 里第 \(i\) 级（从 1 数）的峰值激活是 \((p-i+1)M_B + (i-1)M_W\)，不超过 \(pM_B\)）：</p>
         <table class="t fragment" style="margin-top:8px; width:80%">
           <tr><th>调度</th><th>气泡</th><th>峰值激活</th></tr>
           <tr><td>1F1B</td><td class="num">(p−1)(T_F+T_B+T_W)</td><td class="num">p·M_B</td></tr>
@@ -567,18 +566,18 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>自动调度与 ZB-V</h2>
       <div class="two s22">
         <div>
-          <p class="fragment">真实模型里 \(T_F, T_B, T_W\) 不相等，还有 p2p 通信时间 \(T_{comm}\)，手工调度会留下洞。论文的启发式：</p>
+          <p class="fragment">真实模型里 \(T_F, T_B, T_W\) 不相等，还有 p2p 通信时间 \(T_{comm}\)，手工调度会留下洞。于是改成自动生成调度，启发式是：</p>
           <ul class="tight fragment" style="margin-top:6px">
             <li>warm-up 在显存上限内尽量多放 F；</li>
             <li>之后 1F-1B 交替，出现大于 \(T_W\) 的空隙就塞 W，显存到上限时也用 W 回收；</li>
             <li>F 和 B 用完后把剩余 W 依次做完。</li>
           </ul>
-          <p class="fragment" style="margin-top:6px">也可写成整数线性规划（ILP）求解。实验里比较了 ZB-1p（激活上限 \(pM_B\)，与 1F1B 同）和 ZB-2p（\(2pM_B\)）；论文摘要的结论是：相近显存下吞吐比 1F1B 最多高 23%，放宽显存限制后最多高 31%。</p>
+          <p class="fragment" style="margin-top:6px">也可写成整数线性规划（ILP）求解。按激活上限分两档：ZB-1p（\(pM_B\)，与 1F1B 相同）和 ZB-2p（\(2pM_B\)）。实测相近显存下吞吐比 1F1B 最多高 23%，放宽显存限制后最多高 31%。</p>
         </div>
         <div>
           <p class="fragment"><b>ZB-V</b>：每卡恰好 2 段，段的分配走「V 形」：0→p−1 再 p−1→0（16 层 4 卡时卡 0 放 1–2 层和 15–16 层）。于是一个 micro-batch 的前向和反向都从同一张卡开始，第 0 级不必等反向从最后一级传回。</p>
           <p class="fragment" style="margin-top:8px">在 \(T_F=T_B=T_W\) 下 ZB-V 以 \(pM_B\) 的峰值激活做到零气泡（约为 ZB-H2 的一半），且各卡显存天然均衡。</p>
-          <p class="note fragment" style="margin-top:8px">模拟器里的 ZB-H2 用的是「B 优先、F 受在途上限约束、空隙塞 W」的贪心，与论文启发式同一思路，不是逐格照抄论文图。</p>
+          <p class="note fragment" style="margin-top:8px">模拟器里的 ZB-H2 也是这样贪心生成的：B 优先，F 受在途上限约束，空隙塞 W。</p>
         </div>
       </div>
     </section>
@@ -590,11 +589,11 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <div class="two wide-left s22">
         <div>
           <p class="fragment">DeepSeek-V3 在 2048 张 H800 上训练：16 路 PP、64 路专家并行（EP，跨 8 个节点）、ZeRO-1 数据并行，<b>没用 TP</b>。</p>
-          <p class="fragment" style="margin-top:8px">跨节点 EP 意味着每个 MoE 层都有两次 all-to-all（dispatch 把 token 送到专家所在的卡，combine 再送回来）。报告里说这让计算:通信大约是 <b>1:1</b>——单纯减少气泡已经不够，必须把通信藏起来。</p>
+          <p class="fragment" style="margin-top:8px">跨节点 EP 意味着每个 MoE 层都有两次 all-to-all（dispatch 把 token 送到专家所在的卡，combine 再送回来）。这让计算和通信的时间大约是 <b>1:1</b>：单纯减少气泡已经不够，必须把通信藏起来。</p>
           <p class="fragment" style="margin-top:8px">DualPipe 的两个想法：①在一对「前向块 + 反向块」内部重叠计算和通信；②双向流水线，让每张卡总有一对可以重叠的前向/反向。</p>
         </div>
         <div class="card fragment">
-          <h4>硬件背景（报告中的数字）</h4>
+          <h4>硬件背景</h4>
           <p>节点内 NVLink 160 GB/s，节点间 IB 50 GB/s，约 3.2 倍。</p>
           <p>节点受限路由：每个 token 最多发往 4 个节点。先走 IB 到目标节点上同号卡，再经 NVLink 转发——IB 和 NVLink 的传输完全重叠。</p>
           <p>只用 20 个 SM 就能吃满 IB 和 NVLink 带宽。</p>
@@ -611,8 +610,8 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
           <text x="0" y="62" fill="var(--text-soft)">计算流</text>
           <text x="0" y="142" fill="var(--text-soft)">通信流</text>
           <g id="dp-overlap"></g>
-          <text x="80" y="210" font-size="15" fill="var(--text-soft)">示意图（不按比例）：前向块的 dispatch/combine 落在反向块的计算期间，反向块的 dispatch/combine 落在前向块的计算期间。</text>
-          <text x="80" y="236" font-size="15" fill="var(--text-soft)">实际实现还手工调节通信与计算各占多少 SM，并插入 PP 通信；DeepSeek 报告图 4 中 all-to-all 和 PP 通信都被完全隐藏。</text>
+          <text x="80" y="210" font-size="15" fill="var(--text-soft)">（不按比例）前向块的 dispatch/combine 落在反向块的计算期间，反向块的 dispatch/combine 落在前向块的计算期间。</text>
+          <text x="80" y="236" font-size="15" fill="var(--text-soft)">实际实现还手工调节通信与计算各占多少 SM，并插入 PP 通信；调好之后 all-to-all 和 PP 通信都能被完全藏住。</text>
         </g>
       </svg>
       <p class="s22 fragment">每个块分成四部分：<b>attention、all-to-all dispatch、MLP、all-to-all combine</b>；反向块里的 attention 和 MLP 再按 Zero Bubble 拆成 B 与 W。一个前向块和一个<b>不相关的</b>反向块（不同 micro-batch、不同方向）没有数据依赖，它们的计算可以去填对方的通信时间。</p>
@@ -626,7 +625,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <g id="dp-bidir" font-size="16" fill="var(--text)"></g>
       </svg>
       <div class="s22">
-        <p class="fragment">把模型切成 \(PP\) 段。卡 \(r\) 同时存<b>正向流水线的第 \(r\) 段</b>和<b>反向流水线的第 \(PP-1-r\) 段</b>——也就是存两份模型参数（\(2\times\)）。报告的解释：EP 很大时每卡的专家参数本来就很少，多一份不显著。</p>
+        <p class="fragment">把模型切成 \(PP\) 段。卡 \(r\) 同时存<b>正向流水线的第 \(r\) 段</b>和<b>反向流水线的第 \(PP-1-r\) 段</b>——也就是存两份模型参数（\(2\times\)）。这个代价可以接受：EP 很大时每卡的专家参数本来就很少，多一份不显著。</p>
         <p class="fragment" style="margin-top:6px">\(m\) 个 micro-batch 对半分给两个方向。中间稳态里，每张卡交替执行「一个方向的前向 + 另一个方向的反向」，这一对正好可以做块内重叠。</p>
       </div>
     </section>
@@ -634,9 +633,9 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 34 -->
     <section class="slide tight" id="s-dual">
       <div class="kicker">DualPipe · 交互</div>
-      <h2>官方代码的调度，在这里重放</h2>
+      <h2>DualPipe 的时间线</h2>
       <div class="widget gv" data-interactive data-sched="dual" data-p="8" data-m="20" data-ctrls="p,m,TW" data-anim="1"></div>
-      <p class="s22">这张时间线由 <code>deepseek-ai/DualPipe</code> 中 <code>DualPipe.step()</code> 的 8 个阶段逐行移植生成（不建模通信）。半紫半橙的长格是重叠的 F&amp;B 对；浅色是反方向的 micro-batch（编号带 ′）。\(PP=8, m=20\) 时与报告图 5 的排布一致。</p>
+      <p class="s22">这张时间线按 DualPipe 开源实现 <code>step()</code> 的 8 个阶段生成（不含通信）。半紫半橙的长格是重叠的 F&amp;B 对；浅色是反方向的 micro-batch（编号带 ′）。默认的 \(PP=8, m=20\) 就是 DeepSeek-V3 报告配图的设置。</p>
     </section>
 
     <!-- 35 -->
@@ -644,15 +643,15 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <div class="kicker">DualPipe · 账本</div>
       <h2>气泡、参数、激活</h2>
       <div class="s22">
-        <p class="fragment">DeepSeek-V3 报告表 2（\(F\) 前向块，\(B\) <b>完整</b>反向块，\(W\) 权重反向块，\(F\&amp;B\) 一对重叠块的耗时）：</p>
+        <p class="fragment">记号：\(F\) 前向块，\(B\) <b>完整</b>反向块，\(W\) 权重反向块，\(F\&amp;B\) 一对重叠的前向+反向块的耗时。</p>
         <table class="t fragment" style="margin-top:8px">
           <tr><th>方法</th><th>气泡</th><th>每卡参数</th><th>每卡激活</th></tr>
           <tr><td>1F1B</td><td class="num">(PP−1)(F+B)</td><td>1×</td><td>PP</td></tr>
           <tr><td>ZB1P</td><td class="num">(PP−1)(F+B−2W)</td><td>1×</td><td>PP</td></tr>
           <tr><td>DualPipe</td><td class="num">(PP/2−1)(F&amp;B+B−3W)</td><td>2×</td><td>PP+1</td></tr>
         </table>
-        <p class="fragment" style="margin-top:10px">换回 Zero Bubble 记号（\(B_{zb}\) 只是输入梯度）：ZB1P 一行 \(= (PP-1)(T_F+T_{B}-T_W)\)，就是 ZB-H1。不建模通信时 \(F\&amp;B = F + B\)；取 \(T_F=T_B^{zb}=T_W=1\)：1F1B 气泡 \(3(PP-1)\)，ZB1P \((PP-1)\)，DualPipe \((PP/2-1)\cdot 2 = PP-2\)。模拟器的结果与这三个式子一致。</p>
-        <p class="fragment" style="margin-top:6px">真正的收益在通信：前两者的 \(F\)、\(B\) 里还包着暴露的 all-to-all，而 DualPipe 的 \(F\&amp;B\) 把它藏了。另外：只要求 PP 级数和 micro-batch 数为偶数（代码里还要求 \(m \ge 2PP\)），不像 Chimera 要求 \(m\) 被级数整除；\(m\) 增大时气泡和激活都不再增长。</p>
+        <p class="fragment" style="margin-top:10px">换回 Zero Bubble 记号（\(B_{zb}\) 只是输入梯度）：ZB1P 一行 \(= (PP-1)(T_F+T_{B}-T_W)\)，就是 ZB-H1。不建模通信时 \(F\&amp;B = F + B\)；取 \(T_F=T_B^{zb}=T_W=1\)：1F1B 气泡 \(3(PP-1)\)，ZB1P \((PP-1)\)，DualPipe \((PP/2-1)\cdot 2 = PP-2\)。上一页模拟器读出的气泡就是这几个数。</p>
+        <p class="fragment" style="margin-top:6px">真正的收益在通信：前两者的 \(F\)、\(B\) 里还包着暴露的 all-to-all，而 DualPipe 的 \(F\&amp;B\) 把它藏了。另外，它只要求 PP 级数和 micro-batch 数为偶数（实现里还要求 \(m \ge 2PP\)），不像 Chimera 那样要求 \(m\) 被级数整除；\(m\) 增大时气泡和激活都不再增长。</p>
       </div>
     </section>
 
@@ -661,10 +660,10 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <div class="kicker">后续</div>
       <h2>DualPipeV：对半折叠</h2>
       <div class="s24">
-        <p class="fragment">DualPipe 的两个方向是对称的。Sea AI Lab 在博客里提出「cut-in-half」：把它对折，得到一个 V 形调度（DualPipe 仓库里叫 DualPipeV）。</p>
-        <p class="fragment" style="margin-top:10px">按仓库 README 的表：同样 \(PP\) 个流水线段，DualPipeV 只用 \(PP/2\) 张卡，每卡 2 段（和 ZB-V 一样是 V 形放置），气泡与 DualPipe 相同 \((PP/2-1)(F\&amp;B+B-3W)\)，激活 \(PP+1\)。</p>
-        <p class="fragment" style="margin-top:10px">每卡参数仍是 2 段的量（README 表里记作 2×），但这 2 段是不同的层，整个系统只有一份模型，而不是 DualPipe 那样两份完整副本。</p>
-        <p class="note fragment" style="margin-top:10px">模拟器只实现了 DualPipe 本体；DualPipeV 的排布可以看仓库里的示意图。</p>
+        <p class="fragment">DualPipe 的两个方向是对称的，存两份参数有点浪费。把它从中间对折（Sea AI Lab 称为 cut-in-half），得到一个 V 形调度：DualPipeV。</p>
+        <p class="fragment" style="margin-top:10px">同样 \(PP\) 个流水线段，DualPipeV 只用 \(PP/2\) 张卡，每卡 2 段（和 ZB-V 一样是 V 形放置），气泡与 DualPipe 相同 \((PP/2-1)(F\&amp;B+B-3W)\)，激活 \(PP+1\)。</p>
+        <p class="fragment" style="margin-top:10px">每卡仍然存 2 段的参数，但这 2 段是不同的层：整个系统只有一份模型，而不是 DualPipe 那样两份完整副本。</p>
+        <p class="note fragment" style="margin-top:10px">模拟器里只有 DualPipe 本体，没有 DualPipeV。</p>
       </div>
     </section>
 
@@ -682,7 +681,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>依赖 + 每卡程序顺序 = 时间线</h2>
       <div class="two s22">
         <div>
-          <p class="fragment">每种调度先生成「每张卡依次执行的任务列表」（AFAB、1F1B、交错按 Megatron 的规则；ZB-H1 按论文描述；DualPipe 逐行移植官方 <code>step()</code>）。</p>
+          <p class="fragment">每种调度先生成「每张卡依次执行的任务列表」（AFAB、1F1B、交错按 Megatron-LM 的规则；ZB-H1 按前面讲的「第 \(r\) 级推迟 \(r\) 轮做 W」；DualPipe 按开源实现 <code>step()</code> 的逻辑）。</p>
           <p class="fragment" style="margin-top:8px">然后按「尽早开始」模拟：任务开始时间 = max(本卡上一个任务结束, 依赖完成 + 跨卡延迟 \(c\))。依赖只有三种：</p>
           <ul class="tight fragment" style="margin-top:4px">
             <li>F(级 s) 依赖 F(级 s−1)；</li>
@@ -711,7 +710,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <tr class="fragment"><td>ZB-H2</td><td class="num">(p−1)(T_F+T_B−2T_W)</td><td class="num">2p−1</td><td class="num">p−1</td><td>需绕过 optimizer 同步</td></tr>
         <tr class="fragment"><td>DualPipe</td><td class="num">(p/2−1)(F&amp;B+B−3W)</td><td class="num">p+1</td><td class="num">p−1</td><td>2× 参数；p、m 偶数；为 EP 重叠而生</td></tr>
       </table>
-      <p class="note">交错一行的峰值是 Korthikanti 等人对 Megatron 交错调度首级的估算，模拟器在 \(p=4,v=2\) 时给出 5.5，与之吻合。</p>
+      <p class="note">交错一行是第 0 级的峰值：\(p + (p-1)/v\) 份（以一级的完整激活为单位），\(p=4,v=2\) 时为 5.5。</p>
     </section>
 
     <!-- 40 -->
@@ -728,7 +727,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
           <tr><td>喜欢</td><td>大 mbs、长序列藏通信</td><td>大梯度累积藏气泡</td></tr>
         </table>
         <div>
-          <p class="fragment">两者都沿深度方向切模型；Playbook 指出它们可以组合但实践少见，因为要大幅加大全局 batch 才能摊薄两边的通信；若组合，ZeRO-3 应在整串 micro-batch 期间保留聚合好的权重。</p>
+          <p class="fragment">两者都把模型参数分散到多张卡上。它们可以组合，但实践中少见：两边的通信都要靠大全局 batch 来摊薄，叠在一起对 batch 的要求太高。真要组合，ZeRO-3 应在整串 micro-batch 期间保留聚合好的权重，而不是每个 micro-batch 都重新 all-gather 一遍。</p>
           <p class="fragment" style="margin-top:8px">PP + ZeRO-1/2 没有新问题，DeepSeek-V3 就是 PP + ZeRO-1。TP（+SP）与 PP 互补：TP 放节点内，PP 放跨节点。Llama 3 405B 的组合是 [TP, CP, PP, DP] 由内到外。</p>
         </div>
       </div>
@@ -740,7 +739,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <h2>怎么选调度</h2>
       <ul class="s24">
         <li class="fragment dim-after">先问要不要 PP：模型（+优化器状态）在 TP×ZeRO 下装得进节点，就别用 PP。</li>
-        <li class="fragment dim-after">要用就从 <b>1F1B</b> 起步，把 \(m\) 拉到 \(\gg p\)（\(m \ge 4p\) 是 GPipe 给的经验线）；受全局 batch 限制时提高 DP 度 \(d\) 或减小 \(p\)。</li>
+        <li class="fragment dim-after">要用就从 <b>1F1B</b> 起步，把 \(m\) 拉到 \(\gg p\)（\(m \ge 4p\) 是常用的经验线）；受全局 batch 限制时提高 DP 度 \(d\) 或减小 \(p\)。</li>
         <li class="fragment dim-after">\(m\) 拉不大、而节点间带宽尚可：上 <b>交错</b>，\(v=2\)–4；注意 \(m\) 要是 \(p\) 的倍数，通信 \(\times v\)。</li>
         <li class="fragment dim-after">框架支持拆 B/W：<b>ZB-H1 / ZB-1p</b> 几乎是免费午餐（显存同 1F1B）；显存有余量再考虑 ZB-2p / ZB-V。</li>
         <li class="fragment dim-after">大规模跨节点 MoE、通信与计算同量级：<b>DualPipe / DualPipeV</b> 的价值主要在藏 all-to-all。</li>
@@ -751,7 +750,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 42 -->
     <section class="slide">
       <div class="kicker">参考</div>
-      <h2>参考资料</h2>
+      <h2>参考与延伸阅读</h2>
       <ul class="s22 tight" style="column-count:2; column-gap:40px">
         <li><a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a>：Pipeline Parallelism 各节、5D Parallelism、附录 PP communication analysis</li>
         <li><a href="https://jax-ml.github.io/scaling-book/training/">Scaling Book · Training</a>：Pipelining 一节</li>
@@ -765,7 +764,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
         <li><a href="https://github.com/deepseek-ai/DualPipe">deepseek-ai/DualPipe</a>（调度代码与 DualPipeV）</li>
         <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（激活估算）</li>
       </ul>
-      <p class="note">图都是按原文描述重画的；模拟器的计时是理想化的，数字只用来理解趋势。</p>
+      <p class="note">想看更完整的推导和实测，推荐从 Ultra-Scale Playbook 的流水线并行各节读起。</p>
     </section>
 
     <!-- 43 -->
