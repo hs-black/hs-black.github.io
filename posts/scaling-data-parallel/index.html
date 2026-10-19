@@ -1,0 +1,780 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>数据并行、ZeRO 与 FSDP · Zunzhe Zhang</title>
+  <meta name="description" content="从朴素数据并行讲到 ZeRO-1/2/3 与 FSDP：通信重叠、分桶、no_sync、显存公式，以及什么时候会被通信卡住。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    svg.fig { width: 100%; height: auto; display: block; }
+    svg.fig text { fill: var(--text); font-family: var(--font-sans); }
+    svg.fig .soft { fill: var(--text-soft); }
+    svg.fig .faint { fill: var(--text-faint); }
+    svg.fig .frame { fill: var(--surface); stroke: var(--border); }
+    svg.fig .line { stroke: var(--text-faint); fill: none; }
+    .c-param { fill: var(--accent); }
+    .c-grad { fill: var(--accent-2); }
+    .c-opt { fill: color-mix(in srgb, var(--accent) 45%, var(--text-faint)); }
+    .c-g32 { fill: color-mix(in srgb, var(--accent-2) 45%, var(--text-faint)); }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-soft); margin-top: 8px; }
+    .legend i { display: inline-block; width: 12px; height: 12px; border-radius: 3px; vertical-align: -1px; margin-right: 5px; }
+    .legend .p { background: var(--accent); }
+    .legend .g { background: var(--accent-2); }
+    .legend .o { background: color-mix(in srgb, var(--accent) 45%, var(--text-faint)); }
+    .legend .g32 { background: color-mix(in srgb, var(--accent-2) 45%, var(--text-faint)); }
+    .legend .cm { background: var(--accent-2); }
+    .legend .cp { background: var(--accent); }
+    .zbars { display: grid; gap: 10px; margin-top: 10px; }
+    .zrow { display: grid; grid-template-columns: 4.6em 1fr 5.4em; gap: 10px; align-items: center; font-size: 14px; }
+    .ztrack { position: relative; height: 26px; border-radius: 6px; background: var(--bg-soft); }
+    .zfill { position: absolute; inset: 0; display: flex; overflow: hidden; border-radius: 6px; }
+    .zfill > span { height: 100%; transition: width 0.3s; }
+    .zcap { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); opacity: 0.6; }
+    .zval { font-family: var(--font-mono); font-size: 13px; text-align: right; }
+    .zrow.over .zval { color: var(--accent-2); font-weight: 600; }
+    .note-s { font-size: 13px; color: var(--text-faint); margin-top: 8px; }
+    .demo .row2 { display: flex; flex-wrap: wrap; gap: 8px 18px; align-items: center; font-size: 15px; }
+    .tl-wrap { margin-top: 10px; }
+    .tl-wrap svg { width: 100%; height: auto; display: block; }
+    .tl-wrap text { fill: var(--text-soft); font-family: var(--font-sans); }
+    .verdict { margin-top: 10px; padding: 8px 12px; border-radius: 10px; font-size: 15px; background: var(--bg-soft); }
+    .verdict.bad { background: color-mix(in srgb, var(--accent-2) 14%, transparent); }
+    .verdict.good { background: var(--accent-soft); }
+    .prose pre { font-size: 13.5px; }
+    /* keep KaTeX's absolutely positioned MathML inside the scrolling table box */
+    .table-wrap { position: relative; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>数据并行、ZeRO 与 FSDP</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>数据并行（data parallelism，DP）是多卡训练里最先学到、也最常用的一维并行：每张卡放一份完整模型，各自吃不同的数据，反向之后把梯度平均一下。听起来一句话就讲完了，但真要把它用好，有一串问题要回答：梯度同步能不能和反向计算同时进行？同步应该按参数一个个发还是攒成一批？梯度累积的时候要不要每次都同步？卡多到什么程度会被网络卡住？每张卡都存一份完整的优化器状态是不是太浪费？</p>
+      <p>这篇按 Ultra-Scale Playbook 的数据并行一章和 Scaling Book 训练一章里 DP / FSDP 的部分，从头推一遍。前置知识是上一篇幻灯片 <a href="/posts/scaling-collectives/">集合通信与分片矩阵乘法</a> 里的 AllReduce、ReduceScatter、AllGather 及其代价公式，用到时我会再简单回顾。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#recap">先把一步训练拆开</a></li>
+          <li><a href="#naive">朴素数据并行</a></li>
+          <li><a href="#overlap">优化一：梯度同步与反向重叠</a></li>
+          <li><a href="#bucket">优化二：梯度分桶</a>（交互：分桶时间线）</li>
+          <li><a href="#nosync">优化三：与梯度累积配合</a></li>
+          <li><a href="#gbs">重新计算全局 batch size</a></li>
+          <li><a href="#bound">什么时候被通信卡住</a>（交互：通信瓶颈计算器）</li>
+          <li><a href="#memory">数据并行的显存账</a></li>
+          <li><a href="#zero">ZeRO-1 / 2 / 3</a>（交互：ZeRO 显存计算器）</li>
+          <li><a href="#fsdp">用分片记号看 FSDP</a></li>
+          <li><a href="#summary">小结与局限</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="recap">1. 先把一步训练拆开</h2>
+      <p>单卡上，一个训练步（step）分三段：</p>
+      <ol>
+        <li><b>前向</b>：输入一批样本，逐层计算，得到 loss，同时把反向需要的中间结果（激活）存下来；</li>
+        <li><b>反向</b>：从最后一层往前，逐层算出 loss 对激活和对参数的梯度；</li>
+        <li><b>优化器步</b>：用梯度更新参数，例如 Adam 要先更新一阶、二阶动量，再更新参数。</li>
+      </ol>
+      <p>记模型参数量为 \(\Psi\)（沿用 ZeRO 论文的记号）。在常见的 bf16 混合精度 + Adam 训练里，每个参数要存：bf16 参数 2 字节、bf16 梯度 2 字节、fp32 主参数 4 字节、fp32 一阶动量 4 字节、fp32 二阶动量 4 字节，一共 16 字节；如果梯度也在 fp32 里累积，再加 4 字节。这些和激活一起就是训练时的显存大头，细节在本系列第一篇 <a href="/posts/scaling-memory/">训练的账本</a>。</p>
+      <p>另一个要用到的概念是<b>梯度累积</b>（gradient accumulation）。一次前向+反向处理的样本数叫 micro-batch size（mbs），两次优化器步之间总共处理的样本数叫 global batch size（gbs）。如果一张卡一次只能放下 mbs 个样本，但我们想要更大的 gbs，就连续做 grad_acc 次前向+反向，把梯度累加起来（实践中取平均，好让结果与累积步数无关），再做一次优化器步：</p>
+      $$\text{gbs} = \text{mbs} \times \text{grad\_acc}$$
+      <p>梯度累积用时间换显存：激活只需要放一个 micro-batch 的量，但要多跑几次前向反向，而且需要一块在整个训练步内常驻的梯度累加缓冲。注意这几次前向反向之间<b>互不依赖</b>，只是输入样本不同——既然如此，为什么不把它们放到不同的卡上同时算？这就是数据并行。</p>
+
+      <h2 id="naive">2. 朴素数据并行</h2>
+      <h3>2.1 做法</h3>
+      <p>有 \(N_d\) 张卡（DP degree，也直接叫 DP size）。每张卡上放一份完全相同的模型副本（"model instance"），每个训练步：</p>
+      <ol>
+        <li>把这一步的 batch 切成 \(N_d\) 份，每张卡拿一份 micro-batch；</li>
+        <li>每张卡独立地做前向和反向，得到<b>各自不同</b>的梯度 \(g_r\)；</li>
+        <li>对梯度做一次 <b>AllReduce</b>（求和再除以 \(N_d\)，即求平均），之后每张卡上的梯度都相同；</li>
+        <li>每张卡用相同的梯度做相同的优化器步，模型副本保持一致。</li>
+      </ol>
+
+      <figure>
+        <svg class="fig" viewBox="0 0 680 270" role="img" aria-label="数据并行示意图">
+          <g font-size="13">
+            <rect x="20" y="20" width="640" height="34" rx="8" class="frame"/>
+            <text x="340" y="42" text-anchor="middle">一个 global batch，切成 4 份</text>
+            <g id="dp-fig"></g>
+            <rect x="20" y="200" width="640" height="40" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <text x="340" y="225" text-anchor="middle">AllReduce：ḡ = (g₀ + g₁ + g₂ + g₃) / 4，结果写回每张卡</text>
+          </g>
+        </svg>
+        <figcaption>每张卡一份完整模型，吃不同的数据，反向得到不同的梯度，AllReduce 之后梯度一致，优化器步也就一致。</figcaption>
+      </figure>
+
+      <h3>2.2 为什么结果和单卡大 batch 一样</h3>
+      <p>设整个 batch 有 \(B\) 个样本，loss 是平均值 \(L = \frac{1}{B}\sum_{i=1}^{B}\ell_i\)。把样本均分到 \(N_d\) 张卡，第 \(r\) 张卡上的局部 loss 是 \(L_r = \frac{N_d}{B}\sum_{i\in S_r}\ell_i\)，于是</p>
+      $$\nabla L = \frac{1}{B}\sum_{i=1}^{B}\nabla\ell_i = \frac{1}{N_d}\sum_{r=1}^{N_d}\Big(\frac{N_d}{B}\sum_{i\in S_r}\nabla\ell_i\Big) = \frac{1}{N_d}\sum_{r=1}^{N_d}\nabla L_r .$$
+      <p>每张卡算自己的 \(\nabla L_r\)，平均一下，就精确等于大 batch 的梯度。这里假设每张卡上的样本数相同；如果 loss 按 token 平均而各卡 token 数不同，需要按 token 数加权，否则会有偏差。所以数据并行在数学上就是"并行版的梯度累积"，不改变优化过程，只改变墙钟时间。</p>
+
+      <h3>2.3 用分片记号写出来</h3>
+      <p>Scaling Book 把 Transformer 近似成一串 MLP 块（大模型里注意力只占 FLOPs 的一小部分，且忽略门控矩阵），每层两个矩阵 \(W_\text{in}[D, F]\) 和 \(W_\text{out}[F, D]\)，输入 \(\text{In}[B, D]\)，这里 \(B\) 是这一步的<b>总 token 数</b>。数据并行就是沿网格轴 X 切 batch 维、权重完全复制：</p>
+      $$\text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \rightarrow \text{Out}[B_X, D]$$
+      <p>前向里收缩维 \(D\)、\(F\) 都没被切，是上一篇里的"情形 1"，完全不需要通信。反向时：</p>
+      <pre><code>dOut[B_X, D]      = ...
+dW_out[F, D]{U_X} = Tmp[B_X, F] ·_B dOut[B_X, D]    # 沿被切开的 B 收缩：部分和
+dW_out[F, D]      = AllReduce(dW_out[F, D]{U_X})    # 不在关键路径上，可异步
+dTmp[B_X, F]      = dOut[B_X, D] ·_D W_out[F, D]
+dW_in[D, F]{U_X}  = In[B_X, D] ·_B dTmp[B_X, F]
+dW_in[D, F]       = AllReduce(dW_in[D, F]{U_X})     # 同上
+dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]     # 传给前一层</code></pre>
+      <p>权重梯度是沿 batch 维收缩出来的，而 batch 维被切开了，所以每张卡只得到一个"沿 X 未归约"的部分和 \(\{U_X\}\)，需要 AllReduce，这就是上一篇的"情形 3"。关键的一点：<b>这些 AllReduce 不在关键路径上</b>。算前一层的 \(d\text{In}\) 只需要本地的 \(d\text{Tmp}\) 和 \(W\)，不需要等 \(dW\) 同步完成。只要总通信时间不超过总计算时间，就可以完全藏在计算后面。后面讲的张量并行没有这个好性质。</p>
+
+      <h3>2.4 一次 AllReduce 要多久</h3>
+      <p>回顾上一篇：在 \(N\) 个 rank 上用环形算法 AllReduce 一个 \(V\) 字节的数组，每个 rank 收发 \(2\frac{N-1}{N}V\) 字节，带宽受限时</p>
+      $$T_\text{AR} \approx \frac{2(N-1)}{N}\cdot\frac{V}{W},$$
+      <p>其中 \(W\) 是每张卡（或每个节点）的单向出口带宽。H100 节点内 NVLink 是每卡 450 GB/s，跨节点每个节点出口是 8×400 Gbps = 400 GB/s。拿一个 8B 参数的模型来说，bf16 梯度 \(V = 16\) GB：节点内 8 卡约 \(2 \times \frac78 \times 16\text{e}9 / 450\text{e}9 \approx 62\) ms，跨节点约 \(2 \times 16\text{e}9/400\text{e}9 = 80\) ms（实际带宽通常只能跑到标称值的七八成）。这个时间要和反向计算的时间比，比的结果在第 7 节。</p>
+
+      <h3>2.5 朴素实现的问题</h3>
+      <p>最朴素的写法是等反向全部结束，拿到所有梯度，再发起一次 AllReduce，结束后做优化器步。这样计算和通信是<b>串行</b>的：AllReduce 的那几十毫秒里 GPU 完全闲着。Playbook 的原话是这种"先算后传"的串行安排是 A BIG NO-NO。下面三个优化都在解决这件事。</p>
+
+      <h2 id="overlap">3. 优化一：梯度同步与反向重叠</h2>
+      <p>反向是从最后一层往前算的。最后一层的梯度一算完，它就已经是最终值了，后面再怎么算前面的层也不会改变它。所以没必要等所有层算完：<b>某一层的梯度一就绪，就可以立刻开始对它做 AllReduce</b>，同时 GPU 继续算更前面的层。</p>
+
+      <figure>
+        <svg class="fig" viewBox="0 0 680 210" role="img" aria-label="串行与重叠的时间线">
+          <g font-size="13">
+            <text x="0" y="22" class="soft">朴素（串行）</text>
+            <g id="ov-a"></g>
+            <text x="0" y="122" class="soft">与反向重叠</text>
+            <g id="ov-b"></g>
+            <text x="120" y="200" class="faint">紫 = 反向计算（L4 → L1）；橙 = 梯度 AllReduce；虚线 = 一步结束</text>
+          </g>
+        </svg>
+        <figcaption>重叠以后，大部分通信藏在前面几层的反向计算后面，只有最后一层（L1）的 AllReduce 露在外面。</figcaption>
+      </figure>
+
+      <p>PyTorch 里的实现方式是给每个参数挂一个 hook，梯度累加完就触发：</p>
+      <pre><code>def register_backward_hook(self, hook):
+    """给所有需要梯度的参数注册 hook。"""
+    for p in self.module.parameters():
+        if p.requires_grad is True:
+            p.register_post_accumulate_grad_hook(hook)
+
+# hook 里对 p.grad 发起异步 AllReduce（async_op=True），
+# 把返回的 work handle 存起来；优化器步之前统一 wait()。</code></pre>
+      <p>通信 kernel 跑在单独的 CUDA stream 上，与计算 kernel 并发执行。这是"计算与通信重叠"这个思路第一次出现，后面的张量并行、流水线并行、上下文并行都会反复用到它。Playbook 的 Picotron 仓库里有一个带重叠的朴素 DP 实现可以对照着看。</p>
+
+      <h2 id="bucket">4. 优化二：梯度分桶</h2>
+      <p>按参数逐个 AllReduce 有个问题：一个模型有成百上千个参数张量，很多很小（LayerNorm 的权重、偏置），每次集合通信都有固定开销——kernel 启动、同步、环上每一跳的延迟。上一篇的 α-β 模型里，环形 AllReduce 的时间是</p>
+      $$T = 2(N-1)\,\alpha + \frac{2(N-1)}{N}\cdot\frac{V}{W}.$$
+      <p>消息越小，延迟项占比越大；交叉点大约在 \(V^\ast \approx N\alpha W\)。再加上 GPU 上无论计算还是通信，大张量都比很多小张量高效。所以做法是：把若干个参数的梯度<b>攒到一个"桶"（bucket）里</b>，桶满了才发起一次 AllReduce。就像寄东西，几个大箱子比一堆小包裹省事。PyTorch DDP 默认的桶大小是 25 MB（<code>bucket_cap_mb</code>）。</p>
+      <p>桶也不是越大越好：桶越大，第一个桶要等越久才凑满，而且最后一个桶是在反向完全结束后才凑满的，它的通信<b>一定</b>露在外面。极端情况下桶 = 整个模型，就退化成了朴素的串行实现。下面的演示把这件事算出来。</p>
+
+      <div class="demo" id="bucket-demo">
+        <div class="demo-label">交互演示 · 反向计算与分桶 AllReduce 的时间线</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>桶大小</span><input type="range" id="bk-size" min="2.5" max="18.5" step="0.25" value="11"><output id="bk-size-out"></output></label>
+          <label class="ctrl"><span>每卡 token 数</span><input type="range" id="bk-tok" min="8" max="16" step="1" value="12"><output id="bk-tok-out"></output></label>
+          <label class="ctrl"><span>DP 卡数 N</span><input type="range" id="bk-n" min="1" max="10" step="1" value="3"><output id="bk-n-out"></output></label>
+          <label class="ctrl"><span>每次通信固定开销 α′</span><input type="range" id="bk-alpha" min="0" max="500" step="10" value="50"><output id="bk-alpha-out"></output></label>
+        </div>
+        <div class="row2">
+          <span>模型：</span>
+          <span class="seg" id="bk-model"><button data-v="2048,24" aria-pressed="false">h=2048, 24 层</button><button data-v="4096,32" aria-pressed="true">h=4096, 32 层</button><button data-v="8192,80">h=8192, 80 层</button></span>
+          <span>带宽：</span>
+          <select id="bk-w"><option value="450e9">450 GB/s（H100 节点内）</option><option value="400e9">400 GB/s（跨节点，每节点）</option><option value="50e9">50 GB/s（单卡 IB）</option></select>
+        </div>
+        <div class="tl-wrap"><svg id="bk-svg" viewBox="0 0 680 150"></svg></div>
+        <div class="legend"><span><i class="cp"></i>反向计算</span><span><i class="cm"></i>桶的 AllReduce</span><span>竖线 = 反向结束</span></div>
+        <div class="readout">
+          <div><span class="k">反向计算</span><span class="v" id="bk-tb"></span></div>
+          <div><span class="k">通信总时长</span><span class="v" id="bk-tc"></span></div>
+          <div><span class="k">桶个数</span><span class="v" id="bk-nb"></span></div>
+          <div><span class="k">暴露的通信</span><span class="v" id="bk-exp"></span></div>
+        </div>
+        <div class="verdict" id="bk-verdict"></div>
+        <p class="note-s">模型规模按 Playbook 附录 A2 的估算：每层 \(16h^2\) 个参数（含 GLU MLP，忽略 embedding 和 GQA），bf16 梯度每参数 2 字节。反向 FLOPs = \(4 \times \text{tokens} \times \text{参数量}\)，按 H100 稠密 bf16 峰值 989 TFLOP/s、50% 利用率换算。假设梯度在反向过程中匀速产生。每次 AllReduce 的固定开销 α′ 是示意值，不是测量值；带宽项用环形公式 \(2\frac{N-1}{N}\frac{V}{W}\)。</p>
+      </div>
+
+      <p>拖一拖可以看到几种状态：桶很小时（几十 kB），桶的个数成千上万，固定开销累积起来让通信总时长远超带宽项；桶很大时（几 GB），只有一两个桶，最后一个桶整个露在外面；中间有一段宽的"甜区"，通信几乎全部藏进反向里，只剩最后一个小桶的尾巴。再把每卡 token 数调小，反向计算变短而通信量不变（梯度大小只取决于参数量），无论桶怎么分都藏不住了——这就是第 7 节要推导的通信瓶颈。</p>
+
+      <div class="callout">
+        <p><b>实现上的细节。</b>集合通信要求张量在内存里连续，否则就要先拷贝。所以 DDP 之类的实现会预先分配与桶对应的连续缓冲区，反向时直接把梯度写进去（或把参数的 <code>.grad</code> 设成缓冲区的视图）。这能加速通信，但这块缓冲区本身也计入峰值显存。</p>
+      </div>
+
+      <h2 id="nosync">5. 优化三：与梯度累积配合</h2>
+      <p>数据并行和梯度累积可以叠加使用：每张卡连续做几次 micro-batch 的前向反向，累加梯度，最后做一次同步和优化器步。问题是第 3 节的 hook 会在<b>每一次</b>反向时都触发 AllReduce。中间那几次同步完全是浪费：最终需要的只是累加完之后的梯度和，在最后一次反向时同步一次效果相同，开销却只有 1/grad_acc。</p>
+      <p>PyTorch 的做法是用 <code>model.no_sync()</code> 上下文管理器在不需要同步的反向里关掉 hook：</p>
+      <pre><code>for i, batch in enumerate(micro_batches):
+    last = (i == len(micro_batches) - 1)
+    ctx = contextlib.nullcontext() if last else model.no_sync()
+    with ctx:
+        loss = model(batch).loss / len(micro_batches)
+        loss.backward()        # 只有最后一次触发梯度 AllReduce
+optimizer.step()
+optimizer.zero_grad()</code></pre>
+
+      <h2 id="gbs">6. 重新计算全局 batch size</h2>
+      <p>加上数据并行，全局 batch size 变成三个因子的乘积：</p>
+      $$\text{gbs} = \text{mbs} \times \text{grad\_acc} \times \text{dp}$$
+      <p>在 LLM 里我们更常用 token 数来计 batch：\(\text{gbs}_\text{tokens} = \text{gbs} \times \text{seq\_len}\)。给定一个目标 gbs，grad_acc 和 dp 可以互换：dp 翻倍、grad_acc 减半，gbs 不变。两者的区别在于数据并行是真并行，梯度累积是串行的，所以实践中<b>尽量把 dp 开大</b>，只有在卡不够用、dp 达不到目标 gbs 时才用梯度累积补齐。</p>
+
+      <h3>6.1 一个配置流程</h3>
+      <p>Playbook 给了一个搭建一维数据并行训练的草稿流程：</p>
+      <ol>
+        <li>先确定最优的全局 batch size（以 token 计）：查文献，或者跑实验看收敛；</li>
+        <li>再确定训练序列长度：同样查文献或做实验。2k–8k token 对现在的评测基准比较可靠，主预训练阶段 DeepSeek 和 Llama 用的都是 4k，长上下文通常在训练末期再扩；网上比这更长的文档本来就很少；</li>
+        <li>于是知道了 gbs（样本数）。在单卡上不断增大 mbs 直到显存放不下，得到最大 mbs；</li>
+        <li>根据可用卡数确定 dp，剩下的用 \(\text{grad\_acc} = \text{gbs}/(\text{mbs}\times\text{dp})\) 补齐。</li>
+      </ol>
+      <p>Playbook 的算例：想要 gbs = 4M token、序列长度 4k，那么 gbs ≈ 1024 个样本（取最近的 2 的幂）。假设单卡只放得下 mbs = 2，手上有 128 张卡，那么 \(\text{grad\_acc} = 1024 / (2 \times 128) = 4\)。如果突然有了 512 张卡，就可以 mbs = 2、grad_acc = 1，同样的 gbs，一步快 4 倍。</p>
+      <p>如果算出来 grad_acc 小于 1，说明卡太多了（GPU-rich）：可以不用完所有卡、试更大的 gbs，或者调小 mbs——后者以单卡效率为代价换总吞吐。</p>
+
+      <h3>6.2 数据并行的天花板</h3>
+      <p>Playbook 提醒：到了 512 卡以上的规模，取决于网络，环形通信开始受环延迟（信号绕环一圈所需的时间）限制，DP 通信不能再被完全重叠，吞吐会下降。他们的基准测试也显示：超过某个规模后，再加 DP rank，吞吐明显下降，而每卡显存一点不变。显存不变是因为每张卡仍然存着完整的模型、梯度和优化器状态——这是第 8 节和第 9 节的话题。通信什么时候开始藏不住，是下一节的话题。</p>
+
+      <h2 id="bound">7. 什么时候被通信卡住</h2>
+      <h3>7.1 推导</h3>
+      <p>沿用 2.3 节的 MLP 模型。设每张卡算力 \(C\)（FLOP/s），集合通信带宽 \(W\)，DP 轴上 \(X\) 张卡，这一步全局 \(B\) 个 token。只看反向（前向没有通信）。</p>
+      <p><b>计算时间</b>：每层反向有 4 个矩阵乘（每个矩阵的权重梯度和输入梯度各一个），每个 \(2 \cdot \frac{B}{X} \cdot D \cdot F\) FLOPs：</p>
+      $$T_\text{math} = \frac{4 \cdot 2BDF}{X\,C} = \frac{8BDF}{XC}.$$
+      <p><b>通信时间</b>：每层两个权重矩阵，各 \(DF\) 个参数、bf16 下 \(2DF\) 字节，各做一次 AllReduce（代价是 2 × 字节数 / 带宽）：</p>
+      $$T_\text{comms} = 2 \cdot \frac{2 \cdot 2DF}{W} = \frac{8DF}{W}.$$
+      <p>两者能重叠时，每层耗时 \(\approx \max(T_\text{math}, T_\text{comms}) = 8DF\cdot\max\!\big(\frac{B}{XC}, \frac{1}{W}\big)\)。计算受限的条件是 \(T_\text{math} \gt T_\text{comms}\)：</p>
+      $$\boxed{\ \frac{B}{X} \gt \frac{C}{W}\ }$$
+      <p>左边是<b>每张卡的 token 数</b>，右边是硬件的"网络算术强度"——每通信一个字节，卡能算多少 FLOPs。\(D\)、\(F\) 都约掉了，模型多大都一样。直观上：计算量随每卡 batch 线性增长，通信量只取决于参数量、与 batch 无关；每卡 batch 太小，计算就盖不住通信。这和单卡 roofline 里"batch 要大于某个阈值才能计算受限"是同一个道理（见 <a href="/posts/scaling-roofline/">Roofline</a> 一篇）。</p>
+
+      <h3>7.2 代入硬件</h3>
+      <div class="table-wrap">
+        <table>
+          <tr><th>硬件 / 通信层级</th><th class="num">\(C\)</th><th class="num">\(W\)</th><th class="num">每卡至少多少 token</th></tr>
+          <tr><td>TPU v5p，一个 ICI 轴（双向带宽）</td><td class="num">4.59e14</td><td class="num">1.8e11</td><td class="num">≈ 2550</td></tr>
+          <tr><td>TPU v5p，三个轴都做 DP</td><td class="num">4.59e14</td><td class="num">3 × 1.8e11</td><td class="num">≈ 850</td></tr>
+          <tr><td>H100，节点内（NVLink）</td><td class="num">9.9e14</td><td class="num">4.5e11</td><td class="num">≈ 2200</td></tr>
+          <tr><td>H100，跨节点（IB，每节点出口）</td><td class="num">9.9e14</td><td class="num">4.0e11</td><td class="num">≈ 2475</td></tr>
+          <tr><td>H800（Scaling Book 按 300 GB/s 算）</td><td class="num">9.9e14</td><td class="num">3.0e11</td><td class="num">≈ 3300</td></tr>
+        </table>
+      </div>
+      <p>这些数都来自 Scaling Book。几个推论：</p>
+      <ul>
+        <li>LLaMA-3 用了约 16000 张 H100，按 2475 token/卡，batch 至少要 40M token 才不被 DP 通信卡住，而它实际用的是 16M——只靠纯数据并行，在这么多卡上是做不到计算受限的。</li>
+        <li>DeepSeek-V3 在 2048 张 H800 上训练，按 3300 token/卡需要约 6.7M token，实际用了 4M。</li>
+        <li>纯 DP 被卡住的门槛其实不高：TPU v5p 三个轴全做 DP，每卡 850 token，一个 8960 芯片的 pod 只要 7.6M token 的 batch。</li>
+      </ul>
+
+      <h3>7.3 两个修正</h3>
+      <p><b>DP 很小时</b>：环形 AllReduce 的精确代价带一个 \(\frac{X-1}{X}\) 因子，\(X=2\) 时只有一半。把它带进去，门槛变成 \(\frac{B}{X} \gt \frac{C}{W}\cdot\frac{X-1}{X}\)。只做 2 个节点的数据并行时，H100 的门槛降到约 1237 token/卡。这也是为什么经常看到 2 路数据并行。</p>
+      <p><b>MoE</b>：每个 token 只激活 \(E\) 个专家里的 \(k\) 个，计算按 \(k\) 算，但每层要同步全部 \(E\) 个专家的梯度：</p>
+      $$T_\text{math} = \frac{8kBDF}{XC},\quad T_\text{comms} = \frac{8EDF}{W}\ \Rightarrow\ \frac{B}{X} \gt \frac{E}{k}\cdot\frac{C}{W}.$$
+      <p>门槛放大 \(E/k\) 倍。Scaling Book 举的例子是 \(E=128,\ k=4\) 时跨节点需要 \(32 \times 2475 = 79{,}200\) token/卡。这是 MoE 必须配合专家并行的原因之一（第 8 篇）。</p>
+
+      <h3>7.4 Playbook 的写法</h3>
+      <p>Playbook 附录 A3 用整个模型来写同一件事：梯度总量 ≈ 参数量，反向计算 \(t_\text{compute} = 4\cdot\text{tokens}\cdot\Psi / \text{peak\_flops}\)，按 bf16 每参数 2 字节，AllReduce 全部梯度 \(t_\text{comm} = 2\Psi \cdot 2\frac{N_d-1}{N_d} / \text{peak\_bw}\)，于是</p>
+      $$\frac{t_\text{comm}}{t_\text{compute}} = \frac{N_d-1}{N_d}\cdot\frac{\text{peak\_flops}}{\text{tokens}\cdot\text{peak\_bw}} \le 1 .$$
+      <p>和 7.1 节完全一致（tokens 指每卡的 token 数）。Playbook 原文的式子里多一个 \(\frac12\)，是因为它把参数个数直接当成字节数，没有乘 bf16 的 2；按字节算就是上面的形式。</p>
+
+      <div class="demo" id="bound-demo">
+        <div class="demo-label">交互演示 · 数据并行 / FSDP 通信瓶颈计算器</div>
+        <div class="row2">
+          <span>硬件：</span>
+          <select id="bd-hw">
+            <option value="989e12,450e9,1">H100 节点内（NVLink 450 GB/s）</option>
+            <option value="989e12,400e9,1" selected>H100 跨节点（400 GB/s / 节点）</option>
+            <option value="989e12,300e9,1">H800（300 GB/s）</option>
+            <option value="2.3e15,900e9,1">B200 节点内（900 GB/s）</option>
+            <option value="459e12,180e9,1">TPU v5p，1 个 ICI 轴</option>
+            <option value="459e12,180e9,3">TPU v5p，3 个 ICI 轴</option>
+          </select>
+        </div>
+        <div class="ctrls">
+          <label class="ctrl"><span>全局 batch（token）</span><input type="range" id="bd-b" min="18" max="27" step="0.25" value="24"><output id="bd-b-out"></output></label>
+          <label class="ctrl"><span>DP 卡数 X</span><input type="range" id="bd-x" min="1" max="15" step="1" value="12"><output id="bd-x-out"></output></label>
+          <label class="ctrl"><span>MoE 稀疏度 E/k</span><input type="range" id="bd-ek" min="0" max="6" step="1" value="0"><output id="bd-ek-out"></output></label>
+          <label class="ctrl"><span>模型宽度 D（F = 4D）</span><input type="range" id="bd-d" min="10" max="14" step="1" value="13"><output id="bd-d-out"></output></label>
+        </div>
+        <div class="readout">
+          <div><span class="k">每卡 token B/X</span><span class="v" id="bd-bx"></span></div>
+          <div><span class="k">临界值 (E/k)·C/W·(X−1)/X</span><span class="v" id="bd-crit"></span></div>
+          <div><span class="k">每层反向计算</span><span class="v" id="bd-tm"></span></div>
+          <div><span class="k">每层梯度通信</span><span class="v" id="bd-tc"></span></div>
+          <div><span class="k">这个 batch 最多用几张卡</span><span class="v" id="bd-max"></span></div>
+        </div>
+        <div class="verdict" id="bd-verdict"></div>
+        <p class="note-s">公式见 7.1–7.3：\(T_\text{math} = 8kBDF/(XC\,\cdot)\)，\(T_\text{comms} = 8EDF\cdot\frac{X-1}{X}/W\)（TPU 双向环直接用 \(W_\text{bi}\cdot\)轴数）。假设完美重叠、峰值算力，所以是乐观的估计。MoE 时每层时间按 k = 1、E = E/k 显示，比值不变。"最多几张卡"由 \(B \gt \frac{E}{k}\frac{C}{W}(X-1)\) 解出。</p>
+      </div>
+
+      <h3>7.5 这和"临界 batch size"有什么关系</h3>
+      <p>上面的条件有一个反直觉的推论：卡数固定时，<b>总 batch 越小，越容易被通信卡住</b>。反过来，只要能不断加大 batch，DP / FSDP 就能扩到任意多的卡。问题在于 batch 不能无限加大：batch 大到一定程度，梯度噪声已经很小，再加大收益递减（这个拐点常被称为临界 batch size），有时还会不稳定。</p>
+      <p>所以在算力充足时，真实的问题往往是反过来的：batch size 由 scaling law 定死了，卡数也定了（很多），要找一种切分方式，让这么"小"的 batch 也能铺满这么多卡。Scaling Book 的两个例子：DeepSeek-V2 公开的 batch 约 40M token，按 TPU v5p 的 2550 token/卡，大约能扩到 47,000 张芯片；LLaMA-3 70B 的 16M token batch，按三个轴做 DP 的 850 token/卡，可以铺到约 18,800 张芯片。再往上就需要换一种并行维度（张量并行、流水线并行），它们不靠 batch 维来分摊。</p>
+
+      <h2 id="memory">8. 数据并行的显存账</h2>
+      <p>数据并行把激活按 batch 分摊到了各卡（每卡只存自己 micro-batch 的激活），这对激活占大头的训练很有帮助。但它对参数、梯度、优化器状态<b>完全没有帮助</b>：每张卡都存一整份。按第 1 节的计数，bf16 混合精度 + Adam，每参数 16 字节（不算 fp32 梯度累积）：</p>
+      $$\underbrace{2\Psi}_{\text{bf16 参数}} + \underbrace{2\Psi}_{\text{bf16 梯度}} + \underbrace{4\Psi + (4\Psi + 4\Psi)}_{\text{fp32 主参数 + Adam 动量}} = 16\Psi .$$
+      <p>记优化器相关的那部分为 \(k\Psi\)，Adam 下 \(k = 12\)。一个 7.5B 的模型就是 \(16 \times 7.5 = 120\) GB，单张 80 GB 的卡放不下，这还没算任何激活。Playbook 给了一个速算：只看 bf16 参数就是参数量 × 2，70B → 140 GB。</p>
+      <p>Scaling Book 用的是另一种计数：bf16 参数 + fp32 的 Adam 一阶、二阶动量，每参数 10 字节（不单独存 fp32 主参数，也不算梯度），于是纯数据并行能训练的最大模型约是 HBM / 10，96 GB 的 TPU v5p 大约 9B。这是 batch 只有 1 个 token、不存任何激活时的绝对上界，实际用不上。两种计数的差别只在于有没有 fp32 主参数和梯度缓冲，结论一样：<b>纯数据并行只适合几 B 以下的模型</b>。要训更大的模型，至少要把参数或优化器状态切开。</p>
+      <p>切开有两条正交的路：一是"并行"——张量、上下文、流水线并行，把计算本身拆开；二是"分片"（sharding）——DeepSpeed ZeRO 或 PyTorch FSDP，计算仍按数据并行做，只是把各种状态分片存放、用时再取。两者可以组合。分片和 DP 关系最近，先讲它。</p>
+
+      <h2 id="zero">9. ZeRO：把冗余去掉</h2>
+      <p>ZeRO（Zero Redundancy Optimizer）的观察是：数据并行里每个 rank 存着完全相同的参数、梯度和优化器状态，这是纯粹的冗余。把它们沿 DP 维切成 \(N_d\) 份，每个 rank 只存 \(1/N_d\)，需要完整数据时再通过通信临时拼回来。按切的范围分三级：</p>
+      <ul>
+        <li><b>ZeRO-1</b>：切优化器状态；</li>
+        <li><b>ZeRO-2</b>：再切梯度；</li>
+        <li><b>ZeRO-3</b>：再切参数（PyTorch 的原生实现叫 FSDP）。</li>
+      </ul>
+      <p>激活为什么不在列表里？每个 DP rank 吃不同的 micro-batch，激活本来就各不相同，不存在冗余，自然没什么可切的。</p>
+
+      <figure>
+        <svg class="fig" viewBox="0 0 680 300" role="img" aria-label="ZeRO 各阶段在 4 张卡上保存的状态">
+          <g id="zero-fig" font-size="13"></g>
+        </svg>
+        <figcaption>4 个 DP rank 上各自保存的内容（宽度按每参数字节数 2 / 2 / 12 画）。实心 = 完整一份；只有一段着色 = 只存 1/N<sub>d</sub>。</figcaption>
+      </figure>
+
+      <p>每张卡的显存（不含激活）：</p>
+      <div class="table-wrap">
+        <table>
+          <tr><th>阶段</th><th>每卡显存</th><th>每步通信（单位：参数个数 Ψ）</th><th>用到的集合通信</th></tr>
+          <tr><td>DP（ZeRO-0）</td><td>\(2\Psi + 2\Psi + k\Psi\)</td><td>\(2\Psi\)</td><td>梯度 AllReduce</td></tr>
+          <tr><td>ZeRO-1</td><td>\(2\Psi + 2\Psi + \frac{k\Psi}{N_d}\)</td><td>\(2\Psi\)</td><td>梯度 ReduceScatter + 参数 AllGather</td></tr>
+          <tr><td>ZeRO-2</td><td>\(2\Psi + \frac{(2+k)\Psi}{N_d}\)</td><td>\(2\Psi\)</td><td>同上，梯度边算边 RS、边释放</td></tr>
+          <tr><td>ZeRO-3 / FSDP</td><td>\(\frac{(2+2+k)\Psi}{N_d}\)</td><td>\(3\Psi\)</td><td>前向 AG + 反向 AG + 梯度 RS</td></tr>
+        </table>
+      </div>
+      <p>如果在 ZeRO-2 / ZeRO-3 里用 fp32 做梯度累积，梯度项再加 \(\frac{4\Psi}{N_d}\)（在 DP 和 ZeRO-1 里是完整的 \(4\Psi\)）。通信量这一列沿用 ZeRO 论文的口径：一次 ReduceScatter 或 AllGather 算 \(\Psi\)，一次 AllReduce 算 \(2\Psi\)（都是 \(\frac{N-1}{N}\) 取极限后的近似）。</p>
+
+      <h3 id="zero1">9.1 ZeRO-1：切优化器状态</h3>
+      <p>普通 DP 里，所有 rank 在梯度 AllReduce 之后拿着相同的梯度，各自做一模一样的优化器步——同样的计算做了 \(N_d\) 遍。ZeRO-1 让第 \(r\) 个 rank 只负责 \(1/N_d\) 的参数：只存这部分参数的 fp32 主参数和 Adam 动量，也只更新这部分。一个训练步变成：</p>
+      <ol>
+        <li>前向：每个 rank 用同一份完整的 bf16 参数，算不同的 micro-batch；</li>
+        <li>反向：每个 rank 得到完整的（但各不相同的）梯度；</li>
+        <li>对梯度做 <b>ReduceScatter</b>：rank \(r\) 只拿到自己负责那 \(1/N_d\) 的梯度之和；</li>
+        <li>每个 rank 用本地的优化器状态更新自己那 \(1/N_d\) 的 fp32 参数，再转成 bf16；</li>
+        <li>对 bf16 参数做 <b>AllGather</b>，把别人更新好的那些片段拿回来，每个 rank 又有了完整的新参数。</li>
+      </ol>
+      <p>显存从 \(16\Psi\) 降到 \(4\Psi + 12\Psi/N_d\)。通信呢？普通 DP 是一次 AllReduce；ZeRO-1 是一次 ReduceScatter 加一次 AllGather——而 AllReduce 本来就等于 ReduceScatter + AllGather。所以总通信量<b>不变</b>，只是 AllGather 从"梯度"挪到了"更新后的参数"上。ReduceScatter 本身只有 AllReduce 一半的代价。</p>
+      <p>新出现的 AllGather 也要想办法藏起来。两种思路：</p>
+      <ul>
+        <li><b>在优化器步里重叠</b>：第一片参数一更新完就开始 AllGather，同时更新后面的片；</li>
+        <li><b>在前向里重叠</b>：下一步前向用到第 \(\ell\) 层时才需要它的完整参数，所以每层的 AllGather 可以和前面层的前向计算重叠。</li>
+      </ul>
+      <p>这两种都需要精细地使用 hook 和分桶，实现起来不容易。Playbook 的建议是：实践中直接用 PyTorch 原生的 ZeRO-3 / FSDP，并把 FSDP 单元设成整个模型，就能得到类似的效果。</p>
+
+      <h3 id="zero2">9.2 ZeRO-2：再切梯度</h3>
+      <p>ZeRO-1 里每个 rank 只用自己那 \(1/N_d\) 的梯度去更新，其他部分的梯度存着也没用。那就别存：反向时不做 AllReduce，直接对梯度做 <b>ReduceScatter</b>，每个 rank 只保留自己那份，其余的发出去后立刻释放。</p>
+      <p>显存变成 \(2\Psi + \frac{(2+k)\Psi}{N_d}\)。\(N_d\) 很大时趋于 \(2\Psi\)，相对基线 \(16\Psi\) 最多省 8 倍。通信和 ZeRO-1 完全一样（梯度 RS + 参数 AG），也就和普通 DP 一样，区别只是边通信边释放内存。如果用 fp32 做梯度累积，只需要为自己那 \(1/N_d\) 保留 fp32 梯度，用来累加 ReduceScatter 送来的 bf16 梯度。</p>
+      <p>ZeRO-2 相对 ZeRO-1 基本没有额外开销，只是实现更复杂一些，所以 Playbook 的结论是 ZeRO-2 通常是更好的选择。</p>
+
+      <h3 id="zero3">9.3 ZeRO-3 / FSDP：连参数也切</h3>
+      <p>最后一步是把 bf16 参数也切了，每个 rank 只常驻 \(1/N_d\) 的参数。前向和反向需要某一层的完整参数时，<b>临时 AllGather</b> 过来，用完立刻丢掉：</p>
+      <ul>
+        <li><b>前向</b>：逐层 AllGather 参数 → 计算 → 释放参数；</li>
+        <li><b>反向</b>：反着来，逐层再 AllGather 一次参数（前向时已经扔掉了）→ 算梯度 → 对这层梯度做 ReduceScatter → 释放参数和非本 rank 的梯度。</li>
+      </ul>
+
+      <figure>
+        <svg class="fig" viewBox="0 0 680 230" role="img" aria-label="ZeRO-3 前向与反向的通信">
+          <g id="z3-fig" font-size="13"></g>
+        </svg>
+        <figcaption>ZeRO-3 一个训练步里每层的通信：前向一次 AllGather，反向一次 AllGather 加一次 ReduceScatter。预取（prefetch）让下一层的 AllGather 与当前层计算重叠。</figcaption>
+      </figure>
+
+      <p><b>通信量</b>：前向 AllGather 全部参数一遍，\(\Psi\)；反向再 AllGather 一遍，\(\Psi\)；梯度 ReduceScatter，\(\Psi\)。合计 \(3\Psi\)，是 DP / ZeRO-2 的 \(2\Psi\) 的 1.5 倍——这正是 ZeRO 论文给出的数字。和 ZeRO-2 相比，一个训练步里多了 \(2\cdot\text{num\_layers} - 1\) 次 AllGather（Playbook 的数）：前向每层一次，反向每层一次，但反向最先用到的最后一层参数刚在前向里用过，可以不释放直接用，省掉一次（这是我对这个数的理解，Playbook 没有展开）。每次 AllGather 都带一点固定延迟。</p>
+      <p><b>预取</b>：多出来的通信听起来很多，但它可以藏起来。前向算第 \(n\) 层时，就开始 AllGather 第 \(n+1\) 层的参数；反向算第 \(n\) 层时，AllGather 第 \(n-1\) 层。只要单层的计算时间大于单层参数的 AllGather 时间，就藏得住。Playbook 的经验是 DP 不要超过 512 左右，否则重叠会失效。</p>
+      <p><b>显存</b>：\(\frac{(2+2+k)\Psi}{N_d}\)，原则上 \(N_d\) 越大越省，可以无限降下去——但只限于模型相关的状态。外加两层临时的完整参数（正在用的和正在预取的）。激活一点没减少，那要靠激活重计算和梯度累积。</p>
+
+      <h3>9.4 用计算器验证</h3>
+      <p>ZeRO 论文给过一个表：\(\Psi = 7.5\text{B}\)、\(k = 12\)、\(N_d = 64\) 时，每卡显存基线 120 GB，ZeRO-1 31.4 GB，ZeRO-2 16.6 GB，ZeRO-3 1.88 GB。下面的计算器默认就是这组参数，可以对照。</p>
+
+      <div class="demo" id="zero-demo">
+        <div class="demo-label">交互演示 · ZeRO 每卡显存计算器</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>参数量 Ψ</span><input type="range" id="zm-psi" min="-0.3" max="3" step="0.005" value="0.875"><output id="zm-psi-out"></output></label>
+          <label class="ctrl"><span>DP 卡数 N<sub>d</sub></span><input type="range" id="zm-nd" min="0" max="12" step="1" value="6"><output id="zm-nd-out"></output></label>
+          <label class="ctrl"><span>优化器倍数 k</span><input type="range" id="zm-k" min="4" max="16" step="1" value="12"><output id="zm-k-out"></output></label>
+        </div>
+        <div class="row2">
+          <label><input type="checkbox" id="zm-fp32"> fp32 梯度累积（+4 字节/参数）</label>
+          <span>显存：</span>
+          <select id="zm-hbm"><option value="80">80 GB（H100）</option><option value="141">141 GB（H200）</option><option value="192">192 GB（B200）</option><option value="96">96 GB（TPU v5p）</option></select>
+        </div>
+        <div class="zbars" id="zm-bars"></div>
+        <div class="legend"><span><i class="p"></i>bf16 参数</span><span><i class="g"></i>bf16 梯度</span><span><i class="g32"></i>fp32 梯度</span><span><i class="o"></i>优化器状态（kΨ）</span><span>竖线 = 单卡显存</span></div>
+        <div class="readout">
+          <div><span class="k">各阶段相对基线</span><span class="v" id="zm-ratio"></span></div>
+          <div><span class="k">ZeRO-3 每步通信 / DP</span><span class="v">1.5×</span></div>
+          <div><span class="k">放得下的最高"最低阶段"</span><span class="v" id="zm-fit"></span></div>
+        </div>
+        <p class="note-s">按 9 节表格的公式计算，GB = 10⁹ 字节，不含激活、临时缓冲、通信缓冲和显存碎片；实际还要留出大量余量。k = 12 对应 bf16 混合精度 + Adam（fp32 主参数 + 两个动量）。</p>
+      </div>
+
+      <p>拖动时注意几件事：ZeRO-1、ZeRO-2 在 \(N_d\) 增大时很快饱和在 \(4\Psi\)、\(2\Psi\)，因为它们没切的部分不随 \(N_d\) 下降；只有 ZeRO-3 一直按 \(1/N_d\) 下降。70B 模型在 64 卡上 ZeRO-2 也要 140 GB 以上，必须上 ZeRO-3 或者别的并行。</p>
+
+      <h2 id="fsdp">10. 用分片记号看 FSDP</h2>
+      <p>Scaling Book 用上一篇的记号把 FSDP 写成：权重沿<b>同一个</b> DP 轴 X 切开（切的是 \(D\) 维），激活照旧沿 batch 维切开：</p>
+      $$\text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \rightarrow \text{Out}[B_X, D]$$
+      <p>这时 \(\text{In}[B_X, D]\cdot W_\text{in}[D_X, F]\) 是"一边的收缩维被切"（情形 2），而且 \(B_X\) 和 \(D_X\) 用的是同一个轴，所以必须先把权重 AllGather 回来。完整算法：</p>
+      <pre><code># 前向
+W_in[D, F]   = AllGather(W_in[D_X, F])     # 不在关键路径：可在上一层计算时进行
+Tmp[B_X, F]  = In[B_X, D] ·_D W_in[D, F]    # 之后可以扔掉 W_in[D, F]
+W_out[F, D]  = AllGather(W_out[F, D_X])    # 同上
+Out[B_X, D]  = Tmp[B_X, F] ·_F W_out[F, D]
+
+# 反向
+dW_out[F, D]{U_X} = Tmp[B_X, F] ·_B dOut[B_X, D]
+dW_out[F, D_X]    = ReduceScatter(dW_out[F, D]{U_X})   # 可异步
+W_out[F, D]       = AllGather(W_out[F, D_X])           # 可提前做
+dTmp[B_X, F]      = dOut[B_X, D] ·_D W_out[F, D]        # 之后扔掉 W_out[F, D]
+dW_in[D, F]{U_X}  = In[B_X, D] ·_B dTmp[B_X, F]
+dW_in[D_X, F]     = ReduceScatter(dW_in[D, F]{U_X})    # 可异步
+W_in[D, F]        = AllGather(W_in[D_X, F])            # 可提前做
+dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]         # 传给前一层</code></pre>
+      <p>和 2.3 节的纯 DP 对比，唯一的变化是：反向里的 AllReduce 被拆成了 ReduceScatter（立即做，得到切开的梯度）和 AllGather（推迟到下一次用权重之前做）。上一篇证明过 AllGather 的转置就是 ReduceScatter，所以前向 AllGather 权重、反向 ReduceScatter 梯度，是求导的必然结果。</p>
+      <p>ZeRO 名字的来历也在这里：不做任何多余的计算或存储。普通 DP 里每张卡 AllReduce 全部梯度、更新全部优化器状态、更新全部参数，都是重复劳动；ZeRO 分片后，ReduceScatter 梯度，只更新自己那片优化器状态和参数，用时再 AllGather 参数。</p>
+
+      <h3>10.1 FSDP 的通信瓶颈和 DP 一样</h3>
+      <p>前向和反向的计算 / 通信比例相同，看前向即可（前向 2 个矩阵乘，各一次 AllGather，AllGather 代价是 AllReduce 的一半）：</p>
+      $$T_\text{math} = \frac{2\cdot 2BDF}{XC},\qquad T_\text{comms} = \frac{2\cdot 2DF}{W}\ \Rightarrow\ \text{计算受限当且仅当}\ \frac{B}{X} \gt \frac{C}{W}.$$
+      <p>门槛与纯 DP <b>完全相同</b>。也就是说，只要每卡 batch 大到纯 DP 能计算受限，就可以无代价地升级到 FSDP，省下大量参数和优化器状态的显存。前向确实多了通信，但它与前向的计算按同样比例增长，不改变 roofline。Scaling Book 的结论：DP 和 FSDP 在每卡 batch 小于 \(C/W\)（TPU v5p 单轴 2550，除以使用的网格轴数）时变成带宽受限。</p>
+
+      <h3>10.2 Playbook 对 ZeRO-3 单层重叠的分析</h3>
+      <p>Playbook 附录 A3 从"一层"的角度检查预取能不能藏住：每层 \(16h^2\) 个参数（bf16 下 \(32h^2\) 字节），AllGather 一层参数需要 \(t_\text{comm} = 32h^2\cdot\frac{N_d-1}{N_d}/\text{peak\_bw}\)；这一层前向计算 \(t_\text{compute} = 2\cdot\text{seq}\cdot\text{mbs}\cdot 16h^2/\text{peak\_flops}\)。比值：</p>
+      $$\frac{t_\text{comm}}{t_\text{compute}} = \frac{N_d - 1}{N_d}\cdot\frac{\text{peak\_flops}}{\text{seq}\cdot\text{mbs}\cdot\text{peak\_bw}} \le 1 .$$
+      <p>\(\text{seq}\cdot\text{mbs}\) 就是每卡 token 数，结论还是"每卡 token 数要大于 \(C/W\)"。（同 7.4 节，Playbook 原式按每参数 1 字节计，多一个 \(\frac12\)。）H100 节点内 \(C/W \approx 2200\)：seq = 4096、mbs = 1 就够；但如果为了省激活把 mbs 压到很小、序列又短，FSDP 的预取就藏不住了。</p>
+
+      <h3>10.3 FSDP 单元</h3>
+      <p>FSDP 不是逐个参数做 AllGather 的，而是把模型分成若干"单元"（通常一个 Transformer 块一个单元），以单元为粒度 gather、计算、释放、预取——和第 4 节的分桶是同一个权衡：单元太小，通信次数多、固定开销大；单元太大，临时的完整参数占显存多，而且第一个单元的 gather 无法与计算重叠。把单元设成整个模型，就退化成在前向开始前一次性 gather 全部参数，显存上相当于 ZeRO-2 / ZeRO-1，这就是 9.1 节说的"用 FSDP 实现 ZeRO-1"。FSDP1 和 FSDP2 的实现差异 Playbook 没有展开，它推荐了一篇外部博客，我这里也不展开。</p>
+
+      <h2 id="summary">11. 小结与局限</h2>
+      <div class="table-wrap">
+        <table>
+          <tr><th></th><th>DP</th><th>ZeRO-1</th><th>ZeRO-2</th><th>ZeRO-3 / FSDP</th></tr>
+          <tr><td>切开的状态</td><td>—</td><td>优化器状态</td><td>+ 梯度</td><td>+ 参数</td></tr>
+          <tr><td>每卡显存</td><td>\(16\Psi\)</td><td>\(4\Psi + \frac{12\Psi}{N_d}\)</td><td>\(2\Psi + \frac{14\Psi}{N_d}\)</td><td>\(\frac{16\Psi}{N_d}\)</td></tr>
+          <tr><td>通信量</td><td>\(2\Psi\)</td><td>\(2\Psi\)</td><td>\(2\Psi\)</td><td>\(3\Psi\)</td></tr>
+          <tr><td>前向通信</td><td>无</td><td>无（参数 AG 可放这里）</td><td>同左</td><td>每层 AG</td></tr>
+          <tr><td>计算受限条件</td><td colspan="4">每卡 token 数 \(\gt C/W\)（MoE 再乘 \(E/k\)）</td></tr>
+        </table>
+      </div>
+      <p>回顾一下这一篇走过的路：</p>
+      <ul>
+        <li>数据并行 = 并行版梯度累积，数学上与大 batch 等价；</li>
+        <li>梯度 AllReduce 不在关键路径上，用 hook 与反向重叠，用分桶摊薄固定开销，用 <code>no_sync</code> 避免梯度累积时的重复同步；</li>
+        <li>\(\text{gbs} = \text{mbs}\times\text{grad\_acc}\times\text{dp}\)，优先加 dp；</li>
+        <li>每卡 token 数低于 \(C/W\)（H100 约 2200–2500）时被通信卡住；batch 又不能无限加大，这限制了纯 DP 能用的卡数；</li>
+        <li>ZeRO 用 RS + AG 代替 AllReduce，通信量不变（ZeRO-1/2）或只多 50%（ZeRO-3），显存可以降到 \(1/N_d\)。</li>
+      </ul>
+      <p>但 ZeRO 有两个绕不过去的局限：</p>
+      <ol>
+        <li><b>激活不能切</b>。激活随序列长度和 batch 增长，ZeRO 一点也帮不上忙，只能靠激活重计算和梯度累积。我们并不想因为硬件限制就只能训短序列。</li>
+        <li><b>每层必须放得下</b>。ZeRO-3 每次仍要把一整层的参数 gather 到一张卡上计算；而且计算仍然沿 batch 维分摊，batch 固定时卡数一多就会通信受限。</li>
+      </ol>
+      <p>下一篇的张量并行换了一个方向：沿模型的隐藏维切矩阵乘本身，参数、梯度、优化器状态<b>和激活</b>都被切开，而且完全不需要在卡之间传参数。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Nanotron, <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>：Data Parallelism（含三个优化、Revisiting global batch size、Our journey up to now）、Zero Redundancy Optimizer（ZeRO-1/2/3）、附录 A2 Typical Scales、附录 A3 Math for Compute/Communication Overlap。</li>
+        <li>Austin et al., How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/training/#data-parallelism">Part 5 · Data Parallelism</a>、<a href="https://jax-ml.github.io/scaling-book/training/#fully-sharded-data-parallelism-fsdp">FSDP</a>、<a href="https://jax-ml.github.io/scaling-book/training/#takeaways-from-llm-training-on-tpus">Takeaways</a>；<a href="https://jax-ml.github.io/scaling-book/gpus/#data-parallelism">Part 12 · GPU 上的数据并行 roofline</a>。</li>
+        <li>Rajbhandari et al., <a href="https://arxiv.org/abs/1910.02054">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</a>（显存表与 3Ψ 通信量）。</li>
+        <li>Simon Boehm, <a href="https://siboehm.com/articles/22/data-parallel-training">Data-Parallel Distributed Training of Deep Learning Models</a>（Playbook 推荐的延伸阅读）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, parent, text) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      if (text != null) e.textContent = text;
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const fmtT = (s) => s >= 1 ? s.toFixed(2) + ' s' : s >= 1e-3 ? (s * 1e3).toFixed(s >= 0.1 ? 0 : 1) + ' ms' : (s * 1e6).toFixed(0) + ' µs';
+    const fmtB = (b) => b >= 1e9 ? (b / 1e9).toFixed(b >= 1e10 ? 0 : 1) + ' GB' : b >= 1e6 ? (b / 1e6).toFixed(b >= 1e7 ? 0 : 1) + ' MB' : (b / 1e3).toFixed(0) + ' kB';
+    const fmtN = (n) => n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(n >= 1e4 ? 0 : 1) + 'k' : String(Math.round(n));
+    const segVal = (seg) => seg.querySelector('[aria-pressed="true"]').dataset.v;
+    function bindSeg(seg, cb) {
+      seg.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        seg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        cb();
+      });
+    }
+
+    /* ---------- static figures ---------- */
+    // DP overview
+    const dp = document.getElementById('dp-fig');
+    for (let r = 0; r < 4; r++) {
+      const x = 20 + r * 165;
+      el('line', { x1: x + 75, y1: 54, x2: x + 75, y2: 76, class: 'line' }, dp);
+      el('rect', { x, y: 76, width: 150, height: 100, rx: 10, class: 'frame' }, dp);
+      el('text', { x: x + 75, y: 96, 'text-anchor': 'middle', class: 'soft' }, dp, 'GPU ' + r);
+      el('rect', { x: x + 12, y: 106, width: 126, height: 24, rx: 5, fill: 'var(--accent)', opacity: 0.8 }, dp);
+      el('text', { x: x + 75, y: 123, 'text-anchor': 'middle', style: 'fill:#fff' }, dp, '完整模型副本');
+      el('text', { x: x + 75, y: 154, 'text-anchor': 'middle' }, dp, 'micro-batch ' + r + ' → g' + r);
+      el('line', { x1: x + 75, y1: 176, x2: x + 75, y2: 200, class: 'line' }, dp);
+    }
+    // overlap timeline
+    function ovDraw(g, y0, overlap) {
+      const L = 4, cw = 100, comm = 70, x0 = 120;
+      for (let i = 0; i < L; i++) {
+        el('rect', { x: x0 + i * cw, y: y0, width: cw - 4, height: 26, rx: 5, fill: 'var(--accent)', opacity: 0.8 }, g);
+        el('text', { x: x0 + i * cw + cw / 2 - 2, y: y0 + 18, 'text-anchor': 'middle', style: 'fill:#fff' }, g, 'L' + (L - i));
+      }
+      let end;
+      if (!overlap) {
+        el('rect', { x: x0 + L * cw, y: y0 + 34, width: comm * L * 0.6, height: 26, rx: 5, fill: 'var(--accent-2)', opacity: 0.85 }, g);
+        el('text', { x: x0 + L * cw + comm * L * 0.3, y: y0 + 52, 'text-anchor': 'middle', style: 'fill:#fff' }, g, 'AllReduce 全部梯度');
+        end = x0 + L * cw + comm * L * 0.6;
+      } else {
+        let t = x0;
+        for (let i = 0; i < L; i++) {
+          const ready = x0 + (i + 1) * cw;
+          const s = Math.max(ready, t), w = comm * 0.6;
+          el('rect', { x: s, y: y0 + 34, width: w - 3, height: 26, rx: 5, fill: 'var(--accent-2)', opacity: 0.85 }, g);
+          el('text', { x: s + w / 2 - 1, y: y0 + 52, 'text-anchor': 'middle', style: 'fill:#fff' }, g, 'g' + (L - i));
+          t = s + w;
+        }
+        end = t;
+      }
+      el('line', { x1: end, y1: y0 - 6, x2: end, y2: y0 + 66, stroke: 'var(--text-faint)', 'stroke-dasharray': '4 4' }, g);
+    }
+    ovDraw(document.getElementById('ov-a'), 8, false);
+    ovDraw(document.getElementById('ov-b'), 108, true);
+
+    // ZeRO figure: 4 stages x 4 ranks
+    const zf = document.getElementById('zero-fig');
+    const stages = [['DP', [1, 1, 1]], ['ZeRO-1', [1, 1, 0]], ['ZeRO-2', [1, 0, 0]], ['ZeRO-3', [0, 0, 0]]];
+    const widths = [2, 2, 12].map((w) => w * 7.2); // 16 bytes -> 115 px
+    const cls = ['c-param', 'c-grad', 'c-opt'];
+    stages.forEach(([name, full], si) => {
+      const y = 14 + si * 70;
+      el('text', { x: 0, y: y + 30 }, zf, name);
+      for (let r = 0; r < 4; r++) {
+        const x0 = 70 + r * 152;
+        if (si === 0) el('text', { x: x0 + 58, y: 10, 'text-anchor': 'middle', class: 'faint', 'font-size': 12 }, zf, 'rank ' + r);
+        let x = x0;
+        for (let c = 0; c < 3; c++) {
+          const w = widths[c];
+          el('rect', { x, y: y + 12, width: w, height: 30, rx: 3, class: 'frame' }, zf);
+          if (full[c]) el('rect', { x, y: y + 12, width: w, height: 30, rx: 3, class: cls[c], opacity: 0.85 }, zf);
+          else el('rect', { x: x + (w / 4) * r, y: y + 12, width: w / 4, height: 30, rx: 2, class: cls[c], opacity: 0.85 }, zf);
+          x += w;
+        }
+      }
+    });
+    el('text', { x: 70, y: 296, class: 'faint', 'font-size': 12 }, zf, '每格依次为：bf16 参数（2 字节）· bf16 梯度（2 字节）· fp32 主参数与 Adam 动量（12 字节）');
+
+    // ZeRO-3 per-layer comms figure
+    const z3 = document.getElementById('z3-fig');
+    const Lz = 4, bw = 120, x0z = 90;
+    el('text', { x: 0, y: 40, class: 'soft' }, z3, '前向');
+    el('text', { x: 0, y: 150, class: 'soft' }, z3, '反向');
+    for (let i = 0; i < Lz; i++) {
+      const x = x0z + i * (bw + 10);
+      el('rect', { x, y: 50, width: bw, height: 24, rx: 5, fill: 'var(--accent)', opacity: 0.8 }, z3);
+      el('text', { x: x + bw / 2, y: 67, 'text-anchor': 'middle', style: 'fill:#fff' }, z3, '层 ' + (i + 1) + ' 前向');
+      el('rect', { x: x - 30, y: 20, width: bw * 0.55, height: 22, rx: 5, fill: 'var(--accent-2)', opacity: 0.85 }, z3);
+      el('text', { x: x - 30 + bw * 0.275, y: 35, 'text-anchor': 'middle', style: 'fill:#fff', 'font-size': 12 }, z3, 'AG W' + (i + 1));
+      const xb = x0z + (Lz - 1 - i) * (bw + 10);
+      el('rect', { x: xb, y: 160, width: bw, height: 24, rx: 5, fill: 'var(--accent)', opacity: 0.8 }, z3);
+      el('text', { x: xb + bw / 2, y: 177, 'text-anchor': 'middle', style: 'fill:#fff' }, z3, '层 ' + (Lz - i) + ' 反向');
+      if (i > 0) {
+        el('rect', { x: xb + bw - 20, y: 130, width: bw * 0.55, height: 22, rx: 5, fill: 'var(--accent-2)', opacity: 0.85 }, z3);
+        el('text', { x: xb + bw - 20 + bw * 0.275, y: 145, 'text-anchor': 'middle', style: 'fill:#fff', 'font-size': 12 }, z3, 'AG W' + (Lz - i));
+      }
+      el('rect', { x: xb + 20, y: 192, width: bw * 0.55, height: 22, rx: 5, fill: 'color-mix(in srgb, var(--accent-2) 55%, var(--text-faint))' }, z3);
+      el('text', { x: xb + 20 + bw * 0.275, y: 207, 'text-anchor': 'middle', style: 'fill:#fff', 'font-size': 12 }, z3, 'RS dW' + (Lz - i));
+    }
+    el('text', { x: 90, y: 110, class: 'faint', 'font-size': 12 }, z3, '层 4 的参数前向刚用过，反向直接复用，不必再 AG（所以是 2L−1 次）');
+
+    /* ---------- demo: bucket timeline ---------- */
+    const bk = {};
+    ['size', 'tok', 'n', 'alpha', 'w'].forEach((k) => { bk[k] = document.getElementById('bk-' + k); });
+    const bkModel = document.getElementById('bk-model');
+    const C_H100 = 989e12, MFU = 0.5;
+    function bkRender() {
+      const [h, L] = segVal(bkModel).split(',').map(Number);
+      const Pl = 16 * h * h, P = Pl * L;
+      const S = 1e3 * Math.pow(10, +bk.size.value / 2.5); // bucket bytes: 1 kB .. ~25 GB
+      const tokens = Math.pow(2, +bk.tok.value);
+      const N = Math.pow(2, +bk.n.value);
+      const alpha = +bk.alpha.value * 1e-6;
+      const W = +bk.w.value;
+      document.getElementById('bk-size-out').textContent = fmtB(S);
+      document.getElementById('bk-tok-out').textContent = fmtN(tokens);
+      document.getElementById('bk-n-out').textContent = N;
+      document.getElementById('bk-alpha-out').textContent = bk.alpha.value + ' µs';
+      const Tb = 4 * tokens * P / (C_H100 * MFU);
+      const G = 2 * P; // grad bytes
+      const nb = Math.ceil(G / S);
+      const rate = G / Tb;
+      const factor = N > 1 ? 2 * (N - 1) / N : 0;
+      let tEnd = 0; const bars = [];
+      let commTotal = 0;
+      // to keep it fast for huge bucket counts, process analytically when nb is large
+      const sizeOf = (i) => (i < nb - 1 ? S : G - S * (nb - 1));
+      if (N === 1) { tEnd = Tb; }
+      else if (nb <= 4000) {
+        let cur = 0;
+        for (let i = 0; i < nb; i++) {
+          const sz = sizeOf(i);
+          const ready = Math.min(Tb, (S * i + sz) / rate);
+          const d = alpha + factor * sz / W;
+          const st = Math.max(ready, cur);
+          cur = st + d; commTotal += d;
+          bars.push([st, cur]);
+        }
+        tEnd = Math.max(Tb, cur);
+      } else {
+        // many tiny buckets: each takes d, they become ready at rate; comm stream is the bottleneck if d > S/rate
+        const d = alpha + factor * S / W;
+        commTotal = nb * d;
+        const gap = S / rate;
+        const first = gap;
+        const cur = d > gap ? first + nb * d : Tb + d;
+        tEnd = Math.max(Tb, cur);
+        bars.push([first, cur]);
+      }
+      const exposed = Math.max(0, tEnd - Tb);
+      document.getElementById('bk-tb').textContent = fmtT(Tb);
+      document.getElementById('bk-tc').textContent = N === 1 ? '0' : fmtT(commTotal);
+      document.getElementById('bk-nb').textContent = nb.toLocaleString();
+      document.getElementById('bk-exp').textContent = fmtT(exposed);
+      const v = document.getElementById('bk-verdict');
+      const ideal = factor * G / W;
+      if (N === 1) { v.className = 'verdict'; v.textContent = '单卡：没有梯度同步。'; }
+      else if (exposed < 0.05 * Tb) { v.className = 'verdict good'; v.textContent = '通信几乎全部藏在反向计算里（暴露部分不到反向时间的 5%）。模型梯度共 ' + fmtB(G) + '，纯带宽下限 ' + fmtT(ideal) + '。'; }
+      else if (commTotal > Tb) { v.className = 'verdict bad'; v.textContent = '通信总时长超过了反向计算：' + (nb > 2000 ? '桶太小，固定开销累积起来压垮了通信流；' : '') + (ideal > Tb ? '即使只算带宽项（' + fmtT(ideal) + '）也比反向长，再怎么分桶都藏不住，需要更多每卡 token 或更快的网络。' : '把桶调大一些试试。'); }
+      else { v.className = 'verdict'; v.textContent = '大部分通信能重叠，但最后' + (nb <= 2 ? '一个大桶要等反向结束才开始，整个露在外面' : '几个桶的通信溢出到了反向之后') + '。'; }
+      // draw
+      const svg = document.getElementById('bk-svg'); svg.innerHTML = '';
+      const span = Math.max(tEnd, Tb) * 1.04, X0 = 70, Wd = 600;
+      const sx = (t) => X0 + t / span * Wd;
+      el('text', { x: 0, y: 40, 'font-size': 13 }, svg, '计算');
+      el('text', { x: 0, y: 92, 'font-size': 13 }, svg, '通信');
+      el('rect', { x: X0, y: 24, width: sx(Tb) - X0, height: 26, rx: 4, fill: 'var(--accent)', opacity: 0.8 }, svg);
+      // layer separators
+      for (let i = 1; i < L; i++) el('line', { x1: sx(Tb * i / L), y1: 24, x2: sx(Tb * i / L), y2: 50, stroke: 'var(--surface)', 'stroke-width': L > 40 ? 0.5 : 1 }, svg);
+      const lim = Math.min(bars.length, 600);
+      for (let i = 0; i < lim; i++) {
+        const [a, b] = bars[i];
+        el('rect', { x: sx(a), y: 76, width: Math.max(0.6, sx(b) - sx(a) - (bars.length < 60 ? 1 : 0)), height: 26, rx: bars.length < 60 ? 3 : 0, fill: 'var(--accent-2)', opacity: 0.85 }, svg);
+      }
+      if (bars.length > lim) el('rect', { x: sx(bars[lim][0]), y: 76, width: sx(bars[bars.length - 1][1]) - sx(bars[lim][0]), height: 26, fill: 'var(--accent-2)', opacity: 0.85 }, svg);
+      el('line', { x1: sx(Tb), y1: 16, x2: sx(Tb), y2: 112, stroke: 'var(--text)', 'stroke-dasharray': '4 3' }, svg);
+      el('line', { x1: X0, y1: 124, x2: X0 + Wd, y2: 124, stroke: 'var(--border)' }, svg);
+      [0, 0.25, 0.5, 0.75, 1].forEach((f) => {
+        el('text', { x: X0 + f * Wd, y: 142, 'font-size': 11, 'text-anchor': f === 1 ? 'end' : 'middle' }, svg, fmtT(span * f));
+      });
+    }
+    ['size', 'tok', 'n', 'alpha'].forEach((k) => bk[k].addEventListener('input', bkRender));
+    bk.w.addEventListener('change', bkRender);
+    bindSeg(bkModel, bkRender);
+    bkRender();
+
+    /* ---------- demo: comm-bound calculator ---------- */
+    const bd = {};
+    ['hw', 'b', 'x', 'ek', 'd'].forEach((k) => { bd[k] = document.getElementById('bd-' + k); });
+    function bdRender() {
+      const [C, Wl, axes] = bd.hw.value.split(',').map(Number);
+      const isTPU = C < 5e14;
+      const W = Wl * axes;
+      const B = Math.pow(2, +bd.b.value);
+      const X = Math.pow(2, +bd.x.value);
+      const ek = Math.pow(2, +bd.ek.value);
+      const D = Math.pow(2, +bd.d.value), F = 4 * D;
+      document.getElementById('bd-b-out').textContent = fmtN(B);
+      document.getElementById('bd-x-out').textContent = X;
+      document.getElementById('bd-ek-out').textContent = ek === 1 ? '1（稠密）' : ek;
+      document.getElementById('bd-d-out').textContent = D;
+      const ringF = isTPU ? 1 : (X - 1) / X;
+      const crit = ek * C / W * ringF;
+      const bx = B / X;
+      // per layer, backward; k folded into ek: T_math uses k*B (k=1 here), T_comms uses E (=ek)
+      const Tm = 8 * B * D * F / (X * C);
+      const Tc = X === 1 ? 0 : 8 * ek * D * F * ringF / W;
+      document.getElementById('bd-bx').textContent = fmtN(bx);
+      document.getElementById('bd-crit').textContent = X === 1 ? '—' : fmtN(crit);
+      document.getElementById('bd-tm').textContent = fmtT(Tm);
+      document.getElementById('bd-tc').textContent = X === 1 ? '0' : fmtT(Tc);
+      const base = ek * C / W;
+      const maxX = isTPU ? B / base : B / base + 1;
+      document.getElementById('bd-max').textContent = '≈ ' + fmtN(Math.floor(maxX));
+      const v = document.getElementById('bd-verdict');
+      if (X === 1) { v.className = 'verdict'; v.textContent = '只有一张卡，没有 DP 通信。'; }
+      else if (bx > crit) { v.className = 'verdict good'; v.textContent = '计算受限：每卡 ' + fmtN(bx) + ' token > 临界 ' + fmtN(crit) + '，梯度通信（' + fmtT(Tc) + '/层）可以藏在反向计算（' + fmtT(Tm) + '/层）后面。'; }
+      else { v.className = 'verdict bad'; v.textContent = '通信受限：每卡 token 不足临界值，每层通信比计算长 ' + (Tc / Tm).toFixed(1) + ' 倍。要么加大 batch，要么减少 DP 卡数，改用张量 / 流水线并行补足。'; }
+    }
+    ['b', 'x', 'ek', 'd'].forEach((k) => bd[k].addEventListener('input', bdRender));
+    bd.hw.addEventListener('change', bdRender);
+    bdRender();
+
+    /* ---------- demo: ZeRO memory ---------- */
+    const zm = {};
+    ['psi', 'nd', 'k', 'fp32', 'hbm'].forEach((k) => { zm[k] = document.getElementById('zm-' + k); });
+    const bars = document.getElementById('zm-bars');
+    const names = ['DP', 'ZeRO-1', 'ZeRO-2', 'ZeRO-3'];
+    names.forEach((n) => {
+      const r = document.createElement('div'); r.className = 'zrow';
+      r.innerHTML = '<span>' + n + '</span><div class="ztrack"><div class="zfill"><span class="c" style="background:var(--accent)"></span><span class="c" style="background:var(--accent-2)"></span><span class="c" style="background:color-mix(in srgb, var(--accent-2) 45%, var(--text-faint))"></span><span class="c" style="background:color-mix(in srgb, var(--accent) 45%, var(--text-faint))"></span></div><div class="zcap"></div></div><span class="zval"></span>';
+      bars.appendChild(r);
+    });
+    function zmRender() {
+      const psi = Number((Math.pow(10, +zm.psi.value) * 1e9).toPrecision(3));
+      const Nd = Math.pow(2, +zm.nd.value);
+      const k = +zm.k.value;
+      const f32 = zm.fp32.checked ? 4 : 0;
+      const hbm = +zm.hbm.value * 1e9;
+      document.getElementById('zm-psi-out').textContent = (psi / 1e9 >= 10 ? (psi / 1e9).toFixed(0) : (psi / 1e9).toFixed(psi / 1e9 >= 1 ? 2 : 2)) + 'B';
+      document.getElementById('zm-nd-out').textContent = Nd;
+      document.getElementById('zm-k-out').textContent = k;
+      // [params, grads bf16, grads fp32, optimizer]
+      const parts = [
+        [2 * psi, 2 * psi, f32 * psi, k * psi],
+        [2 * psi, 2 * psi, f32 * psi, k * psi / Nd],
+        [2 * psi, 2 * psi / Nd, f32 * psi / Nd, k * psi / Nd],
+        [2 * psi / Nd, 2 * psi / Nd, f32 * psi / Nd, k * psi / Nd],
+      ];
+      const tot = parts.map((p) => p.reduce((a, b) => a + b, 0));
+      const scale = Math.max(tot[0], hbm) * 1.02;
+      let fit = '都放不下';
+      bars.querySelectorAll('.zrow').forEach((row, i) => {
+        row.querySelectorAll('.c').forEach((s, j) => { s.style.width = (parts[i][j] / scale * 100) + '%'; });
+        row.querySelector('.zcap').style.left = (hbm / scale * 100) + '%';
+        const g = tot[i] / 1e9;
+        row.querySelector('.zval').textContent = (g >= 100 ? g.toFixed(0) : g >= 10 ? g.toFixed(1) : g.toFixed(2)) + ' GB';
+        row.classList.toggle('over', tot[i] > hbm);
+      });
+      for (let i = 0; i < 4; i++) if (tot[i] <= hbm) { fit = names[i] + '（还没算激活）'; break; }
+      document.getElementById('zm-fit').textContent = fit;
+      document.getElementById('zm-ratio').textContent = tot.map((t) => (t / tot[0]).toFixed(t / tot[0] < 0.1 ? 3 : 2)).join(' / ');
+    }
+    ['psi', 'nd', 'k'].forEach((k) => zm[k].addEventListener('input', zmRender));
+    zm.fp32.addEventListener('change', zmRender);
+    zm.hbm.addEventListener('change', zmRender);
+    zmRender();
+  })();
+  </script>
+</body>
+</html>
