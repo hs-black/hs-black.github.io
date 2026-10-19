@@ -76,7 +76,7 @@
 
     <article class="prose">
       <p>DeepSeek 在 2026 年 4 月放出了 V4 的预览版和一份 58 页的技术报告《DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence》（arXiv 2606.19348）。这份报告的主线很清楚：<strong>让一百万 token 的上下文变得便宜到可以日常使用</strong>。为此它几乎把 V3 的注意力推倒重来（CSA + HCA 混合注意力），换了残差连接（mHC），换了优化器（Muon），又在训练、推理、后训练三套基础设施上做了一大堆配套工作。</p>
-      <p>这篇笔记按报告的顺序走一遍，但每个新东西我都先把它所依赖的旧东西（MLA、DeepSeekMoE、MTP、DSA）讲清楚，再讲 V4 改了什么、为什么这样改、张量形状是什么。除了报告本身，我还读了 Hugging Face 上随模型发布的 <code>config.json</code> 和参考推理代码 <code>inference/model.py</code>；报告自己也说「细节以开源实现为准」。凡是从代码或我自己推算得到、报告正文里没写的东西，我都会标出来。</p>
+      <p>下面按报告的顺序走一遍。每遇到一个新部件，先把它所依赖的旧东西（MLA、DeepSeekMoE、MTP、DSA）讲清楚，再讲 V4 改了什么、为什么这样改、张量形状是什么。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -93,7 +93,7 @@
           <li><a href="#post">后训练：专家 RL + 多教师在线蒸馏</a></li>
           <li><a href="#eval">评测结果</a></li>
           <li><a href="#summary">小结与我的看法</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -105,9 +105,9 @@
         <li><strong>DeepSeek-V4-Flash</strong>：总参数 284B，激活 13B，预训练 32T token。</li>
       </ul>
       <p>每个模型又有三档「推理强度」：Non-think、Think High、Think Max。报告里最常出现的 <em>V4-Pro-Max</em> 就是 Pro 在 Think Max 档。</p>
-      <p>报告开篇给了两个效率数字，后文我会用自己的计算器复现：在 1M 上下文下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV cache 只有 10%；V4-Flash 分别是 10% 和 7%。</p>
+      <p>报告开篇给了两个效率数字（第 4 节会用一个计算器把它们算出来）：在 1M 上下文下，V4-Pro 的单 token 推理 FLOPs 只有 V3.2 的 27%，KV cache 只有 10%；V4-Flash 分别是 10% 和 7%。</p>
 
-      <p>下面这张表是我整理的「改动清单」，后面每一行都会展开：</p>
+      <p>先看一张改动清单，后面每一行都会展开：</p>
       <div class="table-wrap">
       <table class="tight">
         <thead><tr><th>部件</th><th>V3（2024.12）</th><th>V3.2（2025.12）</th><th>V4（2026.04）</th></tr></thead>
@@ -162,7 +162,7 @@
           <text x="340" y="210" font-size="13">残差流形状：n_hc × d = 4 × d</text>
           <text x="340" y="234" font-size="12.5" class="soft">子层的输入输出仍是 d 维</text>
         </svg></div>
-        <figcaption>图 1　V4 总体结构（我根据报告图 2 和参考代码重画）。橙色是 mHC 的三种映射，紫色是子层本体。</figcaption>
+        <figcaption>图 1　V4 总体结构。橙色是 mHC 的三种映射，紫色是子层本体。</figcaption>
       </figure>
 
       <!-- ============================================================ -->
@@ -182,7 +182,7 @@
       <p>其中 \(\mathbf e_i\) 是第 \(i\) 个专家的「质心」向量，\(s_{i,t}\) 是亲和度分数。选专家时用 \(s_{i,t}+b_i\) 排序取 top-\(K_r\)，但门控权重 \(g_{i,t}\) 只用 \(s_{i,t}\)，并在选中的 \(K_r\) 个里归一化。偏置 \(b_i\) 不参与梯度：每步之后，过载的专家 \(b_i\) 减 \(\gamma\)，欠载的加 \(\gamma\)，这就是<strong>无辅助损失的负载均衡</strong>（auxiliary-loss-free）。V3 另外加了一个权重很小的序列级均衡损失，防止单条序列内部极端不均。V3 还限制每个 token 最多发往 4 个节点，以控制跨节点通信。</p>
 
       <h3>2.3 MTP：多预测一个 token</h3>
-      <p>MTP（Multi-Token Prediction）在主干之后串一个小模块：把主干第 \(i\) 个位置的最终表示和第 \(i+1\) 个 token 的嵌入拼起来，过一个 Transformer 块，再用共享的输出头预测第 \(i+2\) 个 token。训练时它是一个附加损失（加权 \(\lambda\)），让表示更「往前看」；推理时可以拿来做投机解码。V3 用深度 1；V4 报告明确说 MTP 配置与 V3 完全相同。参考代码里 MTP 块是 \(\mathbf x=W_e\,\mathrm{RMSNorm}(\mathrm{Emb})+W_h\,\mathrm{RMSNorm}(\mathbf h)\)，等价于先拼接再投影。</p>
+      <p>MTP（Multi-Token Prediction）在主干之后串一个小模块：把主干第 \(i\) 个位置的最终表示和第 \(i+1\) 个 token 的嵌入拼起来，过一个 Transformer 块，再用共享的输出头预测第 \(i+2\) 个 token。训练时它是一个附加损失（加权 \(\lambda\)），让表示更「往前看」；推理时可以拿来做投机解码。V3 用深度 1，V4 的 MTP 配置与 V3 完全相同。具体实现上，MTP 块的输入是 \(\mathbf x=W_e\,\mathrm{RMSNorm}(\mathrm{Emb})+W_h\,\mathrm{RMSNorm}(\mathbf h)\)，等价于先拼接再投影。</p>
 
       <h3>2.4 DSA：用一个便宜的打分器挑 token</h3>
       <p>V3.2 引入了 DSA（DeepSeek Sparse Attention）。它的出发点是：一个 query 真正需要关注的历史 token 往往很少。DSA 用一个轻量的 <strong>lightning indexer</strong> 给每个历史 token 打分：</p>
@@ -212,7 +212,7 @@
       <ul>
         <li><strong>softmax 是逐通道的。</strong>\(Z\) 和 \(C\) 形状相同（每个 token 每个通道都有一个权重），softmax 沿「这 \(2m\) 个 token」的方向做，\(c\) 个通道各自归一化。所以这是一个可学习的、逐通道的加权池化，不是简单平均。</li>
         <li>\(B^a,B^b\in\mathbb R^{m\times c}\) 是可学习的<strong>位置偏置</strong>：块内第几个位置天然更重要，可以由它表达。</li>
-        <li><strong>重叠。</strong>条目 \(i\) 用到上一块的 \(C^b\)，条目 \(i-1\) 用到同一块的 \(C^a\)，所以相邻条目覆盖的 token 有一半重叠，每个条目「看」的是 \(2m=8\) 个 token，但条目数仍是 \(n/m\)。\(i=0\) 时上一块不存在，\(Z^b\) 填 \(-\infty\)、\(C^b\) 填 0。参考代码里只有压缩率为 4 时才启用重叠。</li>
+        <li><strong>重叠。</strong>条目 \(i\) 用到上一块的 \(C^b\)，条目 \(i-1\) 用到同一块的 \(C^a\)，所以相邻条目覆盖的 token 有一半重叠，每个条目「看」的是 \(2m=8\) 个 token，但条目数仍是 \(n/m\)。\(i=0\) 时上一块不存在，\(Z^b\) 填 \(-\infty\)、\(C^b\) 填 0。只有压缩率为 4 的压缩器（CSA 的主 KV 和 indexer）才用重叠窗口。</li>
       </ul>
       <p>HCA 的压缩器更简单：只有一套 \(C=HW^{KV}\)、\(Z=HW^{Z}\)，不重叠，每 \(m'=128\) 个 token 做一次逐通道 softmax 加权求和（位置偏置 \(B\in\mathbb R^{m'\times c}\)），条目数 \(n/m'\)。</p>
 
@@ -225,7 +225,7 @@
         <figcaption>图 2　CSA 压缩器的重叠窗口。橙色是当前块（\(C^a\) 部分），紫色是借用的上一块（\(C^b\) 部分）。</figcaption>
       </figure>
 
-      <p>压缩之后，参考代码还会对每个条目做 RMSNorm，在最后 64 维上施加 RoPE（位置取该块第一个 token 的位置 \(mi\)），再把非 RoPE 的 448 维量化成 FP8 存进 cache。注意：只有凑满 \(m\) 个 token 才会产生一个新条目；没凑满的尾巴 token 要先放在缓冲区里（8.5 节的「state cache」）。</p>
+      <p>压缩之后，每个条目还要做一次 RMSNorm，在最后 64 维上施加 RoPE（位置取该块第一个 token 的位置 \(mi\)），再把非 RoPE 的 448 维量化成 FP8 存进 cache。注意：只有凑满 \(m\) 个 token 才会产生一个新条目；没凑满的尾巴 token 要先放在缓冲区里（8.5 节的「state cache」）。</p>
 
       <h3>3.2 CSA：在压缩条目上做 DSA</h3>
       <p>有了 \(n/m\) 个压缩条目，CSA 接下来用 lightning indexer 挑选。indexer 有自己的一套压缩器（同样的重叠压缩，但头维度是 \(c_I=128\)），得到压缩的 indexer key \(K^{\text{IComp}}\in\mathbb R^{\frac nm\times c_I}\)。query 一侧走低秩路径：</p>
@@ -234,12 +234,12 @@
       <p>形式和 V3.2 一模一样，区别只是打分对象从「每个 token」变成了「每个压缩块」，候选数少了 4 倍。然后取 top-\(k\)：</p>
       $$\mathcal C^{\text{SprsComp}}_t=\big\{C^{\text{Comp}}_s\;\big|\;I_{t,s}\in\text{Top-}k(I_{t,:})\big\}.$$
       <p>V4-Flash 取 \(k=512\)，V4-Pro 取 \(k=1024\)，都比 V3.2 的 2048 小。每个压缩条目代表 4 个 token，所以 Pro 每层实际「覆盖」约 4096 个 token 的信息，而 V3.2 是 2048 个 token。</p>
-      <p>注意 query 的低秩潜向量 \(\mathbf c^Q_t\) 由主注意力和 indexer 共享。参考代码里 indexer 的 query 和 key 在量化到 FP4 之前还会做一次 Hadamard 旋转（把离群值摊到各维上，降低量化误差），这一点报告正文没写。</p>
+      <p>注意 query 的低秩潜向量 \(\mathbf c^Q_t\) 由主注意力和 indexer 共享。indexer 的 query 和 key 在量化到 FP4 之前还要做一次 Hadamard 旋转：正交变换不改变内积，却能把少数离群维度的能量摊到所有维度上，量化误差因此更小。</p>
 
       <h3>3.3 Shared-KV MQA 与分组输出投影</h3>
       <p>挑出来的压缩条目直接同时充当 key 和 value，所有 query 头共享（MQA）：</p>
       $$\mathbf q_t=\mathbf c^Q_tW^{UQ}\in\mathbb R^{cn_h},\qquad \mathbf o_{t,i}=\mathrm{CoreAttn}\big(\mathbf q_{t,i},\;\mathcal C^{\text{SprsComp}}_t,\;\mathcal C^{\text{SprsComp}}_t\big)\in\mathbb R^{c}.$$
-      <p>和 2.1 节对照：MLA 在 MQA 模式下，key 是 576 维 \([\mathbf c^{KV};\mathbf k^R]\)，value 是其中 512 维的 \(\mathbf c^{KV}\)；V4 直接把它统一成一个 512 维向量（最后 64 维带 RoPE），K 和 V 用同一个，也不再有 \(W^{UK},W^{UV}\) 这层「先压后解」的分解。我的理解是：V4 把「吸收后的 MLA」当成了模型本来的样子。</p>
+      <p>和 2.1 节对照：MLA 在 MQA 模式下，key 是 576 维 \([\mathbf c^{KV};\mathbf k^R]\)，value 是其中 512 维的 \(\mathbf c^{KV}\)；V4 直接把它统一成一个 512 维向量（最后 64 维带 RoPE），K 和 V 用同一个，也不再有 \(W^{UK},W^{UV}\) 这层「先压后解」的分解。换句话说，V4 把「吸收后的 MLA」直接当成了模型本来的样子。</p>
       <p>代价是输出变宽了：每头输出 512 维，Pro 有 128 个头，拼起来 \(cn_h=65536\) 维，直接投影回 \(d=7168\) 要一个 \(65536\times7168\) 的矩阵（4.7 亿参数，每 token 每层 9.4 亿 FLOPs）。V4 因此用了<strong>分组输出投影</strong>：把 \(n_h\) 个头分成 \(g\) 组，每组 \(\frac{n_h}{g}\) 个头的输出（\(c\frac{n_h}{g}\) 维）先各自投影到 \(d_g\) 维，拼成 \(gd_g\) 维后再投影到 \(d\)：</p>
       $$\mathbf o^G_{t,i}\in\mathbb R^{c\,n_h/g}\xrightarrow{\;W^{O1}_i\;}\mathbf o'^G_{t,i}\in\mathbb R^{d_g},\qquad[\mathbf o'^G_{t,1};\dots;\mathbf o'^G_{t,g}]\in\mathbb R^{gd_g}\xrightarrow{\;W^{O2}\;}\hat{\mathbf o}_t\in\mathbb R^{d}.$$
       <p>算一下 Pro（\(g=16,\ d_g=1024\)）：第一级 16 个 \(4096\times1024\) 矩阵，共 67.1M 参数；第二级 \(16384\times7168\)，117.4M；合计 184.5M，是直接投影的 39%。Flash（\(g=8\)）：33.6M + 33.6M = 67.1M，是直接投影（\(32768\times4096\)）的一半。这其实就是把一个大矩阵换成「块对角 + 稠密」的低秩结构。</p>
@@ -278,28 +278,28 @@
           <path class="ln" d="M115 80 V68 H250 V58 M320 80 V58 M530 80 V68 H390 V58"/>
           <path class="ln" d="M620 210 H632 V40 H470"/>
         </svg></div>
-        <figcaption>图 3　CSA 的数据流（按报告图 3 重画）。HCA 去掉 indexer 和 top-k，压缩率换成 128，其余相同。</figcaption>
+        <figcaption>图 3　CSA 的数据流。HCA 去掉 indexer 和 top-k，压缩率换成 128，其余相同。</figcaption>
       </figure>
 
       <h3>3.4 HCA：压得更狠，但不挑</h3>
       <p>HCA 和 CSA 共用 query 路径、shared-KV MQA、分组输出投影，区别只在压缩：128 个 token 压成 1 个条目、不重叠、没有 indexer，query 对所有已完成的压缩条目做稠密注意力。1M 上下文时也只有 8192 个条目，是 V3.2 每层 top-k（2048 个 token）的 4 倍，远小于 1M。</p>
-      <p>为什么要两种层交替？报告没有做消融，只说这种混合结构显著改善长上下文效率。我的理解是分工：HCA 以极低成本给每一层提供「全局但模糊」的视图，CSA 提供「按需取回、分辨率 4 倍」的细节，滑窗分支补最近的精确信息。</p>
+      <p>为什么要两种层交替？报告没有为此做消融，只说这种混合结构显著改善了长上下文效率。从结构上看，两者是分工：HCA 以极低成本给每一层提供「全局但模糊」的视图，CSA 提供「按需取回、分辨率 4 倍」的细节，滑窗分支补最近的精确信息。</p>
 
       <h3>3.5 其他细节</h3>
       <p><strong>Query 与 KV 条目的 RMSNorm。</strong>在核心注意力之前，对每个 query 头和唯一的那个 KV 头各做一次 RMSNorm。这样 \(\mathbf q\cdot\mathbf k\) 的量级被锁住，注意力 logit 不会爆炸。后面 Muon 一节会看到，正因为有这一步，V4 不需要 Kimi K2 用的 QK-Clip。</p>
       <p><strong>部分 RoPE + 输出的反向旋转。</strong>每个 query 和 KV 条目只在最后 64 维施加 RoPE。问题来了：K 和 V 是同一个向量，于是 value 也带着绝对位置 \(s\) 的旋转。设 \(R(\theta_s)\) 是位置 \(s\) 的旋转矩阵，注意力输出的 RoPE 部分是</p>
       $$\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}\,R(\theta_s)\,\mathbf x_s .$$
-      <p>V4 的处理是在输出上再乘一次位置 \(-t\) 的旋转：\(R(-\theta_t)\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}R(\theta_{s-t})\mathbf x_s\)。旋转矩阵满足 \(R(a)R(b)=R(a+b)\)，所以每个条目对输出的贡献只依赖相对距离 \(s-t\)。参考代码里就是对输出最后 64 维调用一次 <code>apply_rotary_emb(..., inverse=True)</code>。</p>
+      <p>V4 的处理是在输出上再乘一次位置 \(-t\) 的旋转：\(R(-\theta_t)\mathbf o^{\text{rope}}_t=\sum_s p_{t,s}R(\theta_{s-t})\mathbf x_s\)。旋转矩阵满足 \(R(a)R(b)=R(a+b)\)，所以每个条目对输出的贡献只依赖相对距离 \(s-t\)。实现上就是对输出的最后 64 维再调用一次 <code>apply_rotary_emb(..., inverse=True)</code>。</p>
       <p><strong>滑动窗口分支。</strong>压缩条目只有在整块凑满后才可见（严格因果），所以 query 看不到自己所在块里的其他 token；而最近的 token 往往最相关。因此 CSA 和 HCA 都额外接入最近 \(n_{\text{win}}=128\) 个<em>未压缩</em>的 KV（同样是 512 维 shared-KV），和压缩条目放在同一个 softmax 里。</p>
       <p><strong>Attention sink。</strong>每个头有一个可学习的 logit \(z'_h\)，加到 softmax 的分母上：</p>
       $$s_{h,i,j}=\frac{\exp(z_{h,i,j})}{\sum_k\exp(z_{h,i,k})+\exp(z'_h)} .$$
       <p>这样一个头的注意力权重之和可以小于 1，甚至接近 0，头可以选择「这次什么都不看」。在稀疏和压缩注意力里这很有用：被选中的条目不一定真的相关，强行归一到 1 会引入噪声。</p>
-      <p><strong>层的排布。</strong>Flash 共 43 层：前两层只用滑动窗口注意力（SWA），之后 CSA 与 HCA 交替；Pro 共 61 层：前两层用 HCA，之后交替。从 <code>config.json</code> 的 <code>compress_ratios</code> 数下来，Pro 是 30 个 CSA 层 + 31 个 HCA 层，Flash 是 21 个 CSA + 20 个 HCA + 2 个 SWA；MTP 层的压缩率为 0，即只用滑窗。</p>
-      <p><strong>位置编码的配置</strong>（来自 config，报告未写）：RoPE 底数 10000，带压缩的层用 <code>compress_rope_theta = 160000</code> 并开 YaRN（factor 16，原始长度 65536）；纯 SWA 层不开 YaRN。</p>
+      <p><strong>层的排布。</strong>Flash 共 43 层：前两层只用滑动窗口注意力（SWA），之后 CSA 与 HCA 交替；Pro 共 61 层：前两层用 HCA，之后交替。合起来，Pro 是 30 个 CSA 层 + 31 个 HCA 层，Flash 是 21 个 CSA + 20 个 HCA + 2 个 SWA；MTP 层的压缩率为 0，即只用滑窗。</p>
+      <p><strong>位置编码的配置。</strong>RoPE 底数 10000，带压缩的层用 <code>compress_rope_theta = 160000</code> 并开 YaRN（factor 16，原始长度 65536）；纯 SWA 层不开 YaRN。</p>
 
       <div class="demo" id="vis-demo">
         <div class="demo-label">交互演示 · 一个 query 在 CSA / HCA 里能看到什么</div>
-        <p style="margin-top:8px;font-size:15px">为了画得下，这里用缩小的玩具尺寸：64 个 token，CSA 压缩率 \(m=4\)、top-\(k=4\)，HCA 压缩率 \(m'=16\)，滑窗 8。索引分数由随机向量算出，<b>仅作示意</b>；可见性规则（块凑满才可见、重叠覆盖、滑窗包含自身）与参考代码一致。</p>
+        <p style="margin-top:8px;font-size:15px">为了画得下，这里用缩小的玩具尺寸：64 个 token，CSA 压缩率 \(m=4\)、top-\(k=4\)，HCA 压缩率 \(m'=16\)，滑窗 8。索引分数由随机向量算出（示意），可见性规则（块凑满才可见、重叠覆盖、滑窗包含自身）和真实模型相同。</p>
         <div class="ctrls">
           <label class="ctrl"><span>query 位置 t</span><input type="range" id="vis-t" min="0" max="63" value="41"><output id="vis-t-out">41</output></label>
         </div>
@@ -327,7 +327,7 @@
         <li>最重要的：<strong>压缩 + 混合</strong>本身。</li>
       </ol>
       <p>报告给出的对照是：以「BF16、GQA8、头维度 128」这种常见配置为基线，V4 在 1M 上下文时的 KV cache 约为基线的 2%。报告图 1 还画了 V3.2 / V4-Pro / V4-Flash 的累计 KV cache 和单 token FLOPs 随长度变化的曲线，在 1M 处标注 KV 小 9.5×（Pro）和 13.7×（Flash），FLOPs 低 3.7×（Pro）和 9.8×（Flash）。</p>
-      <p>报告没给这些曲线的具体算法，所以我按超参自己搭了一个模型。下面写清楚每一项怎么算（单位：每生成一个 token；\(n\) 是当前上下文长度；「层」是主干层，不含 MTP）：</p>
+      <p>这些曲线可以从超参数直接算出来。把每生成一个 token 的开销拆成四项（\(n\) 是当前上下文长度；「层」是主干层，不含 MTP）：</p>
       <div class="table-wrap">
       <table class="tight">
         <thead><tr><th></th><th>V3.2（61 层）</th><th>V4（CSA 层 / HCA 层）</th></tr></thead>
@@ -339,7 +339,7 @@
         </tbody>
       </table>
       </div>
-      <p>报告说 FLOPs 是「等效 FP8 FLOPs」。我按 FP8 计 1、BF16 计 2（吞吐减半）、FP4 计 0.5 来折算。<b>这个折算规则是我猜的</b>，但用它算出来：1M 处 KV 比值是 9.5× 和 13.6×，FLOPs 比值是 3.8× 和 10.1×，V4-Pro 的 FLOPs 是 V3.2 的 26.5%、KV 是 10.6%，Flash 是 9.9% 和 7.4%；以 61 层 GQA8 BF16 为基线，Pro 的 KV 是 1.98%。和报告的数字都在几个百分点以内吻合，说明这套账大体是对的。</p>
+      <p>报告用「等效 FP8 FLOPs」计量，但没有给出折算方式。最自然的折算是按张量核心吞吐：同样一次乘加，BF16 的耗时是 FP8 的 2 倍，FP4 是一半，所以 FP8 计 1、BF16 计 2、FP4 计 0.5。按这套账，1M 处 KV 比值是 9.5×（Pro）和 13.6×（Flash），FLOPs 比值是 3.8× 和 10.1×；V4-Pro 的 FLOPs 是 V3.2 的 26.5%、KV 是 10.6%，Flash 是 9.9% 和 7.4%；以 61 层 GQA8 BF16 为基线，Pro 的 KV 是 1.98%。这些和报告给出的数字（9.5×、13.7×、3.7×、9.8×、27%、10%、2%）只差几个百分点，说明 V4 的长上下文开销基本就是由上表这几项决定的。</p>
 
       <div class="demo" id="cost-demo">
         <div class="demo-label">交互演示 · KV cache / 单 token FLOPs 计算器（V3.2 vs V4）</div>
@@ -391,11 +391,11 @@
       <p>其中 \(W^{\text{pre}},W^{\text{post}}\in\mathbb R^{n_{hc}d\times n_{hc}}\)，\(W^{\text{res}}\in\mathbb R^{n_{hc}d\times n_{hc}^2}\)，\(S\) 是静态偏置，\(\alpha\) 是初始化为小值的门控标量。然后施加约束：</p>
       $$A_l=\sigma(\tilde A_l),\qquad C_l=2\sigma(\tilde C_l),\qquad B_l=\mathrm{Sinkhorn}(\exp(\tilde B_l)).$$
       <p>Sinkhorn–Knopp 迭代：从 \(M^{(0)}=\exp(\tilde B_l)\)（保证正）出发，交替做列归一化和行归一化 \(M^{(t)}=\mathcal T_r(\mathcal T_c(M^{(t-1)}))\)，迭代 \(t_{\max}=20\) 次。对正矩阵这个过程收敛到一个双随机矩阵。</p>
-      <p>形状账（Pro，\(d=7168,\ n_{hc}=4\)）：三组 \(W\) 合在一起是 \(4d\times(4+4+16)=28672\times24\)，每个子层一份（注意力前一份、MoE 前一份），每层 1.38M 参数，61 层约 84M，相对 1.6T 可以忽略。报告第 3.3 节提到的「mHC 里有一个输出维度只有 24 的矩阵乘」就是它。参考代码中，模型入口把嵌入复制成 4 份，出口用一个只有 sigmoid 权重的 \(A\) 把 4 路合成 1 路再接输出头。</p>
+      <p>形状账（Pro，\(d=7168,\ n_{hc}=4\)）：三组 \(W\) 合在一起是 \(4d\times(4+4+16)=28672\times24\)，每个子层一份（注意力前一份、MoE 前一份），每层 1.38M 参数，61 层约 84M，相对 1.6T 可以忽略。8.4 节会提到的「mHC 里输出维度只有 24 的矩阵乘」就是它。模型入口把嵌入复制成 4 份，出口用一个只有 sigmoid 权重的 \(A\) 把 4 路合成 1 路再接输出头。</p>
 
       <div class="demo" id="sk-demo">
         <div class="demo-label">交互演示 · Sinkhorn 把任意矩阵拉到双随机流形上</div>
-        <p style="margin-top:8px;font-size:15px">\(\tilde B\) 是随机生成的 4×4 矩阵（元素 ~ N(0, σ²)，<b>示意用</b>）。拖动迭代次数，看行和、列和与谱范数怎么变；矩阵右边一列是行和，下面一行是列和。</p>
+        <p style="margin-top:8px;font-size:15px">\(\tilde B\) 是随机生成的 4×4 矩阵，元素服从 N(0, σ²)。拖动迭代次数，看行和、列和与谱范数怎么变；矩阵右边一列是行和，下面一行是列和。</p>
         <div class="ctrls">
           <label class="ctrl"><span>迭代次数 t</span><input type="range" id="sk-t" min="0" max="20" value="0"><output id="sk-t-out">0</output></label>
           <label class="ctrl"><span>初始化尺度 σ</span><input type="range" id="sk-s" min="0.2" max="3" step="0.1" value="1.5"><output id="sk-s-out">1.5</output></label>
@@ -404,7 +404,7 @@
         <div class="mat" id="sk-mat"></div>
         <div class="readout" id="sk-readout"></div>
         <div class="row-btns" style="margin-top:14px"><button class="btn primary" id="sk-stack">堆叠 122 层看看</button><span id="sk-stack-out" style="font-size:14px;color:var(--text-soft)"></span></div>
-        <div class="note">「堆叠」对比两种 122 层（61 层 × 每层两个子层）的残差变换连乘：一种是不加约束的 \(B=I+0.15\,\mathcal N(0,1)\)（模拟 HC 初始化附近的随机扰动），另一种是 20 步 Sinkhorn 投影后的 \(B\)。都是随机矩阵，只为说明量级。</div>
+        <div class="note">「堆叠」对比两种 122 层（61 层 × 每层两个子层）的残差变换连乘：一种是不加约束的 \(B=I+0.15\,\mathcal N(0,1)\)（模拟 HC 初始化附近的随机扰动），另一种是 20 步 Sinkhorn 投影后的 \(B\)（示意）。</div>
       </div>
 
       <p>工程上 mHC 并不免费：残差流宽了 4 倍，激活显存和流水线阶段之间的通信量都变大。报告用融合 kernel、选择性重计算、调整 DualPipe 的 1F1B 重叠三招把墙钟开销压到流水线阶段的 6.7%（见 8.3 节）。</p>
@@ -413,14 +413,14 @@
       <h2 id="moe">6. MoE 的小改动与参数账</h2>
       <p>V4 的 MoE 仍是 DeepSeekMoE，报告列了这些改动：</p>
       <ul>
-        <li><strong>打分函数从 Sigmoid 换成 Sqrt(Softplus)：</strong>\(s_{i,t}=\sqrt{\log(1+e^{\mathbf u_t^\top\mathbf e_i})}\)。Sigmoid 会在 1 处饱和，而 \(\sqrt{\mathrm{softplus}(x)}\) 在 \(x\) 大时像 \(\sqrt x\) 一样继续增长，在 \(x\) 很负时像 \(e^{x/2}\) 一样趋于 0。报告没解释动机。参考代码里选中专家的分数在 top-k 内归一化后再乘一个 <code>route_scale</code>（Pro 2.5，Flash 1.5，来自 config）。</li>
+        <li><strong>打分函数从 Sigmoid 换成 Sqrt(Softplus)：</strong>\(s_{i,t}=\sqrt{\log(1+e^{\mathbf u_t^\top\mathbf e_i})}\)。Sigmoid 会在 1 处饱和，而 \(\sqrt{\mathrm{softplus}(x)}\) 在 \(x\) 大时像 \(\sqrt x\) 一样继续增长，在 \(x\) 很负时像 \(e^{x/2}\) 一样趋于 0。报告没有解释这个改动的动机。选中专家的分数在 top-k 内归一化后，再乘一个 <code>route_scale</code>（Pro 2.5，Flash 1.5）。</li>
         <li><strong>无辅助损失均衡 + 轻微的序列级均衡损失</strong>，与 V3 一样；偏置更新速度 0.001，均衡损失权重 0.0001。</li>
         <li><strong>取消路由目标节点数的限制</strong>（V3 是最多 4 个节点），改为重新设计并行策略来维持训练效率，见 8.1 节的 MegaMoE。</li>
-        <li><strong>前几层的稠密 FFN 换成 Hash 路由的 MoE。</strong>V3 前 3 层是稠密 FFN；V4 所有层都是 MoE，但前 3 层的专家由 token id 经过预先定义的哈希决定（参考代码里是一张 <code>tid2eid[vocab, 6]</code> 的固定表），不由隐藏状态决定。门控权重仍然由打分函数计算。</li>
+        <li><strong>前几层的稠密 FFN 换成 Hash 路由的 MoE。</strong>V3 前 3 层是稠密 FFN；V4 所有层都是 MoE，但前 3 层的专家由 token id 经过预先定义的哈希决定（实现上是一张 <code>tid2eid[vocab, 6]</code> 的固定表），不由隐藏状态决定。门控权重仍然由打分函数计算。</li>
         <li><strong>激活专家数从 8 降到 6</strong>，但单个专家更大（Pro 的专家中间维度 3072）。每 token 计算 1 个共享 + 6 个路由专家。</li>
         <li><strong>SwiGLU clamping</strong>：线性分支截断到 \([-10,10]\)，门控分支上界截断到 10（见 9.4 节）。</li>
       </ul>
-      <p>有了完整的 config，我可以从头数一遍参数：注意力（含 query 低秩、KV 投影、两级输出投影、压缩器、indexer）、mHC、门控、专家、嵌入和输出头。结果 Flash 主干 284.3B、激活 13.3B（不含嵌入表），Pro 主干 1573B、激活 48.9B，和报告的 284B/13B、1.6T/49B 对得上（Pro 的 1.6T 是四舍五入）。MTP 模块另有 6.6B（Flash）和 25.8B（Pro），与主干共享嵌入和输出头。</p>
+      <p>按 config 把参数逐项数一遍：注意力（含 query 低秩、KV 投影、两级输出投影、压缩器、indexer）、mHC、门控、专家、嵌入和输出头。Flash 主干 284.3B、激活 13.3B（不含嵌入表），Pro 主干 1573B、激活 48.9B，正好是报告的 284B/13B 和 1.6T/49B（1573B 取整为 1.6T）。MTP 模块另有 6.6B（Flash）和 25.8B（Pro），与主干共享嵌入和输出头。</p>
 
       <div class="demo" id="moe-demo">
         <div class="demo-label">交互演示 · 参数量与专家并行（EP）通信计算器</div>
@@ -438,7 +438,7 @@
           <label class="ctrl"><span>互联带宽 B（GB/s）</span><input type="range" id="ep-b" min="25" max="900" step="25" value="400"><output id="ep-b-out">400</output></label>
         </div>
         <div class="readout" id="ep-readout"></div>
-        <div class="note">参数按参考代码的模块逐项计数，其余超参取所选起点模型的 config。激活参数不含嵌入表（含输出头）。EP 部分算力、带宽的默认值是随手设的，<b>不是任何具体硬件的数据</b>。</div>
+        <div class="note">参数按模型的各个模块逐项计数，其余超参取所选起点模型的 config。激活参数不含嵌入表（含输出头）。EP 部分的算力、带宽默认值为示意。</div>
       </div>
 
       <!-- ============================================================ -->
@@ -483,7 +483,7 @@
 
       <!-- ============================================================ -->
       <h2 id="infra">8. 训练与推理基础设施</h2>
-      <p>报告第 3 节和第 5.2 节有大量工程内容，这里按「训练/推理通用 → 训练框架 → 推理框架」的顺序整理。报告没有给出并行度（TP/PP/EP/DP 各多少）等具体数字，下面也就不臆测。</p>
+      <p>报告第 3 节和第 5.2 节有大量工程内容，这里按「训练/推理通用 → 训练框架 → 推理框架」的顺序整理。具体的并行度（TP/PP/EP/DP 各多少）报告没有公开。</p>
 
       <h3>8.1 细粒度专家并行：把通信藏进计算</h3>
       <p>专家并行（EP）把不同专家放在不同 GPU 上，每层 MoE 要做两次 all-to-all：<strong>Dispatch</strong>（把 token 发给专家所在的卡）和 <strong>Combine</strong>（把结果收回来）。一层 MoE 因此分成四个阶段：Dispatch（通信）、Linear-1（gate/up 投影，计算）、Linear-2（down 投影，计算）、Combine（通信）。DeepSeek 的 profiling 发现单层里通信总时间小于计算总时间，所以只要排得好，通信可以完全藏住。</p>
@@ -499,15 +499,15 @@
           <text x="115" y="30" text-anchor="middle" font-size="10.5">Dispatch</text><text x="215" y="30" text-anchor="middle" font-size="10.5">L1+Act</text><text x="325" y="30" text-anchor="middle" font-size="10.5">L2</text><text x="425" y="30" text-anchor="middle" font-size="10.5">Combine</text>
           <text x="10" y="80" font-size="12.5">wave 化</text>
           <g id="ep-waves"></g>
-          <text x="70" y="185" font-size="11.5" class="soft">橙＝通信，紫＝计算；三个 wave 示意。计算串成一条，通信藏在缝里。时间比例为示意。</text>
+          <text x="70" y="185" font-size="11.5" class="soft">橙＝通信，紫＝计算；以三个 wave 为例，计算串成一条，通信藏在缝里（时间比例为示意）。</text>
         </svg></div>
-        <figcaption>图 4　按报告图 5 的思路重画的 EP 时间线。</figcaption>
+        <figcaption>图 4　EP 的时间线：朴素串行 vs. 按 wave 重叠。</figcaption>
       </figure>
       <p>实测：在 NVIDIA GPU 和华为昇腾 NPU 上都验证过，相对强的非融合基线，一般推理负载加速 1.50～1.73×，RL rollout、高速 agent 服务这类延迟敏感场景最高 1.96×。CUDA 版的「mega-kernel」以 MegaMoE 的名字开源在 DeepGEMM 里。</p>
       <p>报告由此给硬件厂商提了几条建议，第一条就是上面计算器里的那个比值：通信能否完全藏住取决于「算力/带宽」比 \(C/B\) 而不是带宽本身。对 V4-Pro，每个 token-专家对需要 \(6hd\) FLOPs、传输 \(3h\) 字节，条件化简为 \(C/B\le2d=6144\) FLOPs/字节，即每 1 GB/s 带宽足以藏住 6.1 TFLOP/s 算力的通信；超过这个平衡点后继续堆带宽收益递减。另外三条：极端融合让算力、显存、网络同时满载，功耗墙会成为瓶颈，需要更多功耗余量；Dispatch 用的是「拉」（每张卡主动读远端激活）而不是「推」，因为细粒度推送的通知延迟太高，希望硬件提供更低延迟的跨卡信号；建议把 SwiGLU 换成不含指数和除法的逐元素激活函数，减少 GEMM 之后的处理开销。</p>
 
       <h3>8.2 用 TileLang 写算子</h3>
-      <p>V4 的结构如果用 PyTorch 原生算子拼，会有几百个细碎的 ATen 算子。DeepSeek 用 TileLang（一种写 GPU kernel 的领域专用语言）写了一批融合 kernel 替换掉其中绝大部分，参考推理代码里的 FP4/FP8 GEMM、稀疏注意力、Sinkhorn 都是 TileLang 写的。报告提到三项对 TileLang 本身的改进：</p>
+      <p>V4 的结构如果用 PyTorch 原生算子拼，会有几百个细碎的 ATen 算子。DeepSeek 用 TileLang（一种写 GPU kernel 的领域专用语言）写了一批融合 kernel 替换掉其中绝大部分，开源推理代码里的 FP4/FP8 GEMM、稀疏注意力、Sinkhorn 都是 TileLang 写的。报告提到三项对 TileLang 本身的改进：</p>
       <ul>
         <li><strong>Host Codegen</strong>：kernel 越快，CPU 端 Python 里的参数检查等固定开销占比越高。他们在 IR 层面同时生成设备 kernel 和一个轻量的宿主端启动器（基于 TVM-FFI），把类型、形状、步长检查都挪进生成的宿主代码，每次调用的 CPU 开销从几十到几百微秒降到 1 微秒以下。</li>
         <li><strong>Z3 SMT 求解器辅助的整数分析</strong>：布局推断、内存冲突检测、边界分析都要判断整数表达式的性质。把 TileLang 的整数表达式翻译成 Z3 的无量词非线性整数算术（QF_NIA），能处理可变形状下的向量化等难题，编译时间只多几秒。</li>
@@ -528,7 +528,7 @@
         <li>all-gather 收集所有 rank 的压缩条目，再用一个融合的 select-and-pad 算子整理成总长 \(\text{cp\_size}\cdot s/m\) 的完整序列，填充放在末尾。</li>
       </ol>
       <p>对 HCA 和 CSA 的 indexer，每个 query 可见的压缩条目范围按规则预先算好；对 CSA 的稀疏注意力，top-k 选择器直接给出可见条目的下标。</p>
-      <p><strong>张量级激活检查点。</strong>常规的激活检查点以模块为单位决定保存还是重算，粒度太粗；手写整层的前向和反向又失去了自动微分的便利。V4 的框架让开发者只写前向、给个别张量打「需要重算」的标注；框架用 TorchFX 追踪完整计算图，对每个标注张量反向遍历找出重算它所需的最小子图，插到对应梯度计算之前。重算时直接释放原张量显存、复用重算结果的存储指针，没有额外拷贝；由于追踪时能看到底层存储指针，共享存储的张量（如 reshape 前后）会自动去重。与手写实现相比没有额外开销。</p>
+      <p><strong>张量级激活 checkpoint。</strong>常规的激活 checkpoint 以模块为单位决定保存还是重算，粒度太粗；手写整层的前向和反向又失去了自动微分的便利。V4 的框架让开发者只写前向、给个别张量打「需要重算」的标注；框架用 TorchFX 追踪完整计算图，对每个标注张量反向遍历找出重算它所需的最小子图，插到对应梯度计算之前。重算时直接释放原张量显存、复用重算结果的存储指针，没有额外拷贝；由于追踪时能看到底层存储指针，共享存储的张量（如 reshape 前后）会自动去重。与手写实现相比没有额外开销。</p>
 
       <h3>8.4 批不变与确定性 kernel</h3>
       <p>V4 要求预训练、后训练和推理三条管线之间<strong>逐位对齐</strong>。两个概念：</p>
@@ -557,7 +557,7 @@
       <p>为了让共享前缀的请求不再重复 prefill，V4 把 KV 存到磁盘。CSA/HCA 的压缩条目全部落盘，命中前缀时读取到最后一个完整压缩块为止，尾部不完整块里的 token 需要重算（未压缩的 KV 不落盘）。滑窗 KV 不压缩且每层都有，体积约是压缩条目的 8 倍，报告给了三种策略：</p>
       <ul>
         <li><strong>全量缓存</strong>：存所有 token 的滑窗 KV，命中时只读前缀最后 \(n_{\text{win}}\) 个 token 的即可，零重算；但写多读少，对 SSD 不友好。</li>
-        <li><strong>周期检查点</strong>：每 \(p\) 个 token 存一次「最后 \(n_{\text{win}}\) 个 token 的滑窗 KV」，命中时加载最近的检查点再重算尾巴；\(p\) 可调，在存储和计算之间折中。</li>
+        <li><strong>周期 checkpoint</strong>：每 \(p\) 个 token 存一次「最后 \(n_{\text{win}}\) 个 token 的滑窗 KV」，命中时加载最近的 checkpoint 再重算尾巴；\(p\) 可调，在存储和计算之间折中。</li>
         <li><strong>不缓存</strong>：完全重算。第 \(l\) 层某 token 的滑窗 KV 只依赖第 \(l-1\) 层最近 \(n_{\text{win}}\) 个 token，所以 \(L\) 层模型只需重算最后 \(n_{\text{win}}\cdot L\) 个 token（借助已缓存的 CSA/HCA 条目）。以 Pro 为例是 \(128\times61=7808\) 个 token，与前缀总长度无关。</li>
       </ul>
 
@@ -570,11 +570,11 @@
         <li>数学和代码仍是核心；在 mid-training 阶段加入 agentic 数据增强代码能力。</li>
         <li>更大的多语言语料，覆盖不同文化的长尾知识。</li>
         <li>特别重视长文档：优先收集科学论文、技术报告等有独特学术价值的材料。</li>
-        <li>分词器沿用 V3（词表 128K，config 里是 129280），只新增了几个构造上下文用的特殊 token；沿用 V3 的 token-splitting 和 FIM（Fill-in-Middle）策略；按来源打包文档以尽量减少截断；与 V3 不同，预训练使用<strong>样本级注意力掩码</strong>（同一个打包序列里的不同文档互相看不到）。</li>
+        <li>分词器沿用 V3（词表 128K，精确值 129280），只新增了几个构造上下文用的特殊 token；沿用 V3 的 token-splitting 和 FIM（Fill-in-Middle）策略；按来源打包文档以尽量减少截断；与 V3 不同，预训练使用<strong>样本级注意力掩码</strong>（同一个打包序列里的不同文档互相看不到）。</li>
       </ul>
 
       <h3>9.2 超参数总表</h3>
-      <p>报告 4.2 节的全部数字，加上 config 里补充的几项（标 ⓒ）。V3.2 一列是对照，来自它的 config 和报告。</p>
+      <p>V4 两个型号的完整超参数，V3.2 一列作为对照。</p>
       <div class="table-wrap">
       <table class="tight">
         <thead><tr><th>项目</th><th class="num">V4-Flash</th><th class="num">V4-Pro</th><th class="num">V3.2（对照）</th></tr></thead>
@@ -584,7 +584,7 @@
           <tr><td>隐藏维度 \(d\)</td><td class="num">4096</td><td class="num">7168</td><td class="num">7168</td></tr>
           <tr><td>前两层</td><td class="num">纯 SWA</td><td class="num">HCA</td><td class="num">—</td></tr>
           <tr><td>CSA 压缩率 \(m\) / HCA 压缩率 \(m'\)</td><td class="num">4 / 128</td><td class="num">4 / 128</td><td class="num">—</td></tr>
-          <tr><td>CSA / HCA / SWA 层数 ⓒ</td><td class="num">21 / 20 / 2</td><td class="num">30 / 31 / 0</td><td class="num">—</td></tr>
+          <tr><td>CSA / HCA / SWA 层数</td><td class="num">21 / 20 / 2</td><td class="num">30 / 31 / 0</td><td class="num">—</td></tr>
           <tr><td>query 头数 \(n_h\)</td><td class="num">64</td><td class="num">128</td><td class="num">128</td></tr>
           <tr><td>头维度 \(c\)（其中 RoPE 维）</td><td class="num">512（64）</td><td class="num">512（64）</td><td class="num">qk 192 / v 128；cache 512+64</td></tr>
           <tr><td>KV 头数</td><td class="num">1（shared KV）</td><td class="num">1（shared KV）</td><td class="num">MQA 模式下 1</td></tr>
@@ -597,11 +597,11 @@
           <tr><td>专家中间维度</td><td class="num">2048</td><td class="num">3072</td><td class="num">2048</td></tr>
           <tr><td>激活路由专家</td><td class="num">6</td><td class="num">6</td><td class="num">8</td></tr>
           <tr><td>Hash 路由层 / 稠密 FFN 层</td><td class="num">前 3 层 / 0</td><td class="num">前 3 层 / 0</td><td class="num">0 / 前 3 层</td></tr>
-          <tr><td>路由打分 / route scale ⓒ</td><td class="num">√softplus / 1.5</td><td class="num">√softplus / 2.5</td><td class="num">sigmoid / 2.5</td></tr>
+          <tr><td>路由打分 / route scale</td><td class="num">√softplus / 1.5</td><td class="num">√softplus / 2.5</td><td class="num">sigmoid / 2.5</td></tr>
           <tr><td>MTP 深度</td><td class="num">1</td><td class="num">1</td><td class="num">1</td></tr>
           <tr><td>mHC 扩展 \(n_{hc}\) / Sinkhorn 迭代</td><td class="num">4 / 20</td><td class="num">4 / 20</td><td class="num">—</td></tr>
-          <tr><td>词表 ⓒ</td><td class="num">129280</td><td class="num">129280</td><td class="num">129280</td></tr>
-          <tr><td>RoPE ⓒ</td><td class="num" colspan="2">θ=10⁴；压缩层 θ=1.6×10⁵ + YaRN（×16，原长 65536）</td><td class="num">YaRN ×40</td></tr>
+          <tr><td>词表</td><td class="num">129280</td><td class="num">129280</td><td class="num">129280</td></tr>
+          <tr><td>RoPE</td><td class="num" colspan="2">θ=10⁴；压缩层 θ=1.6×10⁵ + YaRN（×16，原长 65536）</td><td class="num">YaRN ×40</td></tr>
           <tr><td>训练 token</td><td class="num">32T</td><td class="num">33T</td><td class="num">V3.1 基座 + 约 0.94T 续训</td></tr>
           <tr><td>最大 batch（token）</td><td class="num">75.5M</td><td class="num">94.4M</td><td class="num"></td></tr>
           <tr><td>峰值 / 末尾学习率</td><td class="num">2.7e-4 / 2.7e-5</td><td class="num">2.0e-4 / 2.0e-5</td><td class="num"></td></tr>
@@ -614,20 +614,20 @@
         </tbody>
       </table>
       </div>
-      <p>两个我顺手算的小事实：75.5M 恰好是 \(18432\times4096\)，94.4M 是 \(23040\times4096\)，即以 4K 序列计的整数个样本；Flash 在 75.5M 的 batch 下 32T token 大约对应 42 万步量级（前期 batch 更小，实际步数更多）。</p>
+      <p>顺带一提：75.5M 恰好是 \(18432\times4096\)，94.4M 是 \(23040\times4096\)，即以 4K 序列计的整数个样本；Flash 在 75.5M 的 batch 下 32T token 大约对应 42 万步量级（前期 batch 更小，实际步数更多）。</p>
 
       <h3>9.3 训练日程</h3>
       <ul>
         <li><strong>Batch size 调度</strong>：和 V3 一样从小 batch 逐渐增大，到 75.5M（Flash）/ 94.4M（Pro）后保持。</li>
         <li><strong>长度扩展</strong>：从 4K 开始，逐步扩到 16K、64K、1M。预训练结束时模型已经原生支持 1M。</li>
-        <li><strong>稀疏注意力的引入</strong>：Flash 先用稠密注意力训练前 1T token，在序列长度到 64K 时引入稀疏注意力并保持到最后；引入时先用一个短阶段预热 CSA 里的 lightning indexer，再进入稀疏训练。Pro 的稠密阶段更长，引入方式相同（两阶段）。报告没说这里的「稠密」是指 CSA 不做 top-k（对全部压缩条目做注意力）还是连压缩都不做，也没说 indexer 预热用什么损失；V3.2 的做法见 2.4 节。</li>
+        <li><strong>稀疏注意力的引入</strong>：Flash 先用稠密注意力训练前 1T token，在序列长度到 64K 时引入稀疏注意力并保持到最后；引入时先用一个短阶段预热 CSA 里的 lightning indexer，再进入稀疏训练。Pro 的稠密阶段更长，引入方式相同（两阶段）。这里的「稠密」是指 CSA 不做 top-k（对全部压缩条目做注意力）还是连压缩都不做，以及 indexer 预热用什么损失，报告没有公开；V3.2 的做法见 2.4 节。</li>
       </ul>
 
       <h3>9.4 训练不稳定与两个「土办法」</h3>
-      <p>报告坦白训练万亿参数 MoE 时遇到了明显的不稳定，回滚只能暂时恢复、不能防止 loss spike 再次出现。他们的经验观察是：spike 总是和 MoE 层里的离群值（outlier）绑在一起，而路由机制本身似乎会加剧离群值的出现——离群值影响路由，路由又放大离群值。于是从两头下手：打断路由造成的恶性循环，以及直接压住异常值。</p>
+      <p>训练万亿参数的 MoE 时，V4 遇到了明显的不稳定，回滚只能暂时恢复、不能防止 loss spike 再次出现。他们的经验观察是：spike 总是和 MoE 层里的离群值（outlier）绑在一起，而路由机制本身似乎会加剧离群值的出现——离群值影响路由，路由又放大离群值。于是从两头下手：打断路由造成的恶性循环，以及直接压住异常值。</p>
       <p><strong>Anticipatory Routing（预见式路由）。</strong>第 \(t\) 步用当前参数 \(\theta_t\) 计算特征，但路由下标用历史参数 \(\theta_{t-\Delta t}\) 计算。实现上，在第 \(t-\Delta t\) 步就预取第 \(t\) 步的数据，「提前」算好路由下标缓存起来——这正是名字的由来，也避免了加载两份参数。预计算只需要一次前向，通过精心编排流水线和 EP 通信的重叠，额外墙钟开销约 20%。更进一步，它不是一直开着：系统自动检测 loss spike，检测到时短暂回滚并打开预见式路由，跑一段时间后切回正常训练，所以总开销可以忽略，也不损害模型性能。</p>
-      <p><strong>SwiGLU Clamping。</strong>把 SwiGLU 的线性分支截断到 \([-10,10]\)，门控分支上界截断到 10（参考代码：<code>up.clamp(-10, 10)</code>，<code>gate.clamp(max=10)</code>，然后 \(\mathrm{SiLU}(\text{gate})\odot\text{up}\)）。这个做法来自 gpt-oss。Flash 和 Pro 全程都开着，报告说它能有效消除离群值、帮助稳定，且不损害性能。</p>
-      <p>报告自己承认，这两个技巧为什么有效，目前还没有完整的理论解释。</p>
+      <p><strong>SwiGLU Clamping。</strong>把 SwiGLU 的线性分支截断到 \([-10,10]\)，门控分支上界截断到 10（即 <code>up.clamp(-10, 10)</code>，<code>gate.clamp(max=10)</code>，然后 \(\mathrm{SiLU}(\text{gate})\odot\text{up}\)）。这个做法来自 gpt-oss。Flash 和 Pro 全程都开着，报告说它能有效消除离群值、帮助稳定，且不损害性能。</p>
+      <p>这两个技巧为什么有效，目前还没有完整的理论解释。</p>
 
       <h3>9.5 基座模型评测</h3>
       <p>报告表 1，三者在同一内部框架、同一设置下评测（差距不超过 0.3 视为持平）：</p>
@@ -675,7 +675,7 @@
       </ol>
 
       <h3>10.2 专家阶段的 GRPO</h3>
-      <p>报告说 RL 用 GRPO，超参与之前的工作（R1、V3.2）保持接近，没有重新写公式。这里按 V3.2 报告里的版本记一下。对问题 \(q\)，从旧策略采样一组 \(G\) 个回答 \(\{o_i\}\)，目标是</p>
+      <p>RL 用的是 GRPO，超参与 R1、V3.2 保持接近。它的目标函数如下（V3.2 的版本）。对问题 \(q\)，从旧策略采样一组 \(G\) 个回答 \(\{o_i\}\)，目标是</p>
       $$\mathcal J(\theta)=\mathbb E\Bigg[\frac1G\sum_{i=1}^G\frac1{|o_i|}\sum_{t=1}^{|o_i|}\Big(\min\big(r_{i,t}\hat A_{i,t},\ \mathrm{clip}(r_{i,t},1-\varepsilon,1+\varepsilon)\hat A_{i,t}\big)M_{i,t}-\beta\,\mathbb D_{\mathrm{KL}}\big(\pi_\theta\,\|\,\pi_{\mathrm{ref}}\big)\Big)\Bigg],$$
       <p>其中 \(r_{i,t}=\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})/\pi_{\mathrm{old}}(o_{i,t}\mid q,o_{i,\lt t})\) 是重要性比；优势用组内相对奖励 \(\hat A_{i,t}=R_i-\mathrm{mean}(R_1,\dots,R_G)\)，不需要价值网络。V3.2 在此之上加了四个稳定 RL 的做法：</p>
       <ul>
@@ -713,7 +713,7 @@
       <h3>10.6 FP4 量化感知训练（QAT）</h3>
       <p>后训练阶段引入 QAT，让模型（包括教师和参考模型）适应量化带来的精度损失。量化格式是 <strong>MXFP4</strong>：每 32 个元素一组，共享一个 8 位的 2 的幂次缩放因子（E8M0），每个元素是 4 位 E2M1 浮点，能表示 \(\pm\{0,0.5,1,1.5,2,3,4,6\}\)。作用在两处：</p>
       <ol>
-        <li><strong>MoE 专家权重</strong>：显存的主要占用者。我粗算了一下，Pro 主干约 1.55T 个路由专家参数，FP8 存要约 1.55 TB，MXFP4（每元素 4 bit + 每 32 个元素 8 bit 的 scale）约 0.82 TB。</li>
+        <li><strong>MoE 专家权重</strong>：显存的主要占用者。Pro 主干有约 1.55T 个路由专家参数（\(61\times384\times3\times7168\times3072\)），FP8 存要约 1.55 TB，MXFP4（每元素 4 bit，加上每 32 个元素一个 8 bit 的 scale，平均 4.25 bit）约 0.82 TB。</li>
         <li><strong>CSA indexer 的 QK 路径</strong>：QK 激活在 FP4 下缓存、读取、相乘，加速长上下文下的打分。同时把索引分数 \(I_{:,:}\) 从 FP32 量化到 BF16，top-k 选择器提速 2 倍，KV 条目的召回率保持 99.7%。</li>
       </ol>
       <p>专家权重的 QAT 流程：优化器维护 FP32 主权重，前向时先量化到 FP4，再<strong>反量化到 FP8</strong> 参与计算。这一步反量化是无损的：E4M3 比 E2M1 多 2 个指数位、动态范围大得多，只要每个 FP8 量化块（128×128）里各个 FP4 子块（1×32）的 scale 之比不超过某个阈值，细粒度的 scale 信息就能被 FP8 的指数范围完全吸收；他们验证了当前权重满足这个条件。于是整个 QAT 可以完全复用现有的 FP8 训练框架。反向时，梯度对前向用的那份 FP8 权重计算，直接传回 FP32 主权重——等价于对量化操作使用直通估计器（STE），也省掉了对转置权重重新量化。</p>
@@ -772,7 +772,7 @@
         </tbody>
       </table>
       </div>
-      <p>报告自己的解读：知识上 SimpleQA-Verified 比其他开源模型高出约 20 个点，但仍落后 Gemini-3.1-Pro；推理上超过所有开源模型，略逊于 GPT-5.4 和 Gemini-3.1-Pro，自评落后前沿闭源模型约 3～6 个月；Codeforces 3206 分，报告说在人类选手中排第 23；agent 上与 K2.6、GLM-5.1 相当、落后闭源；MRCR 1M 超过 Gemini-3.1-Pro、不及 Opus 4.6。另外，在 Terminal-Bench 2.0 的 Verified 子集上 V4-Pro 约 72.0。</p>
+      <p>报告的总结是：知识上 SimpleQA-Verified 比其他开源模型高出约 20 个点，但仍落后 Gemini-3.1-Pro；推理上超过所有开源模型，略逊于 GPT-5.4 和 Gemini-3.1-Pro，自评落后前沿闭源模型约 3～6 个月；Codeforces 3206 分，报告说在人类选手中排第 23；agent 上与 K2.6、GLM-5.1 相当、落后闭源；MRCR 1M 超过 Gemini-3.1-Pro、不及 Opus 4.6。另外，在 Terminal-Bench 2.0 的 Verified 子集上 V4-Pro 约 72.0。</p>
 
       <h3>11.3 两个尺寸、三档强度（报告表 7）</h3>
       <div class="table-wrap">
@@ -826,7 +826,7 @@
         <li><strong>系统</strong>：wave 化的 MegaMoE；TileLang；批不变 + 确定性 kernel；Muon 的混合 ZeRO；压缩注意力的两阶段 CP；张量级重计算；异构 KV cache 和磁盘缓存。</li>
         <li><strong>后训练</strong>：专家 SFT + GRPO → 多教师全词表 OPD；GRM 由 actor 自己担任并被 RL；三档推理强度；DSML 工具格式；跨轮保留推理；Quick Instruction；FP4 QAT；WAL rollout；DSec 沙箱。</li>
       </ol>
-      <p>我自己的几点看法：</p>
+      <p>几点看法：</p>
       <ul>
         <li>最核心的思路是「<strong>先压缩、再稀疏</strong>」。V3.2 证明了「用便宜的打分器挑选」可行，但 indexer 仍是 \(O(n)\) 每 token；V4 先在序列维度上做可学习的池化，让打分对象少一个数量级，然后再挑。把 DSA 的成本从 \(n\) 降到 \(n/4\)，再配上 FP4，是能在 1M 上省下来的关键。</li>
         <li>shared-KV、512 维头、分组输出投影这一组设计，本质上是承认「解码时的 MLA 就是 MQA」，把它变成原生结构，省掉 \(W^{UK}/W^{UV}\) 的分解；代价转移到了输出投影上，再用分组低秩补回来。</li>
@@ -836,10 +836,10 @@
       <p>报告提到的未来方向：进一步精简架构、研究训练稳定性的基础问题、在 MoE 和稀疏注意力之外探索新的稀疏维度（比如更稀疏的嵌入模块）、低延迟架构、长程多轮 agent 任务、多模态，以及更好的数据构造与合成。</p>
 
       <!-- ============================================================ -->
-      <h2 id="refs">13. 参考</h2>
+      <h2 id="refs">13. 参考与延伸阅读</h2>
       <ul>
         <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2606.19348">DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence</a>, arXiv 2606.19348, 2026。本文结构对应其 §2（架构：§2.1 继承部分、§2.2 mHC、§2.3 CSA/HCA、§2.4 Muon）、§3（基础设施）、§4（预训练）、§5（后训练与评测）。</li>
-        <li>模型卡、config 与参考推理代码：<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">huggingface.co/deepseek-ai/DeepSeek-V4-Pro</a>（<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/inference">inference/</a>）、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash</a>。</li>
+        <li>模型卡、config 与推理代码（层排布、RoPE 配置、Hadamard 旋转、量化等实现细节见这里）：<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">huggingface.co/deepseek-ai/DeepSeek-V4-Pro</a>（<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/tree/main/inference">inference/</a>）、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash</a>。</li>
         <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2512.02556">DeepSeek-V3.2: Pushing the Frontier of Open Large Language Models</a>, 2025（DSA §2.1，GRPO 的改进 §3.1）。</li>
         <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>, 2024（MLA、DeepSeekMoE、无辅助损失均衡、MTP）；<a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>（MLA 的提出）。</li>
         <li>Z. Xie et al. <a href="https://arxiv.org/abs/2512.24880">mHC: Manifold-Constrained Hyper-Connections</a>, 2026；D. Zhu et al. Hyper-Connections, ICLR 2025。</li>
@@ -847,7 +847,6 @@
         <li>Y. Gu et al. MiniLLM, ICLR 2024；K. Lu and Thinking Machines Lab, <a href="https://thinkingmachines.ai/blog/on-policy-distillation">On-Policy Distillation</a>, 2025。</li>
         <li>MegaMoE：<a href="https://github.com/deepseek-ai/DeepGEMM/pull/304">DeepGEMM PR #304</a>；TileLang（Wang et al., ICLR 2026）；B. D. Rouhani et al. Microscaling Data Formats for Deep Learning, 2023（MXFP4）。</li>
       </ul>
-      <p style="font-size:14px;color:var(--text-faint)">文中的图都是我按报告内容重画的示意图；计算器里的成本模型和参数计数是我根据 config 推算的，假设写在各自旁边。</p>
     </article>
 
     <nav class="series-pager" data-series="reports"></nav>
