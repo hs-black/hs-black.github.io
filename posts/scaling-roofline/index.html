@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Roofline：算力、带宽与算术强度 · Zunzhe Zhang</title>
+  <meta name="description" content="一个运算到底卡在算力、显存带宽还是网络上：算术强度、roofline 图、矩阵乘法的临界 batch，以及 TPU 与 GPU 的硬件结构。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    :root { --r-mem: #d6336c; --r-cmp: #13917f; --r-net: #b8860b; }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) { --r-mem: #f06595; --r-cmp: #3cc9b2; --r-net: #e0b84a; }
+    }
+    :root[data-theme="dark"] { --r-mem: #f06595; --r-cmp: #3cc9b2; --r-net: #e0b84a; }
+    .table-wrap { position: relative; } /* keeps KaTeX's hidden MathML inside the scroll box */
+    .prose td.num { white-space: nowrap; }
+    .fig { margin: 1.4em 0 0; }
+    .fig svg { display: block; width: 100%; height: auto; }
+    @media (max-width: 560px) {
+      .fig { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .fig svg { min-width: 560px; }
+      .fig figcaption { position: sticky; left: 0; }
+    }
+    .fig svg text { font-family: var(--font-sans); fill: var(--text); }
+    .fig svg .soft { fill: var(--text-soft); }
+    .fig svg .faint { fill: var(--text-faint); }
+    .fig svg .mono { font-family: var(--font-mono); }
+    .fig svg .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .fig svg .box2 { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1.5; }
+    .fig svg .box-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .fig svg .box-acc2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .fig svg .line { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    .fig svg .link { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .fig svg .link2 { stroke: var(--accent-2); stroke-width: 2; fill: none; }
+    .row-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; font-size: 15px; }
+    .row-ctrl > span:first-child { min-width: 4.5em; color: var(--text-soft); }
+    .chart svg { display: block; width: 100%; height: auto; }
+    .chart svg text { font-family: var(--font-sans); font-size: 12px; fill: var(--text-soft); }
+    .chart .grid { stroke: var(--border); stroke-width: 1; }
+    .note { font-size: 13px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+    .verdict { margin-top: 10px; font-size: 15px; }
+    .tag { display: inline-block; padding: 0 8px; border-radius: 6px; font-size: 13px; font-weight: 600; color: #fff; }
+    .tag.mem { background: var(--r-mem); } .tag.cmp { background: var(--r-cmp); } .tag.net { background: var(--r-net); }
+    .tbars { display: grid; gap: 8px; margin-top: 14px; }
+    .tbar { display: grid; grid-template-columns: 6.5em 1fr 6.5em; align-items: center; gap: 10px; font-size: 14px; }
+    .tbar .track { height: 20px; border-radius: 5px; background: var(--bg-soft); overflow: hidden; }
+    .tbar .fill { height: 100%; border-radius: 5px; transition: width 0.3s; }
+    .tbar .t { font-family: var(--font-mono); font-size: 13px; text-align: right; color: var(--text-soft); }
+    @media (max-width: 560px) { .tbar { grid-template-columns: 5em 1fr 5.6em; gap: 6px; } }
+    .sys-wrap svg { display: block; width: 100%; height: auto; }
+    .sys-wrap svg text { font-family: var(--font-mono); fill: var(--text); }
+    .sys-wrap .pe { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .sys-wrap .pe.on { fill: var(--accent-soft); stroke: var(--accent); }
+    .sys-wrap .w { fill: var(--text-faint); font-size: 11px; }
+    .sys-wrap .x { fill: var(--accent); font-size: 14px; font-weight: 600; }
+    .sys-wrap .ps { fill: var(--accent-2); font-size: 14px; font-weight: 600; }
+    .sys-wrap .lbl { fill: var(--text-soft); font-family: var(--font-sans); font-size: 12px; }
+    .sys-log { font-size: 14px; margin-top: 8px; min-height: 1.6em; color: var(--text-soft); }
+    .rl-legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 13px; color: var(--text-soft); margin-top: 4px; }
+    .rl-legend span { display: inline-flex; align-items: center; gap: 6px; }
+    .rl-legend svg { width: 24px; height: 8px; }
+    .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>Roofline：算力、带宽与算术强度</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p><a href="/posts/scaling-memory/">上一篇</a>算了一步训练要多少 FLOPs。但知道 FLOPs 还不够：同样是 \(10^{12}\) 次运算，一个矩阵乘法在 H100 上可能 1 毫秒就做完，一串逐元素运算却可能慢几十倍。差别在于数据要搬多少、从哪里搬。这一篇讲的 <strong>roofline 分析</strong>就是回答「一个运算的时间到底花在计算上，还是花在搬数据上」的工具，它是后面所有并行策略分析的地基。</p>
+      <p>后半篇讲硬件本身：TPU 和 GPU 的计算单元、存储层次和网络长什么样，规格数字是多少。这些数字是做 roofline 估算的原材料。主要材料是 <a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a> 的第 1、2、12 章（Roofline、TPU、GPU），以及 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a> 里关于 GPU 的部分。芯片规格我对过 NVIDIA 和 Google Cloud 的官方页面。</p>
+
+      <nav class="toc" aria-label="目录">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#s-time">时间花在哪：计算、搬数据、通信</a></li>
+          <li><a href="#s-ai">算术强度与临界强度</a></li>
+          <li><a href="#s-plot">Roofline 图（交互）</a></li>
+          <li><a href="#s-elem">低强度的运算：点积与逐元素运算</a></li>
+          <li><a href="#s-matmul">矩阵乘法：为什么 batch 要过 ~240 个 token</a></li>
+          <li><a href="#s-calc">交互：矩阵乘法耗时计算器</a></li>
+          <li><a href="#s-net">网络的 roofline</a></li>
+          <li><a href="#s-tpu">TPU 是什么样的</a></li>
+          <li><a href="#s-tpunet">TPU 的网络：ICI、torus、pod 与 DCN</a></li>
+          <li><a href="#s-gpu">GPU 是什么样的</a></li>
+          <li><a href="#s-gpunet">GPU 的网络：NVLink、NVSwitch 与 InfiniBand</a></li>
+          <li><a href="#s-compare">对比与规格表</a></li>
+          <li><a href="#s-summary">小结</a></li>
+          <li><a href="#s-ref">参考</a></li>
+        </ol>
+      </nav>
+
+      <!-- ============================================================ -->
+      <h2 id="s-time">1. 时间花在哪：计算、搬数据、通信</h2>
+      <p>Scaling book 用一个朴素的问题开头：为什么一个算法要 50 ms，而不是 50 s 或 5 ms？时间只可能花在两类事情上。</p>
+      <p><strong>计算</strong>。深度学习模型基本就是一堆矩阵乘法，每个由浮点乘和加组成。硬件每秒能做的浮点运算数（FLOP/s）是固定的，于是：</p>
+      $$T_\text{math} = \frac{\text{计算的 FLOPs}}{\text{硬件 FLOP/s}}$$
+      <p>例如 H100 的 BF16 稠密峰值约 \(9.89\times 10^{14}\) FLOP/s，TPU v6e 约 \(9.1\times10^{14}\)。做 \(10^{12}\) 次运算在 H100 上大约 1.01 ms。（实际能达到的比例不同：scaling book 说 H100/B200 通常只能达到标称峰值的 80–85%，TPU 正常使用时可以接近 95%。）</p>
+      <p><strong>通信</strong>，分两种：</p>
+      <ul>
+        <li><strong>芯片内</strong>：张量要在显存（HBM，high bandwidth memory）和计算核心之间搬运，这条路的带宽叫 HBM 带宽（NVIDIA 也叫 memory bandwidth）。H100 约 3.35 TB/s，TPU v6e 约 1.6 TB/s。</li>
+        <li><strong>芯片间</strong>：模型分布在多块芯片上时，张量要在芯片之间传，走 NVLink、ICI、InfiniBand、DCN、PCIe 等不同的链路，带宽各不相同。</li>
+      </ul>
+      <p>两种都按同一个式子估算：</p>
+      $$T_\text{comms} = \frac{\text{通信字节数}}{\text{带宽（字节/秒）}}$$
+      <p>计算和通信通常可以<strong>重叠</strong>：在算这一块的同时，下一块数据已经在路上了。所以总时间有一个下界和一个上界：</p>
+      $$T_\text{lower} = \max(T_\text{math}, T_\text{comms}),\qquad T_\text{upper} = T_\text{math} + T_\text{comms}$$
+      <figure class="fig">
+        <svg viewBox="0 0 720 150" role="img" aria-label="计算与通信串行和重叠时的总时间">
+          <text x="0" y="22" font-size="13" class="soft">串行（上界）</text>
+          <rect x="120" y="8" width="260" height="22" rx="4" style="fill: var(--r-cmp)"/>
+          <rect x="380" y="8" width="180" height="22" rx="4" style="fill: var(--r-mem)"/>
+          <text x="250" y="24" font-size="12" text-anchor="middle" style="fill:#fff">T_math</text>
+          <text x="470" y="24" font-size="12" text-anchor="middle" style="fill:#fff">T_comms</text>
+          <text x="0" y="72" font-size="13" class="soft">完全重叠（下界）</text>
+          <rect x="120" y="50" width="260" height="22" rx="4" style="fill: var(--r-cmp)"/>
+          <rect x="120" y="78" width="180" height="22" rx="4" style="fill: var(--r-mem)"/>
+          <text x="250" y="66" font-size="12" text-anchor="middle" style="fill:#fff">T_math</text>
+          <text x="210" y="94" font-size="12" text-anchor="middle" style="fill:#fff">T_comms</text>
+          <line x1="380" x2="380" y1="44" y2="108" class="line" style="stroke-dasharray: 3 3"/>
+          <line x1="560" x2="560" y1="2" y2="40" class="line" style="stroke-dasharray: 3 3"/>
+          <text x="120" y="135" font-size="12" class="faint">完全重叠时，总时间由较长的那个决定：这里计算更长，是「计算受限」（compute-bound）。</text>
+        </svg>
+      </figure>
+      <p>因为 \(T_\text{math} + T_\text{comms} \le 2\max(T_\text{math}, T_\text{comms})\)，上下界最多差 2 倍。实际估算时按 \(\max\) 来，因为代数简单，而且好的实现确实能接近它；之后再根据 profiling 补上重叠不完美的部分。</p>
+      <p>假设完全重叠：\(T_\text{math} > T_\text{comms}\) 时硬件算力被用满，叫<strong>计算受限</strong>（compute-bound）；反之叫<strong>通信受限</strong>（communication-bound，书里和 memory-bound、bandwidth-bound 混用），一部分算力在等数据。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-ai">2. 算术强度与临界强度</h2>
+      <p>判断一个运算会受哪个限制，看它的<strong>算术强度</strong>（arithmetic intensity，也叫 operational intensity）：</p>
+      $$\text{Intensity} = \frac{\text{计算的 FLOPs}}{\text{通信的字节数}}$$
+      <p>单位是 FLOPs/byte，含义是「每搬一个字节，做多少次运算」。推导计算受限的条件只需要一行：</p>
+      $$T_\text{math} > T_\text{comms} \iff \frac{\text{FLOPs}}{\text{硬件 FLOP/s}} > \frac{\text{Bytes}}{\text{带宽}} \iff \underbrace{\frac{\text{FLOPs}}{\text{Bytes}}}_{\text{算法的强度}} > \underbrace{\frac{\text{硬件 FLOP/s}}{\text{带宽}}}_{\text{硬件的临界强度}}$$
+      <p>右边这个只取决于硬件的量叫<strong>临界算术强度</strong>（critical / peak arithmetic intensity）。它的意思是：硬件要跑满算力，每从 HBM 读一个字节，就必须做这么多次运算。几个芯片（BF16 矩阵单元峰值 / HBM 带宽，稠密值）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>芯片</th><th class="num">BF16 FLOP/s</th><th class="num">HBM 带宽</th><th class="num">临界强度</th></tr></thead>
+          <tbody>
+            <tr><td>NVIDIA A100</td><td class="num">3.1e14</td><td class="num">2.0e12</td><td class="num">≈ 156</td></tr>
+            <tr><td>NVIDIA H100 SXM</td><td class="num">9.89e14</td><td class="num">3.35e12</td><td class="num">≈ 295</td></tr>
+            <tr><td>NVIDIA H200</td><td class="num">9.89e14</td><td class="num">4.8e12</td><td class="num">≈ 206</td></tr>
+            <tr><td>NVIDIA B200</td><td class="num">2.25e15</td><td class="num">8.0e12</td><td class="num">≈ 281</td></tr>
+            <tr><td>TPU v5e</td><td class="num">1.97e14</td><td class="num">8.2e11</td><td class="num">≈ 240</td></tr>
+            <tr><td>TPU v5p</td><td class="num">4.59e14</td><td class="num">2.8e12</td><td class="num">≈ 164</td></tr>
+            <tr><td>TPU v6e</td><td class="num">9.2e14</td><td class="num">1.6e12</td><td class="num">≈ 575</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>数字来源：GPU 取自 scaling book 第 12 章的表和 NVIDIA 规格页（H100 SXM 规格表上 BF16 写 1,979 TFLOPS 但带星号，是结构化稀疏的数字，稠密值减半为 989；DGX B200 是 8 卡 72 PFLOPS FP8 稀疏、64 TB/s HBM，折合每卡 BF16 稠密 2.25 PFLOPS、8 TB/s）；TPU 取自 scaling book 第 2 章的表，与 Google Cloud 文档一致（v5e 197 TFLOPs，v5p 459 TFLOPs、2,765 GB/s，v6e 918 TFLOPs、1,638 GB/s；按官方 v6e 数字算临界强度约 560）。</p>
+      <p>可以看到，主流加速器的临界强度大多在 150–600 之间，而且有意思的是，几代硬件之间它变化不大：算力和带宽大体同步增长。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-plot">3. Roofline 图</h2>
+      <p>把上面的关系画出来就是 <strong>roofline 图</strong>：横轴是算术强度，纵轴是可达到的吞吐（FLOP/s），两个轴都取对数。对强度为 \(I\) 的算法，能达到的吞吐是</p>
+      $$\text{FLOP/s}_\text{achievable} = \min\big(\text{峰值 FLOP/s},\; I \times \text{带宽}\big)$$
+      <p>图形像一个屋顶：左边是一条斜率为 1 的斜线（对数坐标下，斜线的高度由带宽决定），右边是一条水平线（峰值算力）。两线交点就是临界强度，也叫 ridge point。点落在斜线下方的区域是带宽受限，落在水平线下方是计算受限。提升性能只有两种方式：让算法的强度变大（点往右移），或者换更高的带宽（斜线往上移）。</p>
+      <p>下面这张图可以选芯片和运算，拖动参数看点怎么移动。除了 HBM 的屋顶，还画了芯片间网络的屋顶（虚线），和片上高速存储的屋顶（点线，有数据时才画）。</p>
+
+      <div class="demo" id="rl-demo">
+        <div class="demo-label">交互演示 · Roofline 图</div>
+        <div class="row-ctrl"><span>芯片</span><div class="seg" id="rl-chip"></div></div>
+        <div class="row-ctrl"><span>运算</span>
+          <select id="rl-op" aria-label="运算">
+            <option value="mm">BF16 矩阵乘法 [B,D]·[D,F]</option>
+            <option value="mm8">FP8/INT8 矩阵乘法（输入输出都是 1 字节）</option>
+            <option value="mmw8">INT8 权重 + BF16 激活与计算</option>
+            <option value="bmm">每个样本一套权重 [B,D]·[B,D,F]</option>
+            <option value="attn">注意力核心（GQA，BF16）</option>
+            <option value="dot">BF16 点积</option>
+            <option value="add">FP32 逐元素加法</option>
+          </select>
+        </div>
+        <div class="ctrls" id="rl-params"></div>
+        <div class="chart" id="rl-chart"></div>
+        <div class="rl-legend" id="rl-legend"></div>
+        <div class="verdict" id="rl-verdict"></div>
+        <div class="readout" id="rl-readout"></div>
+        <p class="note" id="rl-note"></p>
+      </div>
+      <p>几个值得自己拖出来的现象：</p>
+      <ul>
+        <li>BF16 矩阵乘法里，强度几乎只由 \(B\) 决定，\(D,F\) 大时 \(I \approx B\)。把 \(B\) 拖过临界值（H100 约 295）点就爬上屋顶。</li>
+        <li>\(D=F=1024\) 时，要达到同样的强度需要的 \(B\) 明显更大（\(BF\)、\(BD\) 两项不再可以忽略）。</li>
+        <li>点积和逐元素加法的强度是常数（1/2 和 1/12），无论 \(N\) 多大都在屋顶的斜坡上。</li>
+        <li>注意力核心在生成阶段（\(T=1\)）强度约等于分组大小 \(G\)，永远到不了屋顶；在训练/prefill（\(T=S\)）强度随 \(T\) 线性增长，很快就计算受限。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="s-elem">4. 低强度的运算：点积与逐元素运算</h2>
+      <h3>点积</h3>
+      <p>计算 BF16 向量的点积 \(x\cdot y\)：\(x, y\) 各 \(N\) 个元素，读 \(2N + 2N\) 字节，写回 2 字节；做 \(N\) 次乘、\(N-1\) 次加：</p>
+      $$\text{Intensity}(\text{dot}) = \frac{2N-1}{4N+2} \xrightarrow{N\to\infty} \frac{1}{2}$$
+      <p>每读一个字节只做半次运算。拿它和矩阵单元的临界强度（几百）比没有意义，因为点积本来就不在矩阵单元上跑，而在向量单元上（TPU 的 VPU、GPU 的 CUDA core）。但向量单元的算力低得多，它们的临界强度也低：scaling book 估算 TPU v5p 的 VPU 每核约 \(7\times10^{12}\) FLOP/s，临界强度约 3；H100 的 CUDA core 不算 FMA 时约 33.5 TFLOP/s，除以 3.35 TB/s，临界强度约 10。即便如此，1/2 依然远低于它们，所以点积是带宽受限的。</p>
+      <h3>逐元素运算</h3>
+      <p>两个 FP32 向量相加：读 \(2\times 4N\)、写 \(4N\) 字节，做 \(N\) 次加法，强度 \(N/12N = 1/12\)，糟糕至极。在 H100 上：</p>
+      $$T \approx \frac{12N}{3.35\times10^{12}}$$
+      <p>scaling book 实测：\(N = 1024^3\) 时 roofline 预测约 3.84 ms，JAX 实测 4.1 ms，很接近；但 \(N=65{,}536\) 时预测 0.23 μs，实测约 1.5 μs——数据太小时，内核启动和延迟才是主要成本。</p>
+      <p>这个结论的实际意义很大：LayerNorm、激活函数、残差加、dropout、softmax……这些逐元素或归约运算的 FLOPs 在总账里可以忽略，但每一个都要把整个张量从 HBM 读一遍、写一遍。所以要么把它们<strong>融合</strong>（fuse）进相邻的矩阵乘法内核里（读进来顺手算掉，不单独写回），要么至少把几个逐元素运算融合成一个内核。Playbook 讲 GPU 内核时的「fused kernels」、FlashAttention 不把注意力矩阵写回 HBM，背后都是这一张图。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-matmul">5. 矩阵乘法：为什么 batch 要过 ~240 个 token</h2>
+      <h3>推导</h3>
+      <p>\(X\) 是 \(\text{bf16}[B, D]\)，\(Y\) 是 \(\text{bf16}[D, F]\)，求 \(Z = XY\)，\(Z\) 是 \(\text{bf16}[B,F]\)。要读 \(2BD + 2DF\) 字节，写 \(2BF\) 字节（输出在累加时是 FP32，但写回 HBM 前一般转成 BF16），做 \(2BDF\) 次运算：</p>
+      $$\text{Intensity}(\text{matmul}) = \frac{2BDF}{2BD + 2DF + 2BF} = \frac{BDF}{BD + DF + BF}$$
+      <p>在 Transformer 里，\(X\) 是激活（\(B\) 是 token 数），\(Y\) 是权重（\(D, F\) 是模型维度）。如果 \(B\) 远小于 \(D\) 和 \(F\)，分母里 \(DF\) 占主导：</p>
+      $$\frac{BDF}{BD + DF + BF} \approx \frac{BDF}{DF} = B$$
+      <p>于是计算受限的条件变成一个极其简单的规则：</p>
+      $$B > \frac{\text{硬件 FLOP/s}}{\text{HBM 带宽}}\quad\Longrightarrow\quad B_\text{TPU v5e} > \frac{1.97\times10^{14}}{8.2\times10^{11}} \approx 240,\quad B_\text{H100} > \frac{9.89\times10^{14}}{3.35\times10^{12}} \approx 295$$
+      <p>直觉上：权重 \(DF\) 从 HBM 读一次的成本是固定的，它要被 \(B\) 个 token 复用；每个 token 对每个权重做 2 次运算（乘和加）而权重占 2 字节，所以强度就是 \(B\)。token 越多，读一次权重摊到的计算越多。</p>
+      <div class="callout">
+        <p><strong>这里的 \(B\) 是 token 数，不是序列数。</strong>而且是<strong>每个模型副本</strong>（per-replica）的本地 token 数。例如在 2,048 张 GPU 上训练、全局 batch 是 512 条 × 4,096 token = 2M token，每张卡的本地 batch 是 1k token。为什么是「每副本」：如果把模型切到更多芯片上（模型并行），算力和带宽同比例增加，临界值不变；而数据并行把 token 分给不同副本，每个副本的 \(B\) 变小。</p>
+      </div>
+      <p>这就是训练和推理里一系列选择的来源：</p>
+      <ul>
+        <li><strong>训练</strong>：每个副本的本地 token batch 通常 \(\gt 1024\)，而 \(D, F\gt 8000\)，矩阵乘法舒服地计算受限。但如果数据并行开得太大，本地 batch 掉到几百以下，就开始浪费算力。</li>
+        <li><strong>推理的生成阶段</strong>：每步每条序列只出一个 token，\(B\) 就是并发的序列数。batch 小时，每一步都要把全部权重从 HBM 读一遍，而计算只用到一点点。这时 roofline 给出一个延迟下界：<em>权重字节数 / HBM 带宽</em>。scaling book 的例子：200B 参数、BF16，切到 32 张 TPU v4p 上，每张约 12.5 GB，以约 1.2 TB/s 读完需要约 10 ms，所以单步采样不可能快于 10 ms。</li>
+      </ul>
+
+      <h3>精确的临界值与形状的影响</h3>
+      <p>\(B \ll D, F\) 是近似。不做近似，直接解 \(2BDF/P = (2BD + 2DF + 2BF)/W\)：H100 上，\(D=F=8192\) 时需要 \(B \ge 319\)，\(D=F=4096\) 时 \(B \ge 345\)，\(D=F=1024\) 时要 \(B\ge 698\)，几乎翻倍。scaling book 的另一个例题：int8 的 \([B, 4096]\times[4096, 16384]\) 在 v5e 上，精确算出 \(B \gt 267\)，略大于 240，因为把 \(D, F\) 的有限大小也算进去了。矩阵越小，越难吃饱。</p>
+      <h3>分块（tiling）</h3>
+      <p>大矩阵乘法在硬件里会被拆成小块，放进片上的高速存储（TPU 的 VMEM、GPU 的 SMEM/TMEM），块会被重复读取，所以并不严格是只读 \(O(N^2)\) 字节。设 \((m,k)\cdot(k,n)\) 的矩阵乘法用块大小 \(b_m, b_k, b_n\)，块数 \(t_m = m/b_m\) 等，总 FLOPs 是 \(2\,t_m t_n t_k\, b_m b_n b_k\)，总字节约 \(2\,t_m t_n\big(t_k(b_m b_k + b_k b_n) + b_m b_n\big)\)。忽略最后一项，强度约为 \(\frac{b_m b_n}{b_m + b_n}\)，形式和整体的式子一样。这说明块要足够大，片上存储的容量因此很重要。</p>
+      <h3>量化</h3>
+      <ul>
+        <li><strong>INT8（或 FP8）全程</strong>：每个数 1 字节，强度变成 \(2B\)，但硬件的 INT8 峰值也是 BF16 的 2 倍（v5e 3.94e14，临界强度 480），条件仍是 \(2B > 480\)，即 \(B > 240\)。基本不变。</li>
+        <li><strong>INT8 权重 + BF16 激活和计算</strong>：只有权重变成 1 字节，强度约 \(2BDF/DF = 2B\)，而算力仍按 BF16 的 240，于是 \(B > 120\)。权重量化在小 batch 推理里很划算，因为它直接减少了要搬的字节。</li>
+        <li>H100、B200 的 FP8 峰值正好是 BF16 的 2 倍，临界强度翻倍到约 590 和 562；如果权重也用 FP8 读入，实际门槛不变。</li>
+      </ul>
+      <h3>强度永远很低的两种情况</h3>
+      <ul>
+        <li><strong>每个样本一套权重</strong>：\(\text{int8}[B, D]\cdot\text{int8}[B, D, F]\)。FLOPs 不变（\(2BDF\)），但要读 \(BDF\) 字节的权重，强度约为 2，与 \(B\) 无关。没有权重复用，就永远带宽受限。</li>
+        <li><strong>生成阶段的注意力</strong>：每条序列有自己的 KV cache，本质上同上。GQA 下（\(N\) 个 Q 头、\(K\) 个 KV 头、每组 \(G = N/K\)），scaling book 给出 FLOPs \(4BTSKGH\)、字节 \(4BHK(TG + S)\)，强度为 \(\frac{TSG}{TG + S}\)。训练/prefill 时 \(T = S\)，强度 \(\frac{SG}{G+1}=O(T)\)，序列稍长就计算受限；生成时 \(T = 1\)，强度 \(\frac{SG}{G+S}\to G\)，永远带宽受限。增大 \(G\)（更少的 KV 头）会让它更接近屋顶，这是 GQA/MQA 在推理上的意义之一。</li>
+      </ul>
+      <h3>MoE</h3>
+      <p>MoE 有 \(E\) 个专家，每个 token 选 \(k\) 个。每个权重矩阵要读 \(E\cdot DF\) 个数，但 FLOPs 只有 \(2k\cdot BDF\)。scaling book 的例题：INT8 权重、BF16 计算、v5e（临界 240），计算受限需要 \(2kBDF/(EDF) > 240\)，即 \(B > 120\,E/k\)。DeepSeek-V3（\(E=256, k=8\)）得到 \(B > 3840\) 个 token——在生成阶段这是很大的 batch。换句话说：要让每个专家都吃饱，平均每个专家分到的 token 数要过临界值。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-calc">6. 交互：矩阵乘法耗时计算器</h2>
+      <p>下面把 \(T_\text{math}\)、\(T_\text{HBM}\) 和芯片间通信时间 \(T_\text{comm}\) 放在一起算。可以选择把矩阵乘法切到多块芯片上：</p>
+      <ul>
+        <li><strong>沿 \(D\) 切</strong>（缩并维）：每块芯片拿 \(X\) 的 \(D/n\) 列和 \(Y\) 的 \(D/n\) 行，算出完整形状 \([B,F]\) 的部分和，然后需要把部分和加起来（AllReduce）。</li>
+        <li><strong>沿 \(F\) 切</strong>（输出维）：每块芯片拿完整的 \(X\) 和 \(Y\) 的 \(F/n\) 列，各算一部分输出，不需要通信（但 \(X\) 要在每块芯片上都有一份）。</li>
+      </ul>
+
+      <div class="demo" id="mm-demo">
+        <div class="demo-label">交互演示 · 矩阵乘法耗时：计算 vs HBM vs 通信</div>
+        <div class="row-ctrl"><span>芯片</span><div class="seg" id="mm-chip"></div></div>
+        <div class="ctrls">
+          <div class="ctrl"><span>B（token）</span><input type="range" id="mm-b" min="0" max="16" step="1" value="9" aria-label="B"><output id="mm-b-v"></output></div>
+          <div class="ctrl"><span>D</span><input type="range" id="mm-d" min="0" max="16" step="1" value="7" aria-label="D"><output id="mm-d-v"></output></div>
+          <div class="ctrl"><span>F</span><input type="range" id="mm-f" min="0" max="16" step="1" value="12" aria-label="F"><output id="mm-f-v"></output></div>
+        </div>
+        <div class="row-ctrl"><span>精度</span>
+          <div class="seg" id="mm-dt">
+            <button data-v="bf16" aria-pressed="true">BF16</button>
+            <button data-v="i8" aria-pressed="false">FP8/INT8 全程</button>
+            <button data-v="w8" aria-pressed="false">INT8 权重 + BF16</button>
+          </div>
+        </div>
+        <div class="row-ctrl"><span>芯片数</span>
+          <div class="seg" id="mm-n">
+            <button data-v="1" aria-pressed="true">1</button><button data-v="2" aria-pressed="false">2</button><button data-v="4" aria-pressed="false">4</button><button data-v="8" aria-pressed="false">8</button>
+          </div>
+        </div>
+        <div class="row-ctrl"><span>切分方式</span>
+          <div class="seg" id="mm-split">
+            <button data-v="D" aria-pressed="true">沿 D 切（交换部分和）</button>
+            <button data-v="F" aria-pressed="false">沿 F 切（无通信）</button>
+          </div>
+        </div>
+        <div class="tbars" id="mm-bars"></div>
+        <div class="verdict" id="mm-verdict"></div>
+        <div class="readout" id="mm-readout"></div>
+        <p class="note">计算时间按每块芯片的 \(2BDF/n\) 除以峰值；HBM 时间按每块芯片要读的输入、权重和要写的输出字节数除以 HBM 带宽；沿 \(D\) 切时，部分和 \([B,F]\) 用环形 AllReduce 汇总，按每块芯片发送约 \(2\cdot\tfrac{n-1}{n}\cdot\) 部分和字节数估算（\(n=2\) 时就是把自己的一份发给对方，即 scaling book 的两芯片例子；AllReduce 的推导放在<a href="/posts/scaling-collectives/">下一篇</a>）。链路带宽：GPU 用每卡 NVLink 单向带宽（A100 300、H100/H200 450、B200 900 GB/s），TPU 用一条 ICI 链路的单向带宽（v5e 45、v5p/v6e 90 GB/s），都是理想值。部分和的加法（\(O(BF)\)）忽略不计。</p>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="s-net">7. 网络的 roofline</h2>
+      <p>前面的屋顶都是芯片内的：分母是 HBM 带宽。但同样的推理对芯片间的通信完全适用，而且后面分析并行策略时，我们关心的几乎都是这一种。</p>
+      <p>Scaling book 的例子：\(X\sim\text{bf16}[B,D]\)、\(Y\sim\text{bf16}[D,F]\)，沿 \(D\) 均分到 2 块 TPU 上。每块芯片算一半：\(Z_0 = X[:, :D/2]\,Y[:D/2, :]\)，\(Z_1\) 同理，然后把部分和发给对方相加。设每个方向能传 \(4.5\times10^{10}\) 字节/秒，每块芯片算力 \(1.97\times10^{14}\)：</p>
+      $$T_\text{math} = \frac{2BDF}{2\times 1.97\times10^{14}} = \frac{BDF}{1.97\times10^{14}},\qquad T_\text{comms} = \frac{2BF}{4.5\times10^{10}}$$
+      <p>计算受限的条件是</p>
+      $$\frac{BDF}{2BF} = \frac{D}{2} > \frac{1.97\times10^{14}}{4.5\times10^{10}} \approx 4377 \quad\Longrightarrow\quad D > 8755$$
+      <p>和 HBM 的 roofline 不同，这里的临界条件只和 \(D\) 有关，和 \(B\) 无关。原因：FLOPs 和要传的字节（部分和 \([B, F]\)）都和 \(B\)、\(F\) 成正比，二者相除只剩下 \(D\)——每块芯片在缩并维上做了多少工作，决定了它能「掩护」多少通信。推广到 \(n\) 块芯片做环形 AllReduce，条件大约是 \(D > 2(n-1)\cdot P/W\)，切得越多越难。</p>
+      <p>每一层带宽都有自己的临界强度。拿 BF16 算力分别除以各层带宽，就能看到越往外走，需要的强度越高：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>芯片</th><th>链路</th><th class="num">带宽</th><th class="num">临界强度</th></tr></thead>
+          <tbody>
+            <tr><td rowspan="3">H100</td><td>HBM</td><td class="num">3.35 TB/s</td><td class="num">≈ 295</td></tr>
+            <tr><td>NVLink（每卡单向）</td><td class="num">450 GB/s</td><td class="num">≈ 2,200</td></tr>
+            <tr><td>InfiniBand（每节点 400 GB/s，摊到每卡）</td><td class="num">50 GB/s</td><td class="num">≈ 19,800</td></tr>
+            <tr><td rowspan="4">TPU v5p</td><td>HBM</td><td class="num">2.8 TB/s</td><td class="num">≈ 164</td></tr>
+            <tr><td>ICI（每轴双向）</td><td class="num">180 GB/s</td><td class="num">≈ 2,550</td></tr>
+            <tr><td>PCIe（每芯片）</td><td class="num">16 GB/s</td><td class="num">≈ 28,700</td></tr>
+            <tr><td>DCN（每芯片）</td><td class="num">6.25 GB/s</td><td class="num">≈ 73,000</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>同一个道理也适用于 PCIe：scaling book 的例题是把 \(\text{bf16}[D, F]\) 的权重和 \(\text{bf16}[B, D]\) 的激活都放在主机内存里，在一块 TPU v6e 上做矩阵乘法（\(F = 4D\)，\(B\ll D\)），要不被 PCIe（1.6e10 B/s）卡住，需要 \(B > 9.2\times10^{14}/1.6\times10^{10}\approx 57{,}500\)。这就是为什么权重卸载（offload）到 CPU 内存只在 batch 极大时才划算。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-tpu">8. TPU 是什么样的</h2>
+      <p>有了 roofline 的语言，再来看硬件。先看 TPU，因为它结构更简单。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 720 300" role="img" aria-label="TPU 芯片的结构：TensorCore 包含 MXU、VPU、VMEM、标量单元，旁边是 HBM">
+          <rect class="box2" x="10" y="10" width="470" height="280" rx="12"/>
+          <text x="24" y="34" font-size="14">TensorCore</text>
+          <rect class="box-acc" x="30" y="50" width="190" height="110" rx="8"/>
+          <text x="125" y="72" font-size="14" text-anchor="middle">MXU × 4</text>
+          <text x="125" y="92" font-size="12" text-anchor="middle" class="soft">128×128 脉动阵列</text>
+          <text x="125" y="110" font-size="12" text-anchor="middle" class="soft">bf16[8,128]@[128,128]</text>
+          <text x="125" y="128" font-size="12" text-anchor="middle" class="soft">每 8 个周期一次</text>
+          <text x="125" y="148" font-size="12" text-anchor="middle" class="faint">矩阵乘法，绝大部分算力</text>
+          <rect class="box-acc2" x="240" y="50" width="220" height="110" rx="8"/>
+          <text x="350" y="72" font-size="14" text-anchor="middle">VPU</text>
+          <text x="350" y="92" font-size="12" text-anchor="middle" class="soft">(8, 128) 的二维 SIMD</text>
+          <text x="350" y="110" font-size="12" text-anchor="middle" class="soft">逐元素运算、归约</text>
+          <text x="350" y="128" font-size="12" text-anchor="middle" class="soft">VREG 向量寄存器</text>
+          <text x="350" y="148" font-size="12" text-anchor="middle" class="faint">算力约为 MXU 的 1/30</text>
+          <rect class="box" x="30" y="174" width="430" height="52" rx="8"/>
+          <text x="245" y="196" font-size="13" text-anchor="middle">VMEM：片上暂存，由编译器/程序员显式管理</text>
+          <text x="245" y="215" font-size="12" text-anchor="middle" class="soft">v5e 上 128 MiB；到 MXU 的带宽约为 HBM 的 22 倍</text>
+          <rect class="box" x="30" y="236" width="200" height="40" rx="8"/>
+          <text x="130" y="261" font-size="13" text-anchor="middle">标量单元 + SMEM</text>
+          <text x="250" y="254" font-size="12" class="faint">取指、发射指令、发起 DMA；</text>
+          <text x="250" y="270" font-size="12" class="faint">控制流只有一个线程</text>
+          <rect class="box-acc" x="540" y="90" width="170" height="120" rx="10"/>
+          <text x="625" y="135" font-size="15" text-anchor="middle">HBM</text>
+          <text x="625" y="157" font-size="12" text-anchor="middle" class="soft">v5e 16 GB / 8.2e11 B/s</text>
+          <text x="625" y="175" font-size="12" text-anchor="middle" class="soft">v5p 95 GiB / 2.8e12 B/s</text>
+          <path class="link" d="M480 202 H 540"/>
+          <text x="510" y="194" font-size="11" text-anchor="middle" class="soft">HBM 带宽</text>
+        </svg>
+        <figcaption>TPU 芯片的组成（按 scaling book 第 2 章的描述重画）。数据流：HBM → VMEM → 寄存器 → MXU/VPU → VMEM → HBM。</figcaption>
+      </figure>
+      <p>Scaling book 的概括是：TPU 基本就是一个专门做矩阵乘法的计算核心（<strong>TensorCore</strong>），挂在一堆高速显存（HBM）上。TensorCore 里有三个关键单元：</p>
+      <ul>
+        <li><strong>MXU</strong>（Matrix Multiply Unit）：TensorCore 的核心。大多数代际里，它每 8 个周期完成一次 \(\text{bf16}[8,128]\,@\,\text{bf16}[128,128]\to\text{f32}[8,128]\) 的矩阵乘法，用的是<strong>脉动阵列</strong>（systolic array，下面细讲）。TPU v6e（Trillium）的 MXU 是 256×256，之前各代都是 128×128。v5e 上每个 MXU 在 1.5 GHz 下约 \(5\times10^{13}\) BF16 FLOP/s，大多数 TensorCore 有 2 或 4 个 MXU，所以 v5e 总共约 \(2\times10^{14}\)。低精度更快：v5e 的 INT8 是 \(4\times10^{14}\) OP/s。</li>
+        <li><strong>VPU</strong>（Vector Processing Unit）：做 ReLU、逐元素加乘、归约等一般数学运算。它是一个形状为 (8, 128) 的二维 SIMD 机器：128 那一维叫 lane，8 那一维叫 sublane，每个 (lane, sublane) 位置在 v5 上有 4 个独立的 ALU。scaling book 算出 v5p 每核 VPU 约 \(8\times128\times4\times1.75\text{e}9 \approx 7\times10^{12}\) FLOP/s，大约是 MXU 的 1/30。沿 sublane 的归约便宜（有一个周期左右的 shuffle），跨 lane 的归约要经过专门的 XLU（cross-lane unit），又慢又贵。</li>
+        <li><strong>VMEM</strong>（Vector Memory）：TensorCore 里的片上暂存，比 HBM 小得多（v5e 上 128 MiB），但到 MXU 的带宽高得多。它像 CPU 的 L1/L2 缓存，但大得多，而且由程序员/编译器显式管理。HBM 里的数据必须先拷到 VMEM 才能参与计算。</li>
+      </ul>
+      <p>此外还有标量单元（scalar core）：它取指、发射所有指令、执行 HBM 到 VMEM 的传输。它是单线程的，所以每个 TensorCore 每周期只能发起一个 DMA 请求；一个标量核控制着 4,096 个 VPU ALU、4 个 MXU、2 个 XLU 和多个 DMA 引擎。「控制很少、计算很多」是 TPU 硬件效率的来源，也限制了它做依赖数据的灵活计算。</p>
+
+      <h3>流水线与 VMEM 的强度</h3>
+      <p>TPU 上所有操作都是流水线化、相互重叠的。做 \(X\cdot A\to Y\) 时，先把 \(A\) 和 \(X\) 的块从 HBM 拷到 VMEM，再送进 MXU 按 8×128（\(X\)）和 128×128（\(A\)）的块相乘，结果逐块写回 HBM；拷贝和 MXU 的工作是重叠的，所以 MXU 不必等数据——只要整体是计算受限的。如果 HBM→VMEM 比 MXU 慢，就是带宽受限：MXU 在「挨饿」。</p>
+      <p>VMEM 的带宽约为 HBM 的 22 倍，这意味着如果输入输出都能放在 VMEM 里，强度只要 10–20 就能吃满 MXU。scaling book 的例题：\(\text{int8}[B, 4096]\times\text{int8}[4096,16384]\) 在 v5e 上，权重从 HBM 读时需要 \(B > 267\)；如果从 VMEM 读，只需 \(B > 11\)（实际上 VMEM 带宽不能全用来读权重，更接近 20）。这就是 <strong>VMEM 预取</strong>的价值：例如在算注意力的时候，把下一个 FFN 的权重提前搬进 VMEM，就能把权重加载的成本藏起来——前提是一层的权重切得足够小，放得进 VMEM。可惜 VMEM 很小，这往往是个挑战。</p>
+
+      <h3>脉动阵列是怎么工作的</h3>
+      <p>MXU 的核心是一个 128×128（=16,384 个）乘加单元组成的二维网格。权重（RHS，128×128）从上方预先装入，每个单元固定持有一个权重；输入（LHS，8×128）从左边斜着送进来，每个周期往右移一格；部分和从上往下流，每经过一个单元就加上「输入 × 该单元的权重」，从底部流出的就是结果。开始有一个装载权重和输入的流水线气泡，之后新输入可以连续送入，没有额外气泡。所以张量的维度至少要和 MXU 的边长一样大（128，v6e 上 256），否则要补零浪费算力；有多个 MXU 时，切块的维度要大于 128 × MXU 个数。</p>
+      <p>下面用一个 3×3 的小阵列把这个过程一步步走一遍（权重驻留型，weight-stationary）：</p>
+
+      <div class="demo" id="sys-demo">
+        <div class="demo-label">交互演示 · 脉动阵列计算 Y = X · W</div>
+        <div class="sys-wrap" id="sys-svg"></div>
+        <div class="sys-log" id="sys-log"></div>
+        <div class="btns">
+          <button class="btn primary" id="sys-play">播放</button>
+          <button class="btn" id="sys-step">下一个周期 ▶</button>
+          <button class="btn" id="sys-reset">重置</button>
+          <button class="btn" id="sys-new">换一组数</button>
+        </div>
+        <p class="note">每个格子是一个乘加单元：灰色小字是驻留的权重 \(W_{kj}\)，紫色是这个周期流过的输入 \(x\)，橙色是往下传的部分和。输入第 \(t\) 行的第 \(k\) 个元素在第 \(t+k\) 个周期进入第 \(k\) 行，所以左边的输入是斜着排的。真实的 MXU 是 128×128，每个周期送进一列 8 个数。</p>
+      </div>
+
+      <h3>芯片、托盘与主机</h3>
+      <p>一块 TPU 芯片通常有两个 TensorCore，共享显存，可以当成一个算力加倍的大加速器（叫 megacore）——v4、v5p、v6 都是这样（TPU v7 去掉了 megacore，改成两个核之间的高带宽连接）。v3 及更早的芯片两个核显存独立，被当作两个加速器；面向推理的 v5e 每芯片只有一个核。芯片 4 个一组装在一个托盘（tray）上，经 PCIe 连到 CPU 主机；v5e 每台主机挂 2 个托盘、8 块芯片。PCIe 带宽有限，例如 v4 是每个方向 16 GB/s，比 HBM 慢约 100 倍：可以把数据放到主机内存，但搬得不快。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-tpunet">9. TPU 的网络：ICI、torus、pod 与 DCN</h2>
+      <p>同一个 pod 里的芯片通过 <strong>ICI</strong>（inter-chip interconnect）直连，不经过主机。v2/v3、推理芯片 v5e 和 v6e 的每块芯片连 4 个最近邻，构成二维 torus；v4 和 v5p 连 6 个最近邻，构成三维 torus。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 720 260" role="img" aria-label="4×4 二维 torus：每块芯片连上下左右，边缘有回绕链路">
+          <g id="torus"></g>
+          <g transform="translate(400,30)">
+            <text x="0" y="14" font-size="13">要点</text>
+            <text x="0" y="40" font-size="12" class="soft">· 每块芯片只连最近邻（2D 4 条、3D 6 条）</text>
+            <text x="0" y="62" font-size="12" class="soft">· 回绕链路（虚线）把最远距离从 N 降到 N/2</text>
+            <text x="0" y="84" font-size="12" class="soft">· 远处的芯片要经过中间的芯片逐跳转发</text>
+            <text x="0" y="106" font-size="12" class="soft">· 每芯片链路数固定 → 可以扩到很大的 pod</text>
+            <text x="0" y="128" font-size="12" class="soft">· 只适合规整的通信模式（环、网格）</text>
+            <text x="0" y="160" font-size="12" class="faint">v5p：4×4×4 的立方体之间用可重构的光交换机</text>
+            <text x="0" y="178" font-size="12" class="faint">连接，提供回绕；最大 16×20×28 = 8,960 芯片</text>
+          </g>
+        </svg>
+        <figcaption>一个 4×4 的二维 torus（v5e/v6e 的拓扑）。实线是相邻链路，虚线是回绕链路。</figcaption>
+      </figure>
+      <ul>
+        <li><strong>Torus 与回绕</strong>：环形回绕把任意两点的最大距离从 \(N\) 降到 \(N/2\)；还有「扭曲 torus」（twisted torus），像莫比乌斯带一样回绕，进一步缩短平均距离。</li>
+        <li><strong>Pod 和 superpod</strong>：v4 最大 16×16×16，v5p 最大 16×20×28（8,960 块芯片，Google Cloud 文档说单个切片最大可调度 6,144 块）。大 pod 由 4×4×4 的立方体组成，立方体之间用可重构的光交换（optical switch）连起来，它带宽和 ICI 一样，只是让连接可以重配并保留回绕。</li>
+        <li><strong>小切片没有回绕</strong>：申请 2×2×1、2×2×4 之类小于一个整立方体的拓扑，没有回绕链路，大多数通信的时间会翻倍；整立方体的倍数（4×4×4、4×4×8）才有。v5e 和 v6e 的 pod 是单个 16×16 的二维 torus，长度为 16 的轴才有回绕（所以 8×16 在长轴上有回绕）。</li>
+        <li><strong>切片（slice）与 DCN</strong>：一组由 ICI 连起来的 TPU 叫一个切片。切片之间通过数据中心网络（DCN）相连，例如跨 pod 训练（multislice）。DCN 是主机到主机的：数据要先过 PCIe 到主机，出网卡，到对端主机，再过 PCIe 进 HBM。</li>
+      </ul>
+      <p>带宽的量级（v5p）：HBM 每芯片 2.8e12 B/s；ICI 每轴 9e10 B/s（单向，每芯片 3 个轴）；DCN 每芯片约 6.25e9 B/s（v5e 是 3.125e9，v6e 和 TPU7x 是 12.5e9）；PCIe 每芯片约 1.6e10。scaling book 给出 ICI 每条链路的单向/双向带宽：v5e 4.5e10/9e10，v5p 和 v6e 9e10/1.8e11。双向带宽是指沿一个轴、两个方向加起来能发出的字节数，只有在有回绕的轴上（能构成环）才能用满，环形集合通信的公式里经常用它。</p>
+      <p>Scaling book 的总结是：<strong>TPU 很简单</strong>。大多数情况下可以把它看成一个矩阵乘法单元，连着显存（超快）、通过 ICI 连着邻居芯片（相当快）、通过 DCN 连着数据中心的其余部分（还算快）。让通信量和各条通道的速度成比例，就不会卡住 MXU。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-gpu">10. GPU 是什么样的</h2>
+      <p>现代 ML GPU（H100、B200）从高处看和 TPU 惊人地相似：一堆专做矩阵乘法的计算单元（叫 <strong>SM</strong>，streaming multiprocessor），连着一块高速显存（HBM）。区别是 TPU 有 1–2 个大 TensorCore，而 GPU 有一百多个小 SM（H100 132 个，B200 148 个）。每个 SM 比 TPU 的 TensorCore 弱得多，但彼此基本独立，所以 GPU 可以同时做几百件不同的事。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 720 330" role="img" aria-label="H100 的 SM 结构：4 个子分区，每个有 Tensor Core、Warp Scheduler、CUDA core 和寄存器；共享 SMEM/L1；所有 SM 共享 L2 与 HBM">
+          <rect class="box2" x="10" y="10" width="440" height="250" rx="12"/>
+          <text x="24" y="32" font-size="14">一个 SM（H100 共 132 个）</text>
+          <g id="subparts"></g>
+          <rect class="box" x="24" y="208" width="412" height="40" rx="8"/>
+          <text x="230" y="233" font-size="13" text-anchor="middle">SMEM / L1：256 KB，可编程的共享内存或硬件缓存</text>
+          <rect class="box-acc2" x="480" y="40" width="230" height="70" rx="10"/>
+          <text x="595" y="68" font-size="14" text-anchor="middle">L2 缓存 ~50 MB</text>
+          <text x="595" y="90" font-size="12" text-anchor="middle" class="soft">所有 SM 共享，实测约 5.5 TB/s</text>
+          <rect class="box-acc" x="480" y="150" width="230" height="80" rx="10"/>
+          <text x="595" y="182" font-size="14" text-anchor="middle">HBM 80 GB</text>
+          <text x="595" y="204" font-size="12" text-anchor="middle" class="soft">3.35 TB/s</text>
+          <path class="link2" d="M450 75 H 480"/><path class="link" d="M595 110 V 150"/>
+          <text x="10" y="290" font-size="12" class="faint">B200 每个 SM 另有 256 KB TMEM，专门给更大的 Tensor Core 喂数据；HBM 180–192 GB、约 8 TB/s，L2 126 MB。</text>
+          <text x="10" y="310" font-size="12" class="faint">寄存器：每个子分区 16,384 个 32 位字，每 SM 共 256 KB。</text>
+        </svg>
+        <figcaption>H100 一个 SM 的结构（按 scaling book 第 12 章的描述重画）。</figcaption>
+      </figure>
+      <h3>SM 内部</h3>
+      <p>每个 SM 分成 4 个相同的<strong>子分区</strong>（SM subpartition），每个子分区有：</p>
+      <ul>
+        <li><strong>Tensor Core</strong>：专用的矩阵乘法单元，相当于 TPU 的 MXU（注意命名冲突：GPU 的 Tensor Core 是 SM 里的矩阵子单元，TPU 的 TensorCore 是包含 MXU、VPU 等的整个核心）。它提供了绝大部分算力：H100 上 Tensor Core 是 990 TFLOP/s BF16，CUDA core 只有 66 TFLOP/s。按 132 个 SM、1.76 GHz 推算，每个 H100 Tensor Core 每周期约 1,024 BF16 FLOPs，大约是一次 8×8×8 的矩阵乘法；V100 是 256、A100 是 512，B200 估计是 2,048（NVIDIA 没公布细节，这是 scaling book 的推算）。</li>
+        <li><strong>CUDA core 与 Warp Scheduler</strong>：32 个 FP32 的 ALU（就是 NVIDIA 说的 CUDA core）加上调度它们的单元，做 SIMD/SIMT 的向量运算，相当于 TPU 的 VPU：ReLU、逐元素运算、归约都在这里。每个 ALU 每周期做一次运算；FMA（乘加融合）算两次，NVIDIA 的规格数字就是按 FMA 算的。</li>
+        <li><strong>寄存器堆</strong>：16,384 个 32 位字。</li>
+      </ul>
+      <p>按 scaling book 的估算，H100 共有 \(132\times4\times32 = 16{,}896\) 个 FP32 CUDA core，B200 有 18,944 个；而 TPU v5p 一块芯片有 \(2\times4\times8\times128 = 8{,}192\) 个独立 ALU。</p>
+
+      <h3>SIMT、warp 与调度</h3>
+      <p>GPU 的线程以 32 个为一组，叫 <strong>warp</strong>，同一 warp 的线程同时执行同一条指令，处理不同的数据。warp 再组成更大的线程块（block，例如 512 或 1,024 个线程），每个块分配给一个 SM。一个 SM 可以同时驻留多个块和最多 64 个 warp，但每个 warp scheduler 每个周期只执行一个 warp 的指令；它在活跃的 warp 之间切换，以此掩盖访存延迟。相比之下 TPU 基本是单线程的。</p>
+      <p>CUDA core 比 TPU 的 VPU 灵活：它用 <strong>SIMT</strong>（single instruction, multiple threads）模型，每个线程有自己的指令指针，可以独立编程；而 VPU 是纯 SIMD。代价是：如果同一个 warp 里的线程走了不同的分支（<strong>warp divergence</strong>），硬件会把两条分支都执行一遍，把不该执行的线程屏蔽掉，性能悄悄下降。</p>
+      <p>在 GPU 上运行的程序叫<strong>内核</strong>（kernel），可以用 CUDA 或 Triton 写，编译成 PTX。Playbook 总结了写内核的几条路：纯 PyTorch（简单但慢）、<code>torch.compile</code>（简单、快、不够灵活）、Triton（更难、更快、更灵活）、CUDA（最难、最快、最灵活）。它还讲了几种典型优化：<strong>访存合并</strong>（memory coalescing，让一个 warp 的 32 个线程访问连续地址，从而合并成一次 DRAM 突发读取）、<strong>分块</strong>（tiling，把数据搬进共享内存反复使用）、线程粗化和减少分支分歧。这些都是在给定内核里提高实际达到的带宽或算力，对应 roofline 上「离屋顶有多远」。内核细节放在系列后面的 <a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a>。</p>
+
+      <h3>存储层次</h3>
+      <ul>
+        <li><strong>寄存器</strong>：每 SM 256 KB。每个线程最多用 256 个寄存器；如果每个线程都用满，一个 SM 同时只能驻留 8 个 warp。</li>
+        <li><strong>SMEM / L1</strong>：每 SM 256 KB 的片上存储，可以当作程序员控制的共享内存，也可以当硬件缓存，用来存 Tensor Core 矩阵乘法的输入。全卡合计约 33 MB，加上寄存器约 66 MB，大约是 TPU VMEM（约 120 MB）的一半。</li>
+        <li><strong>TMEM</strong>（Blackwell 新增）：B200 的 Tensor Core 大到输入（尤其是累加器）放不进寄存器和 SMEM，所以加了每 SM 256 KB 的 Tensor Memory。相关地，Ampere 的 Tensor Core 可以由一个 warp 驱动，Hopper 需要整个 SM（warpgroup），Blackwell 由 2 个 SM 一起驱动。</li>
+        <li><strong>L2</strong>：所有 SM 共享约 50 MB（H100；实际分成两半，各 25 MB），带宽 NVIDIA 没公布，实测约 5.5 TB/s。它不由程序员控制，所以要靠调整访存模式间接用好它；所有 SM 共享 L2 也迫使各 SM 以相当协调的方式运行。</li>
+        <li><strong>HBM</strong>：主显存，存权重、梯度、激活。容量从 Volta 的 32 GB 涨到 Blackwell 的 192 GB；带宽 H100 3.35 TB/s，B200 约 8 TB/s。</li>
+      </ul>
+      <p>scaling book 的看法：GPU 起源于图形渲染，设计目标是通用，新任务上更容易「直接能跑」，对编译器的依赖小；但正因为硬件管得多，也更难推理和逼近 roofline——一个内核可能因为打爆 L2、访存没合并而性能很差，而你很难看出来。TPU 把更多负担交给编译器（单线程控制、只能做整个 VPU 宽度的指令，所有搬运要编译器排好流水线），反过来更容易接近峰值。另一个差异是 TPU 的快速片上存储（VMEM）多得多，如果能把权重放进或预取进 VMEM，LLM 推理可以更快。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-gpunet">11. GPU 的网络：NVLink、NVSwitch 与 InfiniBand</h2>
+      <p>网络是 GPU 和 TPU 差别最大的地方。TPU 是只连邻居的 torus；GPU 用的是更传统的<strong>分层交换网络</strong>。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 720 300" role="img" aria-label="GPU 网络：节点内 8 块 GPU 经 NVSwitch 全互联，节点经 InfiniBand 叶交换机和脊交换机组成胖树">
+          <rect class="box2" x="10" y="10" width="700" height="44" rx="8"/>
+          <text x="360" y="37" font-size="13" text-anchor="middle">脊（spine）交换机：16 台，连接 4 个 SU → 1,024 块 GPU</text>
+          <rect class="box2" x="60" y="88" width="250" height="40" rx="8"/><text x="185" y="113" font-size="13" text-anchor="middle">叶交换机 × 8（一个 SU）</text>
+          <rect class="box2" x="410" y="88" width="250" height="40" rx="8"/><text x="535" y="113" font-size="13" text-anchor="middle">叶交换机 × 8（下一个 SU）</text>
+          <path class="link2" d="M185 54 V 88"/><path class="link2" d="M535 54 V 88"/>
+          <g id="nodes"></g>
+          <text x="10" y="290" font-size="12" class="faint">InfiniBand 胖树（橙线）：每节点 8×400 Gbps 网卡 = 400 GB/s 出口；节点内 NVLink（紫）：每卡 450 GB/s 单向。</text>
+        </svg>
+        <figcaption>参考的 1,024 卡 DGX H100 SuperPod（简化）：每个 SU 32 个节点 = 256 块 GPU。</figcaption>
+      </figure>
+      <h3>节点内（scale-up）：NVLink 与 NVSwitch</h3>
+      <p>一个<strong>节点</strong>通常是 8 块 GPU（GB200 NVL72 可以到 72 块），彼此通过 <strong>NVLink</strong> 在一跳之内全互联，带宽高、延迟低。节点里有几个 <strong>NVSwitch</strong> 负责在本地 GPU 之间交换数据。H100 节点有 4 个 NVSwitch，每块 GPU 有 18 条 NVLink 4.0 链路，每条单向 25 GB/s（全双工，两个方向互不影响），于是每块 GPU 的出口带宽是 \(18\times25 = 450\) GB/s（NVIDIA 规格页写的 900 GB/s 是双向合计）。B200 的 NVLink 5 每条链路翻倍到 50 GB/s，每卡 900 GB/s 单向。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>NVLink 代</th><th>GPU</th><th class="num">每链路（单向）</th><th class="num">每卡链路数</th><th class="num">每卡带宽（单向）</th><th class="num">节点大小</th><th class="num">每节点 NVSwitch</th></tr></thead>
+          <tbody>
+            <tr><td>3.0</td><td>A100</td><td class="num">25 GB/s</td><td class="num">12</td><td class="num">300 GB/s</td><td class="num">8</td><td class="num">6</td></tr>
+            <tr><td>4.0</td><td>H100</td><td class="num">25 GB/s</td><td class="num">18</td><td class="num">450 GB/s</td><td class="num">8</td><td class="num">4</td></tr>
+            <tr><td>5.0</td><td>B200</td><td class="num">50 GB/s</td><td class="num">18</td><td class="num">900 GB/s</td><td class="num">8 / 72</td><td class="num">2 / 18</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>一个 8×H100 节点：NVSwitch 一侧理论上能处理 \(4\times64\times25\) GB/s = 6.4 TB/s，但每块 GPU 最多 450 GB/s，所以节点的峰值是 \(8\times450\) GB/s = 3.6 TB/s，这也是它的对分带宽（把 8 块卡分成两半，两半之间能流过的总带宽）。</p>
+      <p>理论值和实测有差距：scaling book 测 8×H100 节点内的 AllReduce，总线带宽最多接近 370 GB/s，而且要 10 GB 级别的大消息才能达到；像 Llama 3 70B 一个 MLP 权重那么大的数组（8 路切分后约 58 MB），只能跑到约 150 GB/s。Hopper 开始的 NVSwitch 支持 SHARP（交换机内归约），理论上能让 AllReduce 的成本减半，实测提升约 30%。</p>
+
+      <h3>节点间（scale-out）：InfiniBand 胖树</h3>
+      <p>节点之间用带宽低一些的 <strong>InfiniBand</strong>（IB）或以太网相连，每块 GPU 配一张网卡。NVIDIA 的参考设计 DGX SuperPod（1,024 块 H100）是这样搭的：</p>
+      <ul>
+        <li>每个节点 8 张 400 Gbps 的 ConnectX-7 网卡，即每节点 \(8\times 400/8 = 400\) GB/s 的出口带宽（每卡 50 GB/s）；</li>
+        <li>32 个节点（256 块 GPU）挂在 8 台叶（leaf）交换机下，叫一个 <strong>SU</strong>（scalable unit）；</li>
+        <li>4 个 SU 再由 16 台脊（spine）交换机连起来，共 1,024 块 GPU。</li>
+      </ul>
+      <p>整个 IB 网络是一棵<strong>胖树</strong>（fat tree），线缆和交换机的带宽经过设计，保证节点之上有完整的对分带宽：任意把节点分成两半，每个节点都能以 400 GB/s 向另一半发送。这意味着跨节点的 AllGather/ReduceScatter 有大致恒定的带宽，无论跨多少节点。这只是参考设计，不同客户和云厂商会改；例如 Meta 训练 Llama 3 用的是以太网、三层交换和顶层超额订阅（oversubscribed）的网络。</p>
+      <p>Scaling book 的经验值：节点内每卡 450 GB/s，跨节点每节点 400 GB/s，后者在 AllToAll 这种「每卡对每卡」的通信里会退化得很厉害（跨 2 个节点时相比节点内慢 4 倍以上）。<strong>GB200 NVL72</strong> 把 72 块 GPU 放进一个 NVLink 域，每卡 900 GB/s，节点出口带宽也同比提高到 3.6 TB/s，这显著改变了 GPU 上的通信 roofline。</p>
+
+      <h3>Scale-up 与 scale-out</h3>
+      <p>这两个词描述的正是上面两层：<strong>scale-up</strong> 网络（NVLink 域）是少量芯片之间的高带宽、低延迟全互联，不为大规模和容错设计（scaling book 引用的一个说法是「加强版的 PCIe」）；<strong>scale-out</strong> 网络（IB/以太网）可以连成千上万个节点，带宽每卡低一个数量级，更像传统的数据中心网络。TPU 的 ICI 介于两者之间：它在整个 pod（数千芯片）范围内提供每芯片恒定的带宽（v5p 每链路 90 GB/s、三个轴共 540 GB/s 出口），但只能用于规整的通信模式。并行策略的核心约束就在这里：通信量最大的并行方式（例如张量并行）要放在快的那一层里。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-compare">12. 对比与规格表</h2>
+      <h3>部件对照</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>GPU</th><th>TPU</th><th>是什么</th><th class="num">H100 数量</th><th class="num">TPU v5p 数量</th></tr></thead>
+          <tbody>
+            <tr><td>SM</td><td>TensorCore</td><td>包含其他单元的核心「细胞」</td><td class="num">132</td><td class="num">2</td></tr>
+            <tr><td>Warp Scheduler</td><td>VPU 槽位</td><td>SIMD 向量运算单元</td><td class="num">528</td><td class="num">8</td></tr>
+            <tr><td>CUDA core</td><td>VPU ALU</td><td>SIMD 的 ALU</td><td class="num">16,896</td><td class="num">8,192</td></tr>
+            <tr><td>SMEM（L1）</td><td>VMEM</td><td>快速片上存储</td><td class="num">32 MB</td><td class="num">128 MB</td></tr>
+            <tr><td>寄存器</td><td>VREG</td><td>寄存器</td><td class="num">32 MB</td><td class="num">256 KB</td></tr>
+            <tr><td>Tensor Core</td><td>MXU</td><td>矩阵乘法单元</td><td class="num">528</td><td class="num">8</td></tr>
+            <tr><td>HBM（GMEM）</td><td>HBM</td><td>大容量高带宽显存</td><td class="num">80 GB</td><td class="num">95 GiB</td></tr>
+            <tr><td>NVLink / NVSwitch</td><td>ICI</td><td>快速芯片互联</td><td class="num">8 卡全互联</td><td class="num">3D torus</td></tr>
+            <tr><td>InfiniBand / 以太网</td><td>DCN</td><td>慢速大范围网络</td><td class="num">胖树</td><td class="num">主机间</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>（前几行取自 scaling book 第 12 章的对照表；后两行是我加的。）</p>
+      <h3>芯片规格</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>芯片</th><th class="num">BF16 稠密</th><th class="num">FP8/INT8</th><th class="num">HBM</th><th class="num">HBM 带宽</th><th class="num">临界强度</th><th class="num">快速互联（每芯片）</th></tr></thead>
+          <tbody>
+            <tr><td>A100</td><td class="num">3.1e14</td><td class="num">6.2e14</td><td class="num">80 GB</td><td class="num">2.0e12</td><td class="num">156</td><td class="num">NVLink 300 GB/s</td></tr>
+            <tr><td>H100 SXM</td><td class="num">9.9e14</td><td class="num">2.0e15</td><td class="num">80 GB</td><td class="num">3.35e12</td><td class="num">295</td><td class="num">NVLink 450 GB/s</td></tr>
+            <tr><td>H200</td><td class="num">9.9e14</td><td class="num">2.0e15</td><td class="num">141 GB</td><td class="num">4.8e12</td><td class="num">206</td><td class="num">NVLink 450 GB/s</td></tr>
+            <tr><td>B200</td><td class="num">2.25e15</td><td class="num">4.5e15</td><td class="num">180–192 GB</td><td class="num">8.0e12</td><td class="num">281</td><td class="num">NVLink 900 GB/s</td></tr>
+            <tr><td>TPU v5e</td><td class="num">1.97e14</td><td class="num">3.94e14</td><td class="num">16 GB</td><td class="num">8.2e11</td><td class="num">240</td><td class="num">ICI 4 链路 × 45 GB/s</td></tr>
+            <tr><td>TPU v5p</td><td class="num">4.59e14</td><td class="num">9.18e14</td><td class="num">95 GiB</td><td class="num">2.8e12</td><td class="num">164</td><td class="num">ICI 6 链路 × 90 GB/s</td></tr>
+            <tr><td>TPU v6e</td><td class="num">9.2e14</td><td class="num">1.84e15</td><td class="num">32 GB</td><td class="num">1.6e12</td><td class="num">575</td><td class="num">ICI 4 链路 × 90 GB/s</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>GPU 的互联是每卡单向；TPU 是每链路单向。B200 的显存 scaling book 写 192 GB，NVIDIA DGX B200 页面是 8 卡共 1,440 GB（每卡 180 GB），两个数我都列上。价格方面 scaling book 提到 Google Cloud 上 H200 约每小时 10 美元、TPU v5p 约 4 美元，单块 H200 的算力接近 v5p 的 2 倍、显存 1.5 倍——GPU 单卡更强，TPU 更依赖把很多芯片连起来。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-summary">13. 小结</h2>
+      <ul>
+        <li>任何运算的时间都可以用 \(T_\text{math} = \text{FLOPs}/\text{峰值}\) 和 \(T_\text{comms} = \text{Bytes}/\text{带宽}\) 来估算，完全重叠时取 \(\max\)，不重叠时取和，二者最多差 2 倍。</li>
+        <li>算术强度 = FLOPs / Bytes。大于硬件的临界强度（峰值 / 带宽）就计算受限，否则带宽受限。主流芯片的 HBM 临界强度在 150–600 之间。</li>
+        <li>BF16 矩阵乘法的强度约等于每副本的 token batch \(B\)；在 H100 上要 \(B \gtrsim 300\)、TPU v5e 上 \(B\gtrsim 240\) 才能计算受限。只量化权重时门槛减半。</li>
+        <li>逐元素运算、点积、生成阶段的注意力、每个样本独有的权重：强度是常数，永远带宽受限，只能靠融合和减少字节来加速。</li>
+        <li>网络也有 roofline：沿缩并维切分的矩阵乘法，临界条件取决于每块芯片上的 \(D\) 而不是 \(B\)。越外层的网络临界强度越高（H100：HBM 约 300，NVLink 约 2,200，IB 约 2 万）。</li>
+        <li>TPU = 少数大核心 + 大片上存储 + 只连邻居的 torus；GPU = 上百个小 SM + 小缓存 + 节点内全互联、节点间胖树。</li>
+      </ul>
+      <p>有了每条链路的带宽，下一步就是算具体的通信操作（AllGather、ReduceScatter、AllReduce、AllToAll）各要多少时间，以及矩阵乘法被切分后需要哪些通信。这是<a href="/posts/scaling-collectives/">下一篇：集合通信与分片矩阵乘法</a>的内容。</p>
+
+      <h2 id="s-ref">参考</h2>
+      <ul>
+        <li>Jacob Austin 等，How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/roofline/">Part 1: A Brief Intro to Roofline Analysis</a>（Where Does the Time Go、Visualizing rooflines、Matrix multiplication、Network communication rooflines 及习题）；<a href="https://jax-ml.github.io/scaling-book/tpus/">Part 2: How to Think About TPUs</a>（What Is a TPU、TPU Networking、TPU specs、附录 A/B）；<a href="https://jax-ml.github.io/scaling-book/gpus/">Part 12: How to Think About GPUs</a>（What Is a GPU、Memory、GPUs vs. TPUs、Networking 及习题）；<a href="https://jax-ml.github.io/scaling-book/transformers/">Part 4</a> 的习题 4、8（注意力与 MoE 的强度）。</li>
+        <li>Nouamane Tazi 等，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>：A primer on GPUs、Improving performance with kernels（memory coalescing、tiling、thread coarsening、control divergence）、Fused kernels。</li>
+        <li>NVIDIA 规格页：<a href="https://www.nvidia.com/en-us/data-center/h100/">H100</a>、<a href="https://www.nvidia.com/en-us/data-center/hgx/">HGX</a>、<a href="https://www.nvidia.com/en-us/data-center/dgx-b200/">DGX B200</a>。</li>
+        <li>Google Cloud TPU 文档：<a href="https://cloud.google.com/tpu/docs/v5e">v5e</a>、<a href="https://cloud.google.com/tpu/docs/v5p">v5p</a>、<a href="https://cloud.google.com/tpu/docs/v6e">v6e</a>。</li>
+        <li>Samuel Williams、Andrew Waterman、David Patterson，<a href="https://doi.org/10.1145/1498765.1498785">Roofline: An Insightful Visual Performance Model for Multicore Architectures</a>（CACM 2009），roofline 模型的原始论文。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const $ = (id) => document.getElementById(id);
+    const NS = 'http://www.w3.org/2000/svg';
+    const chartW = (el) => Math.max(330, Math.min(680, el.clientWidth || 680));
+    const sci = (x, d = 2) => {
+      if (!isFinite(x) || x === 0) return '0';
+      const e = Math.floor(Math.log10(Math.abs(x)));
+      return (x / Math.pow(10, e)).toFixed(d) + 'e' + e;
+    };
+    const fmtT = (s) => s >= 1 ? s.toFixed(2) + ' s' : s >= 1e-3 ? (s * 1e3).toFixed(2) + ' ms' : s >= 1e-6 ? (s * 1e6).toFixed(2) + ' μs' : (s * 1e9).toFixed(1) + ' ns';
+    const fmtI = (x) => x >= 100 ? Math.round(x).toLocaleString() : x >= 1 ? x.toFixed(1) : x.toFixed(3);
+    const fmtFlops = (x) => x >= 1e15 ? (x / 1e15).toFixed(2) + ' PFLOP/s' : x >= 1e12 ? (x / 1e12).toFixed(1) + ' TFLOP/s' : (x / 1e9).toFixed(1) + ' GFLOP/s';
+    const isPow2 = (n) => n > 0 && (n & (n - 1)) === 0;
+    const fmtInt = (n) => !Number.isInteger(Math.log2(n)) ? Math.round(n).toLocaleString() : n >= 1048576 ? (n / 1048576) + 'M' : n >= 1024 ? (n / 1024) + 'k' : String(n);
+    const POW2 = (a, b) => Array.from({ length: b - a + 1 }, (_, i) => Math.pow(2, a + i));
+    const DIMS = [256, 512, 1024, 2048, 4096, 5120, 6144, 8192, 12288, 14336, 16384, 24576, 28672, 32768, 53248, 65536, 131072];
+    const fmtAxis = (v) => v >= 1e3 ? (v / 1e3) + 'k' : v >= 1 ? String(v) : String(v);
+    function segInit(el, cb) {
+      el.addEventListener('click', (ev) => {
+        const b = ev.target.closest('button');
+        if (!b) return;
+        el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        cb(b.dataset.v);
+      });
+      return () => el.querySelector('[aria-pressed="true"]').dataset.v;
+    }
+
+    /* ---------------- chip data ---------------- */
+    const CHIPS = {
+      h100: { name: 'H100', P: 9.89e14, BW: 3.35e12, vec: 3.35e13, vecName: 'CUDA core FP32（不计 FMA）', net: 4.5e11, netName: 'NVLink 每卡单向 450 GB/s', on: 5.5e12, onName: 'L2（实测约 5.5 TB/s）', gpu: true },
+      h200: { name: 'H200', P: 9.89e14, BW: 4.8e12, vec: 3.35e13, vecName: 'CUDA core FP32（不计 FMA）', net: 4.5e11, netName: 'NVLink 每卡单向 450 GB/s', gpu: true },
+      b200: { name: 'B200', P: 2.25e15, BW: 8.0e12, vec: 4.0e13, vecName: 'CUDA core FP32（80 TFLOP/s 含 FMA，折半）', net: 9e11, netName: 'NVLink 每卡单向 900 GB/s', gpu: true },
+      a100: { name: 'A100', P: 3.1e14, BW: 2.0e12, net: 3e11, netName: 'NVLink 每卡单向 300 GB/s', gpu: true },
+      v5e: { name: 'TPU v5e', P: 1.97e14, BW: 8.2e11, net: 4.5e10, netName: 'ICI 单链路单向 45 GB/s', on: 8.2e11 * 22, onName: 'VMEM（按约 22× HBM 估）' },
+      v5p: { name: 'TPU v5p', P: 4.59e14, BW: 2.8e12, vec: 7e12, vecName: 'VPU（单核 7e12，书中数字）', net: 9e10, netName: 'ICI 单链路单向 90 GB/s' },
+      v6e: { name: 'TPU v6e', P: 9.2e14, BW: 1.6e12, net: 9e10, netName: 'ICI 单链路单向 90 GB/s' },
+    };
+    const chipButtons = (el, def) => {
+      el.innerHTML = Object.entries(CHIPS).map(([k, c]) => '<button data-v="' + k + '" aria-pressed="' + (k === def) + '">' + c.name + '</button>').join('');
+    };
+
+    /* ---------------- Demo 1: roofline ---------------- */
+    (function roofline() {
+      chipButtons($('rl-chip'), 'h100');
+      const getChip = segInit($('rl-chip'), () => render());
+      const OPS = {
+        mm: { params: [['B', 'B（token）', POW2(0, 16), 7], ['D', 'D', DIMS, 7], ['F', 'F', DIMS, 12]],
+          f: (p, c) => ({ flops: 2 * p.B * p.D * p.F, bytes: 2 * (p.B * p.D + p.D * p.F + p.B * p.F), peak: c.P, peakName: 'BF16 矩阵单元峰值' }),
+          note: '强度 = BDF / (BD + DF + BF)，B ≪ D, F 时约等于 B。' },
+        mm8: { params: [['B', 'B（token）', POW2(0, 16), 7], ['D', 'D', DIMS, 7], ['F', 'F', DIMS, 12]],
+          f: (p, c) => ({ flops: 2 * p.B * p.D * p.F, bytes: p.B * p.D + p.D * p.F + p.B * p.F, peak: 2 * c.P, peakName: '8 位矩阵峰值（按 BF16 的 2 倍）' }),
+          note: '每个数 1 字节，强度约 2B；8 位峰值也翻倍，所以临界 B 基本不变。' },
+        mmw8: { params: [['B', 'B（token）', POW2(0, 16), 6], ['D', 'D', DIMS, 7], ['F', 'F', DIMS, 12]],
+          f: (p, c) => ({ flops: 2 * p.B * p.D * p.F, bytes: 2 * p.B * p.D + p.D * p.F + 2 * p.B * p.F, peak: c.P, peakName: 'BF16 矩阵单元峰值' }),
+          note: '只有权重是 1 字节：强度约 2B，算力仍按 BF16，临界 B 减半。' },
+        bmm: { params: [['B', 'B（样本）', POW2(0, 12), 6], ['D', 'D', DIMS.slice(0, 11), 4], ['F', 'F', DIMS.slice(0, 11), 7]],
+          f: (p, c) => ({ flops: 2 * p.B * p.D * p.F, bytes: 2 * (p.B * p.D + p.B * p.D * p.F + p.B * p.F), peak: c.P, peakName: 'BF16 矩阵单元峰值' }),
+          note: '每个样本有自己的 [D,F] 权重，没有复用：强度约 1（BF16），与 B 无关。' },
+        attn: { params: [['S', 'KV 长度 S', POW2(7, 17), 6], ['T', 'query 长度 T', POW2(0, 17), 0], ['G', '分组 G = N/K', [1, 2, 4, 8, 16], 3]],
+          f: (p, c) => { const T = Math.min(p.T, p.S); const B = 1, K = 8, H = 128; return { flops: 4 * B * T * p.S * K * p.G * H, bytes: 4 * B * H * K * (T * p.G + p.S), peak: c.P, peakName: 'BF16 矩阵单元峰值', T }; },
+          note: '强度 = TSG / (TG + S)。T = 1 是生成阶段（→ G），T = S 是训练/prefill。按 B = 1、K = 8 个 KV 头、H = 128 计时间。' },
+        dot: { params: [['N', '长度 N', POW2(4, 30), 16]],
+          f: (p, c) => ({ flops: 2 * p.N - 1, bytes: 4 * p.N + 2, peak: c.vec || c.P, peakName: c.vec ? c.vecName : '（无向量单元数据，按矩阵峰值画）' }),
+          note: '强度 (2N−1)/(4N+2) → 1/2，与 N 无关。点积在向量单元上跑。' },
+        add: { params: [['N', '长度 N', POW2(4, 30), 16]],
+          f: (p, c) => ({ flops: p.N, bytes: 12 * p.N, peak: c.vec || c.P, peakName: c.vec ? c.vecName : '（无向量单元数据，按矩阵峰值画）' }),
+          note: '读 8N、写 4N 字节，做 N 次加法：强度 1/12。' },
+      };
+      let vals = {};
+      function buildParams() {
+        const op = OPS[$('rl-op').value];
+        $('rl-params').innerHTML = op.params.map(([k, label, list, def]) =>
+          '<div class="ctrl"><span>' + label + '</span><input type="range" data-k="' + k + '" min="0" max="' + (list.length - 1) + '" step="1" value="' + def + '" aria-label="' + label + '"><output></output></div>').join('');
+        $('rl-params').querySelectorAll('input').forEach((inp) => inp.addEventListener('input', render));
+        render();
+      }
+      $('rl-op').addEventListener('change', buildParams);
+      function render() {
+        const c = CHIPS[getChip()];
+        const opKey = $('rl-op').value, op = OPS[opKey];
+        vals = {};
+        $('rl-params').querySelectorAll('input').forEach((inp) => {
+          const list = op.params.find((q) => q[0] === inp.dataset.k)[2];
+          const v = list[+inp.value];
+          vals[inp.dataset.k] = v;
+          inp.nextElementSibling.textContent = fmtInt(v);
+        });
+        const r = op.f(vals, c);
+        if (opKey === 'attn') $('rl-params').querySelector('[data-k="T"]').nextElementSibling.textContent = fmtInt(r.T) + (vals.T > vals.S ? '（≤S）' : '');
+        const I = r.flops / r.bytes;
+        const crit = r.peak / c.BW;
+        const achieved = Math.min(r.peak, I * c.BW);
+        // chart
+        const el = $('rl-chart');
+        const W = chartW(el), H = W < 500 ? 300 : 330, ml = 56, mr = 18, mt = 16, mb = 42;
+        const xlo = -2, xhi = 5; // log10 intensity
+        const ytop = Math.ceil(Math.log10(Math.max(r.peak, c.P) * 2.5)), ybot = ytop - 6;
+        const X = (i) => ml + (Math.log10(i) - xlo) / (xhi - xlo) * (W - ml - mr);
+        const Y = (f) => mt + (1 - (Math.log10(f) - ybot) / (ytop - ybot)) * (H - mt - mb);
+        let g = '';
+        for (let e = xlo; e <= xhi; e++) {
+          g += '<line class="grid" x1="' + X(Math.pow(10, e)) + '" x2="' + X(Math.pow(10, e)) + '" y1="' + mt + '" y2="' + (H - mb) + '"/>';
+          g += '<text x="' + X(Math.pow(10, e)) + '" y="' + (H - mb + 16) + '" text-anchor="middle">' + (e < 0 ? Math.pow(10, e).toFixed(-e) : fmtAxis(Math.pow(10, e))) + '</text>';
+        }
+        for (let e = ybot; e <= ytop; e++) {
+          g += '<line class="grid" x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(Math.pow(10, e)) + '" y2="' + Y(Math.pow(10, e)) + '"/>';
+          g += '<text x="' + (ml - 6) + '" y="' + (Y(Math.pow(10, e)) + 4) + '" text-anchor="end">1e' + e + '</text>';
+        }
+        g += '<text x="' + ((ml + W - mr) / 2) + '" y="' + (H - 6) + '" text-anchor="middle">算术强度（FLOPs/byte）</text>';
+        g += '<text transform="translate(14,' + ((mt + H - mb) / 2) + ') rotate(-90)" text-anchor="middle">FLOP/s</text>';
+        const roof = (bw, peak, style, label) => {
+          const i0 = Math.pow(10, xlo), iR = peak / bw, i1 = Math.pow(10, xhi);
+          const iStart = Math.max(i0, Math.pow(10, ybot) / bw);
+          d = 'M' + X(iStart) + ' ' + Y(iStart * bw) + (iR <= i1 ? ' L' + X(iR) + ' ' + Y(peak) + ' L' + X(i1) + ' ' + Y(peak) : ' L' + X(i1) + ' ' + Y(i1 * bw));
+          g += '<path d="' + d + '" style="fill:none;' + style + '"/>';
+          if (label) {
+            const li = Math.min(iR / 8, Math.pow(10, xhi - 1)), lx = Math.max(X(li), ml + 4);
+            const ly = Y(Math.min(li * bw, peak));
+            g += '<text x="' + (lx + 4) + '" y="' + (ly - 6) + '" style="font-size:11px">' + label + '</text>';
+          }
+        };
+        if (c.on && opKey !== 'dot' && opKey !== 'add') roof(c.on, r.peak, 'stroke:var(--r-cmp);stroke-width:1.5;stroke-dasharray:2 3', '');
+        if (c.net && opKey !== 'dot' && opKey !== 'add') roof(c.net, r.peak, 'stroke:var(--r-net);stroke-width:1.5;stroke-dasharray:6 4', '');
+        roof(c.BW, r.peak, 'stroke:var(--text);stroke-width:2.4', '');
+        // critical line
+        g += '<line x1="' + X(crit) + '" x2="' + X(crit) + '" y1="' + Y(r.peak) + '" y2="' + (H - mb) + '" style="stroke:var(--text-faint);stroke-dasharray:3 3"/>';
+        g += '<text x="' + (X(crit) + 4) + '" y="' + (H - mb - 6) + '" style="font-size:11px">临界 ' + fmtI(crit) + '</text>';
+        g += '<text x="' + (W - mr - 4) + '" y="' + (Y(r.peak) - 6) + '" text-anchor="end" style="font-size:11px">峰值 ' + fmtFlops(r.peak) + '</text>';
+        // point
+        const bound = I < crit;
+        const px = Math.min(Math.max(X(I), ml), W - mr), py = Y(Math.max(achieved, Math.pow(10, ybot)));
+        g += '<circle cx="' + px + '" cy="' + py + '" r="7" style="fill:var(' + (bound ? '--r-mem' : '--r-cmp') + ');stroke:var(--surface);stroke-width:2"/>';
+        // legend (HTML, below the chart)
+        const items = [['stroke:var(--text);stroke-width:2.4', 'HBM ' + (c.BW / 1e12).toFixed(2) + ' TB/s']];
+        if (c.net && opKey !== 'dot' && opKey !== 'add') items.push(['stroke:var(--r-net);stroke-width:1.5;stroke-dasharray:6 4', c.netName]);
+        if (c.on && opKey !== 'dot' && opKey !== 'add') items.push(['stroke:var(--r-cmp);stroke-width:1.5;stroke-dasharray:2 3', c.onName]);
+        $('rl-legend').innerHTML = items.map(([st, name]) => '<span><svg viewBox="0 0 24 8"><line x1="0" x2="24" y1="4" y2="4" style="' + st + '"/></svg>' + name + '</span>').join('');
+        const lg = '';
+        el.innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="roofline 图">' + g + lg + '</svg>';
+        const tMath = r.flops / r.peak, tMem = r.bytes / c.BW;
+        $('rl-verdict').innerHTML = (bound ? '<span class="tag mem">带宽受限</span>' : '<span class="tag cmp">计算受限</span>') +
+          ' 强度 ' + fmtI(I) + ' FLOPs/byte，' + (bound ? '低于' : '高于') + '临界强度 ' + fmtI(crit) + '；可达 ' + fmtFlops(achieved) + '，即峰值的 ' + (achieved / r.peak * 100).toFixed(achieved / r.peak < 0.01 ? 2 : 0) + '%。';
+        $('rl-readout').innerHTML =
+          '<div><span class="k">FLOPs</span><span class="v">' + sci(r.flops) + '</span></div>' +
+          '<div><span class="k">字节</span><span class="v">' + sci(r.bytes) + '</span></div>' +
+          '<div><span class="k">T_math</span><span class="v">' + fmtT(tMath) + '</span></div>' +
+          '<div><span class="k">T_HBM</span><span class="v">' + fmtT(tMem) + '</span></div>';
+        $('rl-note').textContent = op.note + ' 纵轴的峰值：' + r.peakName + '。网络屋顶只是为了对照：若这些字节要走芯片间链路而不是 HBM，斜线会低这么多。';
+      }
+      let lastW = 0;
+      window.addEventListener('resize', () => { const w = chartW($('rl-chart')); if (w !== lastW) { lastW = w; render(); } });
+      buildParams();
+    })();
+
+    /* ---------------- Demo 2: matmul time calculator ---------------- */
+    (function mmcalc() {
+      chipButtons($('mm-chip'), 'h100');
+      const getChip = segInit($('mm-chip'), () => render());
+      const getDt = segInit($('mm-dt'), () => render());
+      const getN = segInit($('mm-n'), () => render());
+      const getSplit = segInit($('mm-split'), () => render());
+      ['mm-b', 'mm-d', 'mm-f'].forEach((id) => $(id).addEventListener('input', render));
+      function render() {
+        const c = CHIPS[getChip()], dt = getDt(), n = +getN(), split = getSplit();
+        const B = Math.pow(2, +$('mm-b').value), D = DIMS[+$('mm-d').value], F = DIMS[+$('mm-f').value];
+        $('mm-b-v').textContent = fmtInt(B); $('mm-d-v').textContent = fmtInt(D); $('mm-f-v').textContent = fmtInt(F);
+        const ba = dt === 'i8' ? 1 : 2, bw = dt === 'bf16' ? 2 : 1, bo = dt === 'i8' ? 1 : 2;
+        const peak = dt === 'i8' ? 2 * c.P : c.P;
+        const flops = 2 * B * D * F / n;
+        let bytes, comm = 0;
+        if (split === 'D' || n === 1) {
+          bytes = ba * B * D / n + bw * D * F / n + bo * B * F;
+          if (n > 1) comm = 2 * (n - 1) / n * bo * B * F;
+        } else {
+          bytes = ba * B * D + bw * D * F / n + bo * B * F / n;
+        }
+        const tM = flops / peak, tH = bytes / c.BW, tC = comm / c.net;
+        const lo = Math.max(tM, tH, tC), hi = tM + tH + tC;
+        const mx = hi;
+        const bar = (name, t, col) => '<div class="tbar"><span>' + name + '</span><div class="track"><div class="fill" style="width:' + (t / mx * 100).toFixed(2) + '%;background:var(' + col + ')"></div></div><span class="t">' + fmtT(t) + '</span></div>';
+        $('mm-bars').innerHTML = bar('T_math', tM, '--r-cmp') + bar('T_HBM', tH, '--r-mem') + (n > 1 && split === 'D' ? bar('T_comm', tC, '--r-net') : '') +
+          bar('下界 max', lo, '--accent') + bar('上界 sum', hi, '--text-faint');
+        const which = lo === tM ? ['cmp', '计算受限'] : lo === tH ? ['mem', 'HBM 带宽受限'] : ['net', '通信受限'];
+        const Ihbm = flops / bytes, crit = peak / c.BW;
+        let extra = '';
+        if (n > 1 && split === 'D') {
+          const dCrit = (n - 1) * bo * peak / c.net;
+          extra = '沿 D 切时，相对网络计算受限需要 D > (n−1)·字节·P/W ≈ ' + Math.round(dCrit).toLocaleString() + '（当前 D = ' + D.toLocaleString() + '）。';
+        }
+        $('mm-verdict').innerHTML = '<span class="tag ' + which[0] + '">' + which[1] + '</span> 每块芯片的 HBM 强度 ' + fmtI(Ihbm) + '，临界 ' + fmtI(crit) + '。' + extra;
+        $('mm-readout').innerHTML =
+          '<div><span class="k">每芯片 FLOPs</span><span class="v">' + sci(flops) + '</span></div>' +
+          '<div><span class="k">每芯片 HBM 字节</span><span class="v">' + sci(bytes) + '</span></div>' +
+          '<div><span class="k">每芯片发送字节</span><span class="v">' + (comm ? sci(comm) : '0') + '</span></div>' +
+          '<div><span class="k">下界时的 MFU</span><span class="v">' + (tM / lo * 100).toFixed(0) + '%</span></div>';
+      }
+      render();
+    })();
+
+    /* ---------------- Demo 3: systolic array ---------------- */
+    (function systolic() {
+      const K = 3, J = 3, M = 3;
+      let Wm, Xm, cyc, timer = null;
+      const rnd = () => 1 + Math.floor(Math.random() * 4);
+      function newData() {
+        Wm = Array.from({ length: K }, () => Array.from({ length: J }, rnd));
+        Xm = Array.from({ length: M }, () => Array.from({ length: K }, rnd));
+      }
+      const total = M + K + J - 3; // last output emerges at cycle (M-1)+(K-1)+(J-1)
+      function state(c) {
+        // PE(k,j) at cycle c handles row t = c - k - j
+        const pe = [];
+        for (let k = 0; k < K; k++) for (let j = 0; j < J; j++) {
+          const t = c - k - j;
+          if (t >= 0 && t < M) {
+            let ps = 0; for (let kk = 0; kk <= k; kk++) ps += Xm[t][kk] * Wm[kk][j];
+            pe.push({ k, j, t, x: Xm[t][k], ps });
+          } else pe.push({ k, j, t: null });
+        }
+        const Y = Array.from({ length: M }, () => Array(J).fill(null));
+        for (let t = 0; t < M; t++) for (let j = 0; j < J; j++) {
+          if (c >= t + (K - 1) + j) { let s = 0; for (let k = 0; k < K; k++) s += Xm[t][k] * Wm[k][j]; Y[t][j] = s; }
+        }
+        return { pe, Y };
+      }
+      function draw() {
+        const s = state(cyc);
+        const narrow = $('sys-svg').clientWidth < 520;
+        const cw = 70, step = narrow ? 30 : 40, x0 = narrow ? 160 : 210, y0 = 50;
+        let g = '';
+        g += '<text x="' + (x0 + J * cw / 2) + '" y="22" text-anchor="middle" class="lbl">' + (narrow ? '权重 W 驻留，部分和向下流' : '权重 W（' + K + '×' + J + '）驻留在阵列里，部分和向下流') + '</text>';
+        // pending inputs on the left (skewed)
+        g += '<text x="4" y="' + (y0 - 14) + '" class="lbl">待输入的 X（斜排）</text>';
+        for (let k = 0; k < K; k++) {
+          for (let t = 0; t < M; t++) {
+            const enter = t + k; // cycle at which X[t][k] enters column 0
+            if (enter > cyc) {
+              const pos = enter - cyc; // 1 = next
+              const x = x0 - pos * step + 6;
+              if (x > 0) g += '<text x="' + x + '" y="' + (y0 + k * cw + cw / 2 + 5) + '" class="x" style="opacity:' + (pos === 1 ? 1 : 0.55) + '">' + Xm[t][k] + '</text>';
+            }
+          }
+        }
+        s.pe.forEach((p) => {
+          const x = x0 + p.j * cw, y = y0 + p.k * cw;
+          g += '<rect x="' + (x + 3) + '" y="' + (y + 3) + '" width="' + (cw - 6) + '" height="' + (cw - 6) + '" rx="8" class="pe' + (p.t !== null ? ' on' : '') + '"/>';
+          g += '<text x="' + (x + 9) + '" y="' + (y + 18) + '" class="w">w=' + Wm[p.k][p.j] + '</text>';
+          if (p.t !== null) {
+            g += '<text x="' + (x + 9) + '" y="' + (y + 40) + '" class="x">x' + p.x + '</text>';
+            g += '<text x="' + (x + cw - 9) + '" y="' + (y + cw - 10) + '" text-anchor="end" class="ps">' + p.ps + '</text>';
+          }
+        });
+        // outputs below
+        const yo = y0 + K * cw + 30;
+        g += '<text x="' + (x0 + J * cw / 2) + '" y="' + (yo - 8) + '" text-anchor="middle" class="lbl">' + (narrow ? '输出 Y = X·W' : '输出 Y = X·W（每列从底部流出）') + '</text>';
+        for (let t = 0; t < M; t++) for (let j = 0; j < J; j++) {
+          const v = s.Y[t][j];
+          g += '<rect x="' + (x0 + j * cw + 12) + '" y="' + (yo + t * 26) + '" width="' + (cw - 24) + '" height="22" rx="4" class="pe"/>';
+          if (v !== null) g += '<text x="' + (x0 + j * cw + cw / 2) + '" y="' + (yo + t * 26 + 16) + '" text-anchor="middle" class="ps">' + v + '</text>';
+        }
+        // X matrix shown on the right (wide screens only)
+        const xr = x0 + J * cw + 30;
+        if (narrow) {
+          const H2 = yo + M * 26 + 10;
+          $('sys-svg').innerHTML = '<svg viewBox="0 0 ' + (x0 + J * cw + 8) + ' ' + H2 + '" role="img" aria-label="3×3 脉动阵列">' + g + '</svg>';
+          logState(s); return;
+        }
+        g += '<text x="' + xr + '" y="' + (y0 - 14) + '" class="lbl">X（' + M + '×' + K + '）</text>';
+        for (let t = 0; t < M; t++) for (let k = 0; k < K; k++) g += '<text x="' + (xr + k * 26) + '" y="' + (y0 + 10 + t * 24) + '" class="x" style="font-size:13px">' + Xm[t][k] + '</text>';
+        g += '<text x="' + xr + '" y="' + (y0 + 100) + '" class="lbl">W（' + K + '×' + J + '）</text>';
+        for (let k = 0; k < K; k++) for (let j = 0; j < J; j++) g += '<text x="' + (xr + j * 26) + '" y="' + (y0 + 124 + k * 24) + '" style="font-size:13px;fill:var(--text-soft)">' + Wm[k][j] + '</text>';
+        const H = yo + M * 26 + 10;
+        $('sys-svg').innerHTML = '<svg viewBox="0 0 ' + (xr + 90) + ' ' + H + '" role="img" aria-label="3×3 脉动阵列">' + g + '</svg>';
+        logState(s);
+      }
+      function logState(s) {
+        const active = s.pe.filter((p) => p.t !== null).length;
+        const done = s.Y.flat().filter((v) => v !== null).length;
+        $('sys-log').textContent = cyc < 0 ? '周期 0 之前：权重已装好，输入尚未进入。' :
+          '周期 ' + cyc + '：' + active + ' 个单元在工作，已输出 ' + done + ' / ' + (M * J) + ' 个结果' + (done === M * J ? '，与 X·W 一致，完成。' : '。');
+      }
+      const stop = () => { clearInterval(timer); timer = null; $('sys-play').textContent = '播放'; };
+      const step = () => { if (cyc < total) { cyc++; draw(); } if (cyc >= total) stop(); };
+      $('sys-step').addEventListener('click', () => { stop(); step(); });
+      $('sys-reset').addEventListener('click', () => { stop(); cyc = -1; draw(); });
+      $('sys-new').addEventListener('click', () => { stop(); newData(); cyc = -1; draw(); });
+      $('sys-play').addEventListener('click', () => {
+        if (timer) { stop(); return; }
+        if (cyc >= total) cyc = -1;
+        if (reduceMotion) { cyc = total; draw(); return; }
+        $('sys-play').textContent = '暂停';
+        timer = setInterval(step, 800);
+      });
+      newData(); cyc = -1; draw();
+      let lastNarrow = $('sys-svg').clientWidth < 520;
+      window.addEventListener('resize', () => { const n = $('sys-svg').clientWidth < 520; if (n !== lastNarrow) { lastNarrow = n; draw(); } });
+    })();
+
+    /* ---------------- static SVG builders ---------------- */
+    (function torus() {
+      const g = $('torus'); const n = 4, s = 70, x0 = 40, y0 = 30;
+      let h = '';
+      for (let i = 0; i < n; i++) {
+        h += '<path class="link" d="M' + x0 + ' ' + (y0 + i * s) + ' H ' + (x0 + (n - 1) * s) + '"/>';
+        h += '<path class="link" d="M' + (x0 + i * s) + ' ' + y0 + ' V ' + (y0 + (n - 1) * s) + '"/>';
+        // wraparounds
+        h += '<path d="M' + x0 + ' ' + (y0 + i * s) + ' C ' + (x0 - 30) + ' ' + (y0 + i * s - 14) + ', ' + (x0 + (n - 1) * s + 30) + ' ' + (y0 + i * s - 14) + ', ' + (x0 + (n - 1) * s) + ' ' + (y0 + i * s) + '" style="fill:none;stroke:var(--accent);stroke-width:1.2;stroke-dasharray:4 4;opacity:0.6"/>';
+        h += '<path d="M' + (x0 + i * s) + ' ' + y0 + ' C ' + (x0 + i * s - 14) + ' ' + (y0 - 24) + ', ' + (x0 + i * s - 14) + ' ' + (y0 + (n - 1) * s + 24) + ', ' + (x0 + i * s) + ' ' + (y0 + (n - 1) * s) + '" style="fill:none;stroke:var(--accent);stroke-width:1.2;stroke-dasharray:4 4;opacity:0.6"/>';
+      }
+      for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
+        h += '<rect class="box" x="' + (x0 + j * s - 16) + '" y="' + (y0 + i * s - 16) + '" width="32" height="32" rx="6"/>';
+        h += '<text x="' + (x0 + j * s) + '" y="' + (y0 + i * s + 4) + '" text-anchor="middle" font-size="10" class="soft">' + i + ',' + j + '</text>';
+      }
+      g.innerHTML = h;
+    })();
+    (function subparts() {
+      const g = $('subparts'); let h = '';
+      for (let i = 0; i < 4; i++) {
+        const x = 24 + i * 104, y = 44;
+        h += '<rect class="box" x="' + x + '" y="' + y + '" width="96" height="150" rx="8"/>';
+        h += '<rect class="box-acc" x="' + (x + 6) + '" y="' + (y + 8) + '" width="84" height="34" rx="5"/><text x="' + (x + 48) + '" y="' + (y + 30) + '" font-size="11" text-anchor="middle">Tensor Core</text>';
+        h += '<rect class="box-acc2" x="' + (x + 6) + '" y="' + (y + 50) + '" width="84" height="44" rx="5"/><text x="' + (x + 48) + '" y="' + (y + 68) + '" font-size="10.5" text-anchor="middle">Warp 调度器</text><text x="' + (x + 48) + '" y="' + (y + 84) + '" font-size="10" text-anchor="middle">32 个 CUDA core</text>';
+        h += '<rect class="box2" x="' + (x + 8) + '" y="' + (y + 102) + '" width="80" height="38" rx="5"/><text x="' + (x + 48) + '" y="' + (y + 118) + '" font-size="11" text-anchor="middle">寄存器</text><text x="' + (x + 48) + '" y="' + (y + 133) + '" font-size="10" text-anchor="middle" class="soft">16k × 32 位</text>';
+      }
+      g.innerHTML = h;
+    })();
+    (function nodes() {
+      const g = $('nodes'); let h = '';
+      const nodeX = [20, 190, 380, 550];
+      nodeX.forEach((x, idx) => {
+        const y = 160;
+        h += '<path class="link2" d="M' + (x + 75) + ' 128 V ' + y + '"/>';
+        h += '<rect class="box" x="' + x + '" y="' + y + '" width="150" height="100" rx="10"/>';
+        h += '<text x="' + (x + 75) + '" y="' + (y + 18) + '" font-size="12" text-anchor="middle">节点（8×H100）</text>';
+        h += '<rect class="box-acc" x="' + (x + 30) + '" y="' + (y + 28) + '" width="90" height="18" rx="4"/><text x="' + (x + 75) + '" y="' + (y + 41) + '" font-size="10" text-anchor="middle">4 × NVSwitch</text>';
+        for (let k = 0; k < 8; k++) {
+          const gx = x + 12 + k * 16.5, gy = y + 66;
+          h += '<path class="link" style="stroke-width:1" d="M' + (gx + 6) + ' ' + gy + ' V ' + (y + 46) + '"/>';
+          h += '<rect x="' + gx + '" y="' + gy + '" width="12" height="22" rx="2" style="fill:var(--accent)"/>';
+        }
+        if (idx === 1 || idx === 3) h += '<text x="' + (x + 165) + '" y="' + (y + 55) + '" font-size="14" class="faint">…</text>';
+      });
+      g.innerHTML = h;
+    })();
+  })();
+  </script>
+</body>
+</html>

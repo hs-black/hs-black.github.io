@@ -461,7 +461,7 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
 .prose th { font-weight: 600; color: var(--text-soft); border-bottom-color: var(--text-faint); }
 .prose td.num, .prose th.num { text-align: right; font-variant-numeric: tabular-nums; }
 /* Wide tables scroll inside this box instead of the page. */
-.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-wrap { position: relative; overflow-x: auto; -webkit-overflow-scrolling: touch; }
 .table-wrap table { min-width: 480px; }
 
 .prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }

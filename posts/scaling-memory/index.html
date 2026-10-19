@@ -1,0 +1,1002 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>训练的账本：显存、FLOPs 与 MFU · Zunzhe Zhang</title>
+  <meta name="description" content="一步训练里显存花在哪、FLOPs 怎么数、MFU 怎么算：从 16 字节/参数和激活公式推到 6ND，附显存计算器与训练时长估算器。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    :root {
+      --m-w: #5b4cf0; --m-g: #13917f; --m-master: #9b8cff; --m-opt: #e8590c;
+      --m-act: #d6336c; --m-logit: #b8860b; --m-misc: #8a8a93;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme="light"]) {
+        --m-w: #8f84ff; --m-g: #3cc9b2; --m-master: #c3baff; --m-opt: #ff8a4c;
+        --m-act: #f06595; --m-logit: #e0b84a; --m-misc: #6f6f7a;
+      }
+    }
+    :root[data-theme="dark"] {
+      --m-w: #8f84ff; --m-g: #3cc9b2; --m-master: #c3baff; --m-opt: #ff8a4c;
+      --m-act: #f06595; --m-logit: #e0b84a; --m-misc: #6f6f7a;
+    }
+    .table-wrap { position: relative; }
+    .prose td.num { white-space: nowrap; } /* keeps KaTeX's hidden MathML inside the scroll box */
+    .fig { margin: 1.4em 0 0; }
+    .fig svg { display: block; width: 100%; height: auto; }
+    @media (max-width: 560px) {
+      .fig { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      .fig svg { min-width: 560px; }
+      .fig figcaption { position: sticky; left: 0; }
+    }
+    .fig svg text { font-family: var(--font-sans); fill: var(--text); }
+    .fig svg .soft { fill: var(--text-soft); }
+    .fig svg .faint { fill: var(--text-faint); }
+    .fig svg .mono { font-family: var(--font-mono); }
+    .fig svg .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .fig svg .box-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .fig svg .line { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    .fig svg .acc { fill: var(--accent); }
+    .fig svg .acc2 { fill: var(--accent-2); }
+    .fig svg .stroke-acc { stroke: var(--accent); }
+    .fig svg .stroke-acc2 { stroke: var(--accent-2); }
+
+    .stack { display: flex; height: 34px; border-radius: 8px; overflow: hidden; background: var(--bg-soft); position: relative; margin-top: 14px; }
+    .stack > span { height: 100%; transition: width 0.3s; }
+    .stack-wrap { position: relative; }
+    .cap-mark { position: absolute; top: -4px; bottom: -4px; width: 2px; background: var(--text); }
+    .cap-label { position: absolute; top: -22px; font-size: 12px; color: var(--text-soft); transform: translateX(-50%); white-space: nowrap; }
+    .legend { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 4px 14px; margin-top: 12px; font-size: 14px; }
+    .legend div { display: flex; align-items: center; gap: 8px; }
+    .legend i { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+    .legend b { margin-left: auto; font-family: var(--font-mono); font-weight: 500; font-size: 13px; }
+    .cfg-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 8px 12px; margin-top: 10px; font-size: 14px; }
+    .cfg-grid label { display: grid; gap: 2px; color: var(--text-soft); }
+    .cfg-grid input { width: 100%; }
+    .row-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; font-size: 15px; }
+    .row-ctrl > span:first-child { min-width: 5.5em; color: var(--text-soft); }
+    .status { margin-top: 10px; font-size: 15px; }
+    .status .ok { color: var(--m-g); font-weight: 600; }
+    .status .bad { color: var(--m-act); font-weight: 600; }
+    .chart svg { display: block; width: 100%; height: auto; }
+    .chart svg text { font-family: var(--font-sans); font-size: 12px; fill: var(--text-soft); }
+    .chart .grid { stroke: var(--border); stroke-width: 1; }
+    .chart .axis { stroke: var(--text-faint); stroke-width: 1; }
+    .note { font-size: 13px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+    .tl-phase { font-size: 15px; margin-top: 8px; min-height: 1.6em; }
+    .tl-btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; align-items: center; }
+    .tl-btns input[type="range"] { flex: 1; min-width: 160px; }
+    .share { display: flex; height: 14px; border-radius: 4px; overflow: hidden; margin-top: 8px; background: var(--bg-soft); }
+    .share span { height: 100%; }
+    .kbd { font-family: var(--font-mono); font-size: 0.9em; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>训练的账本：显存、FLOPs 与 MFU</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>这是「大模型规模化训练」系列的第一篇。后面要讲的数据并行、ZeRO、张量并行、流水线并行，本质上都在回答同一个问题：<strong>一步训练要花多少显存、多少计算、多少通信，怎么在这三者之间做交换</strong>。所以先把账算清楚。这一篇只考虑一张卡，算三本账：</p>
+      <ul>
+        <li><strong>显存账</strong>：权重、梯度、优化器状态、激活值各占多少字节，怎么推出来的；</li>
+        <li><strong>计算账</strong>：一次前向和反向到底做了多少次浮点运算（FLOPs），著名的 \(6ND\) 从哪来，注意力的二次项什么时候才重要；</li>
+        <li><strong>效率账</strong>：MFU 和 HFU 怎么定义，怎么用它们估算训练要多少天。</li>
+      </ul>
+      <p>主要材料是 Hugging Face 的 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a> 前两章，以及 Google DeepMind 的 <a href="https://jax-ml.github.io/scaling-book/transformers/">How to Scale Your Model 第 4 章</a>。文中所有 Llama 3 的配置和数字都对过论文或官方 config。</p>
+
+      <nav class="toc" aria-label="目录">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#s-overview">三个约束：显存、计算、通信</a></li>
+          <li><a href="#s-step">一步训练，和以 token 计的 batch size</a></li>
+          <li><a href="#s-memory">显存里住着什么</a></li>
+          <li><a href="#s-params">数参数：从公式到 Llama 3</a></li>
+          <li><a href="#s-bytes">每个参数几个字节：16 字节规则及其变体</a></li>
+          <li><a href="#s-act">激活显存：逐项推导</a></li>
+          <li><a href="#s-calc">交互：训练显存计算器</a></li>
+          <li><a href="#s-recompute">激活重计算：拿算力换显存</a></li>
+          <li><a href="#s-gradacc">梯度累积</a></li>
+          <li><a href="#s-flops">数 FLOPs：从 \(2mnk\) 开始</a></li>
+          <li><a href="#s-6nd">Transformer 的总账：\(6ND\) 与注意力项</a></li>
+          <li><a href="#s-moe">MoE 与 KV cache 的账</a></li>
+          <li><a href="#s-mfu">MFU 与 HFU</a></li>
+          <li><a href="#s-time">交互：训练要多少天</a></li>
+          <li><a href="#s-summary">小结：一张速查表</a></li>
+          <li><a href="#s-ref">参考</a></li>
+        </ol>
+      </nav>
+
+      <!-- ============================================================ -->
+      <h2 id="s-overview">1. 三个约束：显存、计算、通信</h2>
+      <p>Playbook 一开头就把所有规模化技术归到三个约束上，我觉得这个框架值得先记住：</p>
+      <ol>
+        <li><strong>显存</strong>是硬约束。一步训练放不进显存，就根本跑不起来（OOM，out of memory）。</li>
+        <li><strong>计算效率</strong>：希望硬件绝大部分时间在做计算，而不是在搬数据、等别的卡。</li>
+        <li><strong>通信开销</strong>：卡与卡之间传数据时，计算单元常常在空等。要尽量用快的链路（机内）而少用慢的链路（机间），并且让通信和计算重叠。</li>
+      </ol>
+      <p>几乎每一种技术都是在这三者之间做交换：激活重计算用计算换显存；张量并行用通信换显存；梯度累积用时间换显存。这一篇建立前两本账（显存和计算）；通信账从<a href="/posts/scaling-roofline/">下一篇 Roofline</a> 开始。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-step">2. 一步训练，和以 token 计的 batch size</h2>
+      <p>单卡上的一步训练（一个 <em>step</em>）有三个阶段：</p>
+      <ol>
+        <li><strong>前向</strong>（forward）：输入穿过模型，得到输出和 loss；</li>
+        <li><strong>反向</strong>（backward）：从 loss 出发用链式法则算出每个参数的梯度；</li>
+        <li><strong>优化器更新</strong>（optimizer step）：用梯度更新参数，例如 Adam。</li>
+      </ol>
+      <p><strong>Batch size</strong>（记作 \(bs\)）是一步里用多少条样本估计梯度。它同时影响收敛和吞吐：太小，梯度噪声大；太大，每个 token 被利用得不充分，同样的 token 数换来的 loss 下降变少。好在最终效果对 batch size 在最优值附近并不敏感，所以工程上有不少调整余地。有的训练会逐步增大 batch：Playbook 提到 DeepSeek-V3 在前 469B token 里把 batch 从 3,072 条序列逐渐增大到 15,360 条，之后保持不变；Llama 3 405B 的论文写的是先用 4M token 的 batch（序列长 4,096），训练 252M token 后翻倍到 8M（序列长 8,192），训练到 2.87T token 时再翻倍到 16M。</p>
+      <p>预训练圈子里习惯用 <strong>token 数</strong> 报告 batch size，因为它和序列长度无关：</p>
+      $$bst = bs \times seq$$
+      <p>这里 \(seq\) 是序列长度。Playbook 给的经验区间是近来的 LLM 预训练每步大约 4M 到 60M token：Llama 1 用约 4M token 的 batch 训练 1.4T token，DeepSeek 用约 60M token 的 batch 训练 14T token。问题马上就来了：一张 80 GB 的 H100 显然装不下 4M token 的激活值。为了搞清楚怎么办，先看显存到底花在哪。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-memory">3. 显存里住着什么</h2>
+      <p>训练时显存里主要有四样东西：</p>
+      <ol>
+        <li><strong>模型权重</strong>（weights / parameters）；</li>
+        <li><strong>梯度</strong>（gradients），和权重一一对应，形状相同；</li>
+        <li><strong>优化器状态</strong>（optimizer states），例如 Adam 的一阶矩 \(m\) 和二阶矩 \(v\)，也和权重形状相同；</li>
+        <li><strong>激活值</strong>（activations）：前向时产生、反向时要用到的中间张量。</li>
+      </ol>
+      <p>前三样只和模型大小有关，是「静态」的；激活值和输入有关，随 batch size 和序列长度变化。此外还有一些难以精确计算的杂项：CUDA 上下文和内核本身要占 1–2 GB（Playbook 建议用 <code>torch.ones((1, 1)).to("cuda")</code> 再看 <code>nvidia-smi</code> 自己验证）；中间缓冲区和显存碎片也会吃掉一些。下面的估算都忽略这些常数项。</p>
+
+      <h3>一步之内显存怎么变化</h3>
+      <p>显存占用并不是一个静态数字，在一步之内起伏很大。用 PyTorch profiler 看一步训练，形状通常是：前向时激活值快速堆高；反向开始后，梯度一层层生成，同时用过的激活值一层层释放；最后优化器用全部梯度更新参数和优化器状态，然后进入下一步。</p>
+      <p>还有一个容易踩的坑：<strong>第一步能跑，第二步才 OOM</strong>。原因是 Adam 的状态在第一次调用 <code>optimizer.step()</code> 时才分配（PyTorch 是惰性创建的），所以第二步开始，优化器状态和第二步的激活值同时在显存里，峰值更高。（Playbook 还提到第一步的曲线形状和后面不同，因为 PyTorch 的缓存分配器在第一步里做了很多预分配，后面的步就不用再找空闲块了。）下面这个示意动画把这个过程画了出来。</p>
+
+      <div class="demo" id="tl-demo">
+        <div class="demo-label">交互演示 · 一步训练的显存时间线（示意）</div>
+        <div class="chart" id="tl-chart"></div>
+        <div class="tl-phase" id="tl-phase"></div>
+        <div class="tl-btns">
+          <button class="btn primary" id="tl-play">播放</button>
+          <button class="btn" id="tl-prev">◀ 上一步</button>
+          <button class="btn" id="tl-next">下一步 ▶</button>
+          <input type="range" id="tl-t" min="0" max="10" value="0" aria-label="时间">
+        </div>
+        <div class="legend" id="tl-legend"></div>
+        <p class="note">示意图：一个 4 层的模型，每层参数量相同，按 BF16 混合精度 + Adam 计（每个参数：权重 2 + FP32 主权重 4 = 6 份、梯度 2 份、优化器状态 8 份）；每层激活值的大小是随手设的。数值只为说明形状，虚线是一个假想的显存上限。</p>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="s-params">4. 数参数：从公式到 Llama 3</h2>
+      <p>静态显存 = 参数量 × 每个参数的字节数。先数参数。记号：隐藏维度 \(h\)，层数 \(L\)，词表大小 \(V\)，注意力头数 \(a\)，每头维度 \(d_h = h/a\)，MLP 中间维度 \(F\)。</p>
+
+      <h3>经典 GPT 结构</h3>
+      <p>Playbook 给的公式是（不含位置嵌入）：</p>
+      $$N = h\,V + L\,(12h^2 + 13h) + 2h$$
+      <p>逐项拆开就是：</p>
+      <ul>
+        <li>词嵌入 \(hV\)（输出层与之共享，不另算）；</li>
+        <li>注意力：\(W_Q, W_K, W_V, W_O\) 四个 \(h\times h\) 矩阵，\(4h^2\)，加上 4 个偏置 \(4h\)；</li>
+        <li>MLP：\(h \to 4h \to h\) 两个矩阵 \(8h^2\)，偏置 \(4h + h = 5h\)；</li>
+        <li>两个 LayerNorm，每个有缩放和偏移 \(2h\)，共 \(4h\)；</li>
+        <li>每层合计 \(12h^2 + 13h\)，最后再加一个 LayerNorm 的 \(2h\)。</li>
+      </ul>
+      <p>当 \(h\) 大时，\(h^2\) 项占绝对主导，所以常用的近似是 \(N \approx 12Lh^2\)。</p>
+
+      <h3>Llama 结构：GQA + SwiGLU + RMSNorm</h3>
+      <p>现代模型有三个变化：（1）注意力用 GQA（grouped-query attention），K、V 只有 \(n_{kv}\) 个头，于是 \(W_K, W_V\) 是 \(h \times n_{kv} d_h\)；（2）MLP 用带门控的 SwiGLU，有三个矩阵 \(W_\text{gate}, W_\text{up}\in\mathbb{R}^{h\times F}\)、\(W_\text{down}\in\mathbb{R}^{F\times h}\)；（3）RMSNorm 只有缩放参数，没有偏置，线性层也不带偏置。于是每层：</p>
+      $$N_\text{layer} = \underbrace{2h\cdot a d_h + 2h\cdot n_{kv} d_h}_{\text{注意力}} + \underbrace{3hF}_{\text{MLP}} + \underbrace{2h}_{\text{RMSNorm}}$$
+      <p>整个模型再加上输入嵌入 \(Vh\)、不共享的输出层 \(Vh\)、最后一个 RMSNorm \(h\)。拿 Llama 3 三个尺寸代进去（配置取自 Llama 3 论文表 3 和 Hugging Face 上的 config：词表 128,256，都是 \(n_{kv}=8\)、\(d_h = 128\)、不共享输出层）：</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th class="num">8B</th><th class="num">70B</th><th class="num">405B</th></tr></thead>
+          <tbody>
+            <tr><td>层数 \(L\)</td><td class="num">32</td><td class="num">80</td><td class="num">126</td></tr>
+            <tr><td>隐藏维度 \(h\)</td><td class="num">4,096</td><td class="num">8,192</td><td class="num">16,384</td></tr>
+            <tr><td>MLP 维度 \(F\)</td><td class="num">14,336</td><td class="num">28,672</td><td class="num">53,248</td></tr>
+            <tr><td>Q 头数 \(a\) / KV 头数</td><td class="num">32 / 8</td><td class="num">64 / 8</td><td class="num">128 / 8</td></tr>
+            <tr><td>每层注意力参数</td><td class="num">41.9M</td><td class="num">151.0M</td><td class="num">570.4M</td></tr>
+            <tr><td>每层 MLP 参数</td><td class="num">176.2M</td><td class="num">704.6M</td><td class="num">2,617.2M</td></tr>
+            <tr><td>嵌入 + 输出层</td><td class="num">1.05B</td><td class="num">2.10B</td><td class="num">4.20B</td></tr>
+            <tr><td><strong>总参数 \(N\)</strong></td><td class="num"><strong>8.03B</strong></td><td class="num"><strong>70.55B</strong></td><td class="num"><strong>405.85B</strong></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>几个观察：MLP 占每层参数的约 80%（GQA 让注意力更便宜了）；8B 模型里光嵌入和输出层就有 1.05B，占 13%，这是大词表在小模型上的代价；到 405B，它们只占 1% 左右。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-bytes">5. 每个参数几个字节：16 字节规则及其变体</h2>
+      <p>精度决定每个数占几个字节：FP32 是 4 字节，BF16/FP16 是 2 字节，FP8 是 1 字节。下面以最常用的 Adam（或 AdamW）为例，它为每个参数存两个状态：动量 \(m\) 和方差 \(v\)。</p>
+
+      <h3>全 FP32 训练</h3>
+      $$m_\text{params} = 4N,\quad m_\text{grad} = 4N,\quad m_\text{opt} = (4+4)N \;\Rightarrow\; 16N$$
+
+      <h3>BF16 混合精度 + FP32 主权重</h3>
+      <p>现在默认的做法是「混合精度」：前向和反向的矩阵乘法用 BF16 算，权重和梯度也以 BF16 存一份；但为了数值稳定，另存一份 FP32 的权重拷贝，叫<strong>主权重</strong>（master weights），优化器在这份 FP32 拷贝上更新，然后再转成 BF16 给下一步用。Adam 的 \(m, v\) 也用 FP32 存：</p>
+      $$m_\text{params} = 2N,\quad m_\text{grad} = 2N,\quad m_\text{params,fp32} = 4N,\quad m_\text{opt} = (4+4)N \;\Rightarrow\; 16N$$
+      <p>有些框架（Playbook 提到 Nanotron）还会把梯度以 FP32 累加，因为 BF16 对很小的数值会丢精度，这样再加 \(4N\)，总共 <strong>20 字节/参数</strong>。</p>
+      <p>一个反直觉的事实：<strong>混合精度本身并不省权重相关的显存</strong>，只是把 16 字节重新分配了一下，带 FP32 梯度累加时甚至更多。它的好处在别处：（1）BF16 矩阵乘法在 GPU 上快得多（H100 上 BF16 Tensor Core 的峰值是 TF32 的 2 倍、FP32 CUDA core 的约 15 倍）；（2）激活值用 BF16 存，激活显存减半——而激活值往往是大头。</p>
+
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>配置</th><th class="num">权重</th><th class="num">梯度</th><th class="num">主权重</th><th class="num">优化器</th><th class="num">合计 / 参数</th></tr></thead>
+          <tbody>
+            <tr><td>FP32 + Adam</td><td class="num">4</td><td class="num">4</td><td class="num">–</td><td class="num">8</td><td class="num"><strong>16</strong></td></tr>
+            <tr><td>BF16 混合 + FP32 主权重 + Adam</td><td class="num">2</td><td class="num">2</td><td class="num">4</td><td class="num">8</td><td class="num"><strong>16</strong></td></tr>
+            <tr><td>同上，梯度以 FP32 累加</td><td class="num">2</td><td class="num">2 + 4</td><td class="num">4</td><td class="num">8</td><td class="num"><strong>20</strong></td></tr>
+            <tr><td>FP32 + 带动量的 SGD</td><td class="num">4</td><td class="num">4</td><td class="num">–</td><td class="num">4</td><td class="num">12</td></tr>
+            <tr><td>只做推理（BF16）</td><td class="num">2</td><td class="num">–</td><td class="num">–</td><td class="num">–</td><td class="num">2</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>后两行是为了对照：优化器状态的大小取决于优化器本身（带动量的 SGD 只存一个状态），而推理只需要权重。用 FP8 训练能进一步压低，但稳定性更难保证，系列后面的<a href="/posts/scaling-mixed-precision/">混合精度与 FP8</a> 一篇再细讲。</p>
+      <p>按 16/20 字节算，Playbook 列了一张表；我把 Llama 3 的实际参数量也算进来：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>参数量</th><th class="num">16 字节/参数</th><th class="num">20 字节/参数</th></tr></thead>
+          <tbody>
+            <tr><td>1B</td><td class="num">16 GB</td><td class="num">20 GB</td></tr>
+            <tr><td>7B</td><td class="num">112 GB</td><td class="num">140 GB</td></tr>
+            <tr><td>Llama 3 8B（8.03B）</td><td class="num">128 GB</td><td class="num">161 GB</td></tr>
+            <tr><td>70B</td><td class="num">1,120 GB</td><td class="num">1,400 GB</td></tr>
+            <tr><td>405B</td><td class="num">6,480 GB</td><td class="num">8,100 GB</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>结论很直接：7B 往上，光权重、梯度和优化器状态就已经超过单张 H100 的 80 GB。还没算激活值。这就是为什么后面需要 ZeRO/FSDP 把这些状态切到多张卡上。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-act">6. 激活显存：逐项推导</h2>
+      <h3>为什么反向需要存激活值</h3>
+      <p>考虑一个线性层 \(Y = XW\)，其中 \(X\) 是 \([s, h_\text{in}]\)，\(W\) 是 \([h_\text{in}, h_\text{out}]\)。反向时拿到上游梯度 \(\partial \mathcal{L}/\partial Y\)，需要算两个东西：</p>
+      $$\frac{\partial \mathcal{L}}{\partial W} = X^\top \frac{\partial \mathcal{L}}{\partial Y}, \qquad \frac{\partial \mathcal{L}}{\partial X} = \frac{\partial \mathcal{L}}{\partial Y} W^\top$$
+      <p>第一个式子需要<strong>前向时的输入</strong> \(X\)。所以每个矩阵乘法都要把自己的输入留到反向。逐元素的非线性函数也一样：\(y = \sigma(x)\) 的反向 \(\partial\mathcal{L}/\partial x = \sigma'(x)\cdot \partial\mathcal{L}/\partial y\) 需要 \(x\)（或者 \(y\)，看函数）。这些在前向时产生、留到反向才用的张量，就是激活值。</p>
+
+      <h3>论文里的公式：\(sbh(34 + 5as/h)\)</h3>
+      <p>Playbook 引用了 NVIDIA 关于重计算的论文（Korthikanti 等，2022），对 GPT 结构的一层逐项记账。设序列长 \(s\)、micro-batch 大小 \(b\)，激活值用 2 字节存，dropout 的掩码用 1 字节存：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>位置</th><th>要存的张量</th><th class="num">字节</th></tr></thead>
+          <tbody>
+            <tr><td rowspan="6">注意力</td><td>Q/K/V 投影的共同输入</td><td class="num">\(2sbh\)</td></tr>
+            <tr><td>\(QK^\top\) 需要 Q 和 K</td><td class="num">\(4sbh\)</td></tr>
+            <tr><td>softmax 的输出</td><td class="num">\(2as^2b\)</td></tr>
+            <tr><td>softmax 后 dropout 的掩码</td><td class="num">\(as^2b\)</td></tr>
+            <tr><td>乘 V：dropout 后的概率和 V</td><td class="num">\(2as^2b + 2sbh\)</td></tr>
+            <tr><td>输出投影的输入 + 其后 dropout 掩码</td><td class="num">\(2sbh + sbh\)</td></tr>
+            <tr><td rowspan="3">MLP（\(F=4h\)）</td><td>第一个线性层的输入</td><td class="num">\(2sbh\)</td></tr>
+            <tr><td>GeLU 的输入、第二个线性层的输入</td><td class="num">\(8sbh + 8sbh\)</td></tr>
+            <tr><td>dropout 掩码</td><td class="num">\(sbh\)</td></tr>
+            <tr><td>LayerNorm</td><td>两个 LayerNorm 各存输入</td><td class="num">\(4sbh\)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>注意力块合计 \(11sbh + 5as^2b\)，MLP \(19sbh\)，LayerNorm \(4sbh\)，加起来：</p>
+      $$m_\text{act/layer} = sbh\left(34 + \frac{5as}{h}\right)\ \text{字节},\qquad m_\text{act} = L\cdot sbh\left(34 + \frac{5as}{h}\right)$$
+      <p>两点要看清楚：（1）激活显存<strong>和 \(b\) 成线性、和 \(s\) 有二次项</strong>，来源是 \(s\times s\) 的注意力矩阵，每个头一份；（2）和权重不同，它跟着输入涨。Playbook 用这个公式画了 Llama 各尺寸在 \(bs=1\) 时显存随序列长度的变化：短序列时激活值几乎可以忽略，从 2k–4k token 开始变得显著，长序列时远远超过权重相关的部分。</p>
+
+      <h3>换成现代模型：没有 dropout，有 FlashAttention、GQA 和 SwiGLU</h3>
+      <p>上面的公式是 2022 年 GPT-3 风格模型的账。今天的 Llama 类模型有几处不同，我按同样的方法重新记一遍账（这部分是我自己的推导，不同框架的实现细节会让数字有出入）：</p>
+      <ul>
+        <li><strong>没有 dropout</strong>：预训练大模型基本不用 dropout，掩码项全部消失。</li>
+        <li><strong>FlashAttention</strong>：不把 \(s\times s\) 的注意力矩阵写回显存，反向时分块重算。它只需要存 Q、K、V、输出 O，以及每行 softmax 的 log-sum-exp（FP32，每个头每个位置一个数，\(4abs\) 字节，可忽略）。整个 \(as^2\) 项消失了。</li>
+        <li><strong>GQA</strong>：K、V 只有 \(n_{kv}\) 个头，记 \(h_{kv} = n_{kv} d_h\)，K、V 共 \(4sbh_{kv}\) 字节。</li>
+        <li><strong>SwiGLU</strong>：\(\text{down}(\text{SiLU}(xW_\text{gate}) \odot xW_\text{up})\)。在不融合内核的 PyTorch 写法里，要存 gate 的输出（SiLU 的输入）、up 的输出、SiLU 的输出（逐元素乘的另一个输入）、乘积（down 的输入），共四个 \([s,b,F]\) 张量。</li>
+      </ul>
+      <figure class="fig">
+        <svg viewBox="0 0 720 470" role="img" aria-label="Llama 层的前向数据流，标出反向需要保存的张量">
+          <defs>
+            <marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="currentColor" style="color: var(--text-faint)"/></marker>
+          </defs>
+          <g class="line" marker-end="url(#arr)" style="color: var(--text-faint)">
+            <path d="M60 30 V 60"/><path d="M60 100 V 130"/><path d="M60 170 V 190 H 140 V 200"/><path d="M60 170 V 190 H 300 V 200"/><path d="M60 170 V 190 H 460 V 200"/>
+            <path d="M140 240 V 262"/><path d="M300 240 V 262"/><path d="M460 240 V 262"/>
+            <path d="M300 302 V 324"/><path d="M300 364 V 380 H 60 V 392"/>
+          </g>
+          <path class="line" d="M30 45 H 20 V 412 H 44" style="stroke-dasharray: 4 4"/>
+          <text x="10" y="240" class="faint" font-size="11" transform="rotate(-90 10 240)">残差</text>
+          <rect class="box" x="10" y="10" width="100" height="20" rx="6" style="fill: none; stroke: none"/>
+          <text x="60" y="24" text-anchor="middle" font-size="13" class="soft">x [s,b,h]</text>
+          <rect class="box" x="10" y="60" width="100" height="40" rx="8"/><text x="60" y="85" text-anchor="middle" font-size="14">RMSNorm</text>
+          <rect class="box-acc" x="10" y="130" width="100" height="40" rx="8"/><text x="60" y="155" text-anchor="middle" font-size="13">Q/K/V 输入</text>
+          <rect class="box" x="90" y="200" width="100" height="40" rx="8"/><text x="140" y="225" text-anchor="middle" font-size="14">W_Q</text>
+          <rect class="box" x="250" y="200" width="100" height="40" rx="8"/><text x="300" y="225" text-anchor="middle" font-size="14">W_K</text>
+          <rect class="box" x="410" y="200" width="100" height="40" rx="8"/><text x="460" y="225" text-anchor="middle" font-size="14">W_V</text>
+          <rect class="box-acc" x="90" y="262" width="420" height="40" rx="8"/><text x="300" y="287" text-anchor="middle" font-size="14">FlashAttention（存 Q、K、V、O、lse）</text>
+          <rect class="box" x="250" y="324" width="100" height="40" rx="8"/><text x="300" y="349" text-anchor="middle" font-size="14">W_O</text>
+          <rect class="box" x="10" y="392" width="100" height="40" rx="8"/><text x="60" y="417" text-anchor="middle" font-size="14">+ 残差</text>
+          <!-- annotations -->
+          <g font-size="12" class="mono">
+            <circle cx="122" cy="80" r="5" class="acc2"/><text x="132" y="84" class="soft">2sbh</text>
+            <circle cx="122" cy="150" r="5" class="acc2"/><text x="132" y="154" class="soft">2sbh</text>
+            <circle cx="530" cy="275" r="5" class="acc2"/><text x="540" y="279" class="soft">Q 2sbh, K+V 4sbh_kv</text>
+            <circle cx="530" cy="295" r="5" class="acc2"/><text x="540" y="299" class="soft">O 2sbh（W_O 的输入）</text>
+          </g>
+          <text x="370" y="420" font-size="13" class="soft">MLP 部分同理：RMSNorm 输入 2sbh、MLP 输入 2sbh，</text>
+          <text x="370" y="440" font-size="13" class="soft">SwiGLU 的 gate、up、SiLU 输出、乘积各 2sbF。</text>
+          <text x="370" y="460" font-size="12" class="faint">橙点 = 反向需要的张量（BF16 字节数）</text>
+        </svg>
+        <figcaption>Llama 类结构一层的前半部分（注意力块），橙点标出了要留到反向的张量。</figcaption>
+      </figure>
+      <p>加起来，每层（BF16，激活每个数 2 字节）：</p>
+      $$m_\text{act/layer} \approx 2sb\,\big(\underbrace{2h}_{\text{两个 norm 输入}} + \underbrace{h}_{\text{QKV 输入}} + \underbrace{h + 2h_{kv}}_{Q,K,V} + \underbrace{h}_{O} + \underbrace{h}_{\text{MLP 输入}} + \underbrace{4F}_{\text{SwiGLU}}\big) = 2sb\,(6h + 2h_{kv} + 4F)$$
+      <p>验算一下：把它套回 GPT 结构（\(h_{kv}=h\)，GeLU 只有输入和输出两个 \(4h\) 张量，即把 \(4F\) 换成 \(2\cdot 4h\)），得到 \(2sb\cdot 16h = 32sbh\)，正好是论文的 34 减去两个 dropout 掩码（\(sbh\) 各一个）。如果用朴素注意力（不用 FlashAttention），还要加上 softmax 的输出 \(2as^2b\)。</p>
+      <p>对 Llama 3 8B（\(h=4096, h_{kv}=1024, F=14336\)），括号里是 83,968，每个 token 每层约 168 KB。序列长 8,192、\(b=1\) 时，32 层合计约 <strong>44 GB</strong>；如果用朴素注意力，光 softmax 矩阵就有 \(32\times 2 \times 32 \times 8192^2\) 字节 ≈ <strong>137 GB</strong>。FlashAttention 的意义一目了然。</p>
+      <p>还有一个容易忽略的大张量：<strong>输出层的 logits</strong>。它的形状是 \([s, b, V]\)，Llama 3 的 \(V = 128{,}256\)，如果按 FP32 算交叉熵，一条 8k 序列就要 \(4 \times 8192 \times 128256\) ≈ 4.2 GB。这也是为什么很多框架会把交叉熵分块算或者和输出层融合。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-calc">7. 交互：训练显存计算器</h2>
+      <p>把上面的公式都放进一个计算器里。选模型（或改配置）、序列长度、micro-batch、精度和重计算方式，看单卡显存的构成。这里假设整个模型放在一张卡上，没有任何并行切分；后面几篇引入 ZeRO、张量并行时，再看这些块怎么被切开。</p>
+
+      <div class="demo" id="mem-demo">
+        <div class="demo-label">交互演示 · 训练显存计算器</div>
+        <div class="row-ctrl"><span>模型</span>
+          <div class="seg" id="mem-preset">
+            <button data-v="8b" aria-pressed="true">Llama 3 8B</button>
+            <button data-v="70b" aria-pressed="false">Llama 3 70B</button>
+            <button data-v="405b" aria-pressed="false">Llama 3 405B</button>
+          </div>
+        </div>
+        <details style="margin-top:10px">
+          <summary>改配置</summary>
+          <div class="cfg-grid">
+            <label>隐藏维度 h<input type="number" id="cf-h" min="64" step="64"></label>
+            <label>层数 L<input type="number" id="cf-L" min="1"></label>
+            <label>Q 头数 a<input type="number" id="cf-a" min="1"></label>
+            <label>KV 头数<input type="number" id="cf-kv" min="1"></label>
+            <label>MLP 维度 F<input type="number" id="cf-F" min="64" step="64"></label>
+            <label>词表 V<input type="number" id="cf-V" min="1000" step="1000"></label>
+          </div>
+        </details>
+        <div class="ctrls">
+          <div class="ctrl"><span>序列长度</span><input type="range" id="mem-s" min="9" max="17" step="1" value="12"><output id="mem-s-v"></output></div>
+          <div class="ctrl"><span>micro-batch</span><input type="range" id="mem-b" min="1" max="32" step="1" value="1"><output id="mem-b-v"></output></div>
+        </div>
+        <div class="row-ctrl"><span>精度</span>
+          <div class="seg" id="mem-prec">
+            <button data-v="fp32" aria-pressed="false">FP32</button>
+            <button data-v="bf16" aria-pressed="true">BF16 混合</button>
+            <button data-v="bf16g" aria-pressed="false">BF16 混合 + FP32 梯度</button>
+          </div>
+        </div>
+        <div class="row-ctrl"><span>重计算</span>
+          <div class="seg" id="mem-rec">
+            <button data-v="none" aria-pressed="false">无（朴素注意力）</button>
+            <button data-v="sel" aria-pressed="true">选择性 / FlashAttention</button>
+            <button data-v="full" aria-pressed="false">完全重算</button>
+          </div>
+        </div>
+        <div class="row-ctrl"><span>显卡</span>
+          <div class="seg" id="mem-gpu">
+            <button data-v="80" aria-pressed="true">H100 80GB</button>
+            <button data-v="141" aria-pressed="false">H200 141GB</button>
+            <button data-v="180" aria-pressed="false">B200 180GB</button>
+          </div>
+        </div>
+        <div class="stack-wrap" style="margin-top:28px">
+          <div class="stack" id="mem-bar"></div>
+        </div>
+        <div class="legend" id="mem-legend"></div>
+        <div class="status" id="mem-status"></div>
+        <div class="readout" id="mem-readout"></div>
+        <div class="chart" id="mem-chart" style="margin-top:16px"></div>
+        <p class="note">激活值按上一节的 Llama 式推导：\(2sb(6h+2h_{kv}+4F)\) 字节/层（BF16；FP32 模式下按 4 字节），朴素注意力另加 softmax 输出 \(2as^2b\)；完全重算时每层只存输入 \(2sbh\)，再加反向重算一层时的工作集。logits 按 FP32 的 \(4sbV\) 计；「杂项」固定记 1.5 GB，代表 CUDA 上下文等（Playbook 说 1–2 GB），碎片未计。这些都是估算，真实框架会因内核融合、缓冲区、碎片而有出入。</p>
+      </div>
+
+      <p>拖一拖就能看到几件事：</p>
+      <ul>
+        <li>Llama 3 8B 在 BF16 混合精度下，静态部分就要约 128 GB，单张 H100 怎么调都放不下——这和 Playbook 的结论一致：7B 以上必须开始切分状态。</li>
+        <li>把序列长度从 4k 拉到 32k，朴素注意力下激活值会爆炸（二次项），FlashAttention 下是线性增长。</li>
+        <li>micro-batch 加倍，激活值严格加倍；权重相关的部分不动。</li>
+        <li>完全重算把激活值压到只剩每层一个 \([s,b,h]\) 张量，代价是多算一遍前向（下一节）。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="s-recompute">8. 激活重计算：拿算力换显存</h2>
+      <p><strong>激活重计算</strong>（activation recomputation），也叫梯度检查点（gradient checkpointing）或再物化（rematerialization），思路是：前向时只在少数关键位置保存激活值（叫检查点），其余的丢掉；反向需要时，从最近的检查点重新跑一段前向把它们算回来。本质上是多做一部分前向计算，换更少的显存。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 720 230" role="img" aria-label="三种重计算策略下每层保存的内容">
+          <g font-size="13">
+            <text x="0" y="40">不重算</text>
+            <text x="0" y="110">完全重算</text>
+            <text x="0" y="180">选择性重算</text>
+          </g>
+          <!-- rows of 4 layers -->
+          <g id="rows">
+            <!-- none -->
+            <g transform="translate(100,18)">
+              <rect class="box" x="0" y="0" width="140" height="40" rx="6"/><rect class="box" x="150" y="0" width="140" height="40" rx="6"/><rect class="box" x="300" y="0" width="140" height="40" rx="6"/><rect class="box" x="450" y="0" width="140" height="40" rx="6"/>
+              <g style="fill: var(--m-act)"><rect x="8" y="8" width="124" height="24" rx="3"/><rect x="158" y="8" width="124" height="24" rx="3"/><rect x="308" y="8" width="124" height="24" rx="3"/><rect x="458" y="8" width="124" height="24" rx="3"/></g>
+            </g>
+            <!-- full -->
+            <g transform="translate(100,88)">
+              <rect class="box" x="0" y="0" width="140" height="40" rx="6"/><rect class="box" x="150" y="0" width="140" height="40" rx="6"/><rect class="box" x="300" y="0" width="140" height="40" rx="6"/><rect class="box" x="450" y="0" width="140" height="40" rx="6"/>
+              <g style="fill: var(--m-act)"><rect x="8" y="8" width="12" height="24" rx="3"/><rect x="158" y="8" width="12" height="24" rx="3"/><rect x="308" y="8" width="12" height="24" rx="3"/><rect x="458" y="8" width="12" height="24" rx="3"/></g>
+            </g>
+            <!-- selective -->
+            <g transform="translate(100,158)">
+              <rect class="box" x="0" y="0" width="140" height="40" rx="6"/><rect class="box" x="150" y="0" width="140" height="40" rx="6"/><rect class="box" x="300" y="0" width="140" height="40" rx="6"/><rect class="box" x="450" y="0" width="140" height="40" rx="6"/>
+              <g style="fill: var(--m-act)"><rect x="8" y="8" width="70" height="24" rx="3"/><rect x="158" y="8" width="70" height="24" rx="3"/><rect x="308" y="8" width="70" height="24" rx="3"/><rect x="458" y="8" width="70" height="24" rx="3"/></g>
+              <g style="fill: none; stroke: var(--m-act); stroke-dasharray: 3 3"><rect x="82" y="8" width="50" height="24" rx="3"/><rect x="232" y="8" width="50" height="24" rx="3"/><rect x="382" y="8" width="50" height="24" rx="3"/><rect x="532" y="8" width="50" height="24" rx="3"/></g>
+            </g>
+          </g>
+          <g font-size="12" class="soft">
+            <text x="100" y="78">每层保存所有中间张量（含 s×s 注意力矩阵）</text>
+            <text x="100" y="148">每层只存输入；反向时整层前向重跑一遍</text>
+            <text x="100" y="218">存矩阵乘法相关的张量（实心），注意力核心部分（虚线）丢掉，反向时重算</text>
+          </g>
+        </svg>
+        <figcaption>四层的示意。实心 = 保存，虚线 = 丢弃后重算。</figcaption>
+      </figure>
+
+      <h3>完全重算（full）</h3>
+      <p>在每个 Transformer 层的边界设检查点，即只存每层的输入。反向到某层时，先用这个输入把该层前向重跑一遍，再做反向。等于在反向里多做一次完整的前向。Scaling book 的说法是：训练 FLOPs 从 \(6 \cdot N \cdot D\) 变成大约 \(8 \cdot N \cdot D\)（前向 2、重算 2、反向 4）。Playbook 给的经验是计算量和时间增加最多 30–40%。显存方面，激活值从每层几十个 \(sbh\) 降到每层一个 \(2sbh\)，再加上反向时一层的工作集。</p>
+
+      <h3>选择性重算（selective）</h3>
+      <p>Korthikanti 等人的观察：注意力里 \(QK^\top\)、softmax、乘 V 这几步，激活值很大（带 \(as^2\) 项）但计算量相对小（每个元素只做很少的运算）；而线性层的激活值小、重算却贵。所以只丢掉注意力核心部分，保留其余。公式里的 \(5as/h\) 项正是来自这部分：对 GPT-3（\(a=96, s=2048, h=12288\)）\(5as/h = 80\)，比 34 还大。论文的结果是 GPT-3 上省 70% 的激活显存，只多 2.7% 的 FLOPs。选择性重算后每层的激活值变成 \(34\,sbh\)，和序列长度呈线性。</p>
+      <p>用论文附录的记法，模型 FLOPs 和选择性重算后的硬件 FLOPs 分别是：</p>
+      $$\text{model FLOPs} = 72BLsh^2\left(1 + \frac{s}{6h} + \frac{V}{12hL}\right),\qquad \text{hardware FLOPs} = 72BLsh^2\left(1 + \frac{s}{3h} + \frac{V}{12hL}\right)$$
+      <p>（这里 \(B\) 是 batch 大小。）多出来的就是注意力的两个 \(s^2\) 矩阵乘法在前向里再做一遍，二者之比约为 \(1 + s/(6h)\)。</p>
+
+      <h3>FlashAttention 已经是选择性重算</h3>
+      <p>Playbook 特别指出：FlashAttention 在反向里本来就重算注意力分数和概率矩阵，而不是存下来。所以用 FlashAttention 的人，其实已经在做选择性重算了。另外，重算虽然增加了 FLOPs，却减少了对显存的读写；在显存带宽紧张的 GPU 上，总体常常反而更快——这一点下一篇讲 roofline 时会更清楚。DeepSeek-V3 也做了选择性检查点，并且用 MLA（多头潜在注意力）让需要存的注意力激活更小。</p>
+
+      <h3>其他策略</h3>
+      <p>Scaling book 从另一个角度描述这件事。如果什么都不重算，一层要存的中间节点大约有 20 个 \([B,T,D]\) 大小的张量（例如 \(f(x) = \exp(g(x))\) 的反向既要 \(g(x)\) 又要 \(\exp(g(x))\)）。它举的例子：\(B\cdot T = 4\text{M}\) token、\(L=64\)、\(D=8192\)，BF16 下要存约 \(2\times 20\times BTDL\) ≈ 84 TB 的激活值。两种常用策略：</p>
+      <ul>
+        <li><strong>Block remat</strong>：每层只存输入（即上面的完全重算），上例降到约 4.2 TB，FLOPs 从 \(6ND\) 变成约 \(8ND\)；</li>
+        <li><strong>只存大矩阵乘法的输出</strong>：反向时不用重算任何大矩阵乘法，但要重算激活函数和注意力的一部分，每层从约 20 个降到约 7 个。</li>
+      </ul>
+      <p>在 JAX 里这些策略由 <code>jax.checkpoint</code>（<code>jax.remat</code>）的 policy 控制；PyTorch 里对应 <code>torch.utils.checkpoint</code>，Megatron 有 <code>--recompute-granularity full/selective</code>。</p>
+
+      <details>
+        <summary>补充：为什么是 \(\sqrt{L}\) 个检查点</summary>
+        <p>这是 Chen 等人 2016 年的经典分析（《Training Deep Nets with Sublinear Memory Cost》）。假设 \(L\) 层，每层激活大小相同记为 1。每隔 \(k\) 层存一个检查点，就要存 \(L/k\) 个检查点；反向重算一段时，这一段的 \(k\) 层激活同时在显存里。峰值约为 \(L/k + k\)，对 \(k\) 求最小得 \(k = \sqrt{L}\)，峰值 \(2\sqrt{L}\)，代价同样是多一次前向。Transformer 训练里更常见的是「每层一个检查点」，因为一层内部的激活远大于层输入，按层切天然合适。</p>
+      </details>
+      <p>和测量效率有关的一点：重算让硬件实际做的 FLOPs 变多了。这就引出了 HFU 和 MFU 的区别，第 13 节再说。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-gradacc">9. 梯度累积</h2>
+      <p>重计算压住了「每个样本」的激活值，但激活值仍和 batch size 成正比。<strong>梯度累积</strong>（gradient accumulation）解决这个问题：把一个大 batch 切成若干 <strong>micro-batch</strong>，依次对每个 micro-batch 做前向和反向，把梯度累加起来，最后才做一次优化器更新。</p>
+      <p>记每次前向的 batch 为 micro-batch size \(mbs\)，两次优化器更新之间处理的总 batch 为 global batch size \(gbs\)：</p>
+      $$gbs = mbs \times grad\_acc$$
+      <p>（之后引入数据并行，还会再乘上数据并行的副本数。）</p>
+      <pre><code>optimizer.zero_grad()
+for i, micro in enumerate(split(batch, grad_acc)):
+    loss = model(micro).loss / grad_acc   # 取平均，结果与 grad_acc 无关
+    loss.backward()                       # 梯度在 .grad 里累加
+optimizer.step()</code></pre>
+      <p>要点：</p>
+      <ul>
+        <li><strong>显存</strong>：激活值只需容纳一个 micro-batch，与 \(gbs\) 无关。代价是要有一块在整步里一直存在的梯度缓冲区。不做累积时，梯度可以边算边被优化器消费、激活边算边释放，峰值反而可以更低。</li>
+        <li><strong>时间</strong>：micro-batch 是串行执行的，所以累积本身不加速，只是让大 batch 放得下。Playbook 的说法是「no free lunch」。</li>
+        <li><strong>结果等价</strong>：数学上，取平均后累积的梯度等于整个 batch 的梯度。一个小坑：如果 loss 是按「每个 micro-batch 内 token 的平均」算的，而不同 micro-batch 有效 token 数不同（比如有 padding 或按文档打包），简单地再除以 \(grad\_acc\) 就不等于全局按 token 平均。正确做法是累加 token 级 loss 之和，最后除以整个 batch 的有效 token 数。</li>
+        <li>它和重计算可以叠加使用。</li>
+      </ul>
+      <p>最后，Playbook 指出一个关键观察：各个 micro-batch 的前向和反向是彼此独立的，只差输入不同——那为什么不放到多张卡上并行做？这就是<a href="/posts/scaling-data-parallel/">数据并行</a>：它就是并行版本的梯度累积。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-flops">10. 数 FLOPs：从 \(2mnk\) 开始</h2>
+      <p>显存账告一段落，换计算账。FLOP 指一次浮点运算（一次乘或一次加），FLOPs 是运算次数，FLOP/s 是每秒运算次数（硬件峰值用它衡量）。</p>
+
+      <h3>点积、矩阵向量积、矩阵乘法</h3>
+      <ul>
+        <li>两个长 \(P\) 的向量做点积：\(P\) 次乘、约 \(P\) 次加，<strong>\(2P\)</strong> FLOPs。</li>
+        <li>矩阵 \(A[N,P]\) 乘向量 \(x[P]\)：\(N\) 个点积，<strong>\(2NP\)</strong>。</li>
+        <li>\(A[N,P]\) 乘 \(B[P,M]\)：对 \(B\) 的每一列做一次矩阵向量积，<strong>\(2NPM\)</strong>。</li>
+      </ul>
+      <p>通用规则（scaling book 的写法）：两个高维数组做缩并（einsum）时，FLOPs = 2 × 所有出现维度的乘积，其中<strong>缩并维</strong>（两边都有、输出里没有，被求和掉的）和<strong>批维</strong>（两边都有、输出里也有）只算一次。例如 \(C[G,H,I,J,K,L]\cdot D[G,H,M,N,K,L]\to[G,H,I,J,M,N]\)，\(G,H\) 是批维，\(K,L\) 是缩并维，FLOPs 为 \(2GHIJMNKL\)。没有缩并维时（纯逐元素乘）就没有那个 2。</p>
+      <p>值得记住的一点：矩阵乘法的计算量是 \(O(N^3)\)，而数据量只有 \(O(N^2)\)。矩阵越大，越容易让计算单元「吃饱」。这正是深度学习架构由矩阵乘法主导的原因，下一篇 roofline 会把这句话量化。</p>
+
+      <h3>反向是前向的两倍</h3>
+      <p>设 \(C = AB\)，\(A\) 是 \([N,P]\) 的输入激活，\(B\) 是 \([P,M]\) 的权重。反向需要两个梯度：</p>
+      $$\frac{\partial \mathcal{L}}{\partial B} = A^\top \frac{\partial \mathcal{L}}{\partial C}\quad(\text{缩并 } N,\ 2NPM),\qquad \frac{\partial \mathcal{L}}{\partial A} = \frac{\partial \mathcal{L}}{\partial C} B^\top\quad(\text{缩并 } M,\ 2NPM)$$
+      <figure class="fig">
+        <svg viewBox="0 0 720 170" role="img" aria-label="一次矩阵乘法的前向与两个反向矩阵乘法">
+          <g font-size="13">
+            <text x="10" y="20" class="soft">前向</text>
+            <text x="250" y="20" class="soft">反向：权重梯度</text>
+            <text x="490" y="20" class="soft">反向：输入梯度</text>
+          </g>
+          <!-- forward: A[N,P] x B[P,M] = C[N,M] -->
+          <g transform="translate(10,35)">
+            <rect class="box-acc" x="0" y="0" width="50" height="90"/><text x="25" y="50" text-anchor="middle" font-size="13">A</text>
+            <text x="60" y="50" font-size="13" class="soft">×</text>
+            <rect class="box" x="72" y="0" width="70" height="50"/><text x="107" y="30" text-anchor="middle" font-size="13">B</text>
+            <text x="152" y="50" font-size="13" class="soft">=</text>
+            <rect class="box" x="166" y="0" width="70" height="90" style="fill: var(--bg-soft)"/><text x="201" y="50" text-anchor="middle" font-size="13">C</text>
+            <text x="0" y="112" font-size="12" class="mono soft">[N,P]·[P,M] → 2NPM</text>
+          </g>
+          <g transform="translate(250,35)">
+            <rect class="box-acc" x="0" y="0" width="90" height="50"/><text x="45" y="30" text-anchor="middle" font-size="13">Aᵀ</text>
+            <text x="98" y="30" font-size="13" class="soft">×</text>
+            <rect class="box" x="112" y="0" width="70" height="90" style="fill: var(--bg-soft)"/><text x="147" y="50" text-anchor="middle" font-size="13">dC</text>
+            <text x="0" y="112" font-size="12" class="mono soft">[P,N]·[N,M] → 2NPM</text>
+          </g>
+          <g transform="translate(490,35)">
+            <rect class="box" x="0" y="0" width="70" height="90" style="fill: var(--bg-soft)"/><text x="35" y="50" text-anchor="middle" font-size="13">dC</text>
+            <text x="78" y="50" font-size="13" class="soft">×</text>
+            <rect class="box" x="92" y="0" width="50" height="70"/><text x="117" y="40" text-anchor="middle" font-size="13">Bᵀ</text>
+            <text x="0" y="112" font-size="12" class="mono soft">[N,M]·[M,P] → 2NPM</text>
+          </g>
+          <text x="10" y="165" font-size="12" class="faint">权重梯度要用前向的输入 A（所以要存激活）；输入梯度传给前一层继续反向。</text>
+        </svg>
+        <figcaption>一个矩阵乘法在训练中变成三个同样大小的矩阵乘法：前向 2NPM，反向 4NPM。</figcaption>
+      </figure>
+      <p>所以训练时一个矩阵乘法总共 \(6NPM\) FLOPs：前向 \(2NPM\)，反向 \(4NPM\)，<strong>前向 : 反向 = 1 : 2</strong>。\(PM\) 正好是这个权重矩阵的参数量，\(N\) 是 token 数，于是每个 token 对每个参数花 6 FLOPs。这就是著名的 \(6 \times \text{参数量} \times \text{token 数}\) 的最简形式。</p>
+      <p>注意第一层（嵌入层后的第一个线性层）严格说不需要算输入梯度 \(\partial\mathcal{L}/\partial A\)，因为没有更前面的可学习层需要它；但这只占一层的一部分，可以忽略。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-6nd">11. Transformer 的总账：\(6ND\) 与注意力项</h2>
+      <p>换成 scaling book 的记号：batch \(B\)、序列长 \(T\)、模型维度 \(D\)、MLP 维度 \(F\)、Q 头数 \(N\)、KV 头数 \(K\)、头维 \(H\)、词表 \(V\)。下表都是<strong>训练</strong> FLOPs（前向 + 反向，已乘 3），除以 3 就是只做前向的量。</p>
+      <h3>MLP（门控）</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>运算</th><th class="num">训练 FLOPs</th><th class="num">参数</th></tr></thead>
+          <tbody>
+            <tr><td>\(A[B,T,D]\cdot W_{in1}[D,F]\)</td><td class="num">\(6BTDF\)</td><td class="num">\(DF\)</td></tr>
+            <tr><td>\(A[B,T,D]\cdot W_{in2}[D,F]\)</td><td class="num">\(6BTDF\)</td><td class="num">\(DF\)</td></tr>
+            <tr><td>\(\sigma(A_{in1}) \odot A_{in2}\)</td><td class="num">\(O(BTF)\)</td><td class="num"></td></tr>
+            <tr><td>\(A[B,T,F]\cdot W_{out}[F,D]\)</td><td class="num">\(6BTDF\)</td><td class="num">\(DF\)</td></tr>
+            <tr><td><strong>合计</strong></td><td class="num">\(\approx 18BTDF\)</td><td class="num">\(3DF\)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>注意力投影（GQA）</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>运算</th><th class="num">训练 FLOPs</th><th class="num">参数</th></tr></thead>
+          <tbody>
+            <tr><td>\(W_Q[D,N,H]\)</td><td class="num">\(6BTDNH\)</td><td class="num">\(DNH\)</td></tr>
+            <tr><td>\(W_K[D,K,H]\)、\(W_V[D,K,H]\)</td><td class="num">\(2\times 6BTDKH\)</td><td class="num">\(2DKH\)</td></tr>
+            <tr><td>\(W_O[N,H,D]\)</td><td class="num">\(6BTDNH\)</td><td class="num">\(DNH\)</td></tr>
+            <tr><td><strong>合计</strong></td><td class="num">\(12BTD(N+K)H\)</td><td class="num">\(2D(N+K)H\)</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <h3>注意力核心（点积注意力本身）</h3>
+      <p>把 Q 重排成 \([B,T,K,G,H]\)（\(G = N/K\) 是每组的 Q 头数）。\(Q\cdot K^\top\) 在 \(B, K\) 上是批维、在 \(H\) 上缩并，得到 \([B,T,S,K,G]\)；softmax 是逐元素级的 \(O(BTSN)\)；再乘 V 在 \(S\) 上缩并。两次矩阵乘法各 \(6BTSKGH = 6BTSNH\)：</p>
+      $$\text{attention FLOPs}_\text{train} \approx 12\,BTSNH = 12\,BT^2NH\quad(\text{自注意力 } S=T)$$
+      <p>它不含任何参数，所以不在「6 × 参数量」里。对因果掩码，有用的 FLOPs 只有一半（需要注意力内核真的跳过被掩掉的块才能拿到这一半）。</p>
+      <h3>其他</h3>
+      <p>每层两个 LayerNorm/RMSNorm 只有 \(O(BTD)\)，可以忽略。最后的输出层（unembedding）是一个 \(6BTDV\) 的矩阵乘法，参数 \(DV\)，同样遵守 6 倍规则。输入嵌入是查表，不是矩阵乘法，严格说不花 FLOPs。</p>
+
+      <h3>汇总成 6ND</h3>
+      <p>忽略注意力核心，全部层加起来：</p>
+      $$\big(18BTDF + 12BTD(N+K)H\big)L = 6\cdot BT\cdot\big(3DF + 2D(N+K)H\big)L = 6 \times \text{token 数} \times \text{参数量}$$
+      <p>记 \(N_\text{params}\) 为参数量，\(D_\text{tokens}\) 为训练 token 数（这里的 \(D\) 和上面的模型维度不是一回事，这是领域里的历史记号），得到稠密 Transformer 训练算力的经验公式：</p>
+      $$C_\text{train} \approx 6\,N_\text{params}\,D_\text{tokens}$$
+      <p>验证一下：Llama 3 405B 训练了 15.6T token，\(6 \times 405\text{B} \times 15.6\text{T} \approx 3.79\times 10^{25}\)，Llama 3 论文给的预训练算力正是 \(3.8\times 10^{25}\) FLOPs。</p>
+
+      <h3>注意力项什么时候重要</h3>
+      <p>假设典型配置 \(F = 4D\)、\(D = NH\)、\(N=K\)（MHA），注意力核心与所有矩阵乘法（含投影）之比是：</p>
+      $$\frac{12BT^2NH}{18BTDF + 24BTDNH} = \frac{12BT^2D}{72BTD^2 + 24BTD^2} = \frac{T}{8D}$$
+      <p>所以只有 \(T > 8D\) 时注意力 FLOPs 才占主导。对 \(D \approx 8\text{k}\) 的模型，要到约 64k token；scaling book 还提到 Gemma-27B（\(D = 4608\)）大约在 37k 时注意力开始占主导。这说明对大模型来说，注意力的二次方代价并不像直觉中那么可怕：模型越宽，MLP 越贵，注意力越不显眼。（另一个相关的结论：注意力核心 FLOPs 等于 QKVO 投影 FLOPs 的条件是 \(24BTDNH = 12BT^2NH\)，即 \(T = 2D\)。）</p>
+      <p>拿 Llama 3 8B 在 8k 序列上具体算：\(6N\) ≈ 48.2 GFLOPs/token；注意力核心按因果减半是 \(6\cdot T\cdot NH\cdot L = 6 \times 8192 \times 4096 \times 32\) ≈ 6.4 GFLOPs/token，大约是 \(6N\) 的 13%。405B 在同样长度下只有约 4%。</p>
+      <p>也有人把每 token 的训练 FLOPs 写成 \(6N + 12\,L\,T\,d_\text{attn}\)（\(d_\text{attn} = NH\)）的形式（不考虑因果减半），和上面是同一件事。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-moe">12. MoE 与 KV cache 的账</h2>
+      <h3>MoE</h3>
+      <p>混合专家（Mixture of Experts）把每层的一个稠密 MLP 换成 \(E\) 个独立的 MLP（专家），每个 token 只路由到其中 \(k\) 个，通常 \(k \ll E\)；\(E/k\) 叫稀疏度，常见在 8 到 64 之间（scaling book 举 DeepSeek-V3：实际上 \(k=8\)、\(E=256\)）。参数量按 \(E\) 增长，每个 token 实际经过的参数（<strong>激活参数</strong>）只按 \(k\) 增长。所以算 FLOPs 时要用激活参数：</p>
+      $$C_\text{train}^\text{MoE} \approx 6\,N_\text{active}\,D_\text{tokens}$$
+      <p>而显存账要按<strong>总参数</strong>算——所有专家的权重、梯度和优化器状态都得存着。这就是 MoE「算得少、存得多」的特点，也是后面<a href="/posts/scaling-moe/">专家并行</a>要解决的问题。MoE 还引入新的通信：每个 MoE 层前后各一次 AllToAll，把 token 发到专家所在的卡上再收回来。</p>
+      <h3>KV cache（推理时的显存账）</h3>
+      <p>推理分为 prefill（处理整个提示）和逐 token 的生成。prefill 时把每层的 K、V 投影存下来，生成时复用，这就是 KV cache。每条序列的 KV cache 是一个 \([2, S, L, K, H]\) 的数组（2 代表 K 和 V），字节数为：</p>
+      $$m_\text{KV} = 2\cdot S\cdot L\cdot K\cdot H \cdot \text{bytes}$$
+      <p>Llama 3 8B（\(L=32, K=8, H=128\)）用 BF16 存：每 token \(2\times 32\times 8\times 128\times 2\) 字节 = 128 KiB，一条 8k 序列约 1.07 GB。如果是 MHA（\(K = N = 32\)），会是 4 倍。这就是 GQA/MQA 的动机。推理的完整账放在系列最后一篇<a href="/posts/scaling-inference/">Transformer 推理的数学</a>。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-mfu">13. MFU 与 HFU</h2>
+      <p>知道了一步需要多少 FLOPs，就能衡量训练「用满」了多少硬件。设一步的时长为 \(t_\text{step}\)，单卡峰值算力为 \(P_\text{peak}\)（FLOP/s），卡数为 \(n\)：</p>
+      $$\text{MFU} = \frac{\text{模型 FLOPs}/t_\text{step}}{n\cdot P_\text{peak}},\qquad \text{HFU} = \frac{\text{硬件 FLOPs}/t_\text{step}}{n\cdot P_\text{peak}}$$
+      <ul>
+        <li><strong>硬件 FLOPs</strong>（hardware FLOPs）：硬件实际执行的运算，<em>包含</em>重计算。由它得到的利用率叫 HFU（hardware FLOPs utilization）。</li>
+        <li><strong>模型 FLOPs</strong>（model FLOPs）：模型前向加反向本身所需的运算，<em>不含</em>重计算。由它得到的叫 MFU（model FLOPs utilization），这个概念来自 PaLM 论文。</li>
+      </ul>
+      <p>为什么更看重 MFU？Playbook 的解释很好：最终关心的是在给定数据上训完要多久。如果一种硬件显存足够大、不需要重算，总 FLOPs 更少却训得更快，它应该被奖励而不是被惩罚。HFU 会奖励「多做无用功」，MFU 不会，所以 MFU 更多反映模型和训练方案本身，便于跨实现比较。</p>
+      <p>两者的关系：完全重算下，硬件 FLOPs ≈ \(8ND\)，模型 FLOPs = \(6ND\)，于是 \(\text{HFU} \approx \tfrac{4}{3}\,\text{MFU}\)；选择性重算下，比值约为 \(1 + s/(6h)\)。</p>
+      <h3>几个真实数字</h3>
+      <ul>
+        <li><strong>Llama 3 405B</strong>：论文表 4 给出三种配置的 BF16 MFU：8,192 张 H100 上 430 TFLOPs/GPU、MFU 43%；16,384 张卡上 400 TFLOPs/GPU、41%；128k 长上下文阶段 380 TFLOPs/GPU、38%。用 H100 SXM 的 BF16 稠密峰值 989 TFLOP/s 去除：430/989 ≈ 43.5%，对得上。论文解释了 16k 卡时下降到 41% 的原因：为了保持全局 16M token 的 batch，每个数据并行组的 batch 变小了。</li>
+        <li><strong>DeepSeek-V3</strong>（scaling book 的例题）：报告说用了 2.79M H800 GPU 小时训练 14.8T token，激活参数 37B。FP8 稠密峰值约 1.513e15 FLOP/s（规格表上带稀疏的数字要除以 2），总可用算力 \(2.79\text{e}6 \times 3600 \times 1.513\text{e}15 \approx 1.52\text{e}25\)；需要的是 \(6 \times 37\text{e}9 \times 14.8\text{e}12 \approx 3.3\text{e}24\)，利用率约 21.7%（以 FP8 峰值为分母）。</li>
+      </ul>
+      <div class="callout warn">
+        <p><strong>小心规格表上的数字。</strong>NVIDIA 规格表里 Tensor Core 的数字通常是「带结构化稀疏」的，是稠密值的 2 倍。H100 SXM 规格表写 BF16 1,979 TFLOPS 并标了星号，稠密值是 989。算 MFU 时要用稠密峰值，否则 MFU 会被低估一半。</p>
+      </div>
+      <h3>一个好用的换算</h3>
+      <p>把 MFU 换算成每卡吞吐：</p>
+      $$\text{tokens/s/GPU} = \frac{\text{MFU}\cdot P_\text{peak}}{6N}$$
+      <p>Llama 3 8B 在 H100 上、MFU 40% 时：\(0.4 \times 989\text{e}12 / (6 \times 8.03\text{e}9) \approx 8{,}200\) token/s/GPU。这个数在看训练日志时非常有用：日志报的吞吐乘以 \(6N\) 再除以峰值，就是你的 MFU。（长序列时别忘了加上注意力项，否则 MFU 会被低估。）</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-time">14. 交互：训练要多少天</h2>
+      <p>把上面的东西串起来：</p>
+      $$t_\text{train} = \frac{C_\text{train}}{n \cdot P_\text{peak} \cdot \text{MFU}}$$
+      <p>下面的估算器用 \(6ND\) 加上注意力项（按因果减半），也给出完全重算时的 HFU。峰值都取 BF16 稠密值：H100/H200 989、B200 2,250（NVIDIA HGX B200 规格是 8 卡稀疏 36 PFLOPS，稠密减半后每卡 2.25 PFLOPS）、A100 312、TPU v5p 459、TPU v5e 197 TFLOP/s。</p>
+
+      <div class="demo" id="ttt-demo">
+        <div class="demo-label">交互演示 · 训练时长估算器</div>
+        <div class="row-ctrl"><span>预设</span>
+          <div class="seg" id="ttt-preset">
+            <button data-v="8b" aria-pressed="false">Llama 3 8B</button>
+            <button data-v="70b" aria-pressed="false">Llama 3 70B</button>
+            <button data-v="405b" aria-pressed="true">Llama 3 405B（论文配置）</button>
+          </div>
+        </div>
+        <div class="ctrls">
+          <div class="ctrl"><span>参数量 N</span><input type="range" id="t-n" min="0" max="1000" step="1"><output id="t-n-v"></output></div>
+          <div class="ctrl"><span>token 数 D</span><input type="range" id="t-d" min="0" max="1000" step="1"><output id="t-d-v"></output></div>
+          <div class="ctrl"><span>序列长度</span><input type="range" id="t-s" min="10" max="17" step="1"><output id="t-s-v"></output></div>
+          <div class="ctrl"><span>GPU 数</span><input type="range" id="t-g" min="3" max="16" step="1"><output id="t-g-v"></output></div>
+          <div class="ctrl"><span>MFU</span><input type="range" id="t-mfu" min="5" max="75" step="1"><output id="t-mfu-v"></output></div>
+        </div>
+        <div class="row-ctrl"><span>芯片</span>
+          <div class="seg" id="t-chip">
+            <button data-v="989" aria-pressed="true">H100</button>
+            <button data-v="2250" aria-pressed="false">B200</button>
+            <button data-v="312" aria-pressed="false">A100</button>
+            <button data-v="459" aria-pressed="false">TPU v5p</button>
+            <button data-v="197" aria-pressed="false">TPU v5e</button>
+          </div>
+        </div>
+        <div class="readout" id="t-out"></div>
+        <div style="margin-top:12px;font-size:14px;color:var(--text-soft)">FLOPs 构成：<span id="t-share-txt"></span></div>
+        <div class="share" id="t-share"></div>
+        <p class="note">注意力项按 \(6\cdot T\cdot (a\,d_h)\cdot L\) FLOPs/token 估算（训练、因果减半），其中层数和注意力宽度由参数量按 Llama 3 的形状粗略插值；自定义参数量时这一项只是近似。HFU 一栏假设完全重算（多一遍前向）。</p>
+      </div>
+      <p>默认是 Llama 3 405B 的配置：15.6T token、16,384 张 H100、MFU 41%，只算 \(6ND\) 是约 66 天，加上 8k 序列的注意力项约 69 天。作为对照，Llama 3.1 的模型卡写 405B 用了 30.84M H100 GPU 小时；如果全部按 16,384 张卡均摊，是约 1,880 小时、78 天。反过来算，\(3.8\text{e}25 / (30.84\text{e}6 \times 3600 \times 989\text{e}12) \approx 35\%\)，比表 4 的 38–43% 低一些。这并不矛盾：GPU 小时数的统计口径里很可能还包括故障重启、调试、长上下文和退火等阶段的开销（模型卡没有拆分，我也没查到细分数字），而表 4 的 MFU 是正常运行时的稳态值。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="s-summary">15. 小结：一张速查表</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>量</th><th>公式</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr><td>参数量（Llama 式）</td><td>\(L(2h\,ad_h + 2h\,h_{kv} + 3hF + 2h) + 2Vh\)</td><td>粗略 \(\approx 12Lh^2\)（GPT 式）</td></tr>
+            <tr><td>静态显存</td><td>\(16N\)（或 \(20N\)）字节</td><td>BF16 混合 + FP32 主权重 + Adam</td></tr>
+            <tr><td>激活（GPT，论文）</td><td>\(L\,sbh(34 + 5as/h)\) 字节</td><td>含 dropout 掩码、朴素注意力</td></tr>
+            <tr><td>激活（Llama 式，估算）</td><td>\(L\cdot 2sb(6h + 2h_{kv} + 4F)\) 字节</td><td>FlashAttention、无 dropout</td></tr>
+            <tr><td>完全重算后</td><td>\(L\cdot 2sbh\) + 一层工作集</td><td>FLOPs \(6ND\to 8ND\)</td></tr>
+            <tr><td>全局 batch</td><td>\(gbs = mbs \times grad\_acc\)</td><td>数据并行后再乘 \(dp\)</td></tr>
+            <tr><td>矩阵乘法</td><td>\(2mnk\)；训练 \(6mnk\)</td><td>前向 : 反向 = 1 : 2</td></tr>
+            <tr><td>训练算力</td><td>\(6ND\) + \(12BT^2NH\cdot L\)</td><td>注意力在 \(T > 8D\) 后占主导</td></tr>
+            <tr><td>MoE</td><td>\(6N_\text{active}D\)</td><td>显存按总参数</td></tr>
+            <tr><td>KV cache</td><td>\(2SLKH\) × 字节</td><td>每条序列</td></tr>
+            <tr><td>MFU</td><td>\(\frac{6N\cdot \text{tokens/s}}{n\,P_\text{peak}}\)</td><td>用稠密峰值</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>回到开头的问题：Llama 3 8B 的 16 字节/参数就已经是 128 GB，激活值还会再加几十 GB——单卡装不下，这是必须多卡训练的直接原因。但在开始切模型之前，先要知道一件事：给定的一次运算，瓶颈到底在算力、显存带宽还是网络上。这就是<a href="/posts/scaling-roofline/">下一篇 Roofline</a> 要讲的。</p>
+
+      <h2 id="s-ref">参考</h2>
+      <ul>
+        <li>Nouamane Tazi 等，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook: Training LLMs on GPU Clusters</a>：High-Level Overview；First Steps: Training on One GPU（Memory usage in transformers、Profiling the memory usage、Memory for weights/grads/optimizer states、Memory for activations、Activation recomputation、Gradient accumulation）；附录 A2 Typical Scales in LLM Training。</li>
+        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/transformers/">How to Scale Your Model, Part 4: All the Transformer Math You Need to Know</a>：Counting Dots、Forward and reverse FLOPs、Global FLOPs and Params Calculation、Sparsity and Mixture-of-Experts、Gradient checkpointing、Key-Value caching 及习题。</li>
+        <li>Vijay Korthikanti 等，<a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（2022）：激活显存公式、选择性重算、附录 A 的 FLOPs 公式。</li>
+        <li>Llama Team, Meta，<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>（2024）：表 3（模型配置）、表 4（并行配置与 MFU）、预训练 batch 调度、\(3.8\times10^{25}\) FLOPs。</li>
+        <li><a href="https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md">Llama 3.1 Model Card</a>：各尺寸的 H100 GPU 小时数。</li>
+        <li>Tianqi Chen 等，<a href="https://arxiv.org/abs/1604.06174">Training Deep Nets with Sublinear Memory Cost</a>（2016）。</li>
+        <li>NVIDIA <a href="https://www.nvidia.com/en-us/data-center/h100/">H100</a> 与 <a href="https://www.nvidia.com/en-us/data-center/hgx/">HGX B200</a> 规格页。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const $ = (id) => document.getElementById(id);
+    const fmtGB = (x) => {
+      const g = x / 1e9;
+      if (g >= 1000) return (g / 1000).toFixed(g >= 10000 ? 0 : 1) + ' TB';
+      if (g >= 100) return g.toFixed(0) + ' GB';
+      if (g >= 10) return g.toFixed(1) + ' GB';
+      return g.toFixed(2) + ' GB';
+    };
+    const fmtBytes = (x) => {
+      if (x >= 1e9) return fmtGB(x);
+      if (x >= 1e6) return (x / 1e6).toFixed(x >= 1e8 ? 0 : 1) + ' MB';
+      return (x / 1e3).toFixed(0) + ' KB';
+    };
+    const fmtTick = (v) => v >= 1e12 ? +(v / 1e12).toPrecision(3) + ' TB' : +(v / 1e9).toPrecision(3) + ' GB';
+    const fmtNum = (x) => {
+      if (x >= 1e12) return (x / 1e12).toFixed(x >= 1e13 ? 1 : 2) + 'T';
+      if (x >= 1e9) return (x / 1e9).toFixed(x >= 1e11 ? 0 : x >= 1e10 ? 1 : 2) + 'B';
+      if (x >= 1e6) return (x / 1e6).toFixed(1) + 'M';
+      return Math.round(x).toLocaleString();
+    };
+    const fmtSci = (x) => {
+      const e = Math.floor(Math.log10(x));
+      return (x / Math.pow(10, e)).toFixed(2) + 'e' + e;
+    };
+    function segInit(id, cb) {
+      const el = $(id);
+      el.addEventListener('click', (ev) => {
+        const b = ev.target.closest('button');
+        if (!b) return;
+        el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        cb(b.dataset.v);
+      });
+      return () => el.querySelector('[aria-pressed="true"]').dataset.v;
+    }
+    const chartW = (el) => Math.max(330, Math.min(680, el.clientWidth || 680));
+    const css = (name) => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+
+    /* ---------------- shared model math ---------------- */
+    const PRESETS = {
+      '8b': { h: 4096, L: 32, a: 32, kv: 8, F: 14336, V: 128256 },
+      '70b': { h: 8192, L: 80, a: 64, kv: 8, F: 28672, V: 128256 },
+      '405b': { h: 16384, L: 126, a: 128, kv: 8, F: 53248, V: 128256 },
+    };
+    function params(c) {
+      const dh = c.h / c.a, hkv = c.kv * dh;
+      const per = 2 * c.h * (c.a * dh) + 2 * c.h * hkv + 3 * c.h * c.F + 2 * c.h;
+      return { N: c.L * per + 2 * c.V * c.h + c.h, per, dh, hkv };
+    }
+    function memory(c, s, b, prec, rec) {
+      const { N, hkv } = params(c);
+      const p = prec === 'fp32' ? 4 : 2;
+      const out = {};
+      if (prec === 'fp32') { out.w = 4 * N; out.g = 4 * N; out.master = 0; }
+      else { out.w = 2 * N; out.g = prec === 'bf16g' ? 6 * N : 2 * N; out.master = 4 * N; }
+      out.opt = 8 * N;
+      const base = p * s * b * (6 * c.h + 2 * hkv + 4 * c.F);
+      const scores = p * c.a * s * s * b;
+      const lse = 4 * c.a * s * b;
+      if (rec === 'none') out.act = c.L * (base + scores);
+      else if (rec === 'sel') out.act = c.L * (base + lse);
+      else out.act = c.L * p * s * b * c.h + base + lse;
+      out.logit = 4 * s * b * c.V;
+      out.misc = 1.5e9;
+      out.N = N;
+      out.total = out.w + out.g + out.master + out.opt + out.act + out.logit + out.misc;
+      return out;
+    }
+
+    /* ---------------- Demo A: memory calculator ---------------- */
+    const SEGS = [
+      ['w', '权重', '--m-w'], ['g', '梯度', '--m-g'], ['master', 'FP32 主权重', '--m-master'],
+      ['opt', 'Adam 状态 m, v', '--m-opt'], ['act', '激活值', '--m-act'], ['logit', 'logits', '--m-logit'], ['misc', '杂项', '--m-misc'],
+    ];
+    const cfgIds = ['h', 'L', 'a', 'kv', 'F', 'V'];
+    let cfg = { ...PRESETS['8b'] };
+    function fillCfg() { cfgIds.forEach((k) => { $('cf-' + k).value = cfg[k]; }); }
+    cfgIds.forEach((k) => $('cf-' + k).addEventListener('input', () => {
+      const v = parseInt($('cf-' + k).value, 10);
+      if (v > 0) { cfg[k] = v; if (cfg.kv > cfg.a) cfg.kv = cfg.a; renderMem(); }
+    }));
+    const getPreset = segInit('mem-preset', (v) => { cfg = { ...PRESETS[v] }; fillCfg(); renderMem(); });
+    const getPrec = segInit('mem-prec', () => renderMem());
+    const getRec = segInit('mem-rec', () => renderMem());
+    const getGpu = segInit('mem-gpu', () => renderMem());
+    $('mem-s').addEventListener('input', () => renderMem());
+    $('mem-b').addEventListener('input', () => renderMem());
+
+    function renderMem() {
+      const s = Math.pow(2, +$('mem-s').value), b = +$('mem-b').value;
+      $('mem-s-v').textContent = s >= 1024 ? (s / 1024) + 'k' : s;
+      $('mem-b-v').textContent = b;
+      const prec = getPrec(), rec = getRec(), cap = +getGpu() * 1e9;
+      const m = memory(cfg, s, b, prec, rec);
+      const scale = Math.max(m.total, cap) * 1.02;
+      const bar = $('mem-bar');
+      bar.innerHTML = SEGS.map(([k, , col]) => '<span title="' + k + '" style="width:' + (m[k] / scale * 100).toFixed(3) + '%;background:var(' + col + ')"></span>').join('');
+      const capPct = cap / scale * 100;
+      bar.insertAdjacentHTML('beforeend', '');
+      const wrap = bar.parentElement;
+      wrap.querySelectorAll('.cap-mark,.cap-label').forEach((e) => e.remove());
+      const tx = capPct < 30 ? '0' : capPct > 70 ? '-100%' : '-50%';
+      wrap.insertAdjacentHTML('beforeend', '<div class="cap-mark" style="left:' + capPct + '%"></div><div class="cap-label" style="left:' + capPct + '%;transform:translateX(' + tx + ')">显存上限 ' + (cap / 1e9) + ' GB</div>');
+      $('mem-legend').innerHTML = SEGS.filter(([k]) => m[k] > 0).map(([k, name, col]) =>
+        '<div><i style="background:var(' + col + ')"></i>' + name + '<b>' + fmtGB(m[k]) + '</b></div>').join('');
+      const fits = m.total <= cap;
+      const ratio = m.total / cap;
+      $('mem-status').innerHTML = fits
+        ? '<span class="ok">放得下</span>：合计 ' + fmtGB(m.total) + '，占上限的 ' + (ratio * 100).toFixed(0) + '%。'
+        : '<span class="bad">放不下</span>：合计 ' + fmtGB(m.total) + '，是单卡上限的 ' + ratio.toFixed(1) + ' 倍。';
+      const stat = m.w + m.g + m.master + m.opt;
+      $('mem-readout').innerHTML =
+        '<div><span class="k">参数量 N</span><span class="v">' + fmtNum(m.N) + '</span></div>' +
+        '<div><span class="k">静态（字节/参数）</span><span class="v">' + (stat / m.N).toFixed(0) + ' B</span></div>' +
+        '<div><span class="k">激活 / 每 token</span><span class="v">' + fmtBytes(m.act / (s * b)) + '</span></div>' +
+        '<div><span class="k">激活占比</span><span class="v">' + ((m.act + m.logit) / m.total * 100).toFixed(0) + '%</span></div>';
+      drawMemChart(prec, b, cap, s);
+    }
+
+    function drawMemChart(prec, b, cap, sCur) {
+      const W = chartW($('mem-chart')), H = 260, ml = 56, mr = 14, mt = 14, mb = 40;
+      const xs = []; for (let e = 9; e <= 17; e++) xs.push(Math.pow(2, e));
+      const modes = [['none', '无重算（朴素注意力）', '--m-act'], ['sel', '选择性 / Flash', '--m-w'], ['full', '完全重算', '--m-g']];
+      const series = modes.map(([r]) => xs.map((s) => memory(cfg, s, b, prec, r).total));
+      let ymin = Infinity, ymax = 0;
+      series.flat().concat([cap]).forEach((v) => { ymin = Math.min(ymin, v); ymax = Math.max(ymax, v); });
+      const lo = Math.pow(10, Math.floor(Math.log10(ymin))), hi = Math.pow(10, Math.ceil(Math.log10(ymax)));
+      const X = (s) => ml + (Math.log2(s) - 9) / 8 * (W - ml - mr);
+      const Y = (v) => mt + (1 - (Math.log10(v) - Math.log10(lo)) / (Math.log10(hi) - Math.log10(lo))) * (H - mt - mb);
+      let g = '';
+      for (let v = lo; v <= hi * 1.001; v *= 10) {
+        g += '<line class="grid" x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/>';
+        g += '<text x="' + (ml - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + fmtTick(v) + '</text>';
+      }
+      xs.forEach((s) => {
+        if (W < 500 && [1024, 4096, 16384, 65536].includes(s)) return;
+        g += '<text x="' + X(s) + '" y="' + (H - mb + 16) + '" text-anchor="middle">' + (s >= 1024 ? s / 1024 + 'k' : s) + '</text>';
+      });
+      g += '<text x="' + ((ml + W - mr) / 2) + '" y="' + (H - 4) + '" text-anchor="middle">序列长度（token，对数轴）</text>';
+      g += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(cap) + '" y2="' + Y(cap) + '" style="stroke:var(--text);stroke-dasharray:5 4;stroke-width:1.2"/>';
+      g += '<text x="' + (W - mr) + '" y="' + (Y(cap) - 5) + '" text-anchor="end" style="fill:var(--text)">单卡上限</text>';
+      series.forEach((ys, i) => {
+        const d = ys.map((v, j) => (j ? 'L' : 'M') + X(xs[j]).toFixed(1) + ' ' + Y(v).toFixed(1)).join(' ');
+        g += '<path d="' + d + '" style="fill:none;stroke:var(' + modes[i][2] + ');stroke-width:2.2"/>';
+        const cur = memory(cfg, sCur, b, prec, modes[i][0]).total;
+        g += '<circle cx="' + X(sCur) + '" cy="' + Y(cur) + '" r="4" style="fill:var(' + modes[i][2] + ')"/>';
+      });
+      let lg = '';
+      modes.forEach(([, name, col], i) => {
+        lg += '<g transform="translate(' + (ml + 8) + ',' + (mt + 8 + i * 16) + ')"><rect width="12" height="3" y="-4" style="fill:var(' + col + ')"/><text x="18" y="0">' + name + '</text></g>';
+      });
+      $('mem-chart').innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="总显存随序列长度变化">' + g + lg + '</svg>';
+    }
+    fillCfg();
+    renderMem();
+    let lastW = chartW($('mem-chart'));
+    window.addEventListener('resize', () => { const w = chartW($('mem-chart')); if (w !== lastW) { lastW = w; renderMem(); } });
+
+    /* ---------------- Demo C: memory timeline ---------------- */
+    (function timeline() {
+      const Lr = 4, WT = 24, OPT = 32, GR = 2, ACT = 5, CAP = 70;
+      const frames = [];
+      let st = { w: WT, opt: 0, g: 0, a: 0 };
+      const push = (txt) => frames.push({ ...st, txt });
+      push('开始：显存里只有权重（BF16 权重 + FP32 主权重）。');
+      for (let step = 1; step <= 2; step++) {
+        for (let l = 1; l <= Lr; l++) { st.a += ACT; push('第 ' + step + ' 步 · 前向第 ' + l + ' 层：保存这一层的激活值。'); }
+        for (let l = Lr; l >= 1; l--) { st.g += GR; push('第 ' + step + ' 步 · 反向第 ' + l + ' 层：生成这一层的梯度……'); st.a -= ACT; push('第 ' + step + ' 步 · 反向第 ' + l + ' 层：……然后释放这一层的激活值。'); }
+        if (step === 1) { st.opt = OPT; push('第 1 步 · optimizer.step()：Adam 第一次被调用，才分配 m 和 v。'); }
+        else push('第 2 步 · optimizer.step()：更新参数和 Adam 状态。');
+        st.g = 0; push('第 ' + step + ' 步 · zero_grad(set_to_none=True)：释放梯度。');
+      }
+      const slider = $('tl-t');
+      slider.max = frames.length - 1;
+      const cats = [['w', '权重（含主权重）', '--m-w'], ['opt', 'Adam 状态', '--m-opt'], ['g', '梯度', '--m-g'], ['a', '激活值', '--m-act']];
+      $('tl-legend').innerHTML = cats.map(([, n, c]) => '<div><i style="background:var(' + c + ')"></i>' + n + '</div>').join('');
+      let W = chartW($('tl-chart'));
+      const H = 230, ml = 34, mr = 10, mt = 12, mb = 28;
+      const maxY = 90;
+      const X = (i) => ml + i / (frames.length - 1) * (W - ml - mr);
+      const Y = (v) => mt + (1 - v / maxY) * (H - mt - mb);
+      function draw(t) {
+        let g = '';
+        [0, 20, 40, 60, 80].forEach((v) => { g += '<line class="grid" x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text x="' + (ml - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end">' + v + '</text>'; });
+        // stacked areas up to t (step style)
+        let lower = frames.map(() => 0);
+        cats.forEach(([k, , col]) => {
+          const upper = frames.map((f, i) => lower[i] + f[k]);
+          let d = '';
+          for (let i = 0; i <= t; i++) {
+            const x0 = X(i), x1 = X(Math.min(i + 1, frames.length - 1));
+            d += (i ? 'L' : 'M') + x0 + ' ' + Y(upper[i]) + ' L' + (i === t ? x0 + 6 : x1) + ' ' + Y(upper[i]);
+          }
+          for (let i = t; i >= 0; i--) {
+            const x0 = X(i), x1 = X(Math.min(i + 1, frames.length - 1));
+            d += ' L' + (i === t ? x0 + 6 : x1) + ' ' + Y(lower[i]) + ' L' + x0 + ' ' + Y(lower[i]);
+          }
+          g += '<path d="' + d + 'Z" style="fill:var(' + col + ');opacity:0.85"/>';
+          lower = upper;
+        });
+        g += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(CAP) + '" y2="' + Y(CAP) + '" style="stroke:var(--text);stroke-dasharray:5 4"/>';
+        g += '<text x="' + (W - mr) + '" y="' + (Y(CAP) - 5) + '" text-anchor="end" style="fill:var(--text)">假想的显存上限</text>';
+        const stepSplit = frames.findIndex((f) => f.txt.startsWith('第 2 步'));
+        g += '<line x1="' + X(stepSplit) + '" x2="' + X(stepSplit) + '" y1="' + mt + '" y2="' + (H - mb) + '" class="axis" style="stroke-dasharray:2 3"/>';
+        g += '<text x="' + (X(1)) + '" y="' + (H - 8) + '">第 1 步</text><text x="' + (X(stepSplit) + 6) + '" y="' + (H - 8) + '">第 2 步</text>';
+        const f = frames[t];
+        const tot = f.w + f.opt + f.g + f.a;
+        $('tl-chart').innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '" role="img" aria-label="训练两步的显存堆叠图">' + g + '</svg>';
+        $('tl-phase').innerHTML = f.txt + ' <span style="color:var(--text-faint)">（合计 ' + tot + ' 单位' + (tot > CAP ? '，<b style="color:var(--m-act)">超过上限</b>' : '') + '）</span>';
+        slider.value = t;
+      }
+      let t = 0, timer = null;
+      const stop = () => { clearInterval(timer); timer = null; $('tl-play').textContent = '播放'; };
+      $('tl-play').addEventListener('click', () => {
+        if (timer) { stop(); return; }
+        if (t >= frames.length - 1) t = 0;
+        if (reduceMotion) { t = frames.length - 1; draw(t); return; }
+        $('tl-play').textContent = '暂停';
+        timer = setInterval(() => { t++; draw(t); if (t >= frames.length - 1) stop(); }, 450);
+      });
+      $('tl-prev').addEventListener('click', () => { stop(); t = Math.max(0, t - 1); draw(t); });
+      $('tl-next').addEventListener('click', () => { stop(); t = Math.min(frames.length - 1, t + 1); draw(t); });
+      slider.addEventListener('input', () => { stop(); t = +slider.value; draw(t); });
+      draw(0);
+      window.addEventListener('resize', () => { const w = chartW($('tl-chart')); if (w !== W) { W = w; draw(t); } });
+    })();
+
+    /* ---------------- Demo B: time to train ---------------- */
+    (function ttt() {
+      // log sliders
+      const nMin = 1e8, nMax = 2e12, dMin = 1e10, dMax = 1e14;
+      const toLog = (v, a, b) => Math.round((Math.log10(v) - Math.log10(a)) / (Math.log10(b) - Math.log10(a)) * 1000);
+      const fromLog = (x, a, b) => Math.pow(10, Math.log10(a) + x / 1000 * (Math.log10(b) - Math.log10(a)));
+      const PRE = {
+        '8b': { N: 8.03e9, D: 15e12, s: 13, g: 10, mfu: 40 },
+        '70b': { N: 70.55e9, D: 15e12, s: 13, g: 12, mfu: 40 },
+        '405b': { N: 405.85e9, D: 15.6e12, s: 13, g: 14, mfu: 41 },
+      };
+      const getChip = segInit('t-chip', () => render());
+      function setPre(k) {
+        const p = PRE[k];
+        $('t-n').value = toLog(p.N, nMin, nMax); $('t-d').value = toLog(p.D, dMin, dMax);
+        $('t-s').value = p.s; $('t-g').value = p.g; $('t-mfu').value = p.mfu;
+        exactN = p.N; exactD = p.D;
+        render();
+      }
+      let exactN = null, exactD = null;
+      segInit('ttt-preset', setPre);
+      ['t-n', 't-d'].forEach((id) => $(id).addEventListener('input', () => { if (id === 't-n') exactN = null; else exactD = null; render(); }));
+      ['t-s', 't-g', 't-mfu'].forEach((id) => $(id).addEventListener('input', render));
+      // attention width & layers interpolated from Llama 3 shapes: L*h vs N
+      function attnPerToken(N, T) {
+        // Llama 3 points: (N, L*h): 8B: 32*4096, 70B: 80*8192, 405B: 126*16384 ; fit power law in log space
+        const pts = [[8.03e9, 32 * 4096], [70.55e9, 80 * 8192], [405.85e9, 126 * 16384]];
+        const lx = Math.log(N);
+        let i = 0;
+        if (lx > Math.log(pts[1][0])) i = 1;
+        const [x0, y0] = pts[i], [x1, y1] = pts[i + 1];
+        const t = (lx - Math.log(x0)) / (Math.log(x1) - Math.log(x0));
+        const Lh = Math.exp(Math.log(y0) + t * (Math.log(y1) - Math.log(y0)));
+        return 6 * T * Lh; // causal, training
+      }
+      function render() {
+        const N = exactN || fromLog(+$('t-n').value, nMin, nMax);
+        const D = exactD || fromLog(+$('t-d').value, dMin, dMax);
+        const T = Math.pow(2, +$('t-s').value);
+        const G = Math.pow(2, +$('t-g').value);
+        const mfu = +$('t-mfu').value / 100;
+        const peak = +getChip() * 1e12;
+        $('t-n-v').textContent = fmtNum(N);
+        $('t-d-v').textContent = fmtNum(D);
+        $('t-s-v').textContent = T >= 1024 ? T / 1024 + 'k' : T;
+        $('t-g-v').textContent = G.toLocaleString();
+        $('t-mfu-v').textContent = Math.round(mfu * 100) + '%';
+        const dense = 6 * N * D;
+        const attn = attnPerToken(N, T) * D;
+        const C = dense + attn;
+        const secs = C / (G * peak * mfu);
+        const days = secs / 86400;
+        const gpuh = secs * G / 3600;
+        const tps = mfu * peak / (C / D);
+        const hfu = mfu * (8 * N + attnPerToken(N, T) * 4 / 3) / (6 * N + attnPerToken(N, T));
+        $('t-out').innerHTML =
+          '<div><span class="k">6ND</span><span class="v">' + fmtSci(dense) + '</span></div>' +
+          '<div><span class="k">含注意力的总 FLOPs</span><span class="v">' + fmtSci(C) + '</span></div>' +
+          '<div><span class="k">训练时长</span><span class="v">' + (days >= 2 ? days.toFixed(0) + ' 天' : (secs / 3600).toFixed(1) + ' 小时') + '</span></div>' +
+          '<div><span class="k">GPU 小时</span><span class="v">' + fmtNum(gpuh) + '</span></div>' +
+          '<div><span class="k">token/s/GPU</span><span class="v">' + fmtNum(tps) + '</span></div>' +
+          '<div><span class="k">完全重算时 HFU</span><span class="v">' + (hfu * 100).toFixed(0) + '%</span></div>';
+        const ps = attn / C;
+        $('t-share').innerHTML = '<span style="width:' + ((1 - ps) * 100) + '%;background:var(--m-w)"></span><span style="width:' + (ps * 100) + '%;background:var(--m-act)"></span>';
+        $('t-share-txt').innerHTML = '<span style="color:var(--m-w)">■</span> 参数相关 6ND ' + ((1 - ps) * 100).toFixed(1) + '%　<span style="color:var(--m-act)">■</span> 注意力核心 ' + (ps * 100).toFixed(1) + '%';
+      }
+      setPre('405b');
+    })();
+  })();
+  </script>
+</body>
+</html>
