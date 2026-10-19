@@ -1,0 +1,1248 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GPU 内核与 FlashAttention · Zunzhe Zhang</title>
+  <meta name="description" content="从 SM、warp、内存层级讲起，到访存合并、分块、融合、Triton，再到 FlashAttention 1–3 的推导与实现。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig { margin: 1.6em 0; }
+    .prose p code, .prose li code { overflow-wrap: anywhere; }
+    .fig svg { display: block; width: 100%; height: auto; }
+    .fig figcaption { margin-top: 8px; }
+    svg text { font-family: var(--font-sans); fill: var(--text); }
+    svg .soft { fill: var(--text-soft); }
+    svg .faint { fill: var(--text-faint); }
+    svg .mono { font-family: var(--font-mono); }
+    .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .box-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .box-hot { fill: color-mix(in srgb, var(--accent-2) 16%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .box-soft { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1; }
+    .ln { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    .ln-acc { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .ln-hot { stroke: var(--accent-2); stroke-width: 2; fill: none; }
+    .note { font-size: 14px; color: var(--text-soft); margin-top: 10px; line-height: 1.65; }
+    .demo .btnrow { display: flex; flex-wrap: wrap; gap: 8px; margin: 10px 0; align-items: center; }
+    .demo .seg { margin: 4px 0; }
+    .demo h4 { margin: 14px 0 6px; font-size: 15px; color: var(--text-soft); font-weight: 600; }
+    /* coalescing */
+    #coal-svg { width: 100%; height: auto; display: block; margin-top: 8px; }
+    #coal-svg .th { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1; }
+    #coal-svg .sec { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1; }
+    #coal-svg .sec.hit { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    #coal-svg .w { fill: transparent; stroke: var(--border); stroke-width: 0.6; }
+    #coal-svg .w.req { fill: var(--accent); stroke: var(--accent); }
+    #coal-svg .lk { stroke: var(--accent); stroke-width: 0.8; opacity: 0.45; fill: none; }
+    /* tile animator */
+    .ta-wrap { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 14px; margin-top: 10px; align-items: start; }
+    .mat { display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border); width: max-content; max-width: 100%; }
+    .mat > div { width: 16px; height: 16px; background: var(--surface); font-size: 9px; line-height: 16px; text-align: center; font-family: var(--font-mono); color: var(--text-faint); overflow: hidden; }
+    .mat.big > div { width: 18px; height: 18px; line-height: 18px; }
+    .mat > div.sram { background: var(--accent-soft); outline: 1.5px solid var(--accent); outline-offset: -1.5px; }
+    .mat > div.cur { outline: 2px solid var(--accent-2); outline-offset: -2px; }
+    .mat > div.done { background: color-mix(in srgb, var(--accent) 30%, var(--surface)); }
+    .mat > div.skip { background: repeating-linear-gradient(45deg, var(--bg-soft), var(--bg-soft) 3px, var(--surface) 3px, var(--surface) 6px); }
+    .mat-cap { font-size: 13px; color: var(--text-soft); margin-bottom: 4px; }
+    .ta-stats { font-family: var(--font-mono); font-size: 12.5px; width: 100%; border-collapse: collapse; }
+    .ta-stats td, .ta-stats th { padding: 2px 6px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+    .ta-stats th { color: var(--text-soft); font-weight: 600; }
+    .ta-log { font-size: 14px; color: var(--text-soft); margin-top: 10px; min-height: 3.2em; line-height: 1.6; }
+    .ta-log b { color: var(--text); }
+    .stat-scroll { overflow-x: auto; }
+    /* timeline */
+    pre code .cm { color: var(--text-faint); }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>GPU 内核与 FlashAttention</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>这个系列前面的文章都在「多卡」的层面上算账：参数、梯度、激活怎么切，通信能不能和计算重叠。这些分析默认了一件事——单张卡上的每个算子都跑得足够快。这篇往下走一层，看单张 GPU 内部：硬件长什么样，一个内核（kernel）是怎么被调度执行的，为什么同样的 FLOPs 有的算子能跑满、有的只能跑到峰值的零头，以及 FlashAttention 是怎么把这些知识用到极致的。</p>
+      <p>主要材料是 Hugging Face 的 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a> 里「Diving in the GPUs」一章、JAX Scaling Book 的 <a href="https://jax-ml.github.io/scaling-book/gpus/">How to Think About GPUs</a>，以及 FlashAttention 三篇论文。数字以 H100 SXM 为主，引用处都标了出处。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#why">为什么要关心内核</a></li>
+          <li><a href="#hw">GPU 的硬件组织：SM、核心与内存层级</a></li>
+          <li><a href="#prog">编程模型：线程、warp、block、grid</a></li>
+          <li><a href="#sched">warp 调度、延迟隐藏与占用率</a></li>
+          <li><a href="#tools">写内核的四个层次：PyTorch、torch.compile、Triton、CUDA</a></li>
+          <li><a href="#coalesce">访存合并</a></li>
+          <li><a href="#tiling">分块：把数据复用算清楚</a></li>
+          <li><a href="#coarsen">线程粗化与控制分歧</a></li>
+          <li><a href="#fusion">内核融合</a></li>
+          <li><a href="#std-attn">标准注意力的访存账</a></li>
+          <li><a href="#online">在线 softmax 的推导</a></li>
+          <li><a href="#fa1">FlashAttention：分块 + 重计算</a></li>
+          <li><a href="#bwd">反向传播与重计算</a></li>
+          <li><a href="#fa2">FlashAttention-2：少做非矩阵运算，多做并行</a></li>
+          <li><a href="#fa3">FlashAttention-3：Hopper 上的异步与 FP8</a></li>
+          <li><a href="#summary">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="why">1. 为什么要关心内核</h2>
+      <p>先看一组 H100 SXM 的数字（来自 Scaling Book 的规格表）：BF16 矩阵乘峰值约 \(9.9\times10^{14}\) FLOPs/s，HBM 带宽约 \(3.35\times10^{12}\) 字节/s。两者相除：</p>
+      $$\frac{9.9\times 10^{14}\ \text{FLOPs/s}}{3.35\times 10^{12}\ \text{B/s}} \approx 295\ \text{FLOPs/B}.$$
+      <p>这个比值叫<strong>临界算术强度</strong>。一个算子每从 HBM 读写 1 字节，如果做不到大约 295 次浮点运算，那它的耗时就由搬数据决定，计算单元会闲着等。系列第二篇 <a href="/posts/scaling-roofline/">Roofline</a> 讲的就是这件事。</p>
+      <p>大多数非矩阵乘的算子离这个数差得很远。两个 FP32 向量相加：每个元素读 8 字节、写 4 字节、做 1 次加法，强度是 \(1/12\)。LayerNorm、softmax、GeLU、dropout、残差加法都差不多是这个量级。矩阵乘 \(C=AB\)（\(A\in\mathbb R^{M\times K}, B\in\mathbb R^{K\times N}\)）做 \(2MNK\) 次运算、最少搬 \(2(MK+KN+MN)\) 字节（BF16），当三个维度都是几千时强度能到上千——但这只是「最少」，内核写得不好，实际搬运量可以比这多几十倍。</p>
+      <p>举个具体的例子。一个线性层 \(Y=XW\)，\(X\in\mathbb R^{B\times 4096}\)，\(W\in\mathbb R^{4096\times 8192}\)，BF16，在 H100 上：</p>
+      <ul>
+        <li>\(B=64\)：FLOPs \(=2\cdot64\cdot4096\cdot8192\approx4.3\times10^9\)，按峰值算 4.3 µs；最少搬运 \(2(64\cdot4096+4096\cdot8192+64\cdot8192)\approx6.9\times10^7\) 字节，按带宽算 20.5 µs。搬权重的时间是计算的 5 倍，受带宽限制。</li>
+        <li>\(B=512\)：FLOPs \(\approx3.4\times10^{10}\)，34.7 µs；搬运 \(\approx8.0\times10^7\) 字节，23.8 µs。受算力限制。</li>
+      </ul>
+      <p>当 \(B\) 远小于两个权重维度时，强度约等于 \(B\)（每个权重元素读 2 字节、被用 \(2B\) 次），所以 \(B\) 要超过约 295 才能跑满 Tensor Core。Scaling Book 用 B200 做了同样的练习，得出的临界值约 281。</p>
+      <p>所以写内核的核心问题可以概括成两句话：</p>
+      <ul>
+        <li>对于本来就受带宽限制的算子：少碰 HBM。把多个算子合成一个（融合），每个字节只读一次、写一次。</li>
+        <li>对于本来可以受算力限制的算子（矩阵乘、注意力）：让数据在片上被反复用（分块），并且让搬运和计算同时进行（异步、流水线）。</li>
+      </ul>
+      <p>要做到这两点，得先知道硬件里有哪些层次、每层多大多快。</p>
+
+      <h2 id="hw">2. GPU 的硬件组织：SM、核心与内存层级</h2>
+      <h3>2.1 计算：SM、子分区、CUDA core 与 Tensor Core</h3>
+      <p>一块现代训练 GPU 基本上是「一大堆矩阵乘单元 + 一条很快的内存」。计算部分由许多<strong>流式多处理器</strong>（Streaming Multiprocessor，SM）组成：H100 有 132 个，B200 有 148 个。每个 SM 基本独立，自己取指令、调度、执行，GPU 因此可以同时跑上百个互不相干的任务。</p>
+      <p>每个 SM 又分成 4 个相同的<strong>子分区</strong>（SM sub-partition）。每个子分区里有：</p>
+      <ul>
+        <li><strong>CUDA core</strong>：做标量/向量运算的 ALU。每个子分区有 32 个 FP32 ALU，它们每个周期执行同一条指令。所以 H100 一共有 \(132\times4\times32=16{,}896\) 个 FP32 CUDA core。它们负责逐元素运算、ReLU、求和等。</li>
+        <li><strong>Tensor Core</strong>：专门做小矩阵乘加的单元，GPU 的大部分 FLOPs 都来自它。H100 上 Tensor Core 的 BF16 峰值约 990 TFLOPs/s，而 CUDA core 只有约 66 TFLOPs/s（按 FMA 算两次运算）。Scaling Book 估算每个 H100 Tensor Core 每周期大约做 1024 次 BF16 运算（\(990\text{e}12 / 1.76\text{e}9 / 132 / 4\approx 1066\)），相当于一个 \(8\times8\times8\) 的矩阵乘。</li>
+        <li><strong>warp 调度器</strong>和<strong>寄存器堆</strong>：每个子分区 16,384 个 32 位寄存器，整个 SM 64K 个，即 256 KB。</li>
+      </ul>
+      <p>此外每个 SM 有一块 256 KB 的片上 SRAM，可以由程序员当作<strong>共享内存</strong>（shared memory，SMEM）显式管理，也可以由硬件当作 L1 缓存用。H100 上一个 SM 最多可以把其中 228 KB 配成共享内存，单个 block 最多用 227 KB（CUDA 编程指南的 compute capability 9.0 表）。</p>
+      <p>两个数字值得记住：Tensor Core 和 CUDA core 的吞吐差了 15 倍左右；FP8 矩阵乘的吞吐又是 BF16 的 2 倍。这意味着在矩阵乘密集的程序里，<em>任何不走 Tensor Core 的运算都很贵</em>。FlashAttention-2 和 -3 很大一部分工作就是在压缩这类运算。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 330" role="img" aria-label="H100 结构示意：HBM、L2 和多个 SM，每个 SM 有 4 个子分区和共享内存">
+          <rect x="10" y="10" width="740" height="44" rx="8" class="box-hot"/>
+          <text x="380" y="38" text-anchor="middle">HBM（全局内存）· 80 GB · ≈3.35 TB/s</text>
+          <rect x="10" y="72" width="740" height="38" rx="8" class="box-soft"/>
+          <text x="380" y="96" text-anchor="middle">L2 缓存 · 50 MB · 所有 SM 共享（分两半）</text>
+          <line x1="380" y1="54" x2="380" y2="72" class="ln"/>
+          <g>
+            <rect x="10" y="130" width="420" height="190" rx="10" class="box"/>
+            <text x="22" y="152">一个 SM（H100 上共 132 个）</text>
+            <g>
+              <rect x="22" y="164" width="94" height="104" rx="6" class="box-soft"/>
+              <rect x="30" y="172" width="78" height="26" rx="4" class="box-acc"/><text x="69" y="190" text-anchor="middle" font-size="12">Tensor Core</text>
+              <rect x="30" y="204" width="78" height="26" rx="4" class="box"/><text x="69" y="222" text-anchor="middle" font-size="12">32 FP32 lanes</text>
+              <rect x="30" y="236" width="78" height="26" rx="4" class="box"/><text x="69" y="254" text-anchor="middle" font-size="12">寄存器 64 KB</text>
+            </g>
+            <g transform="translate(102,0)">
+              <rect x="22" y="164" width="94" height="104" rx="6" class="box-soft"/>
+              <rect x="30" y="172" width="78" height="26" rx="4" class="box-acc"/><text x="69" y="190" text-anchor="middle" font-size="12">Tensor Core</text>
+              <rect x="30" y="204" width="78" height="26" rx="4" class="box"/><text x="69" y="222" text-anchor="middle" font-size="12">32 FP32 lanes</text>
+              <rect x="30" y="236" width="78" height="26" rx="4" class="box"/><text x="69" y="254" text-anchor="middle" font-size="12">寄存器 64 KB</text>
+            </g>
+            <g transform="translate(204,0)">
+              <rect x="22" y="164" width="94" height="104" rx="6" class="box-soft"/>
+              <rect x="30" y="172" width="78" height="26" rx="4" class="box-acc"/><text x="69" y="190" text-anchor="middle" font-size="12">Tensor Core</text>
+              <rect x="30" y="204" width="78" height="26" rx="4" class="box"/><text x="69" y="222" text-anchor="middle" font-size="12">32 FP32 lanes</text>
+              <rect x="30" y="236" width="78" height="26" rx="4" class="box"/><text x="69" y="254" text-anchor="middle" font-size="12">寄存器 64 KB</text>
+            </g>
+            <g transform="translate(306,0)">
+              <rect x="22" y="164" width="94" height="104" rx="6" class="box-soft"/>
+              <rect x="30" y="172" width="78" height="26" rx="4" class="box-acc"/><text x="69" y="190" text-anchor="middle" font-size="12">Tensor Core</text>
+              <rect x="30" y="204" width="78" height="26" rx="4" class="box"/><text x="69" y="222" text-anchor="middle" font-size="12">32 FP32 lanes</text>
+              <rect x="30" y="236" width="78" height="26" rx="4" class="box"/><text x="69" y="254" text-anchor="middle" font-size="12">寄存器 64 KB</text>
+            </g>
+            <rect x="22" y="278" width="396" height="30" rx="6" class="box-acc"/>
+            <text x="220" y="298" text-anchor="middle" font-size="13">L1 / 共享内存 SMEM · 256 KB（最多 228 KB 作 SMEM）</text>
+          </g>
+          <line x1="220" y1="110" x2="220" y2="130" class="ln"/>
+          <g>
+            <rect x="450" y="130" width="300" height="190" rx="10" class="box"/>
+            <text x="462" y="152">其余 SM（每个都一样）</text>
+            <g id="sm-grid"></g>
+            <text x="600" y="306" text-anchor="middle" class="soft" font-size="12">每格一个 SM：彼此独立调度，共享 L2 和 HBM</text>
+          </g>
+          <line x1="600" y1="110" x2="600" y2="130" class="ln"/>
+        </svg>
+        <figcaption>H100 的抽象结构（按 Scaling Book 的描述重画）。每个子分区有自己的 Tensor Core、32 条 FP32 lane、warp 调度器和寄存器；SM 内的 4 个子分区共享一块 SMEM/L1。</figcaption>
+      </figure>
+
+      <h3>2.2 内存层级：容量、带宽、延迟</h3>
+      <p>从慢到快：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>层级</th><th>谁能访问</th><th class="num">容量（H100）</th><th class="num">带宽</th><th class="num">访问延迟（时钟周期）</th></tr></thead>
+          <tbody>
+            <tr><td>HBM（全局内存，GMEM）</td><td>所有 SM</td><td class="num">80 GB</td><td class="num">3.35 TB/s</td><td class="num">≈ 479</td></tr>
+            <tr><td>L2 缓存</td><td>所有 SM</td><td class="num">50 MB</td><td class="num">实测 ≈5.5 TB/s；FA3 论文表 1 记 12 TB/s</td><td class="num">≈ 263</td></tr>
+            <tr><td>L1 / 共享内存</td><td>同一 SM 上的线程（SMEM 限同一 block）</td><td class="num">256 KB / SM</td><td class="num">128 B/周期/SM，全卡 ≈31 TB/s</td><td class="num">≈ 29（SMEM）/ 41（L1）</td></tr>
+            <tr><td>寄存器</td><td>单个线程</td><td class="num">256 KB / SM，每线程 ≤ 255 个</td><td class="num">—</td><td class="num">在流水线内</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">延迟一列来自 Luo et al. 对 H800 的微基准测试（P-chase 方法，单位是时钟周期）；L2 带宽 5.5 TB/s 是 Scaling Book 引用的实测值，12 TB/s 是 FlashAttention-3 论文表 1 的数字，NVIDIA 没有官方公布，两个来源口径不同。SMEM 带宽是 FA3 论文用「每 SM 每周期 128 字节 × 132 SM × 1830 MHz」算出来的。</p>
+      <p>几个要点：</p>
+      <ul>
+        <li>从 HBM 到 SMEM，带宽差一个数量级，延迟也差一个多数量级。HBM 一次访问要等将近 500 个周期，这段时间里 Tensor Core 可以做几十万次运算。</li>
+        <li>L2 对程序员不可见、不可显式控制，但它决定了很多内核的实际 HBM 流量：多个 block 读同一块数据时，如果在 L2 里命中，就不用再走 HBM。后面分析矩阵乘和 FlashAttention 时会反复用到这一点。</li>
+        <li>寄存器是最快的存储，但每个 SM 只有 64K 个，所有常驻线程分着用。一个线程用的寄存器越多，SM 上能同时驻留的线程越少——这就是下一节的「占用率」。</li>
+      </ul>
+      <p>各代 GPU 的主要数字（Scaling Book 的规格表）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>GPU</th><th class="num">SM 数</th><th class="num">SMEM/SM</th><th class="num">L2</th><th class="num">HBM</th><th class="num">HBM 带宽</th><th class="num">BF16 FLOPs/s</th><th class="num">FP8 FLOPs/s</th></tr></thead>
+          <tbody>
+            <tr><td>A100</td><td class="num">108</td><td class="num">192 KB</td><td class="num">40 MB</td><td class="num">80 GB</td><td class="num">2.0 TB/s</td><td class="num">3.1e14</td><td class="num">—（INT8 6.2e14）</td></tr>
+            <tr><td>H100</td><td class="num">132</td><td class="num">256 KB</td><td class="num">50 MB</td><td class="num">80 GB</td><td class="num">3.35 TB/s</td><td class="num">9.9e14</td><td class="num">2.0e15</td></tr>
+            <tr><td>H200</td><td class="num">132</td><td class="num">256 KB</td><td class="num">50 MB</td><td class="num">141 GB</td><td class="num">4.8 TB/s</td><td class="num">9.9e14</td><td class="num">2.0e15</td></tr>
+            <tr><td>B200</td><td class="num">148</td><td class="num">256 KB</td><td class="num">126 MB</td><td class="num">192 GB</td><td class="num">8.0 TB/s</td><td class="num">2.3e15</td><td class="num">4.5e15</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>B200 的 Tensor Core 大到输入都放不进 SMEM/寄存器，所以又加了一层 256 KB/SM 的 <strong>TMEM</strong>（Tensor Memory）专门放累加器。Scaling Book 还指出一个趋势：Ampere 上一个 warp 就能驱动 Tensor Core，Hopper 需要一个 warpgroup（4 个 warp），Blackwell 则由 2 个 SM 一起驱动。Tensor Core 越来越大，喂饱它越来越难，这也是 FlashAttention-3 必须重写的原因。</p>
+
+      <h2 id="prog">3. 编程模型：线程、warp、block、grid</h2>
+      <h3>3.1 内核与主机代码</h3>
+      <p>在 GPU 上运行的一段函数叫<strong>内核</strong>。它可以用 CUDA C++ 或 Triton 写，最终编译成 NVIDIA 的虚拟汇编 PTX，再由驱动翻译成机器码 SASS。CPU 端（host）负责分配显存、拷数据、启动内核。启动是异步的：CPU 把内核放进队列就返回，继续准备下一个。</p>
+      <p>最简单的例子是向量加法。内核本身只描述「一个线程做什么」：</p>
+<pre><code>__global__ void vec_add(const float* A, const float* B, float* C, int n) {
+    int i = blockIdx.x * blockDim.x + threadIdx.x;   // 这个线程负责的全局下标
+    if (i &lt; n) C[i] = A[i] + B[i];                  // 越界保护：最后一个 block 可能不满
+}
+// 主机端：每个 block 256 个线程，block 数向上取整
+int threads = 256;
+int blocks = (n + threads - 1) / threads;
+vec_add&lt;&lt;&lt;blocks, threads&gt;&gt;&gt;(dA, dB, dC, n);</code></pre>
+      <p>所有线程执行同一份代码，靠 <code>blockIdx</code>、<code>threadIdx</code> 区分自己负责哪部分数据。</p>
+
+      <h3>3.2 线程层级</h3>
+      <ul>
+        <li><strong>线程</strong>（thread）：最小的执行单位，有自己的寄存器和程序计数器。</li>
+        <li><strong>warp</strong>：32 个连续线程。硬件以 warp 为单位发射指令：一个周期里，一个 warp 的 32 个线程执行同一条指令，作用在各自的数据上。</li>
+        <li><strong>线程块</strong>（block，也叫 CTA）：若干个 warp，最多 1024 个线程。一个 block 整体被分配到某一个 SM 上，从开始到结束都不换 SM。同一 block 的线程可以通过共享内存交换数据、用 <code>__syncthreads()</code> 同步。</li>
+        <li><strong>网格</strong>（grid）：一次内核启动的所有 block。block 之间不能直接同步，执行顺序也不保证。</li>
+      </ul>
+      <p>Hopper 又加了两层：<strong>warpgroup</strong>（4 个连续 warp，128 个线程，Hopper 的 <code>wgmma</code> 矩阵乘指令以它为单位发射）和<strong>线程块簇</strong>（cluster，若干个 block 被保证调度到同一个 GPC 上，可以互相访问对方的共享内存）。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 250" role="img" aria-label="grid 由 block 组成，block 由 warp 组成，block 被分配到 SM">
+          <text x="10" y="22">grid（一次内核启动）</text>
+          <g id="grid-blocks"></g>
+          <path d="M246 127 C 330 127, 330 100, 408 100" class="ln-acc"/>
+          <text x="410" y="40">一个 block → 固定在某个 SM 上</text>
+          <rect x="410" y="52" width="340" height="96" rx="8" class="box"/>
+          <g id="block-warps"></g>
+          <path d="M458 140 L458 194" class="ln-acc"/>
+          <rect x="410" y="194" width="340" height="40" rx="8" class="box-soft"/>
+          <g id="warp-threads"></g>
+          <text x="580" y="248" text-anchor="middle" class="soft" font-size="12">一个 warp = 32 个线程，同一周期执行同一条指令</text>
+        </svg>
+        <figcaption>线程层级。左：grid 中的 block（每格一个）；右上：一个 block 内的 8 个 warp；右下：一个 warp 的 32 条 lane。</figcaption>
+      </figure>
+
+      <h3>3.3 SIMT 与 SIMD</h3>
+      <p>Scaling Book 把这点讲得很清楚：TPU 的向量单元是 SIMD（单指令多数据），一条指令处理一个连续的向量寄存器；GPU 的 CUDA core 是 <strong>SIMT</strong>（单指令多线程）。SIMT 下每个线程有自己的指令指针和寄存器，写代码时可以当成独立的标量程序；但硬件上，同一 warp 的线程每周期还是执行同一条指令。如果 warp 内的线程走了不同的分支，硬件就把两个分支都执行一遍，各自屏蔽掉不该执行的线程——这叫<strong>控制分歧</strong>（第 8 节）。SIMT 的好处是灵活：线程可以访问任意地址、维护各自的状态；代价是写得不小心时性能会悄悄掉下去，而且掉在哪里不容易看出来。</p>
+
+      <h2 id="sched">4. warp 调度、延迟隐藏与占用率</h2>
+      <h3>4.1 用更多 warp 掩盖延迟</h3>
+      <p>一个 SM 上可以同时<strong>驻留</strong>（resident）很多 warp：H100 上最多 64 个（2048 个线程），最多 32 个 block。每个 warp 调度器每个周期只发射一个 warp 的一条指令，但当某个 warp 在等内存时，调度器会在下一个周期换一个就绪的 warp 来执行，切换几乎没有开销（因为每个 warp 的寄存器一直留在寄存器堆里，不需要保存/恢复上下文）。这和 CPU 的超线程类似，只是规模大得多。</p>
+      <p>要掩盖多少延迟？可以用 Little 定律粗估。为了让 HBM 一直满速运转，任一时刻「在路上」的字节数应当等于带宽乘以延迟：</p>
+      $$\text{在途字节} \approx 3.35\times10^{12}\ \text{B/s}\times\frac{479\ \text{周期}}{1.75\times10^{9}\ \text{周期/s}} \approx 0.9\ \text{MB}.$$
+      <p>平摊到 132 个 SM，每个 SM 大约要有 7 KB 的读请求在途。一个 warp 用 16 字节向量化读取一次是 512 字节，所以每个 SM 上大约要有十几个这样的读同时未完成。（这是估算：时钟频率我取了 1.75 GHz，延迟用的是 H800 的测量值。）获得这么多在途请求的两条路：多驻留一些 warp（提高占用率），或者让每个线程自己发出多个独立的读（指令级并行，比如一次读下一块数据的同时计算当前块）。Hopper 的 TMA 走的是第三条路：用专门的硬件单元做异步拷贝，一个线程就能发起一整块的搬运。</p>
+
+      <h3>4.2 占用率</h3>
+      <p><strong>占用率</strong>（occupancy）定义为一个 SM 上活跃 warp 数与硬件允许的最大 warp 数之比。它受四种资源同时限制：每 SM 的线程数（2048）、block 数（32）、寄存器（64K 个）和共享内存（228 KB）。一个 block 要么整个放得下，要么一个都放不下，所以：</p>
+      $$\text{每 SM 的 block 数} = \min\Big(\Big\lfloor\tfrac{2048}{T}\Big\rfloor,\ 32,\ \Big\lfloor\tfrac{65536}{R\cdot T}\Big\rfloor,\ \Big\lfloor\tfrac{228\,\text{KB}}{S}\Big\rfloor\Big),$$
+      <p>其中 \(T\) 是每个 block 的线程数，\(R\) 是每个线程的寄存器数，\(S\) 是每个 block 的共享内存。Scaling Book 里的例子：每个线程用满 255 个寄存器时，一个 SM 只能放 \(65536/(255\times32)\approx 8\) 个 warp，占用率只有 12.5%。</p>
+      <p>占用率不是越高越好。高性能的矩阵乘和注意力内核往往故意用很多寄存器和共享内存来做大分块，占用率很低，但每个 warp 内部有足够的指令级并行和异步搬运来掩盖延迟。NVIDIA 的 Best Practices Guide 也明确说，占用率高到一定程度后再提高不会带来收益。它的作用是诊断：如果内核是带宽受限的、又没有其他手段掩盖延迟，占用率太低就会是瓶颈。</p>
+
+      <div class="demo" id="occ">
+        <div class="demo-label">占用率计算器（H100 / compute capability 9.0 的上限）</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>每 block 线程数</span><input type="range" id="occ-t" min="32" max="1024" step="32" value="256"><output id="occ-t-v">256</output></label>
+          <label class="ctrl"><span>每线程寄存器</span><input type="range" id="occ-r" min="16" max="255" step="1" value="64"><output id="occ-r-v">64</output></label>
+          <label class="ctrl"><span>每 block SMEM (KB)</span><input type="range" id="occ-s" min="0" max="227" step="1" value="32"><output id="occ-s-v">32</output></label>
+        </div>
+        <div class="readout">
+          <div><span class="k">线程上限 → block 数</span><span class="v" id="occ-b1">–</span></div>
+          <div><span class="k">寄存器上限 → block 数</span><span class="v" id="occ-b2">–</span></div>
+          <div><span class="k">SMEM 上限 → block 数</span><span class="v" id="occ-b3">–</span></div>
+          <div><span class="k">每 SM 驻留 warp</span><span class="v" id="occ-w">–</span></div>
+          <div><span class="k">占用率</span><span class="v" id="occ-p">–</span></div>
+        </div>
+        <p class="note" id="occ-note"></p>
+        <p class="note">简化模型：忽略了寄存器按 warp 以 256 个为粒度分配、每个 block 额外保留 1 KB 共享内存等细节，真实数字以 Nsight Compute 的 occupancy 计算为准。</p>
+      </div>
+
+      <h2 id="tools">5. 写内核的四个层次：PyTorch、torch.compile、Triton、CUDA</h2>
+      <p>Playbook 把可选的工具排成一条线：</p>
+      <ul>
+        <li><strong>PyTorch eager</strong>：最容易，但每个算子是一个独立内核，中间结果都要写回 HBM。</li>
+        <li><strong>torch.compile</strong>：同样容易，加一个装饰器；它会捕获计算图，自动融合、生成 Triton 内核。但能做的优化受编译器限制，不够灵活。</li>
+        <li><strong>Triton</strong>：更难一些，更快、更灵活。编程粒度是「block」：你描述一个 program 实例处理哪一块数据，线程级的事情由编译器决定。</li>
+        <li><strong>CUDA</strong>：最难，也最快、最灵活——前提是写对了。能控制到每个线程、共享内存布局、异步拷贝和 warp 级指令。</li>
+      </ul>
+
+      <h3>5.1 torch.compile</h3>
+      <p>Playbook 用 ELU 激活举例：\(\mathrm{ELU}(x)=e^x-1\)（\(x\lt0\)）或 \(x\)（\(x\ge0\)）。直接写 PyTorch 再加装饰器：</p>
+<pre><code>@torch.compile
+def elu(x, alpha=1.0):
+    return torch.where(x &lt; 0, alpha * (torch.exp(x) - 1), x)</code></pre>
+      <p>eager 模式下这一行会启动好几个内核（比较、exp、减、乘、where），每个都读写一遍整个张量；编译后变成一个内核，读一遍 <code>x</code>、写一遍结果。设置环境变量 <code>TORCH_LOGS="output_code"</code> 可以看到 TorchInductor 生成的 Triton 代码——这是学写 Triton 最快的起点：先让编译器写一个，再在它的基础上改。</p>
+
+      <h3>5.2 Triton：逐元素内核</h3>
+      <p>把编译器生成的 ELU 内核整理一下，大致是这样：</p>
+<pre><code>import triton
+import triton.language as tl
+
+@triton.jit
+def elu_kernel(x_ptr, y_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)                    # 第几个 program（相当于 CUDA 的 block）
+    offs = pid * BLOCK + tl.arange(0, BLOCK)  # 这个 program 负责的 BLOCK 个下标
+    mask = offs &lt; n                           # 尾部越界保护
+    x = tl.load(x_ptr + offs, mask=mask)
+    y = tl.where(x &lt; 0, tl.exp(x) - 1.0, x)
+    tl.store(y_ptr + offs, y, mask=mask)
+
+# 启动：grid 是 program 的个数
+grid = (triton.cdiv(n, 1024),)
+elu_kernel[grid](x, y, n, BLOCK=1024)</code></pre>
+      <p>和 CUDA 的区别在于：Triton 里的变量是整块的张量（<code>offs</code> 是长度为 <code>BLOCK</code> 的向量），你不写「线程 i 做什么」，而写「这一块做什么」。<code>tl.arange</code> 产生的连续下标会被编译器映射成合并的访存（第 6 节），向量化宽度、每线程处理几个元素也由编译器决定。</p>
+
+      <h3>5.3 Triton：一个融合的 RMSNorm</h3>
+      <p>行归约类的算子也很好写：一个 program 处理一行。</p>
+<pre><code>@triton.jit
+def rmsnorm_kernel(x_ptr, w_ptr, y_ptr, row_stride, D, eps, BLOCK_D: tl.constexpr):
+    row = tl.program_id(0)
+    cols = tl.arange(0, BLOCK_D)              # BLOCK_D 取 >= D 的 2 的幂
+    mask = cols &lt; D
+    x = tl.load(x_ptr + row * row_stride + cols, mask=mask, other=0.0).to(tl.float32)
+    ms = tl.sum(x * x, axis=0) / D            # 在寄存器里归约，FP32 累加
+    rstd = 1.0 / tl.sqrt(ms + eps)
+    w = tl.load(w_ptr + cols, mask=mask, other=0.0)
+    y = x * rstd * w
+    tl.store(y_ptr + row * row_stride + cols, y.to(y_ptr.dtype.element_ty), mask=mask)
+
+rmsnorm_kernel[(n_rows,)](x, w, y, x.stride(0), D, 1e-6, BLOCK_D=triton.next_power_of_2(D))</code></pre>
+      <p>整行读进寄存器一次，平方、求和、开方、乘权重都在片上完成，最后写一次。第 9 节会算这比 eager 省多少流量。</p>
+
+      <h3>5.4 Triton：分块矩阵乘</h3>
+      <p>矩阵乘是 Triton 的强项。下面是一个最小的分块实现（结构上和 Triton 官方教程一致，去掉了自动调优和 L2 分组）：</p>
+<pre><code>@triton.jit
+def matmul_kernel(a_ptr, b_ptr, c_ptr, M, N, K,
+                  s_am, s_ak, s_bk, s_bn, s_cm, s_cn,
+                  BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr):
+    pid_m = tl.program_id(0)
+    pid_n = tl.program_id(1)
+    rm = pid_m * BM + tl.arange(0, BM)                  # 这块 C 的行
+    rn = pid_n * BN + tl.arange(0, BN)                  # 这块 C 的列
+    rk = tl.arange(0, BK)
+    a_ptrs = a_ptr + rm[:, None] * s_am + rk[None, :] * s_ak   # BM x BK 的指针块
+    b_ptrs = b_ptr + rk[:, None] * s_bk + rn[None, :] * s_bn   # BK x BN 的指针块
+    acc = tl.zeros((BM, BN), dtype=tl.float32)          # 累加器留在寄存器，FP32
+    for k in range(0, tl.cdiv(K, BK)):
+        k_left = K - k * BK
+        a = tl.load(a_ptrs, mask=(rm[:, None] &lt; M) &amp; (rk[None, :] &lt; k_left), other=0.0)
+        b = tl.load(b_ptrs, mask=(rk[:, None] &lt; k_left) &amp; (rn[None, :] &lt; N), other=0.0)
+        acc += tl.dot(a, b)                             # 编译成 Tensor Core 指令
+        a_ptrs += BK * s_ak
+        b_ptrs += BK * s_bk
+    c_ptrs = c_ptr + rm[:, None] * s_cm + rn[None, :] * s_cn
+    tl.store(c_ptrs, acc.to(tl.bfloat16), mask=(rm[:, None] &lt; M) &amp; (rn[None, :] &lt; N))
+
+grid = (triton.cdiv(M, 128), triton.cdiv(N, 128))
+matmul_kernel[grid](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.stride(1),
+                    c.stride(0), c.stride(1), BM=128, BN=128, BK=32)</code></pre>
+      <p>每个 program 负责 C 的一个 \(128\times128\) 块，沿 K 方向每次取 A 的 \(128\times32\) 块和 B 的 \(32\times128\) 块，用 <code>tl.dot</code> 乘加到 FP32 累加器上。这就是第 7 节要推导的「分块」。Triton 编译器负责把块搬进共享内存、安排流水线、选 Tensor Core 指令。</p>
+      <p>Playbook 也提醒了 Triton 的边界：它的抽象停在 block 这一层，对共享内存的精确布局、SM 内的调度（比如 warp 专门化）控制有限。要榨干最后一截性能，就得下到 CUDA（或者 CUTLASS/CuTe 这类模板库）。下面几节的技术都是在 CUDA 层面讲的，但它们背后的道理同样决定 Triton 内核的快慢。</p>
+
+      <h3>5.5 怎么知道内核慢在哪</h3>
+      <p>写之前先测。常用的两层工具：</p>
+      <ul>
+        <li><strong>PyTorch Profiler / Nsight Systems</strong>：看时间线。哪些内核占了大部分时间，内核之间有没有空隙（CPU 启动跟不上、同步、数据拷贝），通信和计算有没有重叠。Playbook 附录 A1 有一节专门讲这个。</li>
+        <li><strong>Nsight Compute（ncu）</strong>：深入单个内核。先看它在 roofline 上的位置——实际达到的内存吞吐和计算吞吐分别是峰值的百分之几；再看 warp 停顿原因（warp stall reasons）：大量停在等全局内存的读取返回，说明延迟没掩盖住或访问没合并；停在 <code>mio_throttle</code>，说明共享内存等指令队列太忙（第 8 节的例子）；ncu 也会直接报告未合并的全局访问和共享内存 bank 冲突。</li>
+      </ul>
+      <p>一个内核如果已经接近它该有的 roofline（带宽受限的接近 HBM 带宽，计算受限的接近 Tensor Core 峰值），再优化它本身就没有意义了，该做的是融合或者改算法。</p>
+
+      <h2 id="coalesce">6. 访存合并</h2>
+      <h3>6.1 DRAM 按突发传输</h3>
+      <p>全局内存是 DRAM。DRAM 每次被访问时，并不是只读出你要的那个字，而是把一段连续地址并行读出来、以突发（burst）的形式送出。GPU 的内存系统也以固定大小的段为单位服务请求：对 compute capability 6.0 及以上的设备，CUDA Best Practices Guide 的说法是，<em>一个 warp 的并发访问会被合并成若干个 32 字节的事务，数量等于覆盖所有线程地址所需的 32 字节段数</em>。</p>
+      <p>于是同一个 warp 的 32 个线程如果读的是 32 个相邻的 FP32（共 128 字节、对齐），只需要 4 个 32 字节事务，搬运的每个字节都有用；如果它们读的地址彼此相隔很远，就需要 32 个事务，搬了 1024 字节只用了 128 字节，有效带宽只剩 1/8。这就是<strong>访存合并</strong>（memory coalescing）：让同一个 warp 里相邻的线程访问相邻的地址。</p>
+
+      <div class="demo" id="coal">
+        <div class="demo-label">访存合并可视化：一个 warp 的 32 个线程 → 地址 → 32 字节扇区</div>
+        <div class="seg" id="coal-preset" role="group" aria-label="预设">
+          <button type="button" data-p="row" aria-pressed="true">按行（连续）</button>
+          <button type="button" data-p="mis">错位 1 个元素</button>
+          <button type="button" data-p="col">按列（步长 = 行宽 64）</button>
+          <button type="button" data-p="bc">广播（同一地址）</button>
+          <button type="button" data-p="s2">步长 2</button>
+        </div>
+        <div class="ctrls">
+          <label class="ctrl"><span>线程间步长（元素）</span><input type="range" id="coal-stride" min="0" max="64" step="1" value="1"><output id="coal-stride-v">1</output></label>
+          <label class="ctrl"><span>起始偏移（元素）</span><input type="range" id="coal-off" min="0" max="15" step="1" value="0"><output id="coal-off-v">0</output></label>
+          <div class="ctrl"><span>元素大小</span>
+            <span class="seg" id="coal-size" role="group" aria-label="元素大小"><button type="button" data-s="4" aria-pressed="true">4 B（FP32）</button><button type="button" data-s="2">2 B（BF16）</button></span><span></span></div>
+        </div>
+        <svg id="coal-svg" viewBox="0 0 1000 200" role="img" aria-label="线程到内存扇区的映射"></svg>
+        <div class="readout">
+          <div><span class="k">请求的字节</span><span class="v" id="coal-req">–</span></div>
+          <div><span class="k">32 B 扇区数（事务数）</span><span class="v" id="coal-sec">–</span></div>
+          <div><span class="k">实际搬运字节</span><span class="v" id="coal-mov">–</span></div>
+          <div><span class="k">有效带宽利用率</span><span class="v" id="coal-eff">–</span></div>
+        </div>
+        <p class="note" id="coal-note"></p>
+      </div>
+      <p>上面的计算就是 Best Practices Guide 给的规则：线程 \(t\) 访问地址 \(a_t = \text{off} + t\cdot s\cdot b\)（\(s\) 是步长，\(b\) 是元素字节数），事务数等于集合 \(\{\lfloor a_t/32\rfloor\}\) 的大小。几个值得注意的情况：错位 1 个元素时，128 字节跨了 5 个扇区，效率掉到 80%；步长 2 时一半的字节白搬；步长达到 8 个 FP32（32 字节）以后，每个线程独占一个扇区，效率稳定在 1/8；广播时 32 个线程读同一个地址，只要 1 个事务。</p>
+
+      <h3>6.2 朴素矩阵乘为什么慢</h3>
+      <p>Playbook 用 Simon Boehm 的矩阵乘系列做例子。最直接的写法是每个线程算 C 的一个元素：</p>
+<pre><code>__global__ void matmul_naive(int M, int N, int K, const float* A, const float* B, float* C) {
+    const uint x = blockIdx.x * blockDim.x + threadIdx.x;   // 行
+    const uint y = blockIdx.y * blockDim.y + threadIdx.y;   // 列
+    if (x &lt; M &amp;&amp; y &lt; N) {
+        float tmp = 0.0;
+        for (int i = 0; i &lt; K; ++i) tmp += A[x * K + i] * B[i * N + y];
+        C[x * N + y] = tmp;
+    }
+}</code></pre>
+      <p>问题在 <code>x</code> 用的是 <code>threadIdx.x</code>。一个 warp 由 <code>threadIdx.x</code> 连续的 32 个线程组成（2D block 中 x 变化最快），于是同一 warp 里的线程有相同的 <code>y</code>、连续的 <code>x</code>。在循环第 \(i\) 步：</p>
+      <ul>
+        <li>读 <code>A[x*K+i]</code>：相邻线程的地址相差 \(K\) 个元素——这是上面 demo 里「按列」的情况，每个线程独占一个扇区。</li>
+        <li>读 <code>B[i*N+y]</code>：所有线程读同一个地址——广播，1 个事务。</li>
+      </ul>
+      <p>修法只需改下标映射，用一维 block，把 <code>threadIdx.x</code> 的低位分给列：</p>
+<pre><code>const int x = blockIdx.x * BLOCKSIZE + (threadIdx.x / BLOCKSIZE);
+const int y = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);</code></pre>
+      <p>现在同一 warp 的线程有相同的 <code>x</code>、连续的 <code>y</code>：读 A 变成广播，读 B 和写 C 变成连续访问。Playbook 报告这一改动后 ncu 里「未合并访问」的警告消失，内存吞吐和执行时间都改善了大约 10 倍。</p>
+
+      <h3>6.3 共享内存的 bank 冲突</h3>
+      <p>共享内存有类似但不同的规则。它被分成 32 个 <strong>bank</strong>，连续的 32 位字依次落在相邻的 bank 上，每个 bank 每周期服务一个 32 位字。一个 warp 的 32 个访问如果落在 32 个不同的 bank 上，一个周期完成；如果有 \(n\) 个地址落在同一 bank 的不同位置，就要串行成 \(n\) 次（同一地址则是广播，不冲突）。</p>
+      <p>典型的坑是按列读一个 \(32\times32\) 的 FP32 共享内存数组：每列的 32 个元素相隔 32 个字，全都落在同一个 bank 上，32 路冲突。经典修法是把数组声明成 \(32\times33\)：多出的一列 padding 让相邻行错开一个 bank，列访问的步长变成 33，模 32 后等于 1，冲突消失（Best Practices Guide 的矩阵转置例子正是这么做的）。CUTLASS 等库更常用的是对地址做异或 swizzle，不浪费空间。</p>
+
+      <h2 id="tiling">7. 分块：把数据复用算清楚</h2>
+      <h3>7.1 没有复用时的流量</h3>
+      <p>\(C=AB\)，\(A\in\mathbb R^{M\times K}\)，\(B\in\mathbb R^{K\times N}\)。每个输出元素 \(C_{ij}=\sum_k A_{ik}B_{kj}\) 需要读 A 的一行和 B 的一列，共 \(2K\) 个元素。如果每个线程都从全局内存各读各的（即使访问合并了），总读取量是</p>
+      $$\text{读取}_{\text{naive}} = 2K\cdot MN = 2MNK\ \text{个元素},$$
+      <p>而总计算是 \(2MNK\) FLOPs。算术强度是每个元素 1 次运算，FP32 下是 \(1/4\) FLOPs/B，比临界值 295 低三个数量级。L1/L2 缓存会挡掉一部分重复读取，但不能指望。</p>
+      <p>可实际上 A 的每个元素被 \(N\) 个输出用到，B 的每个元素被 \(M\) 个输出用到。理想情况下每个元素只需读一次，总读取 \(MK+KN\)。分块就是在有限的片上存储里尽量逼近这个理想。</p>
+
+      <h3>7.2 分块后的流量</h3>
+      <p>把 C 切成 \(B_M\times B_N\) 的块，每个 block 负责一块。计算这块需要 A 的 \(B_M\) 行（\(B_M\times K\)）和 B 的 \(B_N\) 列（\(K\times B_N\)），沿 K 方向每次取 \(B_K\) 宽的一片放进共享内存：</p>
+      <figure class="fig">
+        <svg viewBox="0 0 760 260" role="img" aria-label="分块矩阵乘：A 的行条、B 的列条、C 的块，沿 K 方向滑动">
+          <text x="120" y="20" text-anchor="middle">A（M × K）</text>
+          <rect x="20" y="30" width="200" height="200" class="box"/>
+          <rect x="20" y="90" width="200" height="40" class="box-soft"/>
+          <rect x="70" y="90" width="40" height="40" class="box-acc"/>
+          <text x="90" y="115" text-anchor="middle" font-size="12">B_K</text>
+          <text x="232" y="115" class="soft" font-size="12">B_M</text>
+          <path d="M120 140 L160 140" class="ln-acc" marker-end="url(#ar)"/>
+          <text x="140" y="158" text-anchor="middle" class="soft" font-size="12">沿 K 滑动</text>
+
+          <text x="400" y="20" text-anchor="middle">B（K × N）</text>
+          <rect x="300" y="30" width="200" height="200" class="box"/>
+          <rect x="400" y="30" width="40" height="200" class="box-soft"/>
+          <rect x="400" y="80" width="40" height="40" class="box-acc"/>
+          <text x="420" y="105" text-anchor="middle" font-size="12">B_K</text>
+          <text x="420" y="246" text-anchor="middle" class="soft" font-size="12">B_N</text>
+
+          <text x="650" y="20" text-anchor="middle">C（M × N）</text>
+          <rect x="550" y="30" width="200" height="200" class="box"/>
+          <rect x="650" y="90" width="40" height="40" class="box-hot"/>
+          <text x="670" y="115" text-anchor="middle" font-size="12">acc</text>
+          <text x="650" y="170" text-anchor="middle" class="soft" font-size="12">一个 block 负责的 B_M × B_N 块</text>
+          <text x="650" y="188" text-anchor="middle" class="soft" font-size="12">累加器常驻寄存器</text>
+          <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker></defs>
+        </svg>
+        <figcaption>分块矩阵乘。每一步把 A 的 \(B_M\times B_K\) 片和 B 的 \(B_K\times B_N\) 片搬进共享内存，所有线程从共享内存读它们，乘加到寄存器里的累加器上。</figcaption>
+      </figure>
+      <p>每一步从全局内存读 \((B_M+B_N)B_K\) 个元素，做 \(2B_MB_NB_K\) 次运算。一共有 \(\frac{M}{B_M}\cdot\frac{N}{B_N}\cdot\frac{K}{B_K}\) 步，所以：</p>
+      $$\text{读取}_{\text{tiled}} = \frac{MNK}{B_MB_NB_K}(B_M+B_N)B_K = MNK\Big(\frac{1}{B_N}+\frac{1}{B_M}\Big).$$
+      <p>正方形块 \(B_M=B_N=T\) 时是 \(2MNK/T\)：<strong>全局内存读取量缩小到朴素做法的 \(1/T\)</strong>。相应的算术强度（对全局内存而言）是</p>
+      $$I_{\text{tile}} = \frac{2B_MB_NB_K}{(B_M+B_N)B_K\cdot b} = \frac{2B_MB_N}{(B_M+B_N)\,b},$$
+      <p>\(b\) 是元素字节数。注意它和 \(B_K\) 无关；\(B_K\) 只决定每一步要多少共享内存：\((B_M+B_N)B_K\cdot b\)。几个具体数字（BF16，\(b=2\)）：</p>
+      <ul>
+        <li>\(T=32\)：\(I=32\) FLOPs/B。</li>
+        <li>\(128\times128\)：\(I=64\) FLOPs/B；\(B_K=64\) 时一片 A + 一片 B 占 32 KB 共享内存。</li>
+        <li>\(128\times256\)：\(I\approx85\) FLOPs/B。</li>
+      </ul>
+      <p>这里有个容易忽略的地方：即便 \(128\times256\) 的块，85 也离 H100 的 295 差得远。实际的大矩阵乘能跑到峰值附近，是因为上式算的是「每个 block 从 L2 以下取的数据」，而<em>同时运行的上百个 block 读的是重叠的 A 行条和 B 列条</em>，这些读取大量在 L2 命中。真正落到 HBM 上的流量接近每个元素读一次的理想值。所以高性能 GEMM 还会控制 block 的启动顺序（Triton 教程里叫「grouped ordering」，CUTLASS 叫 swizzle），让同时在跑的 block 共享尽量多的行条和列条，提高 L2 命中率。分块解决 SMEM 层面的复用，启动顺序解决 L2 层面的复用。</p>
+
+      <h3>7.3 CUDA 里的样子</h3>
+      <p>Playbook 给的正方形分块核心循环：</p>
+<pre><code>// 每个线程负责 C 块中的一个元素 (localRow, localCol)
+for (int t = 0; t &lt; K; t += TILE) {
+    sA[localRow * TILE + localCol] = A[localRow * K + localCol];   // 每个线程搬一个元素
+    sB[localRow * TILE + localCol] = B[localRow * N + localCol];
+    __syncthreads();                       // 等整块搬完
+    A += TILE;  B += TILE * N;             // 指针移到下一片
+    for (int i = 0; i &lt; TILE; ++i)
+        sum += sA[localRow * TILE + i] * sB[i * TILE + localCol];
+    __syncthreads();                       // 等所有人算完再覆盖共享内存
+}
+C[localRow * N + localCol] = sum;</code></pre>
+      <p>搬运时 <code>localCol</code> 取自 <code>threadIdx.x</code>，同一 warp 读相邻地址，合并没问题。两次 <code>__syncthreads()</code> 一次保证「读之前已经写完」，一次保证「覆盖之前大家都用完」。Playbook 报告这个版本比合并后的朴素版执行时间又降了约 43%。</p>
+
+      <h3>7.4 Tile 量化与 wave 量化</h3>
+      <p>分块还带来两个离散化的损失，算 GEMM 效率时经常被忽略。</p>
+      <ul>
+        <li><strong>Tile 量化</strong>：如果 \(M\) 不是 \(B_M\) 的整数倍，最后一行块只有部分有效，但它照样占用一个完整 block 的计算。比如 \(M=4100\)、\(B_M=128\)：需要 33 个行块，最后一块只有 4 行有效，白算了约 3% 的量。这也是为什么词表大小、隐藏维度通常取 64 或 128 的倍数。</li>
+        <li><strong>Wave 量化</strong>：block 是一批一批（wave）地铺到 SM 上的。\(4096\times4096\) 的输出、\(128\times128\) 的块，一共 1024 个 block；H100 每个 SM 若只能驻留 1 个这样的 block，132 个 SM 需要 \(\lceil1024/132\rceil=8\) 个 wave，最后一个 wave 只有 \(1024-7\times132=100\) 个 block，有 32 个 SM 闲着。总效率上限是 \(1024/(8\times132)\approx97\%\)。矩阵再小一些时损失会更明显：256 个 block 需要 2 个 wave，效率上限 \(256/264\approx97\%\)；而 140 个 block 也需要 2 个 wave，上限只有 53%。</li>
+      </ul>
+      <p>cuBLAS 会针对形状选不同的块大小和 split-K（把 K 维也切给多个 block，最后再归约）来缓解这些问题；自己写内核或选模型维度时，最好心里有这笔账。</p>
+
+      <div class="demo" id="ta">
+        <div class="demo-label">分块步进动画：分块矩阵乘 / FlashAttention 前向</div>
+        <div class="seg" id="ta-mode" role="group" aria-label="模式">
+          <button type="button" data-m="mm" aria-pressed="true">分块矩阵乘</button>
+          <button type="button" data-m="fa" aria-pressed="false">FlashAttention（FA2 循环顺序）</button>
+        </div>
+        <div class="btnrow">
+          <button class="btn" id="ta-prev" type="button">← 上一步</button>
+          <button class="btn primary" id="ta-next" type="button">下一步 →</button>
+          <button class="btn" id="ta-play" type="button">播放</button>
+          <button class="btn" id="ta-reset" type="button">重置</button>
+          <span class="seg" id="ta-opt" role="group" aria-label="选项"></span>
+        </div>
+        <div class="ta-wrap" id="ta-view"></div>
+        <div class="ta-log" id="ta-log"></div>
+        <p class="note">矩阵里的数是固定随机种子生成的示例数据，只为演示；所有统计量（加载次数、\(m\)、\(\ell\)、输出）都是按算法实时计算的。FlashAttention 模式最后一步会把逐块得到的输出与直接算 softmax 的结果比较。</p>
+      </div>
+
+      <h2 id="coarsen">8. 线程粗化与控制分歧</h2>
+      <h3>8.1 线程粗化（寄存器分块）</h3>
+      <p>分块之后，Playbook 用 Nsight Compute 看 warp 状态，发现大量周期停在 <code>mio_throttle</code>：warp 在等共享内存指令队列有空位。原因是上面的内核里每做一次 FMA 都要从共享内存读两个数，共享内存成了新的瓶颈。</p>
+      <p>办法是<strong>线程粗化</strong>（thread coarsening）：让一个线程算 C 的 \(T_M\times T_N\) 个元素而不是一个。在内层循环的每个 \(k\)，线程从共享内存读 A 的 \(T_M\) 个数和 B 的 \(T_N\) 个数放进寄存器，然后做它们的外积——\(T_MT_N\) 次 FMA：</p>
+      $$\frac{\text{FMA 次数}}{\text{SMEM 读取次数}} = \frac{T_MT_N}{T_M+T_N},$$
+      <p>\(T_M=T_N=1\) 时是 \(1/2\)，\(8\times8\) 时是 4，提高了 8 倍。这其实是同一个分块思想在下一层的重复：全局内存 → 共享内存是 block 级分块，共享内存 → 寄存器是线程级分块。Tensor Core 指令本身（比如一个 warp 做 \(16\times8\times16\) 的 <code>mma</code>）又是再下一层。代价是每个线程要更多寄存器存 \(T_MT_N\) 个累加器，占用率会下降——又回到第 4 节的权衡。</p>
+
+      <h3>8.2 控制分歧</h3>
+      <p>同一 warp 的线程如果在 <code>if</code> 上走了不同的分支，硬件就依次执行两个分支，每次屏蔽掉另一半线程。最坏情况下 32 条路径串行，吞吐掉到 1/32。常见的避免方法：</p>
+      <ul>
+        <li>让分支条件在 warp 内一致。例如按 warp 而不是按线程分配任务；FlashAttention 里因果掩码只在对角线附近的块上做，其他块要么整块计算、要么整块跳过（第 14 节）。</li>
+        <li>用无分支的写法：<code>where</code>/<code>select</code>，或者用谓词执行（predication），两边都算、最后按条件选。对于很短的分支，编译器通常会自动这么做。</li>
+        <li>把数据重排，让走同一路径的元素聚在一起。</li>
+      </ul>
+
+      <h2 id="fusion">9. 内核融合</h2>
+      <p>前面说过，GPU 和 CPU 是异步的，CPU 可以不停地往队列里塞内核。但每个内核都遵循同一个模式：从 HBM 读输入到 SM，计算，把输出写回 HBM。连续几个逐元素算子各自成一个内核时，中间结果就要在 HBM 和 SM 之间来回走好几趟，而计算本身几乎不花时间。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 760 210" role="img" aria-label="未融合：每个算子都读写 HBM；融合：一次读、一次写">
+          <text x="10" y="20">未融合：3 个内核</text>
+          <rect x="10" y="30" width="360" height="30" rx="6" class="box-hot"/><text x="190" y="50" text-anchor="middle" font-size="13">HBM</text>
+          <g font-size="12">
+            <rect x="20" y="110" width="90" height="34" rx="6" class="box-acc"/><text x="65" y="132" text-anchor="middle">x²</text>
+            <rect x="140" y="110" width="90" height="34" rx="6" class="box-acc"/><text x="185" y="132" text-anchor="middle">mean, rsqrt</text>
+            <rect x="260" y="110" width="90" height="34" rx="6" class="box-acc"/><text x="305" y="132" text-anchor="middle">x·r·w</text>
+          </g>
+          <path d="M45 60 L45 110 M85 110 L85 60 M165 60 L165 110 M205 110 L205 60 M285 60 L285 110 M325 110 L325 60" class="ln-hot"/>
+          <text x="190" y="175" text-anchor="middle" class="soft" font-size="12">每一步都读写一遍 HBM，中间结果来回搬</text>
+
+          <text x="410" y="20">融合：1 个内核</text>
+          <rect x="410" y="30" width="340" height="30" rx="6" class="box-hot"/><text x="580" y="50" text-anchor="middle" font-size="13">HBM</text>
+          <rect x="430" y="100" width="300" height="54" rx="8" class="box-acc"/>
+          <text x="580" y="124" text-anchor="middle" font-size="13">x² → mean → rsqrt → x·r·w</text>
+          <text x="580" y="142" text-anchor="middle" font-size="11" class="soft">中间值都在寄存器里</text>
+          <path d="M470 60 L470 100 M690 100 L690 60" class="ln-hot"/>
+          <text x="580" y="175" text-anchor="middle" class="soft" font-size="12">只读一次输入、写一次输出</text>
+        </svg>
+        <figcaption>内核融合（受 Horace He 的示意图启发重画）。逐元素和行归约算子是融合最容易获益的地方。</figcaption>
+      </figure>
+      <p>算一笔账：RMSNorm，输入 \(x\in\mathbb R^{B\times D}\)。eager 下大致是 <code>x.pow(2)</code>（读 \(x\)、写临时量）、<code>mean</code>（读临时量）、<code>x * rstd</code>（读 \(x\)、写临时量）、<code>* w</code>（读临时量、写 \(y\)），大约 6 次全尺寸的 HBM 读写；如果中间还要转 FP32，还会更多。融合后只有读 \(x\)、写 \(y\) 两次。由于这类算子完全受带宽限制，运行时间基本按 3 倍缩短。</p>
+      <p>Transformer 里能融合的地方很多：bias + GeLU、残差加 + 归一化、RoPE、softmax + 掩码 + dropout、交叉熵（不把整个 logits 的 softmax 写回）。torch.compile 会自动做逐元素融合。</p>
+      <p>但融合在训练中有一个限制（FlashAttention 论文第 2.1 节特别指出）：反向传播需要的中间值，前向时仍然得写回 HBM 存起来，融合省不掉这部分写入。比如 softmax 的输出 \(P\) 在反向里要用，朴素地融合了「掩码 + softmax」也还是要把 \(N\times N\) 的 \(P\) 写回去。解决方法是<strong>重计算</strong>：不存中间值，反向时从更小的输入重新算出来。如果重算的代价（多出来的 FLOPs）比存取的代价（HBM 流量）小，那它反而更快。FlashAttention 就是把分块、融合、重计算三件事同时用在注意力上。</p>
+
+      <h2 id="std-attn">10. 标准注意力的访存账</h2>
+      <p>单个注意力头，\(Q,K,V\in\mathbb R^{N\times d}\)（\(N\) 是序列长度，\(d\) 是头维度）：</p>
+      $$S = QK^\top \in\mathbb R^{N\times N},\qquad P=\mathrm{softmax}(S)\ (\text{按行}),\qquad O = PV\in\mathbb R^{N\times d}.$$
+      <p>（通常 \(S\) 还要乘 \(1/\sqrt d\)，这里省略，不影响讨论。）标准实现分三步，每步一个内核：</p>
+      <ol>
+        <li>读 \(Q,K\)（\(2Nd\)），算 \(S\)，写 \(S\)（\(N^2\)）。</li>
+        <li>读 \(S\)（\(N^2\)），算 softmax，写 \(P\)（\(N^2\)）。</li>
+        <li>读 \(P\)（\(N^2\)）和 \(V\)（\(Nd\)），算 \(O\)，写 \(O\)（\(Nd\)）。</li>
+      </ol>
+      <p>总 HBM 访问 \(4N^2+4Nd\) 个元素，即 \(\Theta(N^2+Nd)\)。而 FLOPs 是 \(4N^2d\)（两个矩阵乘，各 \(2N^2d\)）。当 \(N\gg d\) 时，平方项主导，每个 \(S\) 元素带来 \(4d\) 次运算、却要搬 4 次（BF16 共 8 字节）：</p>
+      $$I_{\text{std}} \approx \frac{4N^2d}{4N^2\cdot 2} = \frac{d}{2}\ \text{FLOPs/B}.$$
+      <p>\(d=128\) 时只有 64，远低于 295，所以标准注意力是带宽受限的。实际情况更糟：掩码、dropout 往往各是一个额外的 \(N^2\) 读写。</p>
+      <p>以 \(N=8192\)、\(d=128\)、32 个头、BF16 为例：每个头的 \(S\) 有 \(N^2=6.7\times10^7\) 个元素，134 MB；32 个头是 4.3 GB——这只是一层、一个样本，而且 \(P\) 还要存下来给反向用。FlashAttention 论文里在 A100 上测的 GPT-2 medium（\(N=1024\)，\(d=64\)，16 头，batch 64）前向 + 反向：标准注意力 HBM 读写 40.3 GB、41.7 ms；FlashAttention 4.4 GB、7.3 ms——尽管后者 FLOPs 更多（75.2 vs 66.6 GFLOPs，多出来的是反向重计算）。</p>
+
+      <div class="demo" id="hbm">
+        <div class="demo-label">HBM 流量计算器：标准注意力 vs FlashAttention（前向，单层）</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>序列长度 N</span><input type="range" id="hbm-n" min="9" max="17" step="1" value="13"><output id="hbm-n-v">8192</output></label>
+          <label class="ctrl"><span>头维度 d</span><input type="range" id="hbm-d" min="0" max="2" step="1" value="1"><output id="hbm-d-v">128</output></label>
+          <label class="ctrl"><span>头数 × batch</span><input type="range" id="hbm-h" min="1" max="256" step="1" value="32"><output id="hbm-h-v">32</output></label>
+          <label class="ctrl"><span>Q 块大小 B_r</span><input type="range" id="hbm-br" min="4" max="8" step="1" value="7"><output id="hbm-br-v">128</output></label>
+          <div class="ctrl"><span>元素字节</span><span class="seg" id="hbm-b" role="group" aria-label="元素字节"><button type="button" data-b="2" aria-pressed="true">2（BF16）</button><button type="button" data-b="1">1（FP8）</button></span><span></span></div>
+          <div class="ctrl"><span>因果掩码</span><span class="seg" id="hbm-c" role="group" aria-label="因果"><button type="button" data-c="0" aria-pressed="true">否</button><button type="button" data-c="1">是</button></span><span></span></div>
+        </div>
+        <div class="readout">
+          <div><span class="k">FLOPs</span><span class="v" id="hbm-flops">–</span></div>
+          <div><span class="k">标准：HBM 读写</span><span class="v" id="hbm-std">–</span></div>
+          <div><span class="k">标准：存给反向的 P</span><span class="v" id="hbm-p">–</span></div>
+          <div><span class="k">Flash：HBM 上界（K/V 不命中 L2）</span><span class="v" id="hbm-fu">–</span></div>
+          <div><span class="k">Flash：HBM 下界（各读写一次）</span><span class="v" id="hbm-fl">–</span></div>
+          <div><span class="k">Flash：存给反向的 L</span><span class="v" id="hbm-l">–</span></div>
+        </div>
+        <div class="readout">
+          <div><span class="k">计算时间 @ 峰值</span><span class="v" id="hbm-tc">–</span></div>
+          <div><span class="k">标准：搬运时间</span><span class="v" id="hbm-ts">–</span></div>
+          <div><span class="k">Flash：搬运时间（上界）</span><span class="v" id="hbm-tf">–</span></div>
+          <div><span class="k">Flash 片上算术强度</span><span class="v" id="hbm-i">–</span></div>
+        </div>
+        <p class="note" id="hbm-note"></p>
+        <p class="note">按 H100 SXM 的规格估算：BF16 989 TFLOPs/s、FP8 1979 TFLOPs/s、HBM 3.35 TB/s，都按峰值，不考虑实际效率。标准注意力按上面三步计 \(4N^2+4Nd\) 个元素（不含掩码、dropout 的额外读写），即使有因果掩码也照样物化完整的 \(N\times N\) 矩阵。Flash 按 FA2 的循环顺序：每个 Q 块读一次、遍历全部（因果时约一半）K/V 块。</p>
+      </div>
+
+      <h2 id="online">11. 在线 softmax 的推导</h2>
+      <p>要不物化 \(S\)，就得把 softmax 拆成按块计算。难点在于 softmax 的分母要对整行求和，看起来必须先看到整行。</p>
+      <h3>11.1 安全 softmax</h3>
+      <p>先回忆数值稳定的写法。对向量 \(x\in\mathbb R^B\)：</p>
+      $$m(x)=\max_i x_i,\quad f(x)=\big[e^{x_1-m(x)},\dots,e^{x_B-m(x)}\big],\quad \ell(x)=\sum_i f(x)_i,\quad \mathrm{softmax}(x)=\frac{f(x)}{\ell(x)}.$$
+      <p>减去最大值不改变结果（分子分母同乘 \(e^{-m}\)），但保证指数不会上溢：所有指数都 \(\le 0\)，\(e^{\cdot}\le1\)。朴素实现要扫三遍：一遍求最大值，一遍求和，一遍归一化。</p>
+      <h3>11.2 两块的合并</h3>
+      <p>把 \(x\) 拆成两段 \(x=[x^{(1)}, x^{(2)}]\)，分别算出 \((m_1,\ell_1)\) 和 \((m_2,\ell_2)\)。合并：</p>
+      $$m=\max(m_1,m_2),\qquad \ell = e^{m_1-m}\,\ell_1 + e^{m_2-m}\,\ell_2.$$
+      <p>验证：\(\ell_1=\sum_{i\in 1}e^{x_i-m_1}\)，乘 \(e^{m_1-m}\) 得 \(\sum_{i\in1}e^{x_i-m}\)，两段加起来正是 \(\sum_i e^{x_i-m}=\ell(x)\)。也就是说，<strong>每段只需带着自己的 \((m,\ell)\) 两个数，就能在之后正确合并</strong>，而且合并满足结合律，可以一块接一块地做。这叫在线（online）softmax，Milakov 和 Gimelshein 2018 年把它用在了单遍 softmax 上。</p>
+      <h3>11.3 把输出也一起在线化</h3>
+      <p>注意力要的不是 softmax 本身，而是 \(o=\sum_j p_j v_j\)。设已经处理了前 \(j-1\) 块，维护三个量：当前最大值 \(m\)、当前分母 \(\ell\)、和一个<em>未归一化</em>的输出</p>
+      $$\tilde o = \sum_{\text{已处理的 } k} e^{s_k - m}\, v_k.$$
+      <p>来了新的一块分数 \(s^{(j)}\)（以及对应的 \(V_j\)），令 \(m' = \max(m, \max s^{(j)})\)，则：</p>
+      $$\ell' = e^{m-m'}\ell + \sum_{k\in j} e^{s_k-m'},\qquad \tilde o' = e^{m-m'}\,\tilde o + \sum_{k\in j} e^{s_k-m'}\,v_k.$$
+      <p>第二个式子的道理和 \(\ell\) 一样：旧的每一项 \(e^{s_k-m}v_k\) 乘上 \(e^{m-m'}\) 就变成了以新最大值为基准的 \(e^{s_k-m'}v_k\)。处理完所有块后，\(o = \tilde o/\ell\)。用归纳法很容易验证：每一步之后，\(\tilde o\) 和 \(\ell\) 都恰好等于「对已处理的所有项、以当前 \(m\) 为基准」的和，所以最后一步得到精确结果，<strong>不是近似</strong>。</p>
+      <p>每一块要做的事：一个小矩阵乘得到 \(s^{(j)}\)；按行求最大值；指数；按行求和；把旧的 \(\tilde o\) 和 \(\ell\) 乘一个修正因子 \(e^{m-m'}\)；再一个小矩阵乘 \(\tilde P_jV_j\) 加到 \(\tilde o\) 上。上面的步进动画里切到 FlashAttention 模式，就能逐块看到 \(m\)、\(\ell\) 和输出的变化。</p>
+
+      <h2 id="fa1">12. FlashAttention：分块 + 重计算</h2>
+      <h3>12.1 算法</h3>
+      <p>有了在线 softmax，注意力可以写成一个内核。设片上 SRAM 能放 \(M\) 个元素。FlashAttention（第一版）的算法 1：</p>
+      <ol>
+        <li>取块大小 \(B_c=\lceil M/4d\rceil\)，\(B_r=\min(\lceil M/4d\rceil, d)\)。把 \(Q\) 切成 \(T_r=\lceil N/B_r\rceil\) 块，\(K,V\) 切成 \(T_c=\lceil N/B_c\rceil\) 块。在 HBM 中初始化 \(O=0\)、\(\ell=0\)、\(m=-\infty\)。</li>
+        <li><strong>外层循环</strong> \(j=1..T_c\)：把 \(K_j,V_j\) 载入 SRAM。
+          <ul>
+            <li><strong>内层循环</strong> \(i=1..T_r\)：载入 \(Q_i,O_i,\ell_i,m_i\)；片上算 \(S_{ij}=Q_iK_j^\top\)（\(B_r\times B_c\)）、行最大值、\(\tilde P_{ij}=\exp(S_{ij}-\tilde m_{ij})\)、行和；按上一节的公式更新 \(m_i,\ell_i\)，并更新 \(O_i\)；把 \(O_i,\ell_i,m_i\) 写回 HBM。</li>
+          </ul>
+        </li>
+      </ol>
+      <p>块大小的选法来自 SRAM 预算：\(K_j,V_j\) 各占 \(B_cd\)，\(Q_i,O_i\) 各占 \(B_rd\)，加起来不超过 \(4\cdot (M/4d)\cdot d = M\)。</p>
+      <p>代入 H100 的数字：228 KB 共享内存，BF16 下 \(M\approx1.17\times10^5\) 个元素；\(d=128\) 时 \(B_c=\lceil M/4d\rceil=228\)，\(B_r=\min(228,128)=128\)。实际实现里块大小还受寄存器限制，一般取 64 或 128（FA2 论文第 3.3 节）。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 304" role="img" aria-label="FlashAttention 的循环结构：S 矩阵按块计算，K/V 块和 Q 块在 SRAM 中">
+          <text x="200" y="16" text-anchor="middle">S = QKᵀ 的块（从不完整写入 HBM）</text>
+          <g id="fa-grid"></g>
+          <text x="20" y="160" class="soft" font-size="12" transform="rotate(-90 20 160)">Q 块 i（行）</text>
+          <text x="200" y="298" text-anchor="middle" class="soft" font-size="12">K/V 块 j（列）</text>
+          <rect x="430" y="40" width="320" height="110" rx="8" class="box"/>
+          <text x="445" y="62">FA1：外层 j（K/V），内层 i（Q）</text>
+          <text x="445" y="86" class="soft" font-size="13">K_j, V_j 载入一次；每个 Q_i, O_i 要读写 T_c 次</text>
+          <text x="445" y="108" class="soft" font-size="13">→ 按列扫过 S</text>
+          <text x="445" y="130" class="soft" font-size="13">O、ℓ、m 在 HBM 上反复更新</text>
+          <rect x="430" y="164" width="320" height="110" rx="8" class="box-acc"/>
+          <text x="445" y="186">FA2：外层 i（Q），内层 j（K/V）</text>
+          <text x="445" y="210" class="soft" font-size="13">Q_i 载入一次，O_i 累加器留在寄存器</text>
+          <text x="445" y="232" class="soft" font-size="13">→ 按行扫过 S；不同 i 互不依赖</text>
+          <text x="445" y="254" class="soft" font-size="13">可按 i 并行到不同 thread block</text>
+        </svg>
+        <figcaption>两种循环顺序。紫色是已经算过的 \(S\) 块，橙色是当前块；无论哪种顺序，\(S\) 都只以 \(B_r\times B_c\) 的小块形式存在于片上。</figcaption>
+      </figure>
+
+      <h3>12.2 IO 复杂度</h3>
+      <p>论文的定理 2：标准注意力需要 \(\Theta(Nd+N^2)\) 次 HBM 访问，FlashAttention 需要 \(\Theta(N^2d^2M^{-1})\) 次。推导：外层循环每一轮载入一块 K/V（大小 \(\Theta(M)\)），所以总共 \(T_c=\Theta(Nd/M)\) 轮；每一轮内层都要把整个 \(Q\) 和 \(O\) 过一遍，\(\Theta(Nd)\)。乘起来 \(\Theta(N^2d^2/M)\)。</p>
+      <p>典型参数下 \(d=64\sim128\)，\(M\) 约 100 KB 量级，\(d^2\) 比 \(M\) 小很多倍，所以 \(N^2d^2/M\ll N^2\)。不过常数和 \(d\) 的大小都要紧。我自己代入算了一下：\(N=8192\)、\(d=128\)、\(B_c=228\) 时，FA1 的外层循环有 \(T_c=36\) 轮，每轮读 \(Q\)、读写 \(O\) 共约 \(3Nd\)，再加 \(K,V\) 各读一次，一共约 \(36\times3Nd+2Nd\approx1.2\times10^8\) 个元素；标准实现是 \(4N^2+4Nd\approx2.7\times10^8\)。如果不算 L2 的帮助，只差 2 倍多。\(d=64\) 时 \(B_c\) 翻倍、\(T_c\) 减半、每轮的量也减半，差距就到了 8 倍左右。所以在 \(d=128\) 的现代模型上，FlashAttention 的收益很大一部分来自：重复读取的 \(Q,O\)（FA1）或 \(K,V\)（FA2）在 L2 里命中；不再有掩码、dropout、softmax 各自的额外 \(N^2\) 读写；以及 \(O(N)\) 的显存。论文还证明了一个下界（命题 3）：不存在对所有 \(M\in[d,Nd]\) 都只需要 \(o(N^2d^2/M)\) 次 HBM 访问的精确注意力算法——在这个意义上 FlashAttention 是渐近最优的。</p>
+      <p>换个角度看片上的算术强度会更直观。以 FA2 的顺序为例：每载入一块 \(K_j,V_j\)（\(2B_cd\) 个元素），对一个 \(Q_i\) 块要做 \(4B_rB_cd\) 次运算，所以对 L2/HBM 的强度是</p>
+      $$I_{\text{flash}} = \frac{4B_rB_cd}{2B_cd\cdot b} = \frac{2B_r}{b}\ \text{FLOPs/B}.$$
+      <p>BF16、\(B_r=128\) 时是 128 FLOPs/B。它与 \(N\) 无关，只和 Q 块大小有关——这就是「分块让数据复用」在注意力上的体现。同一个头的 K/V 被所有 Q 块重复读，只要它们在 L2 里（\(N=8192,d=128\) 时一个头的 K+V 是 4 MB，远小于 50 MB 的 L2），真实 HBM 流量会接近「每个元素读写一次」。上面的计算器同时给出了不命中 L2 的上界和全部命中的下界。</p>
+
+      <h3>12.3 显存</h3>
+      <p>除了输入输出，FlashAttention 只需要 \(O(N)\) 的额外显存：每行的 \(m\) 和 \(\ell\)（FA2 合并成一个 logsumexp）。标准实现要存 \(O(N^2)\) 的 \(P\)。这使得长序列训练的激活显存从平方变成线性，也让 Playbook 所说的「线性注意力等近似方法被冷落」成为现实：精确的注意力已经足够快、足够省。</p>
+
+      <h2 id="bwd">13. 反向传播与重计算</h2>
+      <h3>13.1 推导</h3>
+      <p>设损失为 \(\phi\)，已知 \(dO=\partial\phi/\partial O\)。逐个推（以下 \(q_i,k_j,v_j,o_i\) 等表示对应矩阵的第 \(i\)/\(j\) 行）：</p>
+      <ul>
+        <li>\(O=PV\)，所以 \(dV=P^\top dO\)，\(dP = dO\,V^\top\)，即 \(dP_{ij}=do_i^\top v_j\)。</li>
+        <li>softmax 的雅可比：\(y=\mathrm{softmax}(x)\) 时 \(\partial y/\partial x=\mathrm{diag}(y)-yy^\top\)。所以第 \(i\) 行
+          $$dS_{i:} = \big(\mathrm{diag}(P_{i:})-P_{i:}P_{i:}^\top\big)dP_{i:} = P_{i:}\circ dP_{i:} - (P_{i:}^\top dP_{i:})\,P_{i:}.$$</li>
+        <li>定义 \(D_i = P_{i:}^\top dP_{i:}\)。关键的化简：
+          $$D_i=\sum_j P_{ij}\,do_i^\top v_j = do_i^\top\Big(\sum_j P_{ij}v_j\Big) = do_i^\top o_i.$$
+          所以 \(D=\mathrm{rowsum}(dO\circ O)\)，只要 \(O\) 和 \(dO\) 就能算，<em>不需要整行的 \(P\)</em>。于是 \(dS_{ij}=P_{ij}(dP_{ij}-D_i)\)。</li>
+        <li>\(S=QK^\top\)，所以 \(dQ=dS\,K\)，\(dK=dS^\top Q\)。</li>
+      </ul>
+      <h3>13.2 分块反向</h3>
+      <p>前向只存 \(O\) 和每行的 logsumexp \(L_i=m_i+\log\ell_i\)。反向时任何一块 \(P_{ij}\) 都可以从 \(Q_i,K_j\) 重新算出来：\(P_{ij}=\exp(Q_iK_j^\top - L_i)\)，不需要再做在线修正，因为最终的归一化常数已经知道了。FA2 的反向（算法 2）：</p>
+      <ol>
+        <li>预处理：\(D=\mathrm{rowsum}(dO\circ O)\)，写回 HBM。</li>
+        <li>外层循环 K/V 块 \(j\)：载入 \(K_j,V_j\)，片上初始化 \(dK_j=dV_j=0\)。
+          <ul><li>内层循环 Q 块 \(i\)：载入 \(Q_i,O_i,dO_i,L_i,D_i\)；重算 \(S_{ij}\) 和 \(P_{ij}\)；\(dV_j \mathrel{+}= P_{ij}^\top dO_i\)；\(dP_{ij}=dO_iV_j^\top\)；\(dS_{ij}=P_{ij}\circ(dP_{ij}-D_i)\)；\(dQ_i \mathrel{+}= dS_{ij}K_j\)（读写 HBM）；\(dK_j \mathrel{+}= dS_{ij}^\top Q_i\)。</li></ul>
+        </li>
+        <li>写回 \(dK_j,dV_j\)。</li>
+      </ol>
+      <p>反向里有 5 个矩阵乘（重算 \(S\)、\(dV\)、\(dP\)、\(dQ\)、\(dK\)），前向 2 个，所以反向 FLOPs 约为前向的 2.5 倍（FA2 论文计算 TFLOPs/s 时正是用这个系数）。多出来的那次 \(QK^\top\) 就是重计算的代价。由于标准实现的反向同样是带宽受限的（要读 \(P\)、写 \(dS\) 等若干个 \(N^2\) 矩阵），用多出的 FLOPs 换掉这些 HBM 流量是划算的：FlashAttention 的反向不但省显存，而且更快。这和一般的激活重计算（用时间换显存）不同。</p>
+
+      <h2 id="fa2">14. FlashAttention-2：少做非矩阵运算，多做并行</h2>
+      <p>FlashAttention 在 A100 上只达到峰值的 25–40%（FA2 论文的说法），而优化好的 GEMM 能到 80–90%。FA2 的改进不在算法的数学上，而在怎么把工作分给 GPU。</p>
+      <h3>14.1 减少非矩阵乘 FLOPs</h3>
+      <p>A100 的 FP16/BF16 矩阵乘峰值是 312 TFLOPs/s，非矩阵乘的 FP32 只有 19.5 TFLOPs/s：<strong>一次非矩阵乘运算的代价相当于 16 次矩阵乘运算</strong>。所以哪怕只占总 FLOPs 很小比例的 exp、缩放、比较，也可能拖慢整个内核。FA2 做了两处调整：</p>
+      <ul>
+        <li>循环中不再每一步都除以 \(\ell\)：维护未归一化的 \(\tilde O\)，只在最后除一次 \(\mathrm{diag}(\ell)^{-1}\)。FA1 每一步都对 \(O_i\) 做 \(\mathrm{diag}(\ell^{\text{new}})^{-1}(\mathrm{diag}(\ell)\,e^{\cdot}O_i+\dots)\) 这种双重缩放。</li>
+        <li>前向只为反向存 logsumexp \(L=m+\log\ell\) 一个数，而不是 \(m\) 和 \(\ell\) 两个。</li>
+      </ul>
+      <h3>14.2 交换循环顺序，在序列维度上并行</h3>
+      <p>FA1 的并行只在 batch 和头数两个维度上：每个 (样本, 头) 一个 thread block。A100 有 108 个 SM，block 数 ≥ 80 左右时才能填满。长序列训练时 batch 往往很小，block 数不够，很多 SM 闲着。</p>
+      <p>FA2 把外层循环换成 Q 块、内层换成 K/V 块（这一顺序最早由 Phil Tillet 在 Triton 的实现中提出）。这样不同的 Q 块之间完全独立——每个 Q 块各自维护自己的 \(m,\ell,\tilde O\)，可以分给不同的 thread block，并行度变成 batch × 头数 × \(\lceil N/B_r\rceil\)。另外，\(O_i\) 累加器可以一直留在寄存器里，不必每一步读写 HBM。</p>
+      <p>反向时，按 K/V 列块并行：每个 block 负责一个 \(j\)，独立积累 \(dK_j,dV_j\)；唯一的共享写入是 \(dQ_i\)，不同 block 用原子加（atomic add）累加到 HBM 上。</p>
+      <p>MQA/GQA（多个 query 头共享一组 K/V 头）也在这一层处理：不在 HBM 里复制 K/V，而是在计算下标时让多个 query 头指向同一个 K/V 头；反向时，被共享的 \(dK,dV\) 要把各个 query 头的贡献加起来。</p>
+      <h3>14.3 warp 之间的分工</h3>
+      <p>一个 block 里通常有 4 或 8 个 warp。FA1 的做法是把 \(K,V\) 按列切给各个 warp，\(Q\) 大家共享（论文叫「split-K」）：每个 warp 算出 \(QK^\top\) 的一部分列，乘以 \(V\) 的对应行后，得到的是输出的<em>部分和</em>，必须写进共享内存、同步、再加起来。FA2 改为把 \(Q\) 按行切给各个 warp，\(K,V\) 共享：每个 warp 算出自己那几行的完整输出，warp 之间不需要通信。这减少了共享内存读写和同步。</p>
+      <h3>14.4 因果掩码</h3>
+      <p>因果注意力里 \(j\gt i\) 的分数是 \(-\infty\)。按块处理时，列下标全部大于行下标的块（序列长时约一半）直接跳过；行下标严格大于列下标的块完全不需要掩码；只有对角线上的块要逐元素掩码（方块时每行只有 1 块）。FA2 报告相比无掩码约有 1.7–1.8 倍加速。这也是第 8 节「让分支在块级一致」的例子。</p>
+      <h3>14.5 块大小与结果</h3>
+      <p>块越大，共享内存读写越少，但寄存器和共享内存需求越大，过了某个点会寄存器溢出或者放不进共享内存。FA2 通常在 \(\{64,128\}\times\{64,128\}\) 中按头维度和设备手动选。结果：比 FA1 快约 2 倍，在 A100 上前向 + 反向最高 230 TFLOPs/s，约为峰值的 73%；端到端训练 GPT 风格模型时达到 225 TFLOPs/s（72% MFU）。</p>
+
+      <h2 id="fa3">15. FlashAttention-3：Hopper 上的异步与 FP8</h2>
+      <p>FA2 在 H100 上只能到峰值的约 35%。FA3 论文的诊断是：FA2 的设计基于一个简化的同步模型，没有利用 Hopper 的两项新能力——异步和低精度。</p>
+      <h3>15.1 Hopper 的新硬件</h3>
+      <ul>
+        <li><strong>TMA</strong>（Tensor Memory Accelerator）：专门在 HBM 和共享内存之间做异步拷贝的硬件单元。一个线程发出指令，就能搬运一整个多维块（地址计算、越界处理都由 TMA 完成），其他线程不用参与。</li>
+        <li><strong>WGMMA</strong>：warpgroup（128 个线程）级别的矩阵乘指令，<em>异步</em>执行，可以直接从共享内存取操作数。发出之后 warp 可以去做别的事，稍后再等结果。</li>
+        <li><strong>setmaxnreg</strong>：在 warpgroup 之间动态重分配寄存器。</li>
+        <li><strong>FP8 Tensor Core</strong>：吞吐是 FP16/BF16 的 2 倍。</li>
+      </ul>
+      <h3>15.2 warp 专门化：生产者与消费者</h3>
+      <p>FA3 把一个 block 的 warp 分成两种角色：</p>
+      <ul>
+        <li><strong>生产者</strong> warpgroup 只负责用 TMA 把 \(Q_i\) 和一块块的 \(K_j,V_j\) 搬进共享内存。它几乎不需要寄存器，所以用 <code>setmaxnreg</code> 把寄存器让出去。</li>
+        <li><strong>消费者</strong> warpgroup 只做计算：WGMMA 算 \(S\)，softmax，WGMMA 算 \(\tilde PV\)。它们拿到更多寄存器，可以用更大的块。</li>
+      </ul>
+      <p>两者之间是一个 \(s\) 级的环形共享内存缓冲区：生产者等第 \(j\bmod s\) 级被消费完后填入 \(K_j,V_j\)，填好后通知消费者；消费者用完后释放。只要缓冲区不空，消费者就永远不必等 HBM——搬运和计算完全重叠。</p>
+      <h3>15.3 乒乓调度：让 softmax 藏在 GEMM 后面</h3>
+      <p>非矩阵乘的代价在 H100 上更尖锐。H100 SXM5 的 FP16 矩阵乘 989 TFLOPs/s，而 exp 这类特殊函数由多功能单元（MUFU）执行，每个 SM 每周期 16 次，\(16\times132\times1.83\text{ GHz}\approx3.9\) TFLOPs/s。头维度 128 时，每个分数元素对应 \(4d=512\) 次矩阵乘运算和 1 次 exp：矩阵乘运算多 512 倍，但吞吐高约 256 倍，于是 exp 要花掉相当于矩阵乘 50% 的时间。FP8 下矩阵乘吞吐翻倍而 exp 不变，情况更糟。</p>
+      <p>因为 exp 和 Tensor Core 是不同的硬件单元，理想情况是一边做 softmax 一边做矩阵乘。FA3 用两个消费者 warpgroup 做<strong>乒乓调度</strong>：用 <code>bar.sync</code> 强制 warpgroup 1 的两个 GEMM（本轮的 \(\tilde PV\) 和下一轮的 \(QK^\top\)）排在 warpgroup 2 的 GEMM 之前，于是 warpgroup 1 做 softmax 的时候 warpgroup 2 正在用 Tensor Core，然后角色互换。</p>
+      <figure class="fig">
+        <svg viewBox="0 0 760 170" role="img" aria-label="乒乓调度时间线：两个 warpgroup 交替做 GEMM 和 softmax">
+          <text x="10" y="18" class="soft" font-size="12">时间 →</text>
+          <text x="10" y="58">WG 1</text>
+          <text x="10" y="108">WG 2</text>
+          <g id="pp"></g>
+          <rect x="80" y="140" width="16" height="12" class="box-acc"/><text x="102" y="151" font-size="12">GEMM（Tensor Core）</text>
+          <rect x="260" y="140" width="16" height="12" class="box-hot"/><text x="282" y="151" font-size="12">softmax（exp 等，MUFU / CUDA core）</text>
+        </svg>
+        <figcaption>乒乓调度的理想时间线（示意，按 FA3 论文图 1 的思想重画）：任一时刻总有一个 warpgroup 在占用 Tensor Core。</figcaption>
+      </figure>
+      <p>论文说实际的调度没有图上这么整齐，但在 FP16、头维度 128、序列长 8192 的前向上，把吞吐从约 570 提高到 620–640 TFLOPs/s。</p>
+      <h3>15.4 warpgroup 内部的两级流水</h3>
+      <p>单个 warpgroup 内部也可以重叠。一次迭代里 softmax 依赖第一个 GEMM 的结果，第二个 GEMM 又依赖 softmax，看起来是串行的。FA3 跨迭代打破这个依赖：在第 \(j\) 轮，先异步发出 \(S_{\text{next}}=Q_iK_j^\top\)（不等），再异步发出 \(O\mathrel{+}=\tilde P_{\text{cur}}V_{j-1}\)（不等），然后等第一个完成、对 \(S_{\text{next}}\) 做 softmax——这时第二个 GEMM 还在 Tensor Core 上跑。代价是要多存一份 \(S_{\text{next}}\)，每个 block 多占 \(B_r\times B_c\times 4\) 字节寄存器，和「用更大的块」争寄存器。论文还给了一个三级流水的版本，寄存器压力更大。</p>
+      <h3>15.5 FP8</h3>
+      <p>FP8 带来两个问题。效率上，FP8 WGMMA 要求共享内存中的操作数在 K 维上连续（k-major），而 \(V\) 通常在头维度上连续，做 \(\tilde PV\) 时需要转置；FA3 在内核里用 <code>ldmatrix/stmatrix</code> 指令转置 \(V\) 的块，并安排在前面两个 WGMMA 的阴影里执行。另外 FP8 WGMMA 的 FP32 累加器在寄存器中的布局和下一次 WGMMA 期望的操作数布局不一致，要用字节置换指令重排。</p>
+      <p>精度上，E4M3 只有 3 位尾数，大模型的激活又有离群值（outlier）。FA3 用了两个手段：</p>
+      <ul>
+        <li><strong>块量化</strong>：\(Q,K,V\) 每个 \(B_r\times d\) 或 \(B_c\times d\) 的块各有一个缩放因子，而不是整个张量一个。因为算法本来就按块处理，在 \(S\) 的块上乘回缩放因子几乎没有额外开销。</li>
+        <li><strong>非相干处理</strong>（incoherent processing）：量化前把 \(Q\) 和 \(K\) 都乘以同一个随机正交矩阵 \(M\)。因为 \(MM^\top=I\)，\((QM)(KM)^\top=QK^\top\)，结果不变；但 \(QM\) 的每个元素是 \(Q\) 一行的随机线性组合，离群值被「摊开」了，量化误差变小。实际用随机 \(\pm1\) 对角阵乘 Hadamard 矩阵，\(O(d\log d)\) 就能算，还可以和 RoPE 融合。</li>
+      </ul>
+      <p>这两点和下一篇讲的 FP8 训练里的细粒度缩放、离群值问题是同一回事。</p>
+      <h3>15.6 结果</h3>
+      <p>在 H100 SXM5 上，FA3 的 FP16 前向比 FA2 快 1.5–2.0 倍，最高 740 TFLOPs/s（约 75% 利用率），反向快 1.5–1.75 倍；FP8 接近 1.2 PFLOPs/s。在有离群值的情形下，带块量化和非相干处理的 FP8 FA3 比按张量量化的 FP8 基线数值误差低 2.6 倍。</p>
+      <p>Playbook 也提醒，FlashAttention 对能加速的注意力模式有限制；需要自定义掩码或分数修改时，可以看 PyTorch 的 FlexAttention，它用 torch.compile 为用户给的 <code>score_mod</code>/<code>mask_mod</code> 生成融合内核。</p>
+
+      <h2 id="summary">16. 小结</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>技术</th><th>解决什么</th><th>核心做法</th></tr></thead>
+          <tbody>
+            <tr><td>访存合并</td><td>HBM 带宽被浪费</td><td>同一 warp 的相邻线程访问相邻地址，事务数 = 覆盖的 32 B 段数</td></tr>
+            <tr><td>共享内存分块</td><td>同一数据被反复从 HBM 读</td><td>块搬进 SMEM 一次、被块内所有线程用；HBM 流量降到 \(1/T\)</td></tr>
+            <tr><td>L2 友好的启动顺序</td><td>block 之间的重复读取</td><td>让同时在跑的 block 共享行条/列条</td></tr>
+            <tr><td>线程粗化</td><td>SMEM 指令成为瓶颈</td><td>每线程算 \(T_M\times T_N\) 个输出，寄存器级外积</td></tr>
+            <tr><td>避免控制分歧</td><td>warp 内串行执行分支</td><td>块级一致的分支、谓词执行</td></tr>
+            <tr><td>内核融合</td><td>带宽受限算子来回读写中间值</td><td>多个逐元素/归约算子合成一个内核</td></tr>
+            <tr><td>重计算</td><td>为反向存的大中间值</td><td>只存小统计量，反向时重算</td></tr>
+            <tr><td>FlashAttention</td><td>注意力的 \(O(N^2)\) 读写与显存</td><td>在线 softmax + 分块 + 融合 + 重计算</td></tr>
+            <tr><td>FA2</td><td>非矩阵乘开销、并行度不够、warp 间通信</td><td>延迟归一化、按 Q 块并行、split-Q</td></tr>
+            <tr><td>FA3</td><td>Hopper 上 Tensor Core 吃不饱</td><td>TMA + warp 专门化、乒乓调度、流水线、FP8 块量化</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>实际工作中的顺序大概是：先用现成的（FlashAttention、cuBLAS、融合好的 Norm/RoPE/交叉熵内核），再用 torch.compile 收拾零散的逐元素算子；profiler 里还看到哪个算子明显低于它应有的 roofline，再考虑用 Triton 写；只有在 Triton 也表达不了的调度上（warp 专门化、精确的共享内存布局），才值得下到 CUDA/CUTLASS。</p>
+      <p>下一篇讲同一章的另一半：数值格式。FP8 让 Tensor Core 吞吐再翻倍，代价是要管好范围和精度。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Nouamane Tazi et al., <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>，「Diving in the GPUs – fusing, threading, mixing」一章（A primer on GPUs、Improving performance with kernels、Memory coalescing、Tiling、Thread coarsening、Minimizing control divergence、Fused kernels、FlashAttention）。</li>
+        <li>Jacob Austin et al., <a href="https://jax-ml.github.io/scaling-book/gpus/">How to Think About GPUs</a>，JAX Scaling Book：<a href="https://jax-ml.github.io/scaling-book/gpus/#what-is-a-gpu">What Is a GPU?</a>、<a href="https://jax-ml.github.io/scaling-book/gpus/#memory">Memory</a>、<a href="https://jax-ml.github.io/scaling-book/gpus/#summary-of-gpu-specs">Summary of GPU specs</a>。</li>
+        <li>Tri Dao et al., <a href="https://arxiv.org/abs/2205.14135">FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness</a>（2022），第 2–3 节与附录 B。</li>
+        <li>Tri Dao, <a href="https://arxiv.org/abs/2307.08691">FlashAttention-2: Faster Attention with Better Parallelism and Work Partitioning</a>（2023），第 3 节。</li>
+        <li>Jay Shah et al., <a href="https://arxiv.org/abs/2407.08608">FlashAttention-3: Fast and Accurate Attention with Asynchrony and Low-precision</a>（2024），第 2–3 节。</li>
+        <li>Maxim Milakov, Natalia Gimelshein, <a href="https://arxiv.org/abs/1805.02867">Online normalizer calculation for softmax</a>（2018）。</li>
+        <li>Weile Luo et al., <a href="https://arxiv.org/abs/2402.13499">Benchmarking and Dissecting the Nvidia Hopper GPU Architecture</a>（2024），表 IV（各级内存延迟）。</li>
+        <li>NVIDIA, <a href="https://docs.nvidia.com/cuda/cuda-c-best-practices-guide/index.html">CUDA C++ Best Practices Guide</a>：Coalesced Access to Global Memory、Shared Memory and Memory Banks、Occupancy；<a href="https://docs.nvidia.com/cuda/cuda-programming-guide/05-appendices/compute-capabilities.html">CUDA Programming Guide：Compute Capabilities</a>。</li>
+        <li>Simon Boehm, <a href="https://siboehm.com/articles/22/CUDA-MMM">How to Optimize a CUDA Matmul Kernel for cuBLAS-like Performance</a>。</li>
+        <li><a href="https://triton-lang.org/main/getting-started/tutorials/03-matrix-multiplication.html">Triton 教程：Matrix Multiplication</a>（分块与 L2 分组启动顺序）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, parent, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+  const pressSeg = (seg, btn) => seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+
+  /* ---------- static figure decorations ---------- */
+  (() => {
+    const g = $('sm-grid');
+    let n = 0;
+    for (let r = 0; r < 9 && n < 131; r++) for (let c = 0; c < 15 && n < 131; c++, n++)
+      el('rect', { x: 465 + c * 18, y: 162 + r * 14, width: 14, height: 11, rx: 2, class: 'box-soft' }, g);
+
+    const gb = $('grid-blocks');
+    for (let r = 0; r < 5; r++) for (let c = 0; c < 6; c++) {
+      const hot = r === 2 && c === 5;
+      el('rect', { x: 10 + c * 40, y: 30 + r * 40, width: 34, height: 34, rx: 4, class: hot ? 'box-acc' : 'box-soft' }, gb);
+    }
+    const bw = $('block-warps');
+    for (let i = 0; i < 8; i++) {
+      const x = 420 + (i % 4) * 82, y = 60 + Math.floor(i / 4) * 44;
+      el('rect', { x, y, width: 76, height: 36, rx: 4, class: i === 4 ? 'box-acc' : 'box-soft' }, bw);
+      el('text', { x: x + 38, y: y + 23, 'text-anchor': 'middle', 'font-size': 12 }, bw, 'warp ' + i);
+    }
+    const wt = $('warp-threads');
+    for (let i = 0; i < 32; i++)
+      el('rect', { x: 418 + i * 10.2, y: 202, width: 8, height: 24, rx: 1.5, class: 'box-acc' }, wt);
+
+    const fg = $('fa-grid');
+    const n6 = 6, sz = 38, x0 = 80, y0 = 42;
+    for (let i = 0; i < n6; i++) for (let j = 0; j < n6; j++) {
+      const done = i < 2 || (i === 2 && j < 3);
+      const cur = i === 2 && j === 3;
+      el('rect', { x: x0 + j * (sz + 2), y: y0 + i * (sz + 2), width: sz, height: sz, rx: 3,
+        class: cur ? 'box-hot' : done ? 'box-acc' : 'box-soft' }, fg);
+    }
+    el('text', { x: x0 - 8, y: y0 + 2 * (sz + 2) + 24, 'text-anchor': 'end', 'font-size': 12, class: 'soft' }, fg, 'i');
+    el('text', { x: x0 + 3 * (sz + 2) + 19, y: y0 - 4, 'text-anchor': 'middle', 'font-size': 12, class: 'soft' }, fg, 'j');
+
+    const pp = $('pp');
+    const seq1 = ['G', 'S', 'G', 'S', 'G', 'S', 'G'];
+    const seq2 = [null, 'G', 'S', 'G', 'S', 'G', 'S'];
+    const w = 90, x00 = 70;
+    [[seq1, 40], [seq2, 90]].forEach(([seq, y]) => seq.forEach((k, idx) => {
+      if (!k) return;
+      const x = x00 + idx * w;
+      el('rect', { x, y, width: w - 4, height: 26, rx: 4, class: k === 'G' ? 'box-acc' : 'box-hot' }, pp);
+      el('text', { x: x + (w - 4) / 2, y: y + 18, 'text-anchor': 'middle', 'font-size': 11 }, pp, k === 'G' ? 'GEMM' : 'softmax');
+    }));
+  })();
+
+  /* ---------- occupancy ---------- */
+  (() => {
+    const t = $('occ-t'), r = $('occ-r'), s = $('occ-s');
+    function upd() {
+      const T = +t.value, R = +r.value, S = +s.value;
+      $('occ-t-v').textContent = T; $('occ-r-v').textContent = R; $('occ-s-v').textContent = S;
+      const b1 = Math.min(Math.floor(2048 / T), 32);
+      const b2 = Math.floor(65536 / (R * T));
+      const b3 = S === 0 ? Infinity : Math.floor(228 / S);
+      const b = Math.min(b1, b2, b3);
+      const wpb = Math.ceil(T / 32);
+      const warps = Math.min(b * wpb, 64);
+      $('occ-b1').textContent = b1;
+      $('occ-b2').textContent = b2;
+      $('occ-b3').textContent = S === 0 ? '不限' : b3;
+      $('occ-w').textContent = warps + ' / 64';
+      $('occ-p').textContent = (warps / 64 * 100).toFixed(1) + '%';
+      let lim = [];
+      if (b === b1) lim.push(b1 === 32 && Math.floor(2048 / T) > 32 ? '每 SM 32 个 block 的上限' : '每 SM 2048 个线程的上限');
+      if (b === b2) lim.push('寄存器（每 SM 64K 个）');
+      if (b === b3) lim.push('共享内存（每 SM 228 KB）');
+      const note = b === 0
+        ? '一个 block 都放不下：' + (b2 === 0 ? '这个 block 需要 ' + (R * T) + ' 个寄存器，超过 65536。' : '共享内存超过上限。')
+        : '每 SM 可驻留 ' + b + ' 个 block（每个 ' + wpb + ' 个 warp）。限制因素：' + lim.join('、') + '。';
+      $('occ-note').textContent = note;
+    }
+    [t, r, s].forEach((x) => x.addEventListener('input', upd));
+    upd();
+  })();
+
+  /* ---------- coalescing ---------- */
+  (() => {
+    const svg = $('coal-svg');
+    const stride = $('coal-stride'), off = $('coal-off');
+    const presetSeg = $('coal-preset'), sizeSeg = $('coal-size');
+    let size = 4;
+    const presets = { row: [1, 0], mis: [1, 1], col: [64, 0], bc: [0, 0], s2: [2, 0] };
+    presetSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      const [st, of] = presets[b.dataset.p];
+      stride.value = st; off.value = of;
+      pressSeg(presetSeg, b); draw();
+    });
+    sizeSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      size = +b.dataset.s; pressSeg(sizeSeg, b); draw();
+    });
+    [stride, off].forEach((x) => x.addEventListener('input', () => { pressSeg(presetSeg, null); draw(); }));
+
+    function draw() {
+      const st = +stride.value, of = +off.value;
+      $('coal-stride-v').textContent = st; $('coal-off-v').textContent = of;
+      const addr = [];
+      for (let t = 0; t < 32; t++) addr.push((of + t * st) * size);
+      const sectors = new Set(addr.map((a) => Math.floor(a / 32)));
+      const distinct = new Set(addr).size * size;
+      const moved = sectors.size * 32;
+      $('coal-req').textContent = (32 * size) + ' B';
+      $('coal-sec').textContent = sectors.size;
+      $('coal-mov').textContent = moved + ' B';
+      $('coal-eff').textContent = (distinct / moved * 100).toFixed(1) + '%';
+      const ideal = Math.ceil(32 * size / 32);
+      let note;
+      if (st === 0) note = '32 个线程读同一个地址：1 个事务就服务了整个 warp（广播）。';
+      else if (sectors.size === ideal) note = '完全合并：' + (32 * size) + ' 字节恰好落在 ' + ideal + ' 个对齐的 32 字节扇区里，搬运的每个字节都被用到。';
+      else if (st * size >= 32) note = '相邻线程相隔 ' + (st * size) + ' 字节 ≥ 32 字节，每个线程独占一个扇区：32 个事务，只用到其中 ' + size + '/32 的字节。';
+      else note = '需要 ' + sectors.size + ' 个扇区，理想情况是 ' + ideal + ' 个：有 ' + (moved - distinct) + ' 字节被白白搬运。';
+      $('coal-note').textContent = note;
+
+      // layout
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      const rows = [...new Set(addr.map((a) => Math.floor(a / 128)))].sort((a, b) => a - b);
+      let shown = rows;
+      let hiddenMid = 0;
+      if (rows.length > 10) { shown = rows.slice(0, 6).concat([null], rows.slice(-3)); hiddenMid = rows.length - 9; }
+      const W = 1000, tw = W / 32;
+      for (let t = 0; t < 32; t++) {
+        el('rect', { x: t * tw + 2, y: 6, width: tw - 4, height: 24, rx: 3, class: 'th' }, svg);
+        el('text', { x: t * tw + tw / 2, y: 23, 'text-anchor': 'middle', 'font-size': 14 }, svg, t);
+      }
+      el('text', { x: 0, y: 52, 'font-size': 16, class: 'soft' }, svg, '↑ warp 内的线程 0–31　↓ 被访问的 128 B 内存行（每行 4 个 32 B 扇区）');
+      let y = 92;
+      const rowY = new Map();
+      let prev = null;
+      const nW = 32 / size, secW = 219, wW = secW / nW;
+      shown.forEach((row) => {
+        if (row === null) {
+          el('text', { x: 550, y: y + 12, 'text-anchor': 'middle', 'font-size': 16, class: 'soft' }, svg, '⋯ 中间还有 ' + hiddenMid + ' 行，模式相同 ⋯');
+          y += 26; prev = null; return;
+        }
+        if (prev !== null && row - prev > 1) {
+          el('text', { x: 550, y: y + 9, 'text-anchor': 'middle', 'font-size': 14, class: 'faint' }, svg, '⋯ 跳过 ' + (row - prev - 1) + ' 行（' + ((row - prev - 1) * 128) + ' B）⋯');
+          y += 18;
+        }
+        rowY.set(row, y);
+        el('text', { x: 94, y: y + 15, 'text-anchor': 'end', 'font-size': 15, class: 'mono soft' }, svg, '+' + (row * 128));
+        for (let k = 0; k < 4; k++) {
+          const sec = row * 4 + k;
+          const x = 100 + k * 225;
+          el('rect', { x, y, width: secW, height: 20, rx: 2, class: 'sec' + (sectors.has(sec) ? ' hit' : '') }, svg);
+          for (let w = 0; w < nW; w++) {
+            const byte = sec * 32 + w * size;
+            const req = addr.includes(byte);
+            el('rect', { x: x + w * wW + 1, y: y + 3, width: wW - 2, height: 14, class: 'w' + (req ? ' req' : '') }, svg);
+          }
+        }
+        prev = row; y += 26;
+      });
+      // links
+      for (let t = 0; t < 32; t++) {
+        const a = addr[t], row = Math.floor(a / 128);
+        if (!rowY.has(row)) continue;
+        const yy = rowY.get(row);
+        const sec = Math.floor((a % 128) / 32), w = (a % 32) / size;
+        const x = 100 + sec * 225 + (w + 0.5) * wW;
+        const x1 = t * tw + tw / 2;
+        el('path', { d: 'M' + x1 + ' 30 C ' + x1 + ' 60, ' + x + ' ' + (yy - 30) + ', ' + x + ' ' + (yy + 3), class: 'lk' }, svg);
+      }
+      svg.setAttribute('viewBox', '0 0 1000 ' + (y + 6));
+    }
+    draw();
+  })();
+
+  /* ---------- tile animator ---------- */
+  (() => {
+    const view = $('ta-view'), log = $('ta-log'), opt = $('ta-opt');
+    const modeSeg = $('ta-mode');
+    let mode = 'mm', step = -1, timer = null;
+    // seeded rng
+    let seed = 7;
+    const rnd = () => { seed = (seed * 1103515245 + 12345) % 2147483648; return seed / 2147483648; };
+    const gauss = () => { let u = 0; for (let i = 0; i < 6; i++) u += rnd(); return (u - 3) * 1.4; };
+    // matmul data
+    const MM = 8;
+    const A = [], B = [];
+    for (let i = 0; i < MM; i++) { A.push([]); B.push([]); for (let j = 0; j < MM; j++) { A[i].push(Math.floor(rnd() * 4)); B[i].push(Math.floor(rnd() * 4)); } }
+    let T = 4;
+    // flash data
+    const N = 16, D = 4, BS = 4;
+    const Q = [], K = [], V = [];
+    for (let i = 0; i < N; i++) { Q.push([]); K.push([]); V.push([]); for (let k = 0; k < D; k++) { Q[i].push(gauss()); K[i].push(gauss()); V[i].push(gauss()); } }
+    let causal = false;
+    const scale = 1 / Math.sqrt(D);
+    const score = (i, j) => { let s = 0; for (let k = 0; k < D; k++) s += Q[i][k] * K[j][k]; return s * scale; };
+    function exactO(i) {
+      let m = -Infinity; const lim = causal ? i : N - 1;
+      for (let j = 0; j <= lim; j++) m = Math.max(m, score(i, j));
+      let l = 0; const o = new Array(D).fill(0);
+      for (let j = 0; j <= lim; j++) { const p = Math.exp(score(i, j) - m); l += p; for (let k = 0; k < D; k++) o[k] += p * V[j][k]; }
+      return o.map((x) => x / l);
+    }
+
+    function stepsMM() { const s = []; const n = MM / T; for (let bi = 0; bi < n; bi++) for (let bj = 0; bj < n; bj++) for (let kk = 0; kk < n; kk++) s.push({ bi, bj, kk }); return s; }
+    function stepsFA() { const s = []; const n = N / BS; for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) { if (causal && j > i) continue; s.push({ i, j }); } return s; }
+    const steps = () => (mode === 'mm' ? stepsMM() : stepsFA());
+
+    function mat(rows, cols, cellFn, big) {
+      const m = document.createElement('div');
+      m.className = 'mat' + (big ? ' big' : '');
+      m.style.gridTemplateColumns = 'repeat(' + cols + ', auto)';
+      for (let i = 0; i < rows; i++) for (let j = 0; j < cols; j++) {
+        const c = document.createElement('div');
+        cellFn(c, i, j);
+        m.appendChild(c);
+      }
+      return m;
+    }
+    function box(title, node) {
+      const d = document.createElement('div');
+      const cap = document.createElement('div'); cap.className = 'mat-cap'; cap.innerHTML = title;
+      d.appendChild(cap); d.appendChild(node); return d;
+    }
+
+    function renderMM() {
+      const st = stepsMM();
+      const cur = step >= 0 ? st[step] : null;
+      const nT = MM / T;
+      // partial C
+      const C = Array.from({ length: MM }, () => new Array(MM).fill(null));
+      for (let s = 0; s <= step; s++) {
+        const { bi, bj, kk } = st[s];
+        for (let i = bi * T; i < bi * T + T; i++) for (let j = bj * T; j < bj * T + T; j++) {
+          if (C[i][j] === null) C[i][j] = 0;
+          for (let k = kk * T; k < kk * T + T; k++) C[i][j] += A[i][k] * B[k][j];
+        }
+      }
+      const inA = (i, k) => cur && Math.floor(i / T) === cur.bi && Math.floor(k / T) === cur.kk;
+      const inB = (k, j) => cur && Math.floor(k / T) === cur.kk && Math.floor(j / T) === cur.bj;
+      const tileDone = (bi, bj) => { if (!cur) return false; const idx = (bi * nT + bj) * nT + nT - 1; return idx <= step; };
+      view.innerHTML = '';
+      view.appendChild(box('A（8×8）：<span style="color:var(--accent)">框内 = 当前在 SMEM 的片</span>', mat(MM, MM, (c, i, k) => { c.textContent = A[i][k]; if (inA(i, k)) c.className = 'sram'; }, true)));
+      view.appendChild(box('B（8×8）', mat(MM, MM, (c, k, j) => { c.textContent = B[k][j]; if (inB(k, j)) c.className = 'sram'; }, true)));
+      view.appendChild(box('C（8×8）：部分和，橙框 = 当前累加的块', mat(MM, MM, (c, i, j) => {
+        const bi = Math.floor(i / T), bj = Math.floor(j / T);
+        c.textContent = C[i][j] === null ? '' : C[i][j];
+        if (cur && bi === cur.bi && bj === cur.bj) c.className = 'cur';
+        else if (tileDone(bi, bj)) c.className = 'done';
+      }, true)));
+      const loadsTiled = (step + 1) * 2 * T * T;
+      const loadsNaive = (step + 1) * 2 * T * T * T;
+      const stats = document.createElement('div');
+      stats.innerHTML = '<table class="ta-stats"><tbody>' +
+        '<tr><th style="text-align:left">进度</th><td>' + (step + 1) + ' / ' + st.length + ' 步</td></tr>' +
+        '<tr><th style="text-align:left">分块：HBM 读取元素</th><td>' + loadsTiled + '</td></tr>' +
+        '<tr><th style="text-align:left">无复用：HBM 读取元素</th><td>' + loadsNaive + '</td></tr>' +
+        '<tr><th style="text-align:left">比值</th><td>' + (step >= 0 ? (loadsNaive / loadsTiled).toFixed(0) + '× = T' : '–') + '</td></tr>' +
+        '<tr><th style="text-align:left">全部完成时</th><td>' + (2 * MM * MM * MM / T) + ' vs ' + (2 * MM * MM * MM) + '</td></tr>' +
+        '</tbody></table>';
+      view.appendChild(box('计数（每步搬 2T² 个元素，供 T²×T 次乘加）', stats));
+      if (!cur) log.innerHTML = '每一步把 A 的一个 T×T 片和 B 的一个 T×T 片从 HBM 搬进共享内存，C 的一个块在寄存器里累加。点「下一步」开始。';
+      else log.innerHTML = '第 <b>' + (step + 1) + '</b> 步：载入 A[' + (cur.bi * T) + ':' + (cur.bi * T + T) + ', ' + (cur.kk * T) + ':' + (cur.kk * T + T) + '] 和 B[' + (cur.kk * T) + ':' + (cur.kk * T + T) + ', ' + (cur.bj * T) + ':' + (cur.bj * T + T) + ']，C 块 (' + cur.bi + ', ' + cur.bj + ') 累加第 ' + (cur.kk + 1) + ' / ' + nT + ' 片。' +
+        (cur.kk === nT - 1 ? ' 这个 C 块完成，写回 HBM。' : '') +
+        ' 无复用的写法里，这一步涉及的 ' + (T * T) + ' 个输出各自要读 ' + (2 * T) + ' 个元素，共 ' + (2 * T * T * T) + ' 次；分块只读 ' + (2 * T * T) + ' 次。';
+    }
+
+    function faState() {
+      // replay steps up to `step`
+      const st = stepsFA();
+      const m = new Array(N).fill(-Infinity), l = new Array(N).fill(0);
+      const o = Array.from({ length: N }, () => new Array(D).fill(0));
+      const visited = new Set();
+      let last = null;
+      for (let s = 0; s <= step; s++) {
+        const { i, j } = st[s];
+        visited.add(i + ',' + j);
+        const info = [];
+        for (let r = i * BS; r < i * BS + BS; r++) {
+          const sc = [];
+          for (let c = j * BS; c < j * BS + BS; c++) sc.push(causal && c > r ? -Infinity : score(r, c));
+          const mt = Math.max(...sc);
+          const mnew = Math.max(m[r], mt);
+          const corr = m[r] === -Infinity ? 0 : Math.exp(m[r] - mnew);
+          let rs = 0; const pv = new Array(D).fill(0);
+          sc.forEach((x, idx) => { const p = x === -Infinity ? 0 : Math.exp(x - mnew); rs += p; for (let k = 0; k < D; k++) pv[k] += p * V[j * BS + idx][k]; });
+          info.push({ r, mold: m[r], mnew, corr });
+          l[r] = corr * l[r] + rs; for (let k = 0; k < D; k++) o[r][k] = corr * o[r][k] + pv[k];
+          m[r] = mnew;
+        }
+        last = { i, j, info };
+      }
+      return { m, l, o, visited, last, st };
+    }
+
+    const fmt = (x) => (x === -Infinity ? '−∞' : (Math.abs(x) < 1e-12 ? '0' : x.toFixed(3)));
+
+    function renderFA() {
+      const { m, l, o, visited, last, st } = faState();
+      const cur = last;
+      const nB = N / BS;
+      const rowIn = (r) => cur && Math.floor(r / BS) === cur.i;
+      const colIn = (c) => cur && Math.floor(c / BS) === cur.j;
+      const heat = (x) => 'color-mix(in srgb, var(--accent) ' + Math.round(100 / (1 + Math.exp(-x * 1.2))) + '%, var(--surface))';
+      view.innerHTML = '';
+      const qkv = document.createElement('div');
+      qkv.style.display = 'flex'; qkv.style.gap = '10px';
+      [['Q', Q, rowIn], ['K', K, colIn], ['V', V, colIn]].forEach(([name, Mx, inF]) => {
+        qkv.appendChild(box(name + '（16×4）', mat(N, D, (c, r, k) => { c.style.background = heat(Mx[r][k]); if (inF(r)) c.className = 'sram'; })));
+      });
+      view.appendChild(box('框内 = 当前在 SRAM 的块（B_r = B_c = 4）', qkv));
+      view.appendChild(box('S = QKᵀ/√d：只在片上按块出现', mat(N, N, (c, r, cc) => {
+        const bi = Math.floor(r / BS), bj = Math.floor(cc / BS);
+        const key = bi + ',' + bj;
+        if (causal && bj > bi) { c.className = 'skip'; return; }
+        if (visited.has(key)) {
+          if (causal && cc > r) { c.className = 'skip'; return; }
+          c.style.background = heat(score(r, cc));
+          if (cur && bi === cur.i && bj === cur.j) c.className = 'cur';
+        }
+      })));
+      // stats for current Q block
+      const bi = cur ? cur.i : 0;
+      const finished = cur && st.filter((s) => s.i === bi).slice(-1)[0].j === cur.j;
+      let rowsHtml = '';
+      for (let r = bi * BS; r < bi * BS + BS; r++) {
+        const inf = cur ? cur.info.find((x) => x.r === r) : null;
+        const est = l[r] > 0 ? o[r][0] / l[r] : null;
+        const ex = exactO(r)[0];
+        rowsHtml += '<tr><td>' + r + '</td><td>' + (inf ? fmt(inf.mold) + '→' + fmt(inf.mnew) : '−∞') + '</td><td>' + (inf ? fmt(inf.corr) : '–') + '</td><td>' + (l[r] ? l[r].toFixed(3) : '0') + '</td><td>' + (est === null ? '–' : est.toFixed(4)) + '</td><td>' + ex.toFixed(4) + '</td></tr>';
+      }
+      const stats = document.createElement('div');
+      stats.className = 'stat-scroll';
+      stats.innerHTML = '<table class="ta-stats"><thead><tr><th>行</th><th>m 旧→新</th><th>修正因子</th><th>ℓ</th><th>õ₀/ℓ</th><th>精确 o₀</th></tr></thead><tbody>' + rowsHtml + '</tbody></table>';
+      view.appendChild(box('Q 块 ' + bi + ' 各行的在线统计量（只显示输出第 0 维）', stats));
+      let msg;
+      if (!cur) msg = '外层循环遍历 Q 块 i，内层遍历 K/V 块 j。每一步只在片上算一个 4×4 的 S 块，用新的行最大值修正旧的 ℓ 和 õ。点「下一步」开始。';
+      else {
+        const r0 = cur.info[0];
+        msg = '第 <b>' + (step + 1) + '</b> / ' + st.length + ' 步：Q 块 ' + cur.i + ' × K/V 块 ' + cur.j + '。以第 ' + r0.r + ' 行为例：新最大值 ' + fmt(r0.mnew) + '，旧的 ℓ 和 õ 乘以修正因子 ' + fmt(r0.corr) + ' 再加上本块的贡献。';
+        if (causal && cur.i === cur.j) msg += ' 这是对角块，块内按元素做因果掩码。';
+        if (finished) msg += ' <b>Q 块 ' + cur.i + ' 完成</b>：除以 ℓ 得到输出，写回 HBM，同时存 L = m + log ℓ 给反向用。';
+        if (step === st.length - 1) {
+          let err = 0;
+          for (let r = 0; r < N; r++) { const ex = exactO(r); for (let k = 0; k < D; k++) err = Math.max(err, Math.abs(o[r][k] / l[r] - ex[k])); }
+          msg += ' 全部完成：max |O<sub>flash</sub> − O<sub>exact</sub>| = ' + err.toExponential(1) + '（浮点舍入误差量级，算法本身是精确的）。';
+        }
+      }
+      log.innerHTML = msg;
+    }
+
+    function render() { (mode === 'mm' ? renderMM : renderFA)(); }
+    function renderOpt() {
+      opt.innerHTML = '';
+      if (mode === 'mm') {
+        [2, 4].forEach((t) => {
+          const b = document.createElement('button'); b.type = 'button'; b.textContent = 'T = ' + t; b.setAttribute('aria-pressed', t === T ? 'true' : 'false');
+          b.addEventListener('click', () => { T = t; step = -1; stop(); renderOpt(); render(); });
+          opt.appendChild(b);
+        });
+      } else {
+        const b = document.createElement('button'); b.type = 'button'; b.textContent = '因果掩码'; b.setAttribute('aria-pressed', causal ? 'true' : 'false');
+        b.addEventListener('click', () => { causal = !causal; step = -1; stop(); renderOpt(); render(); });
+        opt.appendChild(b);
+      }
+    }
+    function stop() { if (timer) { clearInterval(timer); timer = null; } $('ta-play').textContent = '播放'; }
+    function next() { if (step < steps().length - 1) { step++; render(); } else stop(); }
+    $('ta-next').addEventListener('click', () => { stop(); next(); });
+    $('ta-prev').addEventListener('click', () => { stop(); if (step > -1) { step--; render(); } });
+    $('ta-reset').addEventListener('click', () => { stop(); step = -1; render(); });
+    $('ta-play').addEventListener('click', () => {
+      if (timer) { stop(); return; }
+      if (step >= steps().length - 1) step = -1;
+      $('ta-play').textContent = '暂停';
+      next();
+      timer = setInterval(next, reduceMotion ? 1600 : 900);
+    });
+    modeSeg.addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      mode = b.dataset.m; pressSeg(modeSeg, b); stop(); step = -1; renderOpt(); render();
+    });
+    renderOpt(); render();
+  })();
+
+  /* ---------- HBM traffic calculator ---------- */
+  (() => {
+    const nS = $('hbm-n'), dS = $('hbm-d'), hS = $('hbm-h'), brS = $('hbm-br');
+    const bSeg = $('hbm-b'), cSeg = $('hbm-c');
+    let bytes = 2, causal = false;
+    const DS = [64, 128, 256];
+    bSeg.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; bytes = +b.dataset.b; pressSeg(bSeg, b); upd(); });
+    cSeg.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; causal = b.dataset.c === '1'; pressSeg(cSeg, b); upd(); });
+    [nS, dS, hS, brS].forEach((x) => x.addEventListener('input', upd));
+    const fB = (x) => x >= 1e12 ? (x / 1e12).toFixed(2) + ' TB' : x >= 1e9 ? (x / 1e9).toFixed(2) + ' GB' : x >= 1e6 ? (x / 1e6).toFixed(1) + ' MB' : (x / 1e3).toFixed(1) + ' KB';
+    const fT = (s) => s >= 1 ? s.toFixed(2) + ' s' : s >= 1e-3 ? (s * 1e3).toFixed(2) + ' ms' : (s * 1e6).toFixed(1) + ' µs';
+    const fF = (x) => x >= 1e15 ? (x / 1e15).toFixed(2) + ' PFLOP' : x >= 1e12 ? (x / 1e12).toFixed(2) + ' TFLOP' : (x / 1e9).toFixed(1) + ' GFLOP';
+    function upd() {
+      const N = 2 ** +nS.value, d = DS[+dS.value], H = +hS.value;
+      let Br = Math.min(2 ** +brS.value, N);
+      $('hbm-n-v').textContent = N; $('hbm-d-v').textContent = d; $('hbm-h-v').textContent = H; $('hbm-br-v').textContent = Br;
+      const b = bytes;
+      const flops = 4 * N * N * d * H * (causal ? 0.5 : 1);
+      const stdEl = (4 * N * N + 4 * N * d) * H;
+      const stdB = stdEl * b;
+      const pB = N * N * H * b;
+      const Tr = Math.ceil(N / Br);
+      const kvReads = causal ? N * d * (Tr + 1) : 2 * N * d * Tr;
+      const flUpper = ((2 * N * d + kvReads) * b + N * 4) * H;
+      const flLower = (4 * N * d * b + N * 4) * H;
+      const lB = N * 4 * H;
+      const peak = b === 2 ? 989e12 : 1979e12, bw = 3.35e12;
+      const tc = flops / peak, ts = stdB / bw, tf = flUpper / bw, tfl = flLower / bw;
+      $('hbm-flops').textContent = fF(flops);
+      $('hbm-std').textContent = fB(stdB);
+      $('hbm-p').textContent = fB(pB);
+      $('hbm-fu').textContent = fB(flUpper);
+      $('hbm-fl').textContent = fB(flLower);
+      $('hbm-l').textContent = fB(lB);
+      $('hbm-tc').textContent = fT(tc);
+      $('hbm-ts').textContent = fT(ts);
+      $('hbm-tf').textContent = fT(tf);
+      $('hbm-i').textContent = (2 * Br / b).toFixed(0) + ' FLOPs/B';
+      const crit = peak / bw;
+      let note = '标准注意力的搬运时间是计算时间的 ' + (ts / tc).toFixed(1) + ' 倍' + (ts > tc ? '，受带宽限制。' : '，受算力限制。');
+      note += ' Flash 若 K/V 每次都从 HBM 重新读，搬运时间是计算时间的 ' + (tf / tc).toFixed(2) + ' 倍；K/V 的重复读取全部命中 L2 时是 ' + (tfl / tc).toFixed(3) + ' 倍。';
+      note += ' 片上强度 2B_r/b = ' + (2 * Br / b).toFixed(0) + ' FLOPs/B，H100 对 HBM 的临界强度约 ' + crit.toFixed(0) + '：';
+      note += (2 * Br / b >= crit ? '即使 K/V 全部来自 HBM 也能受算力限制。' : '如果 K/V 全部来自 HBM 会受带宽限制，实际靠 L2 命中补上（一个头的 K+V 在这里是 ' + fB(2 * N * d * b) + '，L2 为 50 MB）。');
+      $('hbm-note').textContent = note;
+    }
+    upd();
+  })();
+})();
+
+  </script>
+</body>
+</html>

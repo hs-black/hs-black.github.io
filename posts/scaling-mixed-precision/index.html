@@ -1,0 +1,1177 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>混合精度与 FP8 训练 · Zunzhe Zhang</title>
+  <meta name="description" content="浮点格式、舍入、损失缩放、FP32 主权重，到 FP8 的缩放策略、DeepSeek-V3 的细粒度量化与 MX/NVFP4 微缩放。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig { margin: 1.6em 0; }
+    .prose p code, .prose li code { overflow-wrap: anywhere; }
+    .fig svg { display: block; width: 100%; height: auto; }
+    svg text { font-family: var(--font-sans); fill: var(--text); }
+    svg .soft { fill: var(--text-soft); }
+    svg .faint { fill: var(--text-faint); }
+    svg .mono { font-family: var(--font-mono); }
+    .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .box-acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .box-hot { fill: color-mix(in srgb, var(--accent-2) 16%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .box-soft { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1; }
+    .b-s { fill: var(--text-faint); }
+    .b-e { fill: var(--accent-2); }
+    .b-m { fill: var(--accent); }
+    .ln { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    .ln-acc { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .note { font-size: 14px; color: var(--text-soft); margin-top: 10px; line-height: 1.65; }
+    .demo h4 { margin: 14px 0 6px; font-size: 15px; color: var(--text-soft); font-weight: 600; }
+    .demo .row { display: flex; flex-wrap: wrap; gap: 10px 16px; align-items: center; margin: 8px 0; }
+    .demo input[type="text"] {
+      font: inherit; font-family: var(--font-mono); font-size: 15px; width: 12em; max-width: 100%;
+      padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); color: var(--text);
+    }
+    .fx-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    .fx-table th, .fx-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: middle; white-space: nowrap; }
+    .fx-table th { color: var(--text-soft); font-weight: 600; }
+    .fx-table td.num { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
+    .bits { font-family: var(--font-mono); font-size: 11.5px; }
+    .bits .s { color: var(--text-faint); }
+    .bits .e { color: var(--accent-2); font-weight: 600; }
+    .bits .m { color: var(--accent); }
+    .tag { display: inline-block; padding: 0 7px; border-radius: 999px; font-size: 12px; background: var(--bg-soft); color: var(--text-soft); }
+    .tag.bad { background: color-mix(in srgb, var(--accent-2) 18%, transparent); color: var(--accent-2); }
+    #fx-grid { width: 100%; height: auto; display: block; margin-top: 6px; }
+    #fx-grid .tk { stroke: var(--accent); stroke-width: 1; }
+    #fx-grid .band { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 0.8; }
+    #fx-grid .axis { stroke: var(--border); stroke-width: 1; }
+    #fx-grid .mk { stroke: var(--accent-2); stroke-width: 2.5; }
+    #q-canvas { width: 100%; height: auto; display: block; border: 1px solid var(--border); border-radius: 6px; image-rendering: pixelated; }
+    .legend-bar { height: 10px; border-radius: 4px; margin-top: 4px; }
+    .legend-row { display: flex; justify-content: space-between; font-size: 12px; color: var(--text-faint); }
+    #ra-svg { width: 100%; height: auto; display: block; margin-top: 8px; }
+    #ra-svg .gl { stroke: var(--border); stroke-width: 1; }
+    .sw { display: inline-block; width: 12px; height: 3px; vertical-align: middle; margin-right: 4px; border-radius: 2px; }
+    td.best { color: var(--accent); font-weight: 600; }
+    @media (max-width: 600px) {
+      .fx-table thead { display: none; }
+      .fx-table, .fx-table tbody, .fx-table tr { display: block; width: 100%; }
+      .fx-table tr { padding: 6px 0; border-bottom: 1px solid var(--border); }
+      .fx-table td { display: flex; justify-content: space-between; gap: 12px; border: 0; padding: 2px 4px; white-space: normal; text-align: right; }
+      .fx-table td::before { content: attr(data-label); color: var(--text-faint); text-align: left; flex: none; }
+      .fx-table td:first-child { font-weight: 600; }
+      .fx-table td:first-child::before { content: none; }
+      .table-wrap .fx-table { min-width: 0; }
+      .fx-table td .bits { min-width: 0; word-break: break-all; text-align: right; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>混合精度与 FP8 训练</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>上一篇讲 GPU 内核时反复出现一个事实：在 H100 上，FP8 矩阵乘的吞吐是 BF16 的 2 倍，BF16 又是 FP32 非矩阵运算的十几倍。把数字表示得更短，可以同时省显存、省带宽、提算力。代价是范围和精度都变小了，训练可能不稳定甚至发散。这篇从浮点数的编码讲起，一路讲到今天大模型预训练实际用的 BF16 混合精度、FP8 训练（以 DeepSeek-V3 的方案为主）和 Blackwell 上的微缩放格式。</p>
+      <p>主要材料是 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a> 的「Mixed Precision Training」一节、Micikevicius 等人的混合精度训练论文和 FP8 格式论文、<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 技术报告</a>第 3.3 节，以及 OCP 微缩放格式和 NVIDIA 的 NVFP4 材料。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#why">为什么要降精度</a></li>
+          <li><a href="#encode">浮点数怎么编码</a></li>
+          <li><a href="#range">范围、精度与 ULP</a></li>
+          <li><a href="#round">舍入：就近偶数与随机舍入</a></li>
+          <li><a href="#amp">FP16 混合精度的三个技巧</a></li>
+          <li><a href="#fp32ops">哪些运算要留在 FP32</a></li>
+          <li><a href="#bf16">BF16：为什么不需要损失缩放</a></li>
+          <li><a href="#fp8">FP8：格式与缩放</a></li>
+          <li><a href="#outlier">离群值与缩放粒度</a></li>
+          <li><a href="#dsv3">DeepSeek-V3 的 FP8 框架</a></li>
+          <li><a href="#accum">累加精度</a></li>
+          <li><a href="#recipes">各种方案的显存账</a></li>
+          <li><a href="#mx">微缩放：MXFP8 与 NVFP4</a></li>
+          <li><a href="#summary">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="why">1. 为什么要降精度</h2>
+      <p>PyTorch 张量默认是 FP32，每个数 4 字节。降到 16 位或 8 位有三重好处：</p>
+      <ul>
+        <li><strong>算力</strong>：Tensor Core 的吞吐按位宽成倍提高。H100 上 BF16/FP16 矩阵乘约 990 TFLOPs/s，FP8 约 1979 TFLOPs/s；B200 还支持 FP4（Scaling Book 的规格表给的是 BF16 2.3e15、FP8 4.5e15、FP4 9.0e15）。</li>
+        <li><strong>带宽</strong>：带宽受限的算子（逐元素、归一化）时间和字节数成正比，位宽减半时间减半。通信也一样：梯度 all-reduce、MoE 的 all-to-all 都按字节计费。</li>
+        <li><strong>显存</strong>：激活、权重副本、优化器状态都可以更小。</li>
+      </ul>
+      <p>但「全部换成 FP16」行不通——Playbook 的说法是，这样做的结果通常是损失发散。混合精度的意思是：大部分计算（尤其是矩阵乘）用低精度做，少数对数值敏感的地方保留高精度。要知道哪些地方敏感、为什么，得先看浮点数是怎么表示的。</p>
+
+      <h2 id="encode">2. 浮点数怎么编码</h2>
+      <h3>2.1 三个字段</h3>
+      <p>浮点数就是二进制的科学计数法。一个数被拆成三部分：</p>
+      <ul>
+        <li><strong>符号位</strong> \(s\)：1 位，0 正 1 负。</li>
+        <li><strong>指数</strong> \(E\)：\(e\) 位无符号整数，存的是加了<strong>偏置</strong>（bias）的指数。偏置通常是 \(2^{e-1}-1\)，这样实际指数可正可负。</li>
+        <li><strong>尾数</strong> \(M\)：\(m\) 位，存小数点后的部分（IEEE 754 叫 trailing significand）。</li>
+      </ul>
+      <p>对普通（规格化，normal）数，值是</p>
+      $$x = (-1)^s\cdot 2^{E-\text{bias}}\cdot\Big(1+\frac{M}{2^m}\Big),\qquad 1\le E\le E_{\max}.$$
+      <p>开头的 1 是隐含的，不占存储——规格化的二进制数小数点前总是 1。指数字段全 0 时是<strong>次正规数</strong>（subnormal），隐含位变成 0，指数固定为最小值：</p>
+      $$x = (-1)^s\cdot 2^{1-\text{bias}}\cdot\frac{M}{2^m},\qquad E=0.$$
+      <p>次正规数让数值能「逐渐下溢」到 0，而不是在最小规格化数以下突然变成 0。指数字段全 1 在 IEEE 格式里留给 \(\pm\infty\)（尾数为 0）和 NaN（尾数非 0）。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 300" role="img" aria-label="各浮点格式的位布局：符号、指数、尾数">
+          <g id="bit-layouts"></g>
+        </svg>
+        <figcaption>各格式的位布局（灰：符号；橙：指数；紫：尾数）。每格一位，按真实位数画。</figcaption>
+      </figure>
+
+      <h3>2.2 常用格式</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>格式</th><th class="num">位数</th><th class="num">指数/尾数</th><th class="num">偏置</th><th class="num">最大值</th><th class="num">最小规格化</th><th class="num">最小次正规</th><th class="num">ε（1 之后的间距）</th></tr></thead>
+          <tbody>
+            <tr><td>FP32</td><td class="num">32</td><td class="num">8 / 23</td><td class="num">127</td><td class="num">3.40e38</td><td class="num">1.18e−38</td><td class="num">1.40e−45</td><td class="num">2⁻²³ ≈ 1.19e−7</td></tr>
+            <tr><td>BF16</td><td class="num">16</td><td class="num">8 / 7</td><td class="num">127</td><td class="num">3.39e38</td><td class="num">1.18e−38</td><td class="num">9.18e−41</td><td class="num">2⁻⁷ ≈ 7.8e−3</td></tr>
+            <tr><td>FP16</td><td class="num">16</td><td class="num">5 / 10</td><td class="num">15</td><td class="num">65504</td><td class="num">6.10e−5</td><td class="num">5.96e−8</td><td class="num">2⁻¹⁰ ≈ 9.8e−4</td></tr>
+            <tr><td>FP8 E4M3</td><td class="num">8</td><td class="num">4 / 3</td><td class="num">7</td><td class="num">448</td><td class="num">2⁻⁶ ≈ 1.6e−2</td><td class="num">2⁻⁹ ≈ 2.0e−3</td><td class="num">2⁻³ = 0.125</td></tr>
+            <tr><td>FP8 E5M2</td><td class="num">8</td><td class="num">5 / 2</td><td class="num">15</td><td class="num">57344</td><td class="num">2⁻¹⁴ ≈ 6.1e−5</td><td class="num">2⁻¹⁶ ≈ 1.5e−5</td><td class="num">2⁻² = 0.25</td></tr>
+            <tr><td>FP4 E2M1</td><td class="num">4</td><td class="num">2 / 1</td><td class="num">1</td><td class="num">6</td><td class="num">1</td><td class="num">0.5</td><td class="num">0.5</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>BF16 的「B」来自 Google Brain。它就是 FP32 截掉低 16 位：指数一样 8 位，所以范围和 FP32 几乎相同；尾数只剩 7 位。FP16 则反过来，尾数多（10 位）、指数少（5 位），范围窄得多。</p>
+      <p>两种 FP8 格式（Micikevicius 等人 2022 年的 FP8 格式论文提出，后来成为 OCP 标准）的取舍也是范围和精度：</p>
+      <ul>
+        <li><strong>E5M2</strong> 完全遵循 IEEE 惯例（有 \(\pm\infty\)，多种 NaN），可以看作尾数更少的 FP16，范围和 FP16 相同。</li>
+        <li><strong>E4M3</strong> 为了扩大范围<em>不表示无穷</em>，NaN 只保留一个位模式 S.1111.111。这样指数全 1 的那一档也能存普通数，多出 256、288、…、448 这 7 个值，最大值从 240 扩到 448，动态范围从 17 个二进制数量级（binade）扩到 18 个。</li>
+      </ul>
+      <p>FP8 论文推荐权重和激活用 E4M3、梯度用 E5M2（梯度的动态范围更大）。后面会看到，DeepSeek-V3 在细粒度缩放的帮助下所有张量都用了 E4M3。</p>
+
+      <h3>2.3 一个例子：0.1</h3>
+      <p>\(0.1 = 1.6\times2^{-4}\)。在各个格式里：</p>
+      <ul>
+        <li>BF16：指数字段 \(-4+127=123\)；尾数 \(0.6\times2^7=76.8\)，就近舍入成 77。值是 \((1+77/128)\times2^{-4}=0.10009765625\)，相对误差约 \(9.8\times10^{-4}\)。</li>
+        <li>FP16：指数字段 \(-4+15=11\)；尾数 \(0.6\times2^{10}=614.4\to614\)。值 \(0.0999755859375\)，相对误差约 \(2.4\times10^{-4}\)。</li>
+        <li>E4M3：指数字段 \(-4+7=3\)；尾数 \(0.6\times8=4.8\to5\)。值 \(0.1015625\)，相对误差 1.6%。</li>
+        <li>E5M2：尾数 \(0.6\times4=2.4\to2\)。值 \(0.09375\)，相对误差 6.25%。</li>
+      </ul>
+      <p>下面的工具可以输入任意数看它在各格式中的编码。</p>
+
+      <h3>2.4 TF32：只在 Tensor Core 里出现的格式</h3>
+      <p>还有一个常被忽略的格式。从 A100 开始，Tensor Core 支持 TF32：输入保留 FP32 的 8 位指数、只取 10 位尾数（和 FP16 一样），乘积在 FP32 中累加。它不是存储格式，张量在显存里仍然是 FP32，只是矩阵乘内部把尾数截短了。PyTorch 用 <code>torch.backends.cuda.matmul.allow_tf32</code>（或 <code>torch.set_float32_matmul_precision("high")</code>）控制 FP32 矩阵乘是否走 TF32。所以「我用的是 FP32 训练」在 A100/H100 上未必是真正的 23 位尾数。</p>
+
+      <h2 id="range">3. 范围、精度与 ULP</h2>
+      <p>浮点数的可表示值不是均匀分布的。在每个区间 \([2^k, 2^{k+1})\)（一个 binade）里，规格化数恰好有 \(2^m\) 个，等间距排列，间距是</p>
+      $$\mathrm{ulp}(x) = 2^{k-m},\qquad 2^k\le |x|\lt 2^{k+1}.$$
+      <p>ULP（unit in the last place）是「最后一位变 1 对应的数值」。所以<strong>绝对精度随数值变大而变粗，相对精度大致不变</strong>：就近舍入的相对误差不超过 \(2^{-(m+1)}\)。这就是为什么常说 FP32 有约 7 位十进制有效数字（\(2^{-24}\approx6\times10^{-8}\)），FP16 约 3 位，BF16 约 2 到 3 位，E4M3 约 1 位。</p>
+      <p>Playbook 用一个直观的实验展示了这一点：在 \([1,2]\) 之间撒 10000 个点，舍入到各格式，E4M3 只能表示其中 7 个不同的内部值（1.125, 1.25, …, 1.875），E5M2 只有 3 个。它也用 ε（1 之后的下一个可表示数与 1 的差）衡量分辨率：FP32 是 \(2^{-23}\approx1.19\times10^{-7}\)，FP16 约 \(10^{-3}\)，BF16 再大 8 倍。</p>
+      <p><strong>动态范围</strong>则由指数位数决定。用「最大值 / 最小次正规数」的以 2 为底的对数衡量：FP32 约 277 个 binade，BF16 约 261，FP16 约 40，E5M2 约 32，E4M3 约 18。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 250" role="img" aria-label="各格式可表示范围，横轴为以 2 为底的对数">
+          <g id="range-chart"></g>
+        </svg>
+        <figcaption>各格式正数的可表示范围，横轴是 \(\log_2|x|\)。深色是规格化范围，浅色是次正规范围。BF16 与 FP32 几乎重合，FP8 只覆盖很窄的一段。</figcaption>
+      </figure>
+
+      <div class="demo" id="fx">
+        <div class="demo-label">浮点格式浏览器</div>
+        <div class="row">
+          <label>输入一个数 <input type="text" id="fx-in" value="0.1" inputmode="decimal" spellcheck="false" aria-label="输入一个数"></label>
+          <span class="seg" id="fx-ex" role="group" aria-label="示例">
+            <button type="button" data-v="0.1">0.1</button>
+            <button type="button" data-v="3.14159265">π</button>
+            <button type="button" data-v="65519">65519</button>
+            <button type="button" data-v="1e-6">1e−6</button>
+            <button type="button" data-v="300">300</button>
+            <button type="button" data-v="1.0009765625">1+2⁻¹⁰</button>
+          </span>
+        </div>
+        <div class="row">
+          <span>舍入方式</span>
+          <span class="seg" id="fx-rm" role="group" aria-label="舍入方式">
+            <button type="button" data-r="rne" aria-pressed="true">就近偶数</button>
+            <button type="button" data-r="sr" aria-pressed="false">随机舍入（显示概率）</button>
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="fx-table" id="fx-table">
+            <thead><tr><th>格式</th><th>位模式（符号 指数 尾数）</th><th class="num">舍入后的值</th><th class="num">相对误差</th><th class="num">该处 ULP</th><th>状态</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <h4>可表示值网格：一个 binade [2<sup>k</sup>, 2<sup>k+1</sup>) 里各格式有哪些点</h4>
+        <div class="ctrls">
+          <label class="ctrl"><span>数量级 k</span><input type="range" id="fx-k" min="-26" max="17" step="1" value="-4"><output id="fx-k-v">−4</output></label>
+        </div>
+        <svg id="fx-grid" viewBox="0 0 1000 300" role="img" aria-label="一个 binade 内的可表示值"></svg>
+        <p class="note" id="fx-note"></p>
+        <p class="note">E4M3 越界时按 FP8 论文推荐的饱和转换钳到 ±448（非饱和模式会得到 NaN）；FP16、BF16、E5M2 越界变成 ±∞。所有数值都是按位精确计算的，FP32 用浏览器的 <code>Math.fround</code>。</p>
+      </div>
+
+      <h2 id="round">4. 舍入：就近偶数与随机舍入</h2>
+      <h3>4.1 就近偶数</h3>
+      <p>IEEE 默认的舍入方式是<strong>就近舍入、平局取偶</strong>（round to nearest, ties to even，RNE）：取离 \(x\) 最近的可表示数；如果恰好在两个数中间，取尾数最后一位是 0 的那个。平局取偶是为了让平局时向上和向下的次数大致相等，避免系统性偏差。</p>
+      <p>RNE 对单次运算是最优的，但有一个在训练里很要命的性质：<strong>如果 \(|\delta|\) 小于 \(x\) 处 ULP 的一半，\(x+\delta\) 舍入后还是 \(x\)</strong>。不管加多少次，都加不上去。一个最直观的例子：在 BF16 里从 0 开始一次加 1。到 256 时，BF16 在 \([256,512)\) 的间距是 \(2^{8-7}=2\)，\(256+1=257\) 恰好落在 256 和 258 的中间，平局取偶得到 256（尾数全 0 是偶数）。于是累加永远停在 256。FP16 同理停在 2048。这叫<strong>吞没</strong>（swamping）。</p>
+      <h3>4.2 随机舍入</h3>
+      <p>设 \(x\) 落在相邻可表示数 \(a\lt x\lt b\) 之间。<strong>随机舍入</strong>（stochastic rounding，SR）以与距离成反比的概率选择：</p>
+      $$\mathrm{SR}(x) = \begin{cases} b & \text{概率 } p=\dfrac{x-a}{b-a}\\[4pt] a & \text{概率 } 1-p\end{cases}$$
+      <p>它的关键性质是<strong>无偏</strong>：</p>
+      $$\mathbb E[\mathrm{SR}(x)] = a(1-p) + bp = a + (b-a)\cdot\frac{x-a}{b-a} = x.$$
+      <p>方差是 \((b-a)^2p(1-p)\le \mathrm{ulp}^2/4\)。于是即使每次更新都小于半个 ULP，平均下来也能正确累积：在上面「加 1」的例子里，SR 下每次有 1/2 的概率加 2，期望正好加 1。Gupta 等人 2015 年的论文发现，用 16 位定点数训练神经网络时舍入方式起决定性作用，配合随机舍入可以几乎无损地训练。NVFP4 预训练也对梯度使用随机舍入（第 13 节）。代价是要生成随机数，以及单次结果有噪声。</p>
+      <p>下面的演示对比两种情形：一个权重被反复加上很小的更新；一串乘积在不同精度的累加器里求和。</p>
+
+      <div class="demo" id="ra">
+        <div class="demo-label">舍入与累加</div>
+        <div class="seg" id="ra-mode" role="group" aria-label="模式">
+          <button type="button" data-m="upd" aria-pressed="true">权重反复加小更新</button>
+          <button type="button" data-m="dot" aria-pressed="false">点积累加</button>
+        </div>
+        <div id="ra-upd">
+          <div class="ctrls">
+            <label class="ctrl"><span>初始权重 w₀</span><input type="range" id="ra-w" min="-3" max="1" step="0.05" value="-1.7"><output id="ra-w-v">0.02</output></label>
+            <label class="ctrl"><span>每步更新 Δ</span><input type="range" id="ra-u" min="-7" max="-1" step="0.05" value="-4.5"><output id="ra-u-v">3.2e−5</output></label>
+            <label class="ctrl"><span>步数</span><input type="range" id="ra-n" min="100" max="5000" step="100" value="2000"><output id="ra-n-v">2000</output></label>
+          </div>
+        </div>
+        <div id="ra-dot" hidden>
+          <div class="ctrls">
+            <label class="ctrl"><span>内积长度 K</span><input type="range" id="ra-k" min="7" max="14" step="1" value="12"><output id="ra-k-v">4096</output></label>
+          </div>
+          <div class="row"><span>乘积分布</span>
+            <span class="seg" id="ra-sign" role="group" aria-label="乘积分布"><button type="button" data-s="pos" aria-pressed="true">全为正（|x|·|y|）</button><button type="button" data-s="mix" aria-pressed="false">有正有负（x·y）</button></span>
+          </div>
+        </div>
+        <svg id="ra-svg" viewBox="0 0 1000 300" role="img" aria-label="结果图"></svg>
+        <div class="table-wrap"><table class="fx-table" id="ra-table"><thead></thead><tbody></tbody></table></div>
+        <p class="note" id="ra-note"></p>
+      </div>
+
+      <h2 id="amp">5. FP16 混合精度的三个技巧</h2>
+      <p>2017 年 Micikevicius 等人的论文《Mixed Precision Training》提出了让 FP16 训练达到 FP32 精度的三个技巧，Playbook 也按这三条讲。它们的流程如下：</p>
+      <figure class="fig">
+        <svg viewBox="0 0 760 230" role="img" aria-label="混合精度训练的一步：FP32 主权重转 FP16，前向反向，梯度反缩放，FP32 更新">
+          <rect x="10" y="20" width="150" height="56" rx="8" class="box-hot"/>
+          <text x="85" y="44" text-anchor="middle">主权重</text><text x="85" y="64" text-anchor="middle" class="soft" font-size="12">FP32</text>
+          <path d="M160 48 L210 48" class="ln-acc" marker-end="url(#ar2)"/>
+          <text x="185" y="40" text-anchor="middle" font-size="11" class="soft">cast</text>
+          <rect x="212" y="20" width="150" height="56" rx="8" class="box-acc"/>
+          <text x="287" y="44" text-anchor="middle">权重副本</text><text x="287" y="64" text-anchor="middle" class="soft" font-size="12">FP16 / BF16</text>
+          <path d="M362 48 L412 48" class="ln-acc" marker-end="url(#ar2)"/>
+          <rect x="414" y="20" width="160" height="56" rx="8" class="box-acc"/>
+          <text x="494" y="44" text-anchor="middle">前向（低精度矩阵乘，</text><text x="494" y="64" text-anchor="middle" font-size="12" class="soft">FP32 累加）→ loss</text>
+          <path d="M574 48 L620 48" class="ln-acc" marker-end="url(#ar2)"/>
+          <rect x="622" y="20" width="128" height="56" rx="8" class="box"/>
+          <text x="686" y="44" text-anchor="middle">loss × S</text><text x="686" y="64" text-anchor="middle" class="soft" font-size="12">损失缩放</text>
+          <path d="M686 76 L686 130" class="ln-acc" marker-end="url(#ar2)"/>
+          <rect x="560" y="132" width="190" height="56" rx="8" class="box-acc"/>
+          <text x="655" y="156" text-anchor="middle">反向（低精度）</text><text x="655" y="176" text-anchor="middle" class="soft" font-size="12">得到 S·∇ 的梯度</text>
+          <path d="M560 160 L486 160" class="ln-acc" marker-end="url(#ar2)"/>
+          <rect x="300" y="132" width="184" height="56" rx="8" class="box"/>
+          <text x="392" y="156" text-anchor="middle">÷ S，查 inf/NaN</text><text x="392" y="176" text-anchor="middle" class="soft" font-size="12">再做裁剪等（FP32）</text>
+          <path d="M300 160 L226 160" class="ln-acc" marker-end="url(#ar2)"/>
+          <rect x="40" y="132" width="184" height="56" rx="8" class="box-hot"/>
+          <text x="132" y="156" text-anchor="middle">优化器更新</text><text x="132" y="176" text-anchor="middle" class="soft" font-size="12">FP32 主权重 + 状态</text>
+          <path d="M100 132 L100 76" class="ln-acc" marker-end="url(#ar2)"/>
+          <text x="392" y="215" text-anchor="middle" class="soft" font-size="12">有溢出：跳过这一步，S 减半；连续若干步无溢出：S 加倍</text>
+          <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker></defs>
+        </svg>
+        <figcaption>FP16 混合精度训练的一步（按 Micikevicius 等人图 1 的思路重画，加上动态损失缩放）。BF16 训练去掉「损失缩放」这一格即可。</figcaption>
+      </figure>
+
+      <h3>5.1 FP32 主权重</h3>
+      <p>权重在优化器里保存一份 FP32 的「主副本」（master weights），每步把它转成 FP16 用于前向和反向；优化器用梯度更新的是 FP32 主副本。原因有两个：</p>
+      <ul>
+        <li><strong>更新本身下溢</strong>：FP16 能表示的最小正数是 \(2^{-24}\approx6\times10^{-8}\)，更小的值变成 0。学习率乘梯度后常常落在这个范围以下。论文里的普通话语音模型有约 5% 的权重梯度指数小于 \(-24\)。</li>
+        <li><strong>更新被吞没</strong>：即使更新本身可表示，加到权重上时也可能被舍掉，就是上一节说的吞没。设 \(w\in[2^k,2^{k+1})\)，ULP 是 \(2^{k-m}\)，更新 \(|\Delta|\lt\frac12\mathrm{ulp}=2^{k-m-1}\) 时 \(w+\Delta\) 舍入回 \(w\)。所以当
+          $$\frac{|w|}{|\Delta|}\gtrsim 2^{m+1}$$
+          时更新会丢失。FP16（\(m=10\)）是 2048，和论文的说法一致；BF16（\(m=7\)）只有 256。</li>
+      </ul>
+      <p>第二点对 BF16 更加严重。举个数：一个量级 0.02 的权重，Adam 的更新幅度约等于学习率。学习率 \(3\times10^{-4}\) 时比值约 67，BF16 还能加上；退火到 \(3\times10^{-5}\) 时比值约 670，超过 256，在 BF16 里用 RNE 直接更新，这些更新全部丢失。所以 BF16 训练同样需要 FP32 主权重（或者在 BF16 权重上用随机舍入/Kahan 补偿求和等替代办法）。论文的实验里，不用 FP32 主副本直接更新 FP16 权重，语音模型的准确率相对损失了 80%。</p>
+      <p>FP32 主副本让权重显存多了 50%（相对 FP32 训练），但激活也变成了 FP16，总显存反而大约减半。在大模型里，主副本和优化器状态会被 ZeRO 切到各个数据并行 rank 上（见<a href="/posts/scaling-data-parallel/">数据并行与 ZeRO</a>）。</p>
+
+      <h3>5.2 损失缩放</h3>
+      <p>激活的梯度通常远小于 1。FP16 规格化数的指数范围是 \([-14,15]\)，而论文里 SSD 检测网络的激活梯度直方图显示，大部分 FP16 的可表示范围（尤其是靠上的部分）根本没被用到，很多值却落在最小可表示值以下变成了 0。</p>
+      <p>办法是把梯度整体「往上挪」。由链式法则，如果把损失乘以常数 \(S\)，反向传播得到的每个梯度都会乘以 \(S\)：</p>
+      $$\frac{\partial (S\cdot L)}{\partial \theta} = S\cdot\frac{\partial L}{\partial\theta}.$$
+      <p>这不需要在反向里加任何额外运算。更新前把权重梯度除以 \(S\) 还原。还原要在梯度裁剪、权重衰减等任何梯度处理<em>之前</em>做，这样这些超参数不用跟着改。</p>
+      <p>\(S\) 怎么选？论文里不同网络用过 8 到 32K 的常数（SSD 用 8 就够了，很多网络不需要缩放）。只要不溢出，\(S\) 越大越好；可以选使 \(S\cdot\max|g|\lt65504\) 的值。溢出会产生 inf/NaN，一旦进入权重就不可逆，所以要检测：<strong>动态损失缩放</strong>在反缩放梯度时检查 inf/NaN，发现就跳过这一步并把 \(S\) 减小；连续若干步没有溢出就把 \(S\) 增大。PyTorch 的 <code>GradScaler</code> 默认初始 \(S=2^{16}\)，溢出时乘 0.5，连续 2000 步无溢出时乘 2。</p>
+<pre><code>scaler = torch.amp.GradScaler("cuda")       # init_scale=2**16, backoff 0.5, growth 2.0 / 2000 步
+for x, y in loader:
+    with torch.autocast("cuda", dtype=torch.float16):
+        loss = loss_fn(model(x), y)
+    scaler.scale(loss).backward()            # 反向得到 S 倍的梯度
+    scaler.unscale_(opt)                     # 先除以 S，再裁剪
+    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+    scaler.step(opt)                         # 有 inf/NaN 就跳过这一步
+    scaler.update()                          # 调整 S
+    opt.zero_grad(set_to_none=True)</code></pre>
+
+      <h3>5.2.1 一个数值例子</h3>
+      <p>设某层的激活梯度典型量级是 \(10^{-6}\)、小的到 \(10^{-9}\)。FP16 最小次正规数是 \(5.96\times10^{-8}\)，所以 \(10^{-9}\) 量级的值直接变成 0；\(10^{-6}\) 也在次正规区（小于 \(6.1\times10^{-5}\)），只剩 \(10^{-6}/5.96\times10^{-8}\approx17\) 个刻度，相对误差高达几个百分点。取 \(S=2^{16}=65536\)：\(10^{-6}\) 变成 \(0.066\)，回到规格化区，相对精度恢复到 \(2^{-11}\)；\(10^{-9}\) 变成 \(6.6\times10^{-5}\)，刚好进入规格化区。只要最大的梯度乘以 \(S\) 后不超过 65504（原始值小于约 1），就没有溢出。这也说明了为什么动态缩放从很大的 \(2^{16}\) 开始：先尽量往上推，溢出了再退。</p>
+
+      <h3>5.3 累加精度</h3>
+      <p>第三个技巧是让低精度的乘积在高精度里累加。矩阵乘的每个输出是 \(K\) 个乘积的和，\(K\) 动辄几千，如果每次部分和都舍入到 FP16，吞没和舍入误差会一路积累。Volta 开始的 Tensor Core 支持 FP16 输入、FP32 累加，最后再把结果转回 FP16 写出。论文还指出，大的归约（求和）应该在 FP32 里做，逐元素运算则用 FP16 还是 FP32 都行——它们是带宽受限的，算术精度不影响速度。</p>
+
+      <h3>5.4 主权重的替代：补偿求和</h3>
+      <p>如果连 FP32 主权重的 4 字节都想省掉，可以用 Kahan 补偿求和：除了 BF16 权重 \(w\)，再存一个 BF16 的补偿量 \(c\)，记录上次加法被舍掉的部分：</p>
+      $$y = \Delta - c,\qquad t = \mathrm{bf16}(w + y),\qquad c = \mathrm{bf16}\big((t - w) - y\big),\qquad w = t.$$
+      <p>\((t-w)\) 是这次实际加上的量，减去本想加的 \(y\) 就是误差；下一步先把它补回来。这样被吞没的小更新不会丢，只是延迟到累积够大时才体现在 \(w\) 上。它和随机舍入一样，都是在「不存高精度副本」的前提下保住小更新，代价是额外的 2 字节状态和几次运算。哪种方案在大规模训练中更稳，各家的经验并不一致，我这里只讲原理。</p>
+
+      <h2 id="fp32ops">6. 哪些运算要留在 FP32</h2>
+      <p>把论文的原则展开，在 Transformer 里通常保留 FP32 的有：</p>
+      <ul>
+        <li><strong>softmax</strong>：\(e^x\) 增长极快，FP16 下 \(x\gt\ln65504\approx11.1\) 就溢出；先减最大值可以避免上溢，但分母是一长串正数的求和，正是吞没的典型场景。FlashAttention 内部的行最大值、行和、输出累加器都是 FP32。</li>
+        <li><strong>归一化</strong>（LayerNorm、RMSNorm）：要算 \(\frac1d\sum x_i^2\)。激活里有几百量级的值时，平方后在 FP16 里会溢出（\(300^2=9\times10^4\gt65504\)）；对 \(d\) 个元素求和又有吞没问题。</li>
+        <li><strong>损失</strong>：交叉熵要对整个词表算 logsumexp，词表十几万。</li>
+        <li><strong>各种大规模归约</strong>：求和、均值、范数（包括梯度裁剪用的全局范数）。</li>
+        <li><strong>优化器</strong>：主权重、Adam 的一阶二阶矩、更新计算本身。</li>
+      </ul>
+      <p>PyTorch 的 <code>autocast</code> 就是按这个思路列的表：在 CUDA 上，<code>matmul</code>、<code>linear</code>、<code>bmm</code>、卷积等会被转成 FP16/BF16；<code>softmax</code>、<code>log_softmax</code>、<code>layer_norm</code>、<code>group_norm</code>、<code>cross_entropy</code>、<code>sum</code>、<code>cumsum</code>、<code>exp</code>、<code>log</code>、<code>pow</code>、<code>norm</code> 等会被转成 FP32；没列出的算子按输入类型运行。注意「转成 FP32 计算」不一定意味着「FP32 存储」：融合内核常常读写 BF16、在寄存器里用 FP32 算，这样既不损失精度也不多花带宽。</p>
+
+      <h2 id="bf16">7. BF16：为什么不需要损失缩放</h2>
+      <p>损失缩放解决的是<em>范围</em>问题：FP16 的最小规格化数是 \(6.1\times10^{-5}\)，梯度掉到这以下就开始丢精度、再往下变成 0。BF16 的指数和 FP32 一样是 8 位，最小规格化数 \(1.18\times10^{-38}\)，实际训练中梯度几乎不可能小到这个程度，也几乎不可能大到 \(3.4\times10^{38}\)。所以 BF16 不需要损失缩放，也就没有跳步、没有 \(S\) 的调节——这正是它在 TPU 和 A100 之后成为大模型训练默认格式的原因。</p>
+      <p>BF16 付出的代价是<em>精度</em>：7 位尾数，相对误差可达 \(2^{-8}\approx0.4\%\)。这使得「FP32 主权重」和「FP32 累加」在 BF16 下比在 FP16 下更重要（更新的吞没阈值从 2048 降到 256）。Playbook 给出的 BF16 混合精度基线显存账是每个参数 20 字节：BF16 参数 2 + BF16 梯度 2 + FP32 主权重 4 + FP32 梯度累加 4 + Adam 两个 FP32 状态 4+4。</p>
+
+      <h3>7.1 梯度累加为什么要 FP32</h3>
+      <p>Playbook 的显存表里「FP32 梯度累加」单独占了 4 字节。原因还是吞没：用梯度累加（或者流水线并行的多个微批）时，一个参数的梯度是 \(n\) 个微批梯度之和。若在 BF16 里累加，部分和变大后每个新加进来的微批梯度只保留约 2 到 3 位有效数字，\(n\) 越大误差越大，而且「全为正」的那部分分量会系统性偏小——第 4 节演示里的 BF16 累加曲线就是这个现象。数据并行的 all-reduce 也是一个求和，所以很多框架用 FP32 做梯度的 reduce，或者至少在 reduce 内部用 FP32 累加。Playbook 表里第二行去掉了这份 FP32 累加缓冲，省下 4 字节，代价就是这里说的精度风险。</p>
+      <h3>7.2 怎么判断是精度出了问题</h3>
+      <p>实际训练里，损失发散的原因很多，精度只是其中之一。几个比较直接的检查：</p>
+      <ul>
+        <li>记录每层激活、梯度的 amax 和下溢（变成 0）的比例。FP16 下大量梯度为 0、或者 FP8 下大量值饱和，都是明确的信号。</li>
+        <li>做一次小规模的对照：同样的种子和数据，把可疑的部分（某一类 GEMM、某个算子、优化器状态）切回高精度，看损失曲线是否分开。DeepSeek-V3 对 Dgrad 块量化的结论就是用这种消融得到的。</li>
+        <li>看权重更新量与权重的比值（\(|\Delta w|/|w|\)）。如果它接近或低于 \(2^{-(m+1)}\)，而权重又以低精度存储、没有主副本或随机舍入，更新就会被吞没——表现往往不是发散，而是学习「悄悄变慢」。</li>
+      </ul>
+
+      <h2 id="fp8">8. FP8：格式与缩放</h2>
+      <h3>8.1 为什么 FP8 必须缩放</h3>
+      <p>E4M3 的正规范围只有 \([2^{-6}, 448]\)，加上次正规也只到 \(2^{-9}\)，约 18 个 binade；而且在每个 binade 里只有 8 个点。一个张量的数值如果分布在 \(10^{-3}\) 附近，直接转成 E4M3 大部分会落进次正规区、精度极差；分布在 \(10^3\) 附近又会溢出。所以 FP8 张量几乎总是带着一个<strong>缩放因子</strong>：</p>
+      $$S=\frac{\text{FP8}_{\max}}{\mathrm{amax}(x)},\qquad q=\mathrm{FP8}(x\cdot S),\qquad \hat x = q/S.$$
+      <p>\(\mathrm{amax}\) 是张量（或某个分组）的绝对值最大值。这样最大的元素恰好映射到格式的最大值附近，充分利用顶部的几个 binade。这和 FP16 的损失缩放是同一个思路，只是 FP8 的范围太窄，一个全局的 \(S\) 不够，需要每个张量（甚至每个分组）各一个。</p>
+      <p>矩阵乘时缩放因子可以提出去：若 \(X\) 和 \(W\) 各有一个标量缩放 \(S_X,S_W\)，则</p>
+      $$XW = \frac{1}{S_XS_W}\,(q_X\,q_W),$$
+      <p>FP8 Tensor Core 算 \(q_Xq_W\)（FP32 累加），最后乘一个标量就还原了。每个输出元素只多一次乘法。FP8 论文也特别指出：FP8 下溢出比 FP16 更容易发生，像 FP16 那样遇到溢出就跳步不合适（会跳太多步），溢出的值应该<strong>饱和</strong>到最大可表示值。</p>
+
+      <h3>8.2 延迟缩放与即时缩放</h3>
+      <p>计算 \(\mathrm{amax}(x)\) 要先完整扫一遍 \(x\)，这意味着「先写出高精度张量 → 读一遍求 amax → 再读一遍做转换」，对带宽受限的部分很不划算。两种策略：</p>
+      <ul>
+        <li><strong>延迟缩放</strong>（delayed scaling）：用过去若干步记录的 amax 来估计这一步的缩放因子，转换和 amax 统计可以融合在产生这个张量的内核里一次完成。NVIDIA Transformer Engine 的 <code>DelayedScaling</code> 默认保留 1024 步的 amax 历史，取其中最大值，缩放因子是 \((\text{FP8}_{\max}/\mathrm{amax})/2^{\text{margin}}\)（margin 默认 0）。缺点是缩放因子是「过时」的：如果这一步突然出现比历史更大的值，就会饱和。</li>
+        <li><strong>即时缩放</strong>（current scaling，DeepSeek-V3 称为 online quantization）：用当前张量（或当前分组）的 amax。更准确，代价是多一次归约。分组越小，这次归约越容易融合进内核（一个 1×128 的分组在一个线程块里就能求完）。</li>
+      </ul>
+      <p>Transformer Engine 的默认格式组合是 <code>HYBRID</code>：前向（权重、激活）用 E4M3，反向（梯度）用 E5M2。</p>
+
+      <h3>8.2.1 延迟缩放会在哪里出问题</h3>
+      <p>设某个激活在前 1000 步的 amax 一直在 20 左右，E4M3 下缩放因子 \(S=448/20=22.4\)。某一步出现一个 50 的值（比如一次 loss spike 的前兆）：\(50\times22.4=1120\gt448\)，被饱和成 448，反量化后是 20——这个最需要被准确表示的大值被截掉了 60%。下一步 amax 历史更新为 50，\(S\) 降到 8.96，但已经晚了一步。反过来，如果历史里曾经出现过一个很大的 amax，取窗口最大值的策略会让后面很多步的 \(S\) 偏小，普通值被压向次正规区，直到那个值滑出 1024 步的窗口。即时缩放没有这两个问题，这也是 DeepSeek-V3 选择它的原因之一（报告原话是「为了保证缩放因子准确并简化框架」）。</p>
+
+      <h3>8.3 一个线性层里的三个 FP8 矩阵乘</h3>
+      <p>线性层 \(Y=XW\)，\(X\in\mathbb R^{T\times d_{\text{in}}}\)，\(W\in\mathbb R^{d_{\text{in}}\times d_{\text{out}}}\)。训练时有三个矩阵乘：</p>
+      <ul>
+        <li><strong>Fprop</strong>：\(Y = XW\)，归约维度是 \(d_{\text{in}}\)。</li>
+        <li><strong>Dgrad</strong>：\(dX = dY\,W^\top\)，归约维度是 \(d_{\text{out}}\)。</li>
+        <li><strong>Wgrad</strong>：\(dW = X^\top dY\)，归约维度是 token 数 \(T\)。</li>
+      </ul>
+      <p>三个都在 FP8 里做，理论上比 BF16 快一倍。而且 Wgrad 用 FP8 的 \(X\)，意味着前向存给反向的激活本身就可以是 FP8，激活显存也减半。注意同一个 \(X\) 在 Fprop 里沿行（\(d_{\text{in}}\)）归约，在 Wgrad 里沿列（\(T\)）归约，这在下面讲分组缩放时会成为麻烦。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 270" role="img" aria-label="FP8 线性层：Fprop、Dgrad、Wgrad 三个 FP8 GEMM 以及各张量精度">
+          <g font-size="13">
+            <rect x="10" y="20" width="130" height="44" rx="8" class="box"/><text x="75" y="40" text-anchor="middle">输入 X</text><text x="75" y="57" text-anchor="middle" font-size="11" class="soft">BF16</text>
+            <rect x="10" y="110" width="130" height="44" rx="8" class="box-hot"/><text x="75" y="130" text-anchor="middle">主权重 W</text><text x="75" y="147" text-anchor="middle" font-size="11" class="soft">FP32</text>
+            <rect x="190" y="20" width="110" height="44" rx="8" class="box-soft"/><text x="245" y="47" text-anchor="middle">→ FP8 量化</text>
+            <rect x="190" y="110" width="110" height="44" rx="8" class="box-soft"/><text x="245" y="137" text-anchor="middle">→ FP8 量化</text>
+            <rect x="350" y="60" width="130" height="54" rx="8" class="box-acc"/><text x="415" y="83" text-anchor="middle">Fprop GEMM</text><text x="415" y="102" text-anchor="middle" font-size="11" class="soft">FP8 × FP8 → FP32 累加</text>
+            <rect x="530" y="60" width="110" height="54" rx="8" class="box"/><text x="585" y="83" text-anchor="middle">输出 Y</text><text x="585" y="102" text-anchor="middle" font-size="11" class="soft">BF16</text>
+            <rect x="350" y="180" width="130" height="54" rx="8" class="box-acc"/><text x="415" y="203" text-anchor="middle">Wgrad GEMM</text><text x="415" y="222" text-anchor="middle" font-size="11" class="soft">Xᵀ(FP8) · dY(FP8)</text>
+            <rect x="530" y="180" width="110" height="54" rx="8" class="box-acc"/><text x="585" y="203" text-anchor="middle">Dgrad GEMM</text><text x="585" y="222" text-anchor="middle" font-size="11" class="soft">dY(FP8) · Wᵀ(FP8)</text>
+            <rect x="660" y="120" width="90" height="44" rx="8" class="box"/><text x="705" y="140" text-anchor="middle">dY</text><text x="705" y="157" text-anchor="middle" font-size="11" class="soft">BF16→FP8</text>
+            <text x="415" y="258" text-anchor="middle" font-size="11" class="soft">→ dW（FP32，进优化器）</text>
+            <text x="585" y="258" text-anchor="middle" font-size="11" class="soft">→ dX（BF16，往前传）</text>
+          </g>
+          <path d="M140 42 L188 42 M140 132 L188 132" class="ln-acc"/>
+          <path d="M300 42 C 330 42, 330 78, 348 78 M300 132 C 330 132, 330 98, 348 98" class="ln-acc"/>
+          <path d="M480 87 L528 87" class="ln-acc"/>
+          <path d="M245 64 C 245 180, 300 206, 348 206" class="ln" stroke-dasharray="4 4"/>
+          <text x="262" y="175" font-size="11" class="soft">缓存 FP8 的 X 给反向</text>
+          <path d="M705 164 C 705 200, 660 207, 642 207 M660 142 C 600 160, 500 190, 482 200" class="ln-acc"/>
+          <path d="M300 140 C 420 160, 560 150, 585 178" class="ln" stroke-dasharray="4 4"/>
+        </svg>
+        <figcaption>FP8 线性层的数据流（参照 DeepSeek-V3 报告图 6 的结构重画）。三个 GEMM 都吃 FP8、在高精度里累加；主权重、权重梯度留在 FP32。</figcaption>
+      </figure>
+
+      <h3>8.4 FP8 能省多少时间</h3>
+      <p>FP8 只加速矩阵乘，而且通常只是线性层的矩阵乘。按 DeepSeek-V3 的方案，注意力、归一化、embedding、输出头、MoE 门控都留在高精度；逐元素算子的时间按字节算，激活从 BF16 变 FP8 只在那些被量化的张量上省带宽；量化本身（求 amax、缩放、转换、转置后重新量化）还要额外的内核或融合工作。所以即使线性层 GEMM 占了一步的 70%，理想加速也只是 \(1/(0.3+0.7/2)\approx1.54\) 倍，实际更少。这也是为什么 Playbook 的表里各家方案都花了很多心思在显存和通信上——FP8 的收益是算力、显存、通信三处加起来的。</p>
+
+      <h2 id="outlier">9. 离群值与缩放粒度</h2>
+      <p>大模型的激活有一个众所周知的特点：少数通道的数值比其他通道大一两个数量级（离群值，outlier），而且这些通道在不同 token 上比较固定。按张量缩放时，\(\mathrm{amax}\) 由离群值决定，其他所有值都被压到格式的底部：如果离群值是普通值的 1000 倍，普通值在 E4M3 里会落到 \(448/1000\approx0.45\) 附近甚至更低，有效精度变差，更小的值直接掉进次正规区或变成 0。</p>
+      <p>DeepSeek-V3 报告说得很直接：「按张量把最大绝对值缩放到 FP8 最大值」的标准做法让低精度训练对激活离群值高度敏感，会严重降低量化精度。解决思路是<strong>缩小共享缩放因子的分组</strong>，让一个离群值只影响它所在的那一小组。</p>
+      <p>下面的演示生成一个 128×256 的「激活」矩阵（行是 token、列是通道，数值是带固定种子的标准高斯随机数，离群值倍数也是可调的示例参数，不代表某个具体模型），在其中注入离群值，再用不同的格式和分组做量化-反量化，计算误差。</p>
+
+      <div class="demo" id="qd">
+        <div class="demo-label">离群值与缩放粒度：量化误差</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>离群值倍数</span><input type="range" id="qd-a" min="0" max="4" step="0.05" value="2.5"><output id="qd-a-v">316×</output></label>
+        </div>
+        <div class="row"><span>离群值类型</span>
+          <span class="seg" id="qd-type" role="group" aria-label="离群值类型">
+            <button type="button" data-t="ch" aria-pressed="true">通道离群（第 37、90 列）</button>
+            <button type="button" data-t="tok" aria-pressed="false">token 离群（第 20、90 行）</button>
+          </span>
+        </div>
+        <div class="row"><span>元素格式</span>
+          <span class="seg" id="qd-fmt" role="group" aria-label="元素格式">
+            <button type="button" data-f="e4m3" aria-pressed="true">E4M3</button>
+            <button type="button" data-f="e5m2" aria-pressed="false">E5M2</button>
+            <button type="button" data-f="e2m1" aria-pressed="false">FP4 E2M1</button>
+            <button type="button" data-f="int8" aria-pressed="false">INT8（对照）</button>
+          </span>
+        </div>
+        <div class="row"><span>热图显示的分组</span>
+          <span class="seg" id="qd-g" role="group" aria-label="分组"></span>
+        </div>
+        <canvas id="q-canvas" width="512" height="256" aria-label="逐元素量化误差热图"></canvas>
+        <div class="legend-bar" id="q-legend"></div>
+        <div class="legend-row"><span>相对误差 ≤ 0.1%</span><span>1%</span><span>10%</span><span>≥ 100%（含被量化成 0）</span></div>
+        <div class="table-wrap">
+          <table class="fx-table" id="qd-table">
+            <thead><tr><th>缩放分组</th><th class="num">整体 L2 误差</th><th class="num">非离群 L2 误差</th><th class="num">非离群逐元素平均误差</th><th class="num">非离群被量化成 0</th><th class="num">缩放因子开销</th></tr></thead>
+            <tbody></tbody>
+          </table>
+        </div>
+        <p class="note" id="qd-note"></p>
+        <p class="note">L2 误差 = \(\lVert\hat x-x\rVert_2/\lVert x\rVert_2\)（矩阵乘看到的主要是它）；逐元素平均误差是 \(|\hat x_i-x_i|/|x_i|\) 的平均。「1×128」对应 DeepSeek-V3 的激活分组（每 token 每 128 通道），「128×128」对应它的权重分组；「1×32，E8M0」是 MX 格式（缩放因子只能是 2 的幂）；「1×16，E4M3」是 NVFP4 的两级缩放（块缩放因子用 E4M3 存、再乘一个 FP32 的张量级缩放）。开销按缩放因子的位数平摊到每个元素计。</p>
+      </div>
+
+      <p>拖动滑块能看到几件事：</p>
+      <ul>
+        <li><strong>浮点格式比整数格式耐离群值。</strong>FP8 在每个 binade 里的相对精度相同，按张量缩放时离群值只是把普通值整体往下挪几个 binade，精度不变；直到普通值被挪进次正规区（E4M3 只有约 18 个 binade 可挪），误差才明显上升、开始大量变成 0。切到 INT8 对照：均匀刻度下，离群值一大，普通值只剩几个量化级，按张量缩放的误差立刻变大。这是 FP8 能比 INT8 更直接地用于训练的原因之一。</li>
+        <li><strong>分组只保护不含离群值的组。</strong>演示里两个离群通道都在前 128 列。通道离群时，所有包含这两列的分组（每一行的第一个 1×128 分组、左边的 128×128 块）都被拉大了缩放因子，右半边则完全不受影响；分组越小（1×32、1×16），受牵连的普通元素越少。真实模型的隐藏维度是几千，一个离群通道只污染它所在的那 1/几十 的分组。</li>
+        <li><strong>token 离群时 1×128 明显优于 128×128。</strong>离群值沿行分布，按 token 分组时离群 token 自成一组，其他 token 不受影响；128×128 的块却把块内所有 token 都拖下水。DeepSeek-V3 在附录里提到，激活<em>梯度</em>有明显的 token 相关离群值，对它们用 128×128 块量化会导致发散（下一节）。</li>
+        <li><strong>E4M3 最依赖细粒度缩放。</strong>E5M2 范围大，按张量缩放时很少把小值压成 0，但每个值的精度更低；E4M3 精度高、范围窄。分组缩放补上了范围，于是可以把位数留给尾数——这就是 DeepSeek-V3「有了细粒度缩放就可以全部用 E4M3」的道理。FP4 只有约 3.6 个 binade、8 个非负值，任何粗粒度缩放都不够用。</li>
+      </ul>
+      <p>另一类办法是在量化前把离群值「摊开」。FlashAttention-3 和 NVFP4 训练都用了随机 Hadamard 变换：对 \(x\) 乘一个正交矩阵 \(H\)（Hadamard 矩阵乘随机 \(\pm1\) 对角阵），每个输出是输入的随机 \(\pm\) 组合，一个大值被均摊到所有位置上，\(\mathrm{amax}\) 和其余值的比例大幅下降。矩阵乘的另一边乘同一个 \(H\)，由 \(HH^\top=I\) 结果不变。</p>
+
+      <h2 id="dsv3">10. DeepSeek-V3 的 FP8 框架</h2>
+      <p>Playbook 说 DeepSeek-V3 技术报告是第一个公开报道的超大规模 FP8 混合精度训练。它的方案可以分成四块。</p>
+      <h3>10.1 什么用 FP8，什么不用</h3>
+      <ul>
+        <li>线性层的三个 GEMM（Fprop、Dgrad、Wgrad）全部用 FP8，输入 FP8，输出 BF16 或 FP32。</li>
+        <li>保持原精度（BF16 或 FP32）的组件：embedding、输出头、MoE 门控、归一化算子、注意力算子。理由是这些算子对低精度敏感，或者计算量小、用高精度几乎不增加成本。</li>
+        <li>主权重、权重梯度、优化器状态用更高精度存储；它们的显存开销靠在数据并行 rank 之间分片来摊薄。</li>
+      </ul>
+      <h3>10.2 细粒度量化</h3>
+      <p>如第 9 节的演示：</p>
+      <ul>
+        <li><strong>激活</strong>按 1×128 分组（每个 token 的每 128 个通道一个缩放因子）。</li>
+        <li><strong>权重</strong>按 128×128 分块（每 128 个输入通道 × 128 个输出通道一个缩放因子）。</li>
+      </ul>
+      <p>关键的一点是：这些分组是沿着 GEMM 的<strong>归约维度 K</strong> 划分的。以 Fprop 为例，\(Y_{ij} = \sum_k X_{ik}W_{kj}\)。把 \(k\) 按 128 分成若干组 \(b\)，每组的激活缩放 \(s^X_{i,b}\) 和权重缩放 \(s^W_{b,j'}\)（\(j'\) 是 \(j\) 所在的 128 块）各不相同：</p>
+      $$Y_{ij} = \sum_b s^X_{i,b}\, s^W_{b,j'}\sum_{k\in b} q^X_{ik}\,q^W_{kj}.$$
+      <p>缩放因子随 \(b\) 变化，<em>不能</em>像按张量缩放那样提到整个求和外面，只能在每组的部分和算完之后乘上去。标准的 FP8 GEMM 不支持这种「沿 K 分组的缩放」。DeepSeek 的实现把它和下面的「提升到 CUDA core 累加」结合在一起：每 128 个元素的部分和从 Tensor Core 拷到 FP32 寄存器时，顺便乘上这一组的两个缩放因子。</p>
+      <p>报告还指出，这种分组和微缩放格式的思路一致，并希望下一代硬件能让 Tensor Core 直接接收分组缩放因子——Blackwell 的 MX 格式正是这样（第 13 节）。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 760 250" role="img" aria-label="细粒度量化：激活 1×128 分组，权重 128×128 分块，沿 K 每 128 个元素提升到 FP32">
+          <text x="10" y="18" font-size="13">激活 X（T × K）：每行每 128 列一个缩放</text>
+          <g id="dq-x"></g>
+          <text x="400" y="18" font-size="13">权重 W（K × N）：每 128×128 一个缩放</text>
+          <g id="dq-w"></g>
+          <text x="10" y="200" font-size="13">累加：Tensor Core 内每 128 个 K（4 次 WGMMA）→ 拷到 CUDA core，乘 s<tspan baseline-shift="sub" font-size="10">X</tspan>·s<tspan baseline-shift="sub" font-size="10">W</tspan>，加进 FP32</text>
+          <g id="dq-acc"></g>
+        </svg>
+        <figcaption>DeepSeek-V3 的细粒度量化与分组累加（参照报告图 7 重画）。上：分组方式；下：沿 K 方向每 128 个元素一组，组内在 Tensor Core 里累加，组间在 FP32 里累加。</figcaption>
+      </figure>
+
+      <h3>10.3 全部用 E4M3、在线量化</h3>
+      <p>此前的工作（Transformer Engine、FP8-LM 等）前向用 E4M3、反向用 E5M2。DeepSeek-V3 所有张量都用 E4M3，理由是细粒度分组相当于让一组元素共享指数位，弥补了 E4M3 范围小的缺点，于是可以把位数花在尾数上。缩放因子用在线（即时）量化：每个 1×128 分组或 128×128 块现算 amax，而不是用历史估计。</p>
+      <h3>10.4 低精度存储与通信</h3>
+      <ul>
+        <li><strong>优化器状态</strong>：AdamW 的一阶、二阶矩用 BF16 存，报告说没有观察到性能下降；主权重和用于梯度累加的梯度仍是 FP32。</li>
+        <li><strong>激活缓存</strong>：给 Wgrad 用的激活以 FP8 缓存。两个例外：注意力之后那个线性层的输入对精度更敏感（它在注意力的反向里也要用），用一种自定义的 E5M6 格式；并且它在反向里要从 1×128 分组转成 128×1 分组，为避免额外的量化误差，缩放因子都取 2 的整数次幂。MoE 里 SwiGLU 的输入以 FP8 缓存，输出在反向时重算。</li>
+        <li><strong>通信</strong>：MoE 上投影之前的激活先量化成 FP8 再做 dispatch（缩放因子同样是 2 的幂），下投影之前的激活梯度也类似；combine 阶段保持 BF16。</li>
+      </ul>
+      <h3>10.5 转置的麻烦和一个失败的尝试</h3>
+      <p>前面说过同一个激活在 Fprop 里沿行归约、在 Wgrad 里沿列归约。按 1×128 分组的量化结果不能直接转置成 128×1 分组，只能「读出来、反量化、转置、重新量化成 128×1、写回」。一个省事的替代是对激活梯度也像权重一样用 128×128 块量化，这样转置只需交换块的下标。DeepSeek 在附录 B.2 里报告：对 Dgrad 相关的张量都用块量化，在约 16B 参数的 MoE 上训练约 300B token 后发散了。他们的解释是激活梯度在 token 之间极不均衡，存在 token 相关的离群值，块量化管不住。</p>
+      <h3>10.6 效果</h3>
+      <p>报告在两个规模上和 BF16 对比：约 16B 总参数的 MoE 训练 1.33T token，约 230B 总参数的 MoE 训练约 0.9T token。FP8 相对 BF16 的损失相对误差始终低于 0.25%，在训练随机性的范围内。</p>
+
+      <h2 id="accum">11. 累加精度</h2>
+      <p>DeepSeek-V3 报告里最让人意外的一点是 Hopper FP8 Tensor Core 的累加精度。他们观察到 H800 上 FP8 GEMM 的累加只保留了大约 14 位，远低于 FP32。报告第 3.5.2 节描述了机制：对齐 32 个尾数乘积时按最大指数右移，只用每个乘积最高的 14 位相加，超出的位截断；加到寄存器里的累加也是 14 位精度。在他们的初步测试里，\(K=4096\) 的两个随机矩阵相乘，最大相对误差接近 2%。\(K\) 越大问题越严重，而大模型训练中 \(K\)（隐藏维度，或者 Wgrad 里的 token 数）恰恰很大。</p>
+      <p>他们的办法是<strong>提升到 CUDA core</strong>（promotion）：Tensor Core 里只累加 \(N_C\) 个元素，然后把部分和拷到 FP32 寄存器，在 CUDA core 上做全精度累加（同时乘上分组缩放因子）。\(N_C=128\)，对应 4 次 WGMMA 指令，是他们实验中能明显提升精度、又不带来太大开销的最小间隔。这会降低单个 warpgroup 发射 WGMMA 的速率，但 H800 上通常有两个 warpgroup 的 WGMMA 并存：一个在做提升时另一个可以继续做 MMA，Tensor Core 的利用率仍然很高。</p>
+      <p>报告把这称为对硬件缺陷的妥协，并建议未来的芯片提高 Tensor Core 内的累加精度、原生支持分组缩放、把 FP8 转换和 TMA 融合以支持在线量化、支持转置读取。Transformer Engine 后来的 FP8 块缩放方案也注明它需要「分段累加」（split accumulation）来保证精度。</p>
+      <p>上面「舍入与累加」演示的第二个模式用一个简化模型复现了这种现象：累加器每次加法后截断到 14 位有效位；可以对比 FP32 累加、每 128 个元素提升一次到 FP32、以及 BF16 累加。</p>
+
+      <h2 id="recipes">12. 各种方案的显存账</h2>
+      <p>Playbook 总结了几种已知 FP8 方案每个参数的显存（不含激活）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>方案</th><th>GEMM 精度</th><th>主权重</th><th>梯度累加</th><th>模型权重</th><th>梯度</th><th>优化器状态</th><th class="num">每参数</th></tr></thead>
+          <tbody>
+            <tr><td>BF16 + FP32 混合精度基线</td><td>BF16</td><td>FP32</td><td>FP32</td><td>BF16</td><td>BF16</td><td>FP32 + FP32</td><td class="num">4+4+2+2+4+4 = 20 B</td></tr>
+            <tr><td>上面去掉 FP32 梯度累加</td><td>BF16</td><td>FP32</td><td>—</td><td>BF16</td><td>BF16</td><td>FP32 + FP32</td><td class="num">16 B</td></tr>
+            <tr><td>Transformer Engine</td><td>FP8</td><td>—</td><td>—</td><td>FP32</td><td>FP32</td><td>FP32 + FP32</td><td class="num">16 B</td></tr>
+            <tr><td>FP8-LM（O3 级）</td><td>FP8</td><td>FP16</td><td>FP16</td><td>FP8</td><td>FP8</td><td>FP8 + FP16</td><td class="num">9 B</td></tr>
+            <tr><td>DeepSeek-V3</td><td>FP8</td><td>FP32</td><td>FP32</td><td>FP8</td><td>BF16</td><td>BF16 + BF16</td><td class="num">15 B</td></tr>
+            <tr><td>Nanotron FP8</td><td>FP8</td><td>BF16</td><td>FP32</td><td>FP8</td><td>FP8</td><td>FP8 + FP8</td><td class="num">10 B</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>可以看到 FP8 的主要收益不在参数相关的显存（DeepSeek-V3 只比基线省 25%），而在算力翻倍、激活减半和通信减半。Playbook 在 2025 年初的判断是 FP8 仍是一项实验性技术，方法还在演进，但很可能会取代 BF16 混合精度成为标准。</p>
+      <p>Playbook 还提醒了 FP8 预训练的主要风险：稳定性。固定模型规模时，学习率越高越不稳定，FP8 的训练损失曲线常见的失败形态是在某一步之后突然发散。</p>
+
+      <h2 id="mx">13. 微缩放：MXFP8 与 NVFP4</h2>
+      <h3>13.1 MX 格式</h3>
+      <p>DeepSeek-V3 的分组缩放在 Hopper 上要靠软件（CUDA core 上的乘法）实现。开放计算项目（OCP）的<strong>微缩放</strong>（Microscaling，MX）规范把这件事标准化、交给硬件：一个 MX 块由 \(k\) 个低精度元素和一个共享缩放因子组成。所有具体的 MX 格式都用 \(k=32\)，缩放因子格式是 <strong>E8M0</strong>（8 位指数、0 位尾数，只能表示 2 的幂，范围覆盖 FP32 的全部指数）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>格式</th><th class="num">块大小</th><th>缩放因子</th><th>元素</th><th class="num">平均位宽</th></tr></thead>
+          <tbody>
+            <tr><td>MXFP8</td><td class="num">32</td><td>E8M0</td><td>FP8（E4M3 或 E5M2）</td><td class="num">8.25</td></tr>
+            <tr><td>MXFP6</td><td class="num">32</td><td>E8M0</td><td>FP6（E2M3 或 E3M2）</td><td class="num">6.25</td></tr>
+            <tr><td>MXFP4</td><td class="num">32</td><td>E8M0</td><td>FP4（E2M1）</td><td class="num">4.25</td></tr>
+            <tr><td>MXINT8</td><td class="num">32</td><td>E8M0</td><td>INT8</td><td class="num">8.25</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>转换算法（MX 论文算法 1）：块内 \(\mathrm{amax}\)，共享指数 \(\lfloor\log_2\mathrm{amax}\rfloor - e_{\max}\)，其中 \(e_{\max}\) 是元素格式最大规格化数的指数（E4M3 是 8，E2M1 是 2）；每个元素除以 \(2^{\text{共享指数}}\) 后量化，超出范围的饱和。因为缩放因子是 2 的幂，乘缩放因子只是改指数，硬件代价很小；但 amax 被向下取到 2 的幂后，块内最大值未必能用满元素格式的顶部。</p>
+      <p>分组是沿某一个轴的（通常是矩阵乘的归约维度），所以 MX 量化和转置不可交换：转置后分组的方向变了。Transformer Engine 的 <code>MXFP8BlockScaling</code> 方案的处理方法是：需要一个张量和它的转置时（前向和反向各用一个），两份都直接从高精度输入量化，避免二次量化误差。它的默认格式是全 E4M3。</p>
+      <h3>13.2 NVFP4</h3>
+      <p>NVIDIA Blackwell 支持 FP4、MXFP4 和自家的 <strong>NVFP4</strong>。元素都是 E2M1（可表示 0、0.5、1、1.5、2、3、4、6 及其相反数）。NVFP4 和 MXFP4 的区别：</p>
+      <ul>
+        <li>块更小：每 16 个元素一个缩放因子（MXFP4 是 32 个）。</li>
+        <li>缩放因子用 E4M3 而不是 E8M0，可以是非 2 的幂的小数，能把块内最大值更准确地对到 6 上。</li>
+        <li>E4M3 缩放因子的范围不够，再加一个 FP32 的<strong>张量级</strong>缩放因子，构成两级缩放。</li>
+      </ul>
+      <p>平均每个元素 4.5 位（4 位元素 + 8 位缩放 / 16），外加每个张量一个 FP32。</p>
+      <h3>13.3 用 NVFP4 预训练</h3>
+      <p>NVIDIA 2025 年的技术报告《Pretraining Large Language Models with NVFP4》用 NVFP4 训练了一个 12B 参数的 Mamba-Transformer 混合模型，10T token，损失曲线和下游精度都接近 FP8 基线。他们的配方几乎就是本文前面各节的组合：</p>
+      <ul>
+        <li><strong>敏感层保留高精度</strong>：12B 模型保守地把前 2 个和最后 8 个块的线性层留在 BF16，约占线性层的 16%。</li>
+        <li><strong>随机 Hadamard 变换</strong>：对 Wgrad 的输入做 16×16 的 RHT，压制块内离群值。</li>
+        <li><strong>二维缩放</strong>：权重按 16×16 的块缩放，这样前向和反向（转置后）看到的是同一个量化结果；激活和梯度按 1×16 缩放。</li>
+        <li><strong>随机舍入</strong>：梯度用随机舍入，权重和激活用就近偶数。Blackwell 的 FP4 转换指令原生支持这两种舍入。</li>
+      </ul>
+      <p>FP4 训练还很新，但它说明了一个趋势：位宽越低，越依赖本文讲的这些「配套设施」——分组缩放、离群值处理、高精度累加、选择性地保留高精度、无偏舍入。</p>
+
+      <h2 id="summary">14. 小结</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>问题</th><th>原因</th><th>对策</th></tr></thead>
+          <tbody>
+            <tr><td>小梯度变 0</td><td>FP16 指数范围窄</td><td>损失缩放（动态）；或换 BF16</td></tr>
+            <tr><td>小更新加不到权重上</td><td>RNE 下 \(|\Delta|\lt\frac12\)ulp 被吞没（FP16 阈值 2048，BF16 256）</td><td>FP32 主权重；随机舍入；补偿求和</td></tr>
+            <tr><td>长求和误差大</td><td>部分和变大后吞没小项</td><td>FP32 累加；softmax/norm/loss/归约在 FP32</td></tr>
+            <tr><td>FP8 范围太窄</td><td>E4M3 只有约 18 个 binade</td><td>按张量缩放：延迟或即时 amax</td></tr>
+            <tr><td>离群值毁掉精度</td><td>amax 被少数大值主导</td><td>细粒度分组（1×128、128×128、MX 32、NVFP4 16）；Hadamard 旋转</td></tr>
+            <tr><td>Tensor Core 累加位数不够</td><td>Hopper FP8 约 14 位</td><td>每 128 个元素提升到 FP32</td></tr>
+            <tr><td>转置后分组方向不对</td><td>分组沿归约维度</td><td>从高精度重新量化两份；或权重用二维块</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>我自己的理解是：所有这些技巧都在回答同一个问题——有限的位数该花在哪里。指数位买范围，尾数位买精度；缩放因子把一组数的公共指数提出去，等于给这组数免费多了几位指数；高精度累加和主权重则保证误差不会在长链条里累积。下一篇讲推理时的数学，届时 KV cache 和权重量化会再次用到这里的格式知识。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Nouamane Tazi et al., <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>，「Mixed precision training」一节（FP16 and BF16 training、FP8 pretraining）。</li>
+        <li>Paulius Micikevicius et al., <a href="https://arxiv.org/abs/1710.03740">Mixed Precision Training</a>（2017），第 3 节。</li>
+        <li>Paulius Micikevicius et al., <a href="https://arxiv.org/abs/2209.05433">FP8 Formats for Deep Learning</a>（2022），第 2–3 节、表 1。</li>
+        <li>DeepSeek-AI, <a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>（2024），第 3.3 节（FP8 Training）、3.5.2 节（Compute Hardware）、附录 B。</li>
+        <li>Bita Darvish Rouhani et al., <a href="https://arxiv.org/abs/2310.10537">Microscaling Data Formats for Deep Learning</a>（2023），表 1 与算法 1；OCP Microscaling Formats (MX) v1.0 规范。</li>
+        <li>NVIDIA, <a href="https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/">Introducing NVFP4 for Efficient and Accurate Low-Precision Inference</a>（技术博客）。</li>
+        <li>NVIDIA, <a href="https://arxiv.org/abs/2509.25149">Pretraining Large Language Models with NVFP4</a>（2025），第 4 节。</li>
+        <li>Jay Shah et al., <a href="https://arxiv.org/abs/2407.08608">FlashAttention-3</a>（2024），第 3.3 节（块量化与非相干处理）。</li>
+        <li>Suyog Gupta et al., <a href="https://arxiv.org/abs/1502.02551">Deep Learning with Limited Numerical Precision</a>（2015）。</li>
+        <li>NVIDIA Transformer Engine，<a href="https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/common/recipe/__init__.py">recipe 定义</a>（DelayedScaling、Float8CurrentScaling、MXFP8BlockScaling、Float8BlockScaling）。</li>
+        <li>PyTorch，<a href="https://docs.pytorch.org/docs/2.4/amp.html">Automatic Mixed Precision 文档</a>（autocast 的算子列表、GradScaler）。</li>
+        <li>Jacob Austin et al., <a href="https://jax-ml.github.io/scaling-book/gpus/#summary-of-gpu-specs">How to Think About GPUs</a>（各代 GPU 的 FLOPs 规格）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+(() => {
+  const $ = (id) => document.getElementById(id);
+  const NS = 'http://www.w3.org/2000/svg';
+  const el = (tag, attrs, parent, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  const pressSeg = (seg, btn) => seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+  const labelCells = (table) => {
+    const hs = [...table.querySelectorAll('thead th')].map((th) => th.textContent);
+    table.querySelectorAll('tbody tr').forEach((tr) => [...tr.children].forEach((td, i) => { if (hs[i] != null && td.colSpan === 1) td.dataset.label = hs[i]; }));
+  };
+  const segClick = (seg, fn) => seg.addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; pressSeg(seg, b); fn(b); });
+
+  /* ---------- number formats ---------- */
+  const SPEC = {
+    fp32: { name: 'FP32', e: 8, m: 23, bias: 127, kind: 'ieee' },
+    bf16: { name: 'BF16', e: 8, m: 7, bias: 127, kind: 'ieee' },
+    fp16: { name: 'FP16', e: 5, m: 10, bias: 15, kind: 'ieee' },
+    e5m2: { name: 'E5M2', e: 5, m: 2, bias: 15, kind: 'ieee' },
+    e4m3: { name: 'E4M3', e: 4, m: 3, bias: 7, kind: 'fn' },
+    e2m1: { name: 'E2M1', e: 2, m: 1, bias: 1, kind: 'fp4' },
+  };
+  const ORDER = ['fp32', 'bf16', 'fp16', 'e5m2', 'e4m3', 'e2m1'];
+  function decode(f, E, M) {
+    const emaxField = (1 << f.e) - 1;
+    if (f.kind === 'ieee' && E === emaxField) return M === 0 ? Infinity : NaN;
+    if (f.kind === 'fn' && E === emaxField && M === (1 << f.m) - 1) return NaN;
+    if (E === 0) return (M / (1 << f.m)) * Math.pow(2, 1 - f.bias);
+    return (1 + M / (1 << f.m)) * Math.pow(2, E - f.bias);
+  }
+  // enumerate positive finite values (with codes) for small formats
+  for (const key of ORDER) {
+    const f = SPEC[key];
+    if (key === 'fp32') {
+      f.max = 3.4028234663852886e38; f.minNormal = Math.pow(2, -126); f.minSub = Math.pow(2, -149);
+      continue;
+    }
+    const vals = [], codes = [];
+    for (let E = 0; E < (1 << f.e); E++) for (let M = 0; M < (1 << f.m); M++) {
+      const v = decode(f, E, M);
+      if (Number.isFinite(v)) { vals.push(v); codes.push((E << f.m) | M); }
+    }
+    f.vals = vals; f.codes = codes; // already ascending
+    f.max = vals[vals.length - 1];
+    f.minNormal = Math.pow(2, 1 - f.bias);
+    f.minSub = vals[1];
+  }
+  const f32buf = new DataView(new ArrayBuffer(4));
+  const f32bits = (x) => { f32buf.setFloat32(0, x); return f32buf.getUint32(0); };
+  const bitsToF32 = (b) => { f32buf.setUint32(0, b >>> 0); return f32buf.getFloat32(0); };
+
+  // neighbours lo <= a <= hi (a >= 0, a < max)
+  function bracket(f, a) {
+    if (f === SPEC.fp32) {
+      const r = Math.fround(a);
+      if (r === a) return { lo: r, hi: r, loCode: f32bits(r), hiCode: f32bits(r) };
+      let lo, hi;
+      if (r < a) { lo = r; hi = bitsToF32(f32bits(r) + 1); } else { hi = r; lo = bitsToF32(f32bits(r) - 1); }
+      return { lo, hi, loCode: f32bits(lo), hiCode: f32bits(hi) };
+    }
+    const v = f.vals;
+    let l = 0, h = v.length - 1;
+    while (h - l > 1) { const mid = (l + h) >> 1; if (v[mid] <= a) l = mid; else h = mid; }
+    if (v[l] === a) return { lo: a, hi: a, loCode: f.codes[l], hiCode: f.codes[l] };
+    if (v[h] === a) return { lo: a, hi: a, loCode: f.codes[h], hiCode: f.codes[h] };
+    return { lo: v[l], hi: v[h], loCode: f.codes[l], hiCode: f.codes[h] };
+  }
+  // round to nearest even; returns {v, code, status}
+  // sat: true -> saturate overflow to max (fn/fp4 always saturate)
+  function quant(f, x, sat) {
+    if (Number.isNaN(x)) return { v: NaN, status: 'NaN' };
+    const s = x < 0 || Object.is(x, -0) ? -1 : 1;
+    const a = Math.abs(x);
+    if (f === SPEC.fp32) {
+      const r = Math.fround(a);
+      if (!Number.isFinite(r)) return { v: s * Infinity, code: f32bits(Infinity), status: 'inf', sign: s };
+      return { v: s * r, code: f32bits(r), sign: s };
+    }
+    if (a >= f.max) {
+      const ulpMax = f.max - f.vals[f.vals.length - 2];
+      if (f.kind === 'ieee' && !sat && a >= f.max + ulpMax / 2) return { v: s * Infinity, code: (((1 << f.e) - 1) << f.m), status: 'inf', sign: s };
+      return { v: s * f.max, code: f.codes[f.codes.length - 1], status: a > f.max ? 'sat' : null, sign: s };
+    }
+    const b = bracket(f, a);
+    if (b.lo === b.hi) return { v: s * b.lo, code: b.loCode, sign: s };
+    const dl = a - b.lo, dh = b.hi - a;
+    let pick;
+    if (dl < dh) pick = 'lo'; else if (dh < dl) pick = 'hi'; else pick = (b.loCode & 1) === 0 ? 'lo' : 'hi';
+    return { v: s * b[pick], code: b[pick + 'Code'], sign: s };
+  }
+  const qv = (f, x, sat) => quant(f, x, sat).v;
+
+  // fast arithmetic rounding to p fractional mantissa bits (no range limits)
+  function roundBits(v, p, mode, rnd) {
+    if (v === 0 || !Number.isFinite(v)) return v;
+    const a = Math.abs(v);
+    let e = Math.floor(Math.log2(a));
+    if (Math.pow(2, e) > a) e--; else if (Math.pow(2, e + 1) <= a) e++;
+    const ulp = Math.pow(2, e - p);
+    const q = a / ulp;
+    let r;
+    if (mode === 'trunc') r = Math.floor(q);
+    else if (mode === 'sr') { const fl = Math.floor(q); r = fl + (rnd() < q - fl ? 1 : 0); }
+    else { const fl = Math.floor(q); const fr = q - fl; r = fr > 0.5 ? fl + 1 : fr < 0.5 ? fl : (fl % 2 === 0 ? fl : fl + 1); }
+    return Math.sign(v) * r * ulp;
+  }
+  function mkRng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+  function gaussFrom(rnd) { let u = 0, v = 0; while (u === 0) u = rnd(); v = rnd(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+  const fmtNum = (x) => {
+    if (Number.isNaN(x)) return 'NaN';
+    if (!Number.isFinite(x)) return (x < 0 ? '−' : '') + '∞';
+    if (x === 0) return Object.is(x, -0) ? '−0' : '0';
+    const a = Math.abs(x);
+    let s = (a >= 1e5 || a < 1e-4) ? x.toExponential(6) : x.toPrecision(10);
+    if (s.includes('e')) { let [m, ex] = s.split('e'); if (m.includes('.')) m = m.replace(/0+$/, '').replace(/\.$/, ''); s = m + 'e' + ex; }
+    else if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
+    return s.replace('-', '−');
+  };
+  const sup = (n) => String(n).replace(/-/g, '⁻').replace(/[0-9]/g, (d) => '⁰¹²³⁴⁵⁶⁷⁸⁹'[d]);
+
+  /* ---------- bit layout figure ---------- */
+  (() => {
+    const g = $('bit-layouts');
+    const rows = [['FP32', 8, 23], ['BF16', 8, 7], ['FP16', 5, 10], ['FP8 E4M3', 4, 3], ['FP8 E5M2', 5, 2], ['FP4 E2M1', 2, 1]];
+    const cw = 20, x0 = 100;
+    rows.forEach(([name, e, m], r) => {
+      const y = 14 + r * 46;
+      el('text', { x: 0, y: y + 19, 'font-size': 13 }, g, name);
+      const parts = [['s', 1, 'b-s'], ['e', e, 'b-e'], ['m', m, 'b-m']];
+      let x = x0;
+      parts.forEach(([k, n, cls]) => {
+        for (let i = 0; i < n; i++) {
+          el('rect', { x: x + i * cw + 1, y, width: cw - 2, height: 26, rx: 2, class: cls, opacity: 0.28 }, g);
+        }
+        el('rect', { x: x + 0.5, y: y - 0.5, width: n * cw - 1, height: 27, rx: 3, fill: 'none', stroke: 'var(--border)' }, g);
+        el('text', { x: x + n * cw / 2, y: y + 18, 'text-anchor': 'middle', 'font-size': 12 }, g, k === 's' ? 's' : (k === 'e' ? (n >= 4 ? '指数 ' + n : n) : (n >= 3 ? '尾数 ' + n : n)));
+        x += n * cw;
+      });
+    });
+  })();
+
+  /* ---------- range chart ---------- */
+  (() => {
+    const g = $('range-chart');
+    const lo = -150, hi = 130, X0 = 150, X1 = 750;
+    const X = (v) => X0 + (v - lo) / (hi - lo) * (X1 - X0);
+    const order = ['fp32', 'bf16', 'fp16', 'e5m2', 'e4m3', 'e2m1'];
+    order.forEach((k, i) => {
+      const f = SPEC[k];
+      const y = 12 + i * 32;
+      const a = Math.log2(f.minSub), b = Math.log2(f.minNormal), c = Math.log2(f.max);
+      el('text', { x: 0, y: y + 14, 'font-size': 13 }, g, f.name);
+      el('text', { x: 52, y: y + 14, 'font-size': 11, class: 'faint' }, g, '≈' + Math.round(c - a) + ' binade');
+      el('rect', { x: X(a), y, width: Math.max(1, X(b) - X(a)), height: 18, rx: 2, class: 'box-soft' }, g);
+      el('rect', { x: X(b), y, width: Math.max(2, X(c) - X(b)), height: 18, rx: 2, class: 'box-acc' }, g);
+    });
+    const ya = 12 + order.length * 32 + 4;
+    el('line', { x1: X0, x2: X1, y1: ya, y2: ya, class: 'ln' }, g);
+    for (let t = -150; t <= 125; t += 25) {
+      el('line', { x1: X(t), x2: X(t), y1: ya, y2: ya + 5, class: 'ln' }, g);
+      el('text', { x: X(t), y: ya + 18, 'text-anchor': 'middle', 'font-size': 11, class: 'soft' }, g, t);
+    }
+    el('line', { x1: X(0), x2: X(0), y1: 6, y2: ya, stroke: 'var(--accent-2)', 'stroke-dasharray': '3 3', 'stroke-width': 1 }, g);
+    el('text', { x: X(0) + 4, y: ya + 34, 'font-size': 11, class: 'soft' }, g, 'log₂|x|（虚线为 1）');
+  })();
+
+  /* ---------- fine-grained quantization figure ---------- */
+  (() => {
+    const gx = $('dq-x'), gw = $('dq-w'), ga = $('dq-acc');
+    for (let r = 0; r < 8; r++) for (let c = 0; c < 4; c++) {
+      el('rect', { x: 10 + c * 85, y: 30 + r * 19, width: 83, height: 17, rx: 2, class: (r + c) % 3 === 0 ? 'box-acc' : 'box-soft' }, gx);
+    }
+    el('text', { x: 52, y: 196 - 12, 'text-anchor': 'middle', 'font-size': 11, class: 'soft' }, gx, '1×128');
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
+      el('rect', { x: 400 + c * 85, y: 30 + r * 38, width: 83, height: 36, rx: 3, class: (r + c) % 2 === 0 ? 'box-acc' : 'box-soft' }, gw);
+    }
+    el('text', { x: 442, y: 52, 'text-anchor': 'middle', 'font-size': 11, class: 'soft' }, gw, '128×128');
+    for (let i = 0; i < 7; i++) {
+      el('rect', { x: 10 + i * 82, y: 212, width: 74, height: 26, rx: 4, class: 'box-acc' }, ga);
+      el('text', { x: 47 + i * 82, y: 230, 'text-anchor': 'middle', 'font-size': 11 }, ga, 'K 的第 ' + (i + 1) + ' 组');
+    }
+    el('rect', { x: 594, y: 208, width: 156, height: 34, rx: 6, class: 'box-hot' }, ga);
+    el('text', { x: 672, y: 230, 'text-anchor': 'middle', 'font-size': 12 }, ga, 'FP32 累加器（CUDA core）');
+  })();
+
+  /* ---------- float explorer ---------- */
+  (() => {
+    const inp = $('fx-in'), tbody = $('fx-table').querySelector('tbody');
+    const kS = $('fx-k'), svg = $('fx-grid');
+    let mode = 'rne';
+    segClick($('fx-ex'), (b) => { inp.value = b.dataset.v; pressSeg($('fx-ex'), null); syncK(); draw(); });
+    segClick($('fx-rm'), (b) => { mode = b.dataset.r; draw(); });
+    inp.addEventListener('input', () => { syncK(); draw(); });
+    kS.addEventListener('input', drawGrid);
+    function parse() { const t = inp.value.trim().replace(/−/g, '-'); if (t === '') return NaN; const v = Number(t); return v; }
+    function syncK() {
+      const x = parse();
+      if (Number.isFinite(x) && x !== 0) {
+        const k = Math.max(+kS.min, Math.min(+kS.max, Math.floor(Math.log2(Math.abs(x)))));
+        kS.value = k;
+      }
+    }
+    function bitsHTML(f, code, sign) {
+      const n = f.e + f.m;
+      let bits;
+      if (f === SPEC.fp32) bits = (code >>> 0).toString(2).padStart(32, '0').slice(1);
+      else bits = code.toString(2).padStart(n, '0');
+      const sb = sign < 0 ? '1' : '0';
+      return '<span class="bits"><span class="s">' + sb + '</span> <span class="e">' + bits.slice(0, f.e) + '</span> <span class="m">' + bits.slice(f.e) + '</span></span>';
+    }
+    function ulpAt(f, a) {
+      if (f === SPEC.fp32) {
+        const r = Math.fround(a); if (!Number.isFinite(r)) return NaN;
+        const b = f32bits(r); return bitsToF32(b + 1) - r;
+      }
+      if (a >= f.max) return f.max - f.vals[f.vals.length - 2];
+      const b = bracket(f, a);
+      if (b.lo !== b.hi) return b.hi - b.lo;
+      const idx = f.vals.indexOf(b.lo);
+      return f.vals[idx + 1] - b.lo;
+    }
+    function draw() {
+      const x = parse();
+      tbody.innerHTML = '';
+      if (Number.isNaN(x)) { tbody.innerHTML = '<tr><td colspan="6">请输入一个数（支持 1e-6 这样的写法）</td></tr>'; drawGrid(); return; }
+      for (const k of ORDER) {
+        const f = SPEC[k];
+        const q = quant(f, x, f.kind !== 'ieee');
+        const a = Math.abs(x);
+        let status = '';
+        const cls = (bad) => '<span class="tag' + (bad ? ' bad' : '') + '">';
+        if (q.status === 'inf') status = cls(true) + '上溢 → ∞</span>';
+        else if (q.status === 'sat') status = cls(true) + '饱和到 ±' + fmtNum(f.max) + '</span>';
+        else if (x !== 0 && q.v === 0) status = cls(true) + '下溢为 0</span>';
+        else if (Math.abs(q.v) < f.minNormal && q.v !== 0) status = cls(true) + '次正规</span>';
+        else if (q.v === x) status = cls(false) + '精确表示</span>';
+        else status = cls(false) + '规格化</span>';
+        let valCell, errCell;
+        const relErr = x === 0 ? 0 : Math.abs(q.v - x) / Math.abs(x);
+        if (mode === 'sr' && Number.isFinite(q.v) && q.status !== 'sat' && a < f.max) {
+          const b = bracket(f, a);
+          if (b.lo === b.hi) { valCell = fmtNum(Math.sign(x) * b.lo); errCell = '0'; }
+          else {
+            const p = (a - b.lo) / (b.hi - b.lo);
+            const sg = x < 0 ? -1 : 1;
+            valCell = fmtNum(sg * b.lo) + '（' + ((1 - p) * 100).toFixed(1) + '%）<br>' + fmtNum(sg * b.hi) + '（' + (p * 100).toFixed(1) + '%）';
+            errCell = '期望 0';
+          }
+        } else {
+          valCell = fmtNum(q.v);
+          errCell = Number.isFinite(relErr) ? (relErr === 0 ? '0' : relErr.toExponential(2)) : '—';
+        }
+        const u = ulpAt(f, Math.min(a, f.max));
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td>' + f.name + '</td><td>' + (q.code != null ? bitsHTML(f, q.code, q.sign || 1) : '—') + '</td><td class="num">' + valCell + '</td><td class="num">' + errCell + '</td><td class="num">' + (Number.isFinite(u) ? fmtNum(u) : '—') + '</td><td>' + status + '</td>';
+        tbody.appendChild(tr);
+      }
+      labelCells($('fx-table'));
+      drawGrid();
+    }
+    function drawGrid() {
+      const k = +kS.value;
+      $('fx-k-v').textContent = k < 0 ? '−' + (-k) : k;
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      const lo = Math.pow(2, k), hi = Math.pow(2, k + 1);
+      const X0 = 150, X1 = 980;
+      const X = (v) => X0 + (v - lo) / (hi - lo) * (X1 - X0);
+      const x = Math.abs(parse());
+      const inRange = Number.isFinite(x) && x >= lo && x < hi;
+      const notes = [];
+      ORDER.forEach((key, i) => {
+        const f = SPEC[key];
+        const y = 14 + i * 44;
+        el('text', { x: 0, y: y + 14, 'font-size': 16 }, svg, f.name);
+        el('line', { x1: X0, x2: X1, y1: y + 18, y2: y + 18, class: 'axis' }, svg);
+        let count, spacing;
+        if (key === 'fp32') {
+          if (lo >= f.minNormal && lo <= f.max) { count = Math.pow(2, f.m); spacing = Math.pow(2, k - f.m); }
+          else if (lo < f.minNormal) { spacing = f.minSub; count = Math.max(0, Math.round((hi - lo) / spacing)); }
+          else count = 0;
+        } else {
+          const pts = f.vals.filter((v) => v >= lo && v < hi);
+          count = pts.length;
+          spacing = count > 1 ? pts[1] - pts[0] : (count === 1 ? NaN : NaN);
+          if (count > 0 && count <= 260) pts.forEach((v) => el('line', { x1: X(v), x2: X(v), y1: y + 8, y2: y + 28, class: 'tk' }, svg));
+        }
+        if (count > 260) el('rect', { x: X0, y: y + 8, width: X1 - X0, height: 20, class: 'band' }, svg);
+        let lab;
+        if (count === 0) lab = lo > f.max ? '超出最大值，没有可表示的数' : '比最小次正规数还小，全部下溢';
+        else lab = count.toLocaleString('en-US') + ' 个点 · 间距 ' + (Number.isFinite(spacing) ? '2' + sup(Math.round(Math.log2(spacing))) : '—');
+        el('text', { x: X1, y: y + 43, 'text-anchor': 'end', 'font-size': 15, class: 'soft' }, svg, lab);
+        if (inRange) {
+          const qq = Math.abs(qv(f, x, f.kind !== 'ieee'));
+          if (qq >= lo && qq <= hi) el('circle', { cx: X(qq), cy: y + 18, r: 5, fill: 'var(--accent-2)' }, svg);
+        }
+        if (key === 'e4m3' || key === 'bf16' || key === 'fp16') notes.push(f.name + ' ' + (count ? count + ' 个' : '0 个'));
+      });
+      if (inRange) el('line', { x1: X(x), x2: X(x), y1: 4, y2: 14 + ORDER.length * 44 - 4, class: 'mk', 'stroke-dasharray': '4 3' }, svg);
+      const ya = 14 + ORDER.length * 44 + 18;
+      el('text', { x: X0, y: ya, 'font-size': 14, class: 'soft' }, svg, '2' + sup(k) + ' = ' + fmtNum(lo));
+      el('text', { x: X1, y: ya, 'text-anchor': 'end', 'font-size': 14, class: 'soft' }, svg, '2' + sup(k + 1) + ' = ' + fmtNum(hi));
+      svg.setAttribute('viewBox', '0 0 1000 ' + (ya + 8));
+      $('fx-note').textContent = '当前区间 [2' + sup(k) + ', 2' + sup(k + 1) + ')。' + (inRange ? '虚线是输入值，橙点是它在各格式里舍入后的位置。' : '输入值不在这个区间里（拖动滑块或输入新的数）。') + ' 规格化区间里每个格式的点数都是 2^m，与 k 无关；进入次正规区后点数开始减半，最后全部下溢。';
+    }
+    syncK(); draw();
+  })();
+
+  /* ---------- rounding & accumulation ---------- */
+  (() => {
+    const svg = $('ra-svg'), thead = $('ra-table').querySelector('thead'), tbody = $('ra-table').querySelector('tbody');
+    let mode = 'upd', sign = 'pos';
+    segClick($('ra-mode'), (b) => { mode = b.dataset.m; $('ra-upd').hidden = mode !== 'upd'; $('ra-dot').hidden = mode !== 'dot'; run(); });
+    segClick($('ra-sign'), (b) => { sign = b.dataset.s; run(); });
+    ['ra-w', 'ra-u', 'ra-n', 'ra-k'].forEach((id) => $(id).addEventListener('input', run));
+    const COL = ['var(--text)', 'var(--accent-2)', 'var(--accent)', 'var(--text-faint)'];
+    const DASH = ['', '', '', '6 4'];
+    function axes(xl, yl, ymaxLabel, yminLabel, xmaxLabel, xminLabel) {
+      while (svg.firstChild) svg.removeChild(svg.firstChild);
+      el('line', { x1: 80, x2: 980, y1: 260, y2: 260, class: 'gl' }, svg);
+      el('line', { x1: 80, x2: 80, y1: 10, y2: 260, class: 'gl' }, svg);
+      el('text', { x: 74, y: 20, 'text-anchor': 'end', 'font-size': 14, class: 'soft' }, svg, ymaxLabel);
+      el('text', { x: 74, y: 260, 'text-anchor': 'end', 'font-size': 14, class: 'soft' }, svg, yminLabel);
+      el('text', { x: 80, y: 284, 'font-size': 14, class: 'soft' }, svg, xminLabel);
+      el('text', { x: 980, y: 284, 'text-anchor': 'end', 'font-size': 14, class: 'soft' }, svg, xmaxLabel);
+      el('text', { x: 530, y: 284, 'text-anchor': 'middle', 'font-size': 14, class: 'soft' }, svg, xl);
+      el('text', { x: 90, y: 30, 'font-size': 14, class: 'soft' }, svg, yl);
+    }
+    function poly(pts, i) {
+      el('polyline', { points: pts.map((p) => p[0].toFixed(1) + ',' + p[1].toFixed(1)).join(' '), fill: 'none', stroke: COL[i], 'stroke-width': 2.2, 'stroke-dasharray': DASH[i] }, svg);
+    }
+    function runUpd() {
+      const w0 = Math.pow(10, +$('ra-w').value), d = Math.pow(10, +$('ra-u').value), n = +$('ra-n').value;
+      $('ra-w-v').textContent = fmtNum(+w0.toPrecision(3));
+      $('ra-u-v').textContent = d.toExponential(1).replace('-', '−');
+      $('ra-n-v').textContent = n;
+      const rnd = mkRng(12345);
+      const variants = [
+        ['FP32', (w) => Math.fround(w + d)],
+        ['BF16 就近偶数', (w) => qv(SPEC.bf16, w + d)],
+        ['BF16 随机舍入', (w) => { const r = roundBits(w + d, 7, 'sr', rnd); return r; }],
+        ['FP16 就近偶数', (w) => qv(SPEC.fp16, w + d)],
+      ];
+      const ideal = w0 + n * d;
+      const traces = variants.map(([name, step]) => {
+        let w = name.startsWith('FP32') ? Math.fround(w0) : (name.startsWith('FP16') ? qv(SPEC.fp16, w0) : qv(SPEC.bf16, w0));
+        const start = w;
+        const tr = [[0, 0]];
+        const every = Math.max(1, Math.floor(n / 200));
+        for (let i = 1; i <= n; i++) { w = step(w); if (i % every === 0 || i === n) tr.push([i, w - start]); }
+        return { name, w, start, tr };
+      });
+      const ymax = Math.max(n * d, ...traces.map((t) => Math.max(...t.tr.map((p) => p[1])))) * 1.05 || 1;
+      axes('步数', '累计增加量 w − w₀', fmtNum(+ymax.toPrecision(2)), '0', n, 0);
+      el('line', { x1: 80, y1: 260, x2: 980, y2: 260 - 250 * (n * d) / ymax, stroke: 'var(--text-faint)', 'stroke-width': 1.2, 'stroke-dasharray': '2 4' }, svg);
+      traces.forEach((t, i) => poly(t.tr.map(([s, v]) => [80 + 900 * s / n, 260 - 250 * v / ymax]), i));
+      thead.innerHTML = '<tr><th>方式</th><th class="num">最终 w</th><th class="num">累计增加</th><th class="num">占理想值</th><th class="num">Δ / (½ ulp(w₀))</th></tr>';
+      tbody.innerHTML = '';
+      traces.forEach((t, i) => {
+        const f = i === 0 ? SPEC.fp32 : (i === 3 ? SPEC.fp16 : SPEC.bf16);
+        const a = Math.abs(t.start);
+        const b = bracket(f, a);
+        const ulp = b.lo === b.hi ? (f === SPEC.fp32 ? bitsToF32(f32bits(Math.fround(a)) + 1) - a : (f.vals[f.vals.indexOf(b.lo) + 1] - b.lo)) : b.hi - b.lo;
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><span class="sw" style="background:' + COL[i] + '"></span>' + t.name + '</td><td class="num">' + fmtNum(+t.w.toPrecision(7)) + '</td><td class="num">' + fmtNum(+(t.w - t.start).toPrecision(4)) + '</td><td class="num">' + ((t.w - t.start) / (n * d) * 100).toFixed(1) + '%</td><td class="num">' + (d / (ulp / 2)).toFixed(3) + '</td>';
+        tbody.appendChild(tr);
+      });
+      labelCells($('ra-table'));
+      const bfRatio = d / ((SPEC.bf16 && (function () { const b = bracket(SPEC.bf16, Math.abs(qv(SPEC.bf16, w0))); return (b.lo === b.hi ? SPEC.bf16.vals[SPEC.bf16.vals.indexOf(b.lo) + 1] - b.lo : b.hi - b.lo) / 2; })()));
+      $('ra-note').textContent = '理想累计增加 nΔ = ' + fmtNum(+(n * d).toPrecision(4)) + '（细点线）。最后一列 < 1 表示单次更新小于半个 ULP：就近偶数会把它整个舍掉。' +
+        (bfRatio < 1 ? ' 当前 BF16 就近偶数完全加不上去，而随机舍入的期望是对的，只是有噪声。' : ' 当前更新大于 BF16 的半个 ULP，就近偶数能加上，但每次都会被舍入到 ULP 的整数倍，累计值会有系统偏差。') +
+        ' 权重值越大，ULP 越大，同样的 Δ 越容易被吞没。';
+    }
+    function runDot() {
+      const kk = +$('ra-k').value, K = 1 << kk;
+      $('ra-k-v').textContent = K;
+      const Ks = [];
+      for (let i = 7; i <= 14; i++) Ks.push(1 << i);
+      const trials = 24;
+      const names = ['FP32 累加', '14 位截断累加（简化模型）', '14 位 + 每 128 个提升到 FP32', 'BF16 累加'];
+      const res = names.map(() => Ks.map(() => ({ mean: 0, max: 0 })));
+      Ks.forEach((Kc, ki) => {
+        const rnd = mkRng(1000 + Kc);
+        for (let t = 0; t < trials; t++) {
+          const p = new Float64Array(Kc);
+          for (let i = 0; i < Kc; i++) {
+            let a = gaussFrom(rnd), b = gaussFrom(rnd);
+            if (sign === 'pos') { a = Math.abs(a); b = Math.abs(b); }
+            // FP8-like inputs are irrelevant here; products taken as exact
+            p[i] = a * b;
+          }
+          let exact = 0; for (let i = 0; i < Kc; i++) exact += p[i];
+          const scale = Math.abs(exact) > 1e-9 ? Math.abs(exact) : 1;
+          let s32 = 0, s14 = 0, s14p = 0, c = 0, sbf = 0;
+          for (let i = 0; i < Kc; i++) {
+            s32 = Math.fround(s32 + p[i]);
+            s14 = roundBits(s14 + p[i], 13, 'trunc');
+            c = roundBits(c + p[i], 13, 'trunc');
+            if ((i + 1) % 128 === 0) { s14p = Math.fround(s14p + c); c = 0; }
+            sbf = roundBits(sbf + p[i], 7, 'rne');
+          }
+          s14p = Math.fround(s14p + c);
+          // for signed products, normalise by sum of |p| to avoid dividing by ~0
+          let denom = scale;
+          if (sign === 'mix') { let sa = 0; for (let i = 0; i < Kc; i++) sa += Math.abs(p[i]); denom = sa; }
+          [s32, s14, s14p, sbf].forEach((v, j) => {
+            const e = Math.abs(v - exact) / denom;
+            res[j][ki].mean += e / trials;
+            res[j][ki].max = Math.max(res[j][ki].max, e);
+          });
+        }
+      });
+      // plot log-log mean error vs K
+      const lo = -9, hi = 0;
+      const Y = (e) => { const l = Math.log10(Math.max(e, 1e-9)); return 260 - 250 * (l - lo) / (hi - lo); };
+      const Xk = (i) => 80 + 900 * i / (Ks.length - 1);
+      axes('内积长度 K（对数刻度）', '平均相对误差（对数刻度）', '1', '1e−9', '16384', '128');
+      for (let l = lo + 1; l < hi; l++) {
+        el('line', { x1: 80, x2: 980, y1: Y(Math.pow(10, l)), y2: Y(Math.pow(10, l)), class: 'gl', opacity: 0.5 }, svg);
+        el('text', { x: 74, y: Y(Math.pow(10, l)) + 4, 'text-anchor': 'end', 'font-size': 12, class: 'faint' }, svg, '1e' + l);
+      }
+      const ci = Ks.indexOf(K);
+      el('line', { x1: Xk(ci), x2: Xk(ci), y1: 10, y2: 260, stroke: 'var(--border)', 'stroke-width': 6, opacity: 0.6 }, svg);
+      res.forEach((r, j) => poly(r.map((v, i) => [Xk(i), Y(v.mean)]), j));
+      thead.innerHTML = '<tr><th>累加方式（K = ' + K + '）</th><th class="num">平均相对误差</th><th class="num">最大相对误差</th></tr>';
+      tbody.innerHTML = '';
+      res.forEach((r, j) => {
+        const tr = document.createElement('tr');
+        tr.innerHTML = '<td><span class="sw" style="background:' + COL[j] + '"></span>' + names[j] + '</td><td class="num">' + r[ci].mean.toExponential(2) + '</td><td class="num">' + r[ci].max.toExponential(2) + '</td>';
+        tbody.appendChild(tr);
+      });
+      labelCells($('ra-table'));
+      $('ra-note').textContent = '每个 K 取 ' + trials + ' 组随机向量（固定种子的示例数据），乘积按精确值给出，只比较累加器。' +
+        (sign === 'mix' ? '有正有负时误差按 Σ|pᵢ| 归一化。' : '') +
+        '「14 位截断」是对 DeepSeek-V3 描述的 Hopper FP8 累加行为的简化模拟：每次加法后把部分和截断到 14 位有效位；真实硬件是在 32 个乘积对齐后截断，数值不会完全一样。全为正时截断误差单向积累，随 K 增长；每 128 个元素提升到 FP32 后，部分和始终较小，截断损失也就小得多。';
+    }
+    function run() { (mode === 'upd' ? runUpd : runDot)(); }
+    run();
+  })();
+
+  /* ---------- quantization demo ---------- */
+  (() => {
+    const R = 128, C = 256;
+    const rnd = mkRng(2024);
+    const base = new Float64Array(R * C);
+    for (let i = 0; i < R * C; i++) base[i] = gaussFrom(rnd);
+    const OUT_CH = [37, 90], OUT_TOK = [20, 90];
+    let type = 'ch', fmt = 'e4m3', show = 'tensor';
+    const GR = [
+      ['tensor', '整个张量（FP32 缩放）', 32 / (R * C)],
+      ['b128', '128×128 块（FP32 缩放）', 32 / (128 * 128)],
+      ['t128', '1×128（FP32 缩放）', 32 / 128],
+      ['mx32', '1×32，E8M0（MX）', 8 / 32],
+      ['nv16', '1×16，E4M3 + 张量 FP32（NVFP4 式）', 8 / 16],
+    ];
+    const gseg = $('qd-g');
+    GR.forEach(([k, name]) => {
+      const b = document.createElement('button'); b.type = 'button'; b.dataset.g = k; b.textContent = name.split('（')[0].split('，')[0];
+      b.setAttribute('aria-pressed', k === show ? 'true' : 'false'); gseg.appendChild(b);
+    });
+    segClick(gseg, (b) => { show = b.dataset.g; run(); });
+    segClick($('qd-type'), (b) => { type = b.dataset.t; run(); });
+    segClick($('qd-fmt'), (b) => { fmt = b.dataset.f; run(); });
+    $('qd-a').addEventListener('input', run);
+    const EMAX = { e4m3: 8, e5m2: 15, e2m1: 2, int8: 6 };
+    const INT8 = { name: 'INT8', max: 127, int: true };
+    const qe = (f, v) => { if (!f.int) return qv(f, v, true); const a = Math.max(-127, Math.min(127, v)); const fl = Math.floor(a), fr = a - fl; return fr > 0.5 ? fl + 1 : fr < 0.5 ? fl : (fl % 2 === 0 ? fl : fl + 1); };
+    const isOut = (r, c) => (type === 'ch' ? OUT_CH.includes(c) : OUT_TOK.includes(r));
+    function quantGroups(x, f, groups, how) {
+      // groups: array of index arrays
+      const y = new Float64Array(x.length);
+      let gAmax = 0; for (let i = 0; i < x.length; i++) gAmax = Math.max(gAmax, Math.abs(x[i]));
+      const gscale = gAmax / (f.max * 448);
+      for (const idx of groups) {
+        let amax = 0; for (const i of idx) amax = Math.max(amax, Math.abs(x[i]));
+        if (amax === 0) continue;
+        let s;
+        if (how === 'fp32') s = amax / f.max;
+        else if (how === 'e8m0') s = Math.pow(2, Math.floor(Math.log2(amax)) - EMAX[fmt]);
+        else { const sb = qv(SPEC.e4m3, amax / (f.max * gscale), true); s = sb * gscale; if (s === 0) continue; }
+        for (const i of idx) y[i] = qe(f, x[i] / s) * s;
+      }
+      return y;
+    }
+    const groupCache = {};
+    function groupsFor(k) {
+      if (groupCache[k]) return groupCache[k];
+      const gs = [];
+      const push = (r0, r1, c0, c1) => { const a = []; for (let r = r0; r < r1; r++) for (let c = c0; c < c1; c++) a.push(r * C + c); gs.push(a); };
+      if (k === 'tensor') push(0, R, 0, C);
+      else if (k === 'b128') { for (let c = 0; c < C; c += 128) push(0, R, c, c + 128); }
+      else { const w = k === 't128' ? 128 : k === 'mx32' ? 32 : 16; for (let r = 0; r < R; r++) for (let c = 0; c < C; c += w) push(r, r + 1, c, c + w); }
+      return (groupCache[k] = gs);
+    }
+    function hexToRgb(h) {
+      h = h.trim();
+      if (h.startsWith('#')) { if (h.length === 4) h = '#' + h[1] + h[1] + h[2] + h[2] + h[3] + h[3]; return [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)]; }
+      const m = h.match(/\d+(\.\d+)?/g); return m ? m.slice(0, 3).map(Number) : [128, 128, 128];
+    }
+    function run() {
+      const A = Math.pow(10, +$('qd-a').value);
+      $('qd-a-v').textContent = (A < 10 ? A.toFixed(1) : Math.round(A)) + '×';
+      const x = new Float64Array(R * C);
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) x[r * C + c] = base[r * C + c] * (isOut(r, c) ? A : 1);
+      const f = fmt === 'int8' ? INT8 : SPEC[fmt];
+      const results = GR.map(([k, name, ov]) => {
+        const how = k === 'mx32' ? 'e8m0' : k === 'nv16' ? 'nv' : 'fp32';
+        const y = quantGroups(x, f, groupsFor(k), how);
+        let num = 0, den = 0, numN = 0, denN = 0, zero = 0, cntN = 0, relN = 0;
+        for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+          const i = r * C + c, d = y[i] - x[i];
+          num += d * d; den += x[i] * x[i];
+          if (!isOut(r, c)) { numN += d * d; denN += x[i] * x[i]; cntN++; relN += Math.abs(d) / Math.abs(x[i]); if (y[i] === 0 && x[i] !== 0) zero++; }
+        }
+        return { k, name, ov, y, err: Math.sqrt(num / den), errN: Math.sqrt(numN / denN), relN: relN / cntN, zero: zero / cntN };
+      });
+      const best = Math.min(...results.map((r) => r.errN)), bestRel = Math.min(...results.map((r) => r.relN));
+      const tb = $('qd-table').querySelector('tbody');
+      tb.innerHTML = '';
+      results.forEach((r) => {
+        const tr = document.createElement('tr');
+        const pct = (v) => (v * 100 < 0.01 ? (v * 100).toExponential(1) : (v * 100).toFixed(2)) + '%';
+        tr.innerHTML = '<td>' + r.name + '</td><td class="num">' + pct(r.err) + '</td><td class="num' + (r.errN === best ? ' best' : '') + '">' + pct(r.errN) + '</td><td class="num' + (r.relN === bestRel ? ' best' : '') + '">' + pct(r.relN) + '</td><td class="num">' + (r.zero * 100).toFixed(1) + '%</td><td class="num">' + (r.ov < 0.01 ? '≈0' : r.ov.toFixed(2)) + ' bit/元素</td>';
+        tb.appendChild(tr);
+      });
+      labelCells($('qd-table'));
+      // heatmap
+      const cv = $('q-canvas'), ctx = cv.getContext('2d');
+      const cs = getComputedStyle(document.documentElement);
+      const c0 = hexToRgb(cs.getPropertyValue('--bg-soft')), c1 = hexToRgb(cs.getPropertyValue('--accent-2'));
+      const img = ctx.createImageData(C * 2, R * 2);
+      const cur = results.find((r) => r.k === show);
+      for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) {
+        const i = r * C + c;
+        const re = Math.abs(cur.y[i] - x[i]) / Math.max(Math.abs(x[i]), 1e-30);
+        const t = Math.max(0, Math.min(1, (Math.log10(Math.max(re, 1e-12)) + 3) / 3));
+        const col = [0, 1, 2].map((j) => Math.round(c0[j] + (c1[j] - c0[j]) * t));
+        for (let dy = 0; dy < 2; dy++) for (let dx = 0; dx < 2; dx++) {
+          const p = ((r * 2 + dy) * C * 2 + (c * 2 + dx)) * 4;
+          img.data[p] = col[0]; img.data[p + 1] = col[1]; img.data[p + 2] = col[2]; img.data[p + 3] = 255;
+        }
+      }
+      ctx.putImageData(img, 0, 0);
+      if (show === 'b128' || show === 't128') {
+        ctx.strokeStyle = cs.getPropertyValue('--accent').trim(); ctx.lineWidth = 2;
+        ctx.beginPath(); ctx.moveTo(256, 0); ctx.lineTo(256, 256); ctx.stroke();
+      }
+      $('q-legend').style.background = 'linear-gradient(to right, var(--bg-soft), var(--accent-2))';
+      const rt = results[0], rb = results.find((r) => r.k === 't128');
+      $('qd-note').textContent = '热图：横轴 256 个通道，纵轴 128 个 token，颜色是逐元素相对误差（当前显示「' + cur.name + '」）。' +
+        '按张量缩放时，非离群元素的 L2 误差是 1×128 分组的 ' + (rt.errN / rb.errN).toFixed(1) + ' 倍、逐元素平均误差是 ' + (rt.relN / rb.relN).toFixed(1) + ' 倍，有 ' + (rt.zero * 100).toFixed(1) + '% 的非离群元素被量化成 0。L2 误差由大数值主导，逐元素误差更能看出小数值被毁掉的程度。' +
+        (fmt === 'e2m1' ? ' FP4 只有 8 个非负值，任何分组下误差都很大，这就是 NVFP4 要用 16 个元素的小块、再配合 Hadamard 变换和随机舍入的原因。' : fmt === 'int8' ? ' INT8 的刻度是均匀的，离群值把刻度拉粗后，普通值只剩少数几个量化级，按张量缩放的损失比浮点格式严重得多。' : ' 浮点格式的相对精度在每个 binade 里相同，离群值只是把普通值整体往下挪了几个 binade；只有挪进次正规区以后误差才明显上升，所以离群值要大到一定程度才显出差别。');
+    }
+    run();
+    if (window.matchMedia) window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', run);
+  })();
+})();
+
+  </script>
+</body>
+</html>

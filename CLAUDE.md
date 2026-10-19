@@ -9,7 +9,8 @@ The owner asks Claude to write the posts; this file is how to do that.
 ## Layout
 
 ```
-index.html            home: profile, about, selected papers, recent posts, CV
+index.html            home: profile card + "Now" (sidebar), intro, experience timeline,
+                      selected papers, writing (series cards + newest 3 posts), awards
 papers/index.html     full publication list (abstract + BibTeX toggles)
 projects/index.html   projects and tools
 blog/index.html       archive of all posts, grouped by year, filter by kind
@@ -21,6 +22,7 @@ feed.xml              RSS; hand-maintained, one <item> per post
 assets/site.css       shared styles + color tokens (light/dark)
 assets/slides.css     slide-deck styles (load after site.css)
 assets/slides.js      slide engine (navigation, fragments, slidechange event)
+assets/series.js      series list + nav for multi-part posts
 assets/img/           avatar and other shared images
 assets/favicon.svg
 files/resume.pdf      linked from the home page
@@ -41,8 +43,10 @@ folder and are referenced relatively.
 3. Add an entry at the **top** of the current year in `blog/index.html`
    (start a new `<section class="archive-year">` for a new year), with the
    right `data-kind`.
-4. Update "Recent Posts" on `index.html`: it shows the newest **3** posts,
-   so add the new one on top and drop the fourth.
+4. Update the post list under "Writing" on `index.html`: it shows the newest
+   **3** posts, so add the new one on top and drop the fourth. If the post
+   belongs to a series, also add it to `assets/series.js` (and bump the count
+   on the series card under "Writing").
 5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
 6. Preview locally (below), then commit and push.
 
@@ -86,6 +90,19 @@ Kinds, used in both the post header and the home list:
   a CDN (jsDelivr). Math: KaTeX (snippet in `templates/article.html`). Charts:
   hand-written SVG/HTML first; D3 if really needed.
 
+## Series and shared helpers
+
+Multi-part posts belong to a series defined in `assets/series.js`
+(`scaling`, `smol`, `reports`). A series post carries
+`<nav class="series" data-series="…">` under its header and
+`<nav class="series-pager" data-series="…">` after the article, and loads
+`/assets/series.js`; titles in that file must match the posts' `<h1>`.
+
+`site.css` has helpers for long technical posts: `.toc`, `.table-wrap` (wide
+tables scroll inside it), `.callout` / `.callout.warn`, `details`, and demo
+controls `.ctrls` > `.ctrl` (label · range · output), `.seg` toggle buttons and
+`.readout` stat tiles.
+
 ## Slide decks
 
 - Each `<section class="slide">` inside `.stage` is one slide, laid out on a
@@ -101,6 +118,9 @@ Kinds, used in both the post header and the home list:
   `posts/next-token/` for the pattern).
 - Navigation: ← → / space / PageUp/Down, click (left third goes back), swipe,
   `F` for fullscreen, `#N` in the URL opens slide N.
+- Live widgets go in `<div class="widget" data-interactive>`: clicks inside
+  don't turn the page, and focused inputs/buttons keep their keys. See
+  `posts/scaling-pipeline/` and `posts/scaling-collectives/`.
 
 ## Preview
 
@@ -115,6 +135,6 @@ pages at desktop and phone widths.
 
 ## Publishing
 
-GitHub Pages serves the repo's publishing branch (Settings → Pages → "Deploy
-from a branch", folder `/`). Changes are live a minute or so after they land
+GitHub Pages serves the `main` branch (Settings → Pages → "Deploy from a
+branch", `main`, folder `/`). Changes are live a minute or so after they land
 on that branch.
