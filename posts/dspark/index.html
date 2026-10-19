@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DSpark：并行草拟与置信度调度 · Zunzhe Zhang</title>
-<meta name="description" content="用动画理解 DSpark 的并行 backbone、轻量 Markov head、条件接受率、前缀存活概率与负载感知验证调度。">
+<meta name="description" content="深入 DSpark 的 Markov 张量、接受率训练、置信度校准与因果预算调度；手算吞吐和选择偏差，配 3 道练习及 CPU 模拟实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson {padding:38px 64px 86px;gap:12px;justify-content:flex-start}
 .slide.lesson h2{font-size:42px;line-height:1.2}.slide.lesson .kicker{font-size:16px}
@@ -17,6 +17,7 @@
 .lesson .reference-list{font-size:22px;line-height:1.6}.lesson .reference-list li+li{margin-top:12px}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.lesson .card{padding:24px;border:1px solid var(--border);background:var(--surface);border-radius:18px;font-size:24px}.lesson .card h3{font-size:28px;margin:0 0 14px}.lesson .card p+p{margin-top:16px}.lesson .mini{font-size:21px;line-height:1.55}.slide.center h1{font-size:76px}.slide.center .subtitle{font-size:30px;max-width:1000px;color:var(--text-soft)}
 
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -129,6 +130,99 @@
 <p class="narration">target 的上下文特征和 anchor 进入 draft。backbone 并行产生各位置的隐藏向量与基础 logits；<b>Markov head 再根据刚采样的 token 修正下一个位置</b>。
 </p>
 </section>
+<section class="slide workshop" id="eng-contract">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>先画清楚一个 block 的输入与输出</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>张量</th>
+<th>教学形状</th>
+<th>内容</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>context features</td>
+<td>[B,L,d]</td>
+<td>target 已确认前缀的隐藏特征</td>
+</tr>
+<tr>
+<td>draft input</td>
+<td>[B,γ]</td>
+<td>anchor + γ−1 个 mask 位置</td>
+</tr>
+<tr>
+<td>H、U</td>
+<td>[B,γ,d]；[B,γ,V]</td>
+<td>并行 backbone 隐藏状态、基础 logits</td>
+</tr>
+<tr>
+<td>qₖ、cₖ</td>
+<td>[B,V]；[B]</td>
+<td>Markov 修正后的分布、条件接受率</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">k=1 的前一个 token 是 anchor。k&gt;1 才读取刚抽出的候选 xₖ₋₁。并行 backbone 不需要逐个等待这些候选。</p>
+</section>
+
+<section class="slide workshop" id="eng-factorization">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>并行算特征，串行决定实际选哪个词</h2>
+<div class="ws-equation">qₖ(v | prefix) = softmax(Uₖ + W₁[xₖ₋₁] W₂)ᵥ<br>q(x₁…xγ) = ∏ₖ qₖ(xₖ | x₀,x₁…xₖ₋₁)</div>
+<p class="ws-lead">条件中包含 anchor x₀ 与本 block 已采样的 x₁…xₖ₋₁。每一行都有自己的归一化常数。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>重计算保留并行</h3>
+<p class="ws-lead">上下文 attention、FFN 和基础 logits 在整段上一起算。Uₖ 已带有长上下文信息。</p>
+</div>
+<div class="ws-card">
+<h3>便宜的依赖保持串行</h3>
+<p class="ws-lead">查出前一个 token 的低维向量，投影成词表 bias，然后 softmax 和采样。</p>
+</div>
+</div>
+<p class="ws-note">不能把整段联合打分后一次全局归一化，冒充这些逐位置 q；接受检验需要实际采样的条件分布。</p>
+</section>
+
+<section class="slide workshop" id="eng-markov-cost">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>“轻量”也要计算参数量与访存量</h2>
+<p class="ws-lead">教学设定 V=128,000、r=256、FP16；W₁∈ℝⱽˣʳ，W₂∈ℝʳˣⱽ。</p>
+<table class="ws-table">
+<thead>
+<tr>
+<th>实现</th>
+<th>参数 / 计算</th>
+<th>代价</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>完整 V×V 转移矩阵</td>
+<td>V²=16.384B 参数</td>
+<td>FP16 约 30.52 GiB</td>
+</tr>
+<tr>
+<td>低秩 W₁W₂</td>
+<td>2Vr=65.536M 参数</td>
+<td>FP16 125 MiB</td>
+</tr>
+<tr>
+<td>每位置查表 + 投影</td>
+<td>约 2rV=65.536M FLOP</td>
+<td>仍有词表投影与 softmax</td>
+</tr>
+<tr>
+<td>γ=8 的串行 head</td>
+<td>约 524.288M FLOP</td>
+<td>backbone 之外的成本</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">这些是形状推算，不是模型实测。batch、数据驻留与融合 kernel 会改变延迟；r、γ 都应进入性能扫描。</p>
+</section>
+
 <section class="slide lesson" id="markov">
 <div class="kicker">03 · Markov head
 </div>
@@ -161,6 +255,43 @@
 <p class="note">柱长与 logits 为示意；Markov head 只显式看前一个 token，更长上下文由 backbone 特征提供。
 </p>
 </section>
+<section class="slide workshop" id="eng-markov-numbers">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>两种续写模式，怎样用一个 rank-1 head 分开</h2>
+<svg class="ws-visual" viewBox="0 0 1152 285" role="img" aria-label="Markov偏置把前一个词对应的下一词概率提升到0.75">
+<text x="25" y="35" class="">基础 U₂=(0,0)；W₁[A]=+1，W₁[B]=−1；W₂=(+ln3/2, −ln3/2)</text>
+<text x="25" y="100" class="">前一个 token=A</text>
+<text x="25" y="195" class="">前一个 token=B</text>
+<rect x="290" y="75" width="240" height="34" rx="5" fill="var(--accent)" opacity="1" id="mkv-a0"/>
+<rect x="530" y="75" width="240" height="34" rx="5" fill="var(--accent-2)" opacity="1" id="mkv-b0"/>
+<text x="800" y="100">A: <tspan id="mkv-av0">0.50</tspan>　B: <tspan id="mkv-bv0">0.50</tspan>
+</text>
+<rect x="290" y="170" width="240" height="34" rx="5" fill="var(--accent)" opacity="1" id="mkv-a1"/>
+<rect x="530" y="170" width="240" height="34" rx="5" fill="var(--accent-2)" opacity="1" id="mkv-b1"/>
+<text x="800" y="195">A: <tspan id="mkv-av1">0.50</tspan>　B: <tspan id="mkv-bv1">0.50</tspan>
+</text>
+<text x="25" y="265" class="ws-small">独立采样混搭概率 0.50；加上转移后变成 0.25</text>
+</svg>
+<p class="ws-lead">前词 A 时，logits 差为 ln3，因此概率比 exp(ln3)=3:1，q₂=(0.75,0.25)；前词 B 时正好反过来。</p>
+<p class="ws-note">教学词表只有 A、B。若首词均匀抽样，AB 或 BA 的总概率是 0.5×0.25+0.5×0.25=0.25。</p>
+</section>
+
+<section class="slide workshop" id="eng-markov-code">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>把真正用于采样的 q 保存下来</h2>
+<pre class="ws-code">
+<code>H, U = backbone(context, anchor_and_masks)
+previous = anchor
+for k in range(gamma):
+    bias = W1[previous] @ W2
+    q[k] = softmax(U[k] + bias)
+    c[k] = sigmoid(confidence(H[k], W1[previous]))
+    candidate[k] = sample(q[k])
+    previous = candidate[k]</code>
+</pre>
+<p class="ws-note">cₖ 在 xₖ 抽样之前就能得到。target 验证时用这里的 q[k]；只用 softmax(U[k]) 会遗漏 Markov 改变的抽样概率。</p>
+</section>
+
 <section class="slide lesson" id="confidence">
 <div class="kicker">04 · 置信度
 </div>
@@ -196,6 +327,98 @@
 <p class="note">示意概率；实际模型通过校准，让预测的前缀存活率贴近观测接受率。
 </p>
 </section>
+<section class="slide workshop" id="eng-confidence-target">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>confidence 预测“通过的概率”，不是词的概率</h2>
+<div class="ws-equation">cₖ* = Σᵥ min(pₖ(v),qₖ(v))<br>= 1 − ½‖pₖ−qₖ‖₁</div>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>训练目标</h3>
+<p class="ws-lead">在相同前缀上取得 pₖ、qₖ，计算软标签 cₖ*。用二元交叉熵等损失，让 sigmoid 输出接近这个条件接受率。</p>
+</div>
+<div class="ws-card">
+<h3>两种事件要分清</h3>
+<p class="ws-lead">“第 4 个位置本身能过”和“前 4 个位置全过”不同。前面拒绝导致后缀未被使用，不等于后缀的条件接受率为零。</p>
+</div>
+</div>
+<p class="ws-note">最大词概率 qₖ(xₖ)、模型熵、p/q 比值都不能直接替代 cₖ。它们回答的是不同的问题。</p>
+</section>
+
+<section class="slide workshop" id="eng-calibration">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>每一格只高估 0.1，长前缀就会高估很多</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>假设四格同率</th>
+<th>单格条件率</th>
+<th>前四格存活</th>
+<th>E[输出]</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>原始预测</td>
+<td>0.9</td>
+<td>0.9⁴=0.6561</td>
+<td>4.0951</td>
+</tr>
+<tr>
+<td>真实行为</td>
+<td>0.8</td>
+<td>0.8⁴=0.4096</td>
+<td>3.3616</td>
+</tr>
+<tr>
+<td>高估量</td>
+<td>0.1</td>
+<td>0.2465</td>
+<td>约 21.82%</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-lead">调度器要用绝对概率来估算 token/s；只有排序正确还不够。</p>
+<div class="ws-equation">温度校准：c′ = sigmoid(logit(c) / T)</div>
+<p class="ws-note">教学例子 T=ln9/ln4≈1.585 时，0.9 映到 0.8。真实 STS 逐位置搜索温度，校准累计存活概率，固定前面已选的温度。</p>
+</section>
+
+<section class="slide workshop" id="eng-calibration-check">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>校准集要回答：预测 80% 的前缀真活了多少？</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>预测 a₃ 分桶</th>
+<th>样本数</th>
+<th>实际存活</th>
+<th>校准差</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>[0.7,0.8)，桶均值 0.75</td>
+<td>200</td>
+<td>120/200=0.60</td>
+<td>0.15</td>
+</tr>
+<tr>
+<td>[0.8,0.9)，桶均值 0.85</td>
+<td>300</td>
+<td>240/300=0.80</td>
+<td>0.05</td>
+</tr>
+<tr>
+<td>加权 ECE</td>
+<td>500</td>
+<td>0.4×0.15+0.6×0.05</td>
+<td>0.09</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-lead">示例只展示两桶。按位置、代码/聊天、上下文长度分别看可靠性曲线；训练数据、校准数据和最终评估数据分开。</p>
+<p class="ws-note">小样本桶会抖动。保留样本量与时间窗口，观察请求分布变化后“预测输出数”和“实际输出数”是否持续偏离。</p>
+</section>
+
 <section class="slide lesson" id="schedule">
 <div class="kicker">05 · 按收益分配
 </div>
@@ -263,6 +486,51 @@
 <p class="note">图中为玩具概率和固定的 5 个草稿位置预算；一个请求还需要 anchor / bonus 对应的基础位置。
 </p>
 </section>
+<section class="slide workshop" id="eng-budget-equation">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>每个请求先占一格 anchor，再竞争草稿预算</h2>
+<div class="ws-equation">aᵣⱼ = ∏ᵢ₌₁ʲ cᵣᵢ<br>B = R + Σᵣ ℓᵣ<br>E[输出] = R + Σᵣ Σⱼ₌₁ˡʳ aᵣⱼ</div>
+<p class="ws-lead">R 个请求各有一个 anchor 输入；每个请求本轮最终输出一个纠正或 bonus token，再加通过验证的候选。</p>
+<div class="ws-equation">预测吞吐 = E[输出] × SPS(B) = E[输出] / Tstep(B)</div>
+<p class="ws-note">SPS 的单位是 step/s，B 统计 target token 位置数，不是请求数。实际 profile 应覆盖 draft、同步与服务调度的端到端成本。</p>
+</section>
+
+<section class="slide workshop" id="eng-budget-walk">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>固定预算时，先买收益最高的下一格</h2>
+<svg class="ws-visual" viewBox="0 0 1152 285" role="img" aria-label="验证预算按累计存活概率逐格分配">
+<text x="25" y="30" class="">A 的存活率：0.90，0.72，0.36；B：0.60，0.36，0.216</text>
+<text x="30" y="86" class="">A₁</text>
+<rect x="90" y="62" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="budget-bar0"/>
+<text x="530" y="86" class="">+0.90 期望 token</text>
+<text x="30" y="128" class="">A₂</text>
+<rect x="90" y="104" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="budget-bar1"/>
+<text x="530" y="128" class="">+0.72 期望 token</text>
+<text x="30" y="170" class="">B₁</text>
+<rect x="90" y="146" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="budget-bar2"/>
+<text x="530" y="170" class="">+0.60 期望 token</text>
+<text x="30" y="212" class="">A₃</text>
+<rect x="90" y="188" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="budget-bar3"/>
+<text x="530" y="212" class="">+0.36 期望 token</text>
+<text x="810" y="90" class="">总 target 位置 B</text>
+<text x="920" y="132" id="budget-b" class="">2</text>
+<text x="810" y="185" class="">期望输出 / 轮</text>
+<text x="880" y="228" id="budget-e" class="">2.00</text>
+</svg>
+<p class="ws-lead">两个请求先各有一格 anchor。增加 3 个名额时选 A₁、A₂、B₁：B=5，长度为 (2,1)，期望输出 2+0.9+0.72+0.6=4.22。</p>
+<p class="ws-note">存活率沿前缀不增，所以高分位置前面的格也会入选；相等时必须让同一请求的前一格优先。这里的数值在候选采样前已固定。</p>
+</section>
+
+<section class="slide workshop" id="eng-marginal">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>预算增长是否值得，看新增收益与新增耗时</h2>
+<div class="ws-equation">(E+a)/(T+ΔT) > E/T<br>⇔ a > E·ΔT/T</div>
+<p class="ws-lead">当前 E=4.22 token，T=5.4 ms。下一个位置的 a=0.36；增加它后 T=6.4 ms。</p>
+<div class="ws-equation">门槛 = 4.22 × 1/5.4 ≈ 0.7815 &gt; 0.36</div>
+<p class="ws-lead">这一步不划算。若新增位置只多花 0.1 ms，门槛就变成 0.07815，此时应该加入。</p>
+<p class="ws-note">这是局部比较。真实 SPS(B) 可能跨过 kernel 或并行配置边界，产生不平滑变化；搜索策略还要遵守采样因果关系。</p>
+</section>
+
 <section class="slide lesson" id="load">
 <div class="kicker">06 · 硬件感知
 </div>
@@ -318,6 +586,71 @@
 <p class="note">上排与下排为负载变化的示意；实际选择取决于校准概率与引擎 profile。
 </p>
 </section>
+<section class="slide workshop" id="eng-profile">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>同一组草稿，服务曲线决定最好送验多长</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>B（含 2 个 anchor）</th>
+<th>预测输出 / 轮</th>
+<th>教学 Tstep</th>
+<th>预测 token/s</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td>2.00</td>
+<td>4.0 ms</td>
+<td>500.00</td>
+</tr>
+<tr>
+<td>3</td>
+<td>2.90</td>
+<td>4.3 ms</td>
+<td>674.42</td>
+</tr>
+<tr>
+<td>4</td>
+<td>3.62</td>
+<td>4.7 ms</td>
+<td>770.21</td>
+</tr>
+<tr>
+<td>5</td>
+<td>4.22</td>
+<td>5.4 ms</td>
+<td>781.48</td>
+</tr>
+<tr>
+<td>6</td>
+<td>4.58</td>
+<td>6.4 ms</td>
+<td>715.63</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">最优 B=5，而不是最大 B。用最近一段负载下的测量更新 profile，并检查总体吞吐与单请求 p95 延迟是否一起满足目标。</p>
+</section>
+
+<section class="slide workshop" id="eng-async">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>历史信号定容量，当前信号分配容量</h2>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>为什么需要异步</h3>
+<p class="ws-lead">GPU 启动下一轮前，host 需要提前知道 batch 形状；等当前采样和调度完成再做决定，会在流水线上留下空隙。</p>
+</div>
+<div class="ws-card">
+<h3>两条信息通路</h3>
+<p class="ws-lead">用两步前的历史预测选择本轮容量 K；用当前累计置信度安排验证前缀。历史容量搜索可以跨过不平滑的性能曲线。</p>
+</div>
+</div>
+<p class="ws-lead">关键约束：某候选是否入选，不能借助这个候选的取值或更远的候选来反选它。过去的容量选择为当前采样建立因果隔离。</p>
+<p class="ws-note">实现时把容量 K、置信度版本、请求 ID 与轮次一起记录；防止跨轮复用错位或让当前候选悄悄进入容量搜索。</p>
+</section>
+
 <section class="slide lesson" id="causality">
 <div class="kicker">07 · 调度和采样
 </div>
@@ -351,6 +684,34 @@
 <p class="note">这是算法的因果依赖顺序。调度实现还要避免后续候选通过回溯搜索影响当前候选的入选。
 </p>
 </section>
+<section class="slide workshop" id="eng-selection-bias">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>即使 p=q，按候选内容选择也能采错</h2>
+<p class="ws-lead">两词表 A/B，p=q=(0.5,0.5)。坏规则：抽到 A 就采用草稿；抽到 B 就跳过草稿，重新从 p 抽一次。</p>
+<div class="ws-equation">P(最终 A)=P(草稿 A)+P(草稿 B)·P(重采 A)<br>=0.5+0.5×0.5=0.75</div>
+<p class="ws-lead">正常应是 0.5。p/q 检验在这里永远接受，但它无法消除“是否送验”已经制造的选择偏差。</p>
+<p class="ws-note">用未来 cₖ₊₁ 反过来决定 xₖ 是否进入前缀，也可能发生相同问题：cₖ₊₁ 已经读过 xₖ。</p>
+</section>
+
+<section class="slide workshop" id="eng-causal-scheduler">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>把“决定”和“抽样”的依赖顺序写进代码</h2>
+<pre class="ws-code">
+<code># 示意：单请求的因果门控，预算由历史状态给出
+capacity = choose_from_history(history)
+previous_token, prefix_survival = anchor, 1.0
+for k in range(gamma):
+    qk, ck = head(H[k], previous_token)
+    admit = gate(ck, prefix_survival, capacity)
+    if not admit: break  # 不看 x[k] 或更晚的候选
+    x[k] = sample(qk)
+    previous_token = x[k]
+    prefix_survival *= ck
+    capacity -= 1</code>
+</pre>
+<p class="ws-note">批量调度要把同样的依赖约束扩展到多个请求。若全局回溯搜索用到未来候选，必须另外证明入选事件没有被这些候选影响。</p>
+</section>
+
 <section class="slide lesson" id="verify">
 <div class="kicker">08 · 闭合一轮
 </div>
@@ -392,6 +753,48 @@
 <p class="narration">先裁掉没送验的 H；target 接受 E、F，拒绝 G，就输出纠正的 G*。<b>置信度是预估收益，接受检验才是最终决定</b>，下一轮从新前缀继续。
 </p>
 </section>
+<section class="slide workshop" id="eng-state-trace">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>把一个 round 的五组数据对齐</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>阶段</th>
+<th>保留的数据</th>
+<th>容易出错的地方</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>backbone</td>
+<td>H₁…Hγ、U₁…Uγ</td>
+<td>anchor 预测位置偏移</td>
+</tr>
+<tr>
+<td>Markov 采样</td>
+<td>xₖ、qₖ、cₖ</td>
+<td>qₖ 漏掉转移 bias</td>
+</tr>
+<tr>
+<td>调度</td>
+<td>request ID、ℓ、历史容量版本</td>
+<td>按未来信息回溯裁剪</td>
+</tr>
+<tr>
+<td>target 验证</td>
+<td>pₖ、连续接受数、纠正 token</td>
+<td>把未送验位置算进分母</td>
+</tr>
+<tr>
+<td>提交与续写</td>
+<td>共同前缀 KV、待消费 anchor</td>
+<td>把纠正 token 当成已有 KV</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">先在两请求、短词表、固定随机种子上打印这张账本，再接入并发调度与复用缓冲。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">09 · 训练与部署
 </div>
@@ -420,6 +823,69 @@
 </div>
 </div>
 </section>
+<section class="slide workshop" id="exercise-markov">
+<div class="kicker">练习 1 · 计算与分析</div>
+<h2>算出 Markov head 真正使用的 q</h2>
+<div class="ws-prompt">基础 logits U=(0,0)。上一词对应 W₁ 的行是 [2]，W₂=[ln2/2, −ln2/2]。求 bias、q 与目标 p=(0.5,0.5) 下的总接受率。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">bias=(ln2,−ln2)，两词概率比为 exp(2ln2)=4:1，故 q=(0.8,0.2)。总接受率 Σmin(p,q)=0.5+0.2=0.7。若误用基础 softmax(U)=(0.5,0.5) 作为 q，采样与接受检验不再一致。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-allocation">
+<div class="kicker">练习 2 · 计算与分析</div>
+<h2>把 3 个草稿名额分给两个请求</h2>
+<div class="ws-prompt">A 的条件率为 (0.9,0.8,0.5)，B 为 (0.6,0.6,0.6)。两请求各自已有 anchor；总预算 B=5。求分配、期望输出和 5.4 ms/轮时的吞吐。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">累计率 A=(0.9,0.72,0.36)，B=(0.6,0.36,0.216)。最高三项是 A₁、A₂、B₁，所以长度 (2,1)。E=2+0.9+0.72+0.6=4.22；吞吐=4.22/0.0054≈781.48 token/s。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-causal">
+<div class="kicker">练习 3 · 计算与分析</div>
+<h2>后缀很有把握，可以回头保留首词吗？</h2>
+<div class="ws-prompt">调度器先采样 x₁，再计算依赖 x₁ 的 c₂。如果 c₂&gt;0.9 就验证两个候选，否则连 x₁ 也不验证。只要最后仍做 p/q 检验，是否保持 target 分布？</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">不能据此保证。x₁ 的入选事件已经依赖 x₁ 的取值；p/q 校正的是从 q 产生的无偏候选。可先按不依赖 x₁ 的信息决定首词是否入选，再决定后续；或用历史信息确定容量，并审计当前前缀分配的因果依赖。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="eng-lab">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>枚举所有短前缀，检查预算分配到底对不对</h2>
+<pre class="ws-code">
+<code>python3 lab.py
+python3 lab.py --budget 6</code>
+</pre>
+<p class="ws-lead">默认输出：混搭概率 0.25；B=5 → prefixes=[2,1]；E[output]=4.2200；合成 profile 最优吞吐 781.48 token/s。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>预测后再改</h3>
+<p class="ws-lead">改置信度、step 时间或预算；先手算最优长度，再对照每种合法前缀组合的穷举结果。</p>
+</div>
+<div class="ws-card">
+<h3>专门试边界</h3>
+<p class="ws-lead">实验包含全 1、全 0 与相等概率。排序打平时先取同一请求的前一格，否则会悄悄超预算。</p>
+</div>
+</div>
+<p class="ws-note">
+<a class="ws-lab-link" download href="/posts/dspark/lab.py">下载 lab.py</a>
+</p>
+<p class="ws-note">标准库教学模拟：验证 Markov 数值、固定预算优化与选择偏差；不加载真实 DSpark 模型。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">参考与延伸阅读
 </div>
@@ -447,9 +913,9 @@
 </section>
 </div>
 </main>
-<script src="/assets/slides.js">
+<script src="/assets/slides.js?v=03e51263994e">
 </script>
-<script src="/assets/anim.js">
+<script src="/assets/anim.js?v=9b723aa5f47d">
 </script>
 <script>(()=>{'use strict';
 function bind(id,make){const el=document.getElementById(id);const tl=Anim.timeline({root:el});make(tl);Anim.slide(el,tl,{steps:true,controls:true});}
@@ -461,6 +927,10 @@ bind('schedule',tl=>{['00','01','02','10','03'].forEach((v,i)=>tl.to('#pick'+v+'
 bind('load',tl=>{tl.to('[id^=light] rect',{stroke:'var(--accent)'},{dur:.6,stagger:.06}).label('轻负载');tl.to('#heavy2,#heavy3,#heavy4',{opacity:.18,y:25},{dur:.65,stagger:.08}).label('繁忙时裁短');});
 bind('causality',tl=>{tl.to('#backward-info',{opacity:1,draw:1},{dur:.8}).to('#causal-rule',{opacity:1},{dur:.4}).label('识别倒流的信息');tl.to('#backward-info',{opacity:.15},{dur:.4}).label('保持因果决策');});
 bind('verify',tl=>{tl.to('#dv3',{opacity:.15,y:30},{dur:.5}).label('裁掉低收益后缀');tl.to('#done0,#done1',{opacity:1},{dur:.4,stagger:.15}).label('接受');tl.to('#dv2',{opacity:.2},{dur:.4}).to('#done2',{opacity:1},{dur:.4}).label('纠正');});
+
+bind('eng-markov-numbers',tl=>{tl.to('#mkv-a0',{attr:{width:360}},{dur:.8}).to('#mkv-b0',{attr:{x:650,width:120}},{at:'<',dur:.8}).to('#mkv-av0',{text:.75,fmt:v=>v.toFixed(2)},{at:'<',dur:.8}).to('#mkv-bv0',{text:.25,fmt:v=>v.toFixed(2)},{at:'<',dur:.8}).label('前词 A');tl.to('#mkv-a1',{attr:{width:120}},{dur:.8}).to('#mkv-b1',{attr:{x:410,width:360}},{at:'<',dur:.8}).to('#mkv-av1',{text:.25,fmt:v=>v.toFixed(2)},{at:'<',dur:.8}).to('#mkv-bv1',{text:.75,fmt:v=>v.toFixed(2)},{at:'<',dur:.8}).label('前词 B');});
+bind('eng-budget-walk',tl=>{let e=2;[.9,.72,.6,.36].forEach((a,i)=>{const at=i*.9;e+=a;tl.to('#budget-bar'+i,{attr:{width:a*430}},{at,dur:.65});tl.to('#budget-b',{text:i+3,fmt:n=>n.toFixed(0)},{at,dur:.65});tl.to('#budget-e',{text:e,fmt:n=>n.toFixed(2)},{at,dur:.65});tl.label('增加第'+(i+1)+'个名额');});});
+
 })();
 </script>
 <script src="/assets/post-links.js">

@@ -58,7 +58,8 @@ folder and are referenced relatively.
 5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
 6. Link related posts to each other in the text where a concept is
    explained elsewhere, then run `python3 scripts/post-links.py` to refresh
-   the cross-reference index and the blog's content-versioned data URLs.
+   the cross-reference index, the blog's content-versioned data URLs, and
+   matching player/style URLs for engineering decks.
 7. Preview locally (below), then commit and push.
 
 The header nav (Home / Papers / Projects / Blog) is copied into every page;
@@ -154,6 +155,17 @@ controls `.ctrls` > `.ctrl` (label · range · output), `.seg` toggle buttons an
 - Live widgets go in `<div class="widget" data-interactive>`: clicks inside
   don't turn the page, and focused inputs/buttons keep their keys. See
   `posts/scaling-pipeline/` and `posts/scaling-collectives/`.
+- Engineering lessons use `/assets/course.css`, loaded after their local
+  styles, and `<section class="slide workshop">`. Derive formulas with
+  named axes and units, work through numbers, and connect implementation
+  choices to a measurable outcome. Split dense material across slides.
+- Exercises use `<details class="ws-answer">` inside an interactive widget.
+  Keep the solution closed initially and verify that the whole slide fits
+  with it open. Supply reasoning and units, not only the final number.
+  Each engineering deck links a runnable `lab.py` beside its HTML, with
+  setup, expected output, a learner experiment and correctness checks.
+  Label simulated timings as teaching inputs; GPU snippets require a
+  separate GPU run before reporting measured performance.
 
 ## Preview
 

@@ -103,8 +103,8 @@
   document.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.target.closest('input, textarea, select, [contenteditable]')) return;
-    // Space / Enter on a focused button inside a widget presses the button.
-    if ((e.key === ' ' || e.key === 'Enter') && e.target.closest('button, a')) return;
+    // Keep native activation for buttons, links and exercise disclosures.
+    if ((e.key === ' ' || e.key === 'Enter') && e.target.closest('button, a, summary')) return;
     switch (e.key) {
       case 'ArrowRight': case 'ArrowDown': case 'PageDown': case ' ': case 'Enter':
         e.preventDefault(); next(); break;
@@ -122,7 +122,7 @@
   // Click the left third to go back, anywhere else to advance. Clicks on
   // links and controls are left alone.
   document.addEventListener('click', (e) => {
-    if (e.target.closest('a, button, input, select, textarea, label, [data-interactive]')) return;
+    if (e.target.closest('a, button, input, select, textarea, label, summary, [data-interactive]')) return;
     if (Date.now() - lastSwipe < 500) return; // the click a swipe can leave behind
     if (e.clientX < innerWidth / 3) prev(); else next();
   });
@@ -131,7 +131,7 @@
   let touchX = null;
   let touchY = null;
   document.addEventListener('touchstart', (e) => {
-    if (e.target.closest('a, button, input, select, textarea, [data-interactive]')) {
+    if (e.target.closest('a, button, input, select, textarea, summary, [data-interactive]')) {
       touchX = null;
       return;
     }

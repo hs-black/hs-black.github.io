@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Continuous batching：每一轮重新组队 · Zunzhe Zhang</title>
-<meta name="description" content="用动画看静态 batch 的空转、逐轮调度、新请求入队、decode 与 prefill 的区别，以及 chunked prefill 的 token 预算。">
+<meta name="description" content="手算每轮调度、TTFT 和 ITL，理解 chunked prefill、显存准入、公平性与过载；附时间轴动画、习题和离散事件实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
@@ -24,7 +24,11 @@
 .slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
 .slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
 .slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
+
+.serving-visual text{fill:var(--text);font:23px var(--font-sans)}
+.serving-visual .clock,.serving-visual .answer,.serving-visual .outputs{font-weight:700;fill:var(--accent)}
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -36,6 +40,7 @@
 <p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
 <p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
 </section>
+
 <section class="slide lesson" id="cb-static">
 <div class="kicker">01 · 空转</div>
 <h2>短请求结束了，为什么还在占位置？</h2>
@@ -132,6 +137,7 @@
 </div>
 <p class="note">方格表示生成一轮的工作，不表示真实耗时；静态 batch 这里指批次成员在完成前不变。</p>
 </section>
+
 <section class="slide lesson" id="cb-loop">
 <div class="kicker">02 · 调度单位</div>
 <h2>一轮 forward，就是一次换人的机会</h2>
@@ -177,6 +183,9 @@
 </div>
 <p class="note">普通 decode 每请求每轮推进一个 token；投机解码等机制可一次验证多个 token。</p>
 </section>
+<section class="slide workshop" id="cb-state"><div class="kicker">工程细节</div><h2>调度器每轮读的，是一张不断变化的状态表</h2><table class="ws-table"><thead><tr><th>字段</th><th>含义</th><th>为何需要</th></tr></thead><tbody><tr><td>arrival</td><td>请求到达时刻</td><td>衡量排队与公平性</td></tr><tr><td>prompt_remaining</td><td>还未计算的输入 token</td><td>决定 prefill chunk</td></tr><tr><td>emitted / max_output</td><td>已经生成 / 允许生成的数量</td><td>决定继续 decode 或完成</td></tr><tr><td>block_table / KV length</td><td>已驻留的历史及位置</td><td>检查显存与构造 attention 输入</td></tr></tbody></table><p class="ws-note">状态通常经历 waiting → prefill → decode → finished；取消也应释放资源。被抢占的请求要保留 token ID，准备恢复计算。</p></section>
+<section class="slide workshop" id="cb-metrics"><div class="kicker">工程细节</div><h2>一条请求有三把时钟</h2><div class="ws-equation">TTFT = 首 token 到达时间 − 请求到达时间</div><div class="ws-equation">ITLᵢ = 第 i 个输出时间 − 第 i−1 个输出时间</div><div class="ws-equation">E2E = 最后一个输出时间 − 请求到达时间</div><p class="">TTFT 包含排队、tokenization、prefill 和传输；下面的教学模拟只建模队列与 forward，真实测量用客户端时钟。</p><p class="ws-note">吞吐也要说清：输入 token/s、输出 token/s、完成请求/s 不可混写。平均 ITL 之外还要看 P95/P99，用户会感觉到偶发停顿。</p></section>
+<section class="slide workshop" id="cb-budget-cost"><div class="kicker">工程细节</div><h2>一个 token 预算，不是一个毫秒预算</h2><div class="ws-equation">Σ prefill chunk 长度 + 本轮 decode 请求数 ≤ C</div><p class="">普通 decode 每条请求本轮计算 1 个输入位置；投机验证、并行草稿等情况需要单独计数。</p><div class="ws-cols"><div class="ws-card"><p class=""><b>Prefill</b><br>同一请求有多个 query，算子更容易形成大矩阵；chunk 越靠后，还会读取之前的 KV。</p></div><div class="ws-card"><p class=""><b>Decode</b><br>每条只有一个 query，读取长度不同的历史；同样 32 个 token 预算，可能有完全不同的时长。</p></div></div><p class="ws-note">调度性能模型至少需要 prefill token 数、decode 条数和历史长度分布，随后用实际 profiling 校准。</p></section>
 <section class="slide lesson" id="cb-replace">
 <div class="kicker">03 · 连续批处理</div>
 <h2>A 刚离场，D 就能补进来</h2>
@@ -218,6 +227,7 @@
 </div>
 <p class="note">D 这里已完成 prefill；新提示词的 prefill 也需要被调度，不能凭空跳过。</p>
 </section>
+
 <section class="slide lesson" id="cb-prefill">
 <div class="kicker">04 · 两种工作</div>
 <h2>长提示词和逐字生成，节奏不一样</h2>
@@ -283,6 +293,22 @@
 </div>
 <p class="note">计算与带宽的占比随模型、batch 和上下文长度变化；这里展示常见工作形态。</p>
 </section>
+<section class="slide workshop" id="cb-trace-setup"><div class="kicker">工程细节</div><h2>从三条请求开始，手工当一次调度器</h2><table class="ws-table"><thead><tr><th>请求</th><th>到达时间</th><th>输入长度</th><th>总输出 token</th></tr></thead><tbody><tr><td>A</td><td>0 ms</td><td>6</td><td>3</td></tr><tr><td>B</td><td>2 ms</td><td>2</td><td>2</td></tr><tr><td>C</td><td>6 ms</td><td>3</td><td>2</td></tr></tbody></table><div class="ws-equation">C = 4；单轮时长 = 2 + 0.5P + 1D ms</div><p class="">P 是本轮 prefill token 数，D 是 decode 请求数。先安排 decode，再按到达顺序填入 prefill；轮内到达只在下个边界加入。</p><p class="ws-note">这是便于手算的教学成本模型。最后一个 prefill chunk 直接采样首 token，后续每轮 decode 再产出一个。</p></section>
+<section class="slide workshop" id="cb-trace-animation"><div class="kicker">计算动画 · 离散事件时间轴</div><h2>看着时钟走，就知道谁在等待</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><g class="" opacity="1"><rect x="15" y="40" width="210" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="120.0" y="83.0" text-anchor="middle">P4 / D0</text></g><g class="" opacity="1"><rect x="240" y="40" width="210" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="345.0" y="83.0" text-anchor="middle">P4 / D0</text></g><g class="" opacity="1"><rect x="465" y="40" width="210" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="570.0" y="83.0" text-anchor="middle">P2 / D2</text></g><g class="" opacity="1"><rect x="690" y="40" width="210" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="795.0" y="83.0" text-anchor="middle">P1 / D1</text></g><g class="" opacity="1"><rect x="915" y="40" width="210" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="1020.0" y="83.0" text-anchor="middle">P0 / D1</text></g><rect class="cursor" x="15" y="32" width="210" height="86" rx="16" fill="none" stroke="var(--accent)" stroke-width="4"/><text x="20" y="175" class="">本轮结束时间：</text><text x="220" y="175" class="clock">0</text><text x="320" y="175" class="">ms</text><text x="20" y="225" class="">累计输出 token：</text><text x="245" y="225" class="outputs">0</text><text x="20" y="270" class="">A: 8 → 13 → 16.5；B: 8 → 13；C: 16.5 → 19.5 ms</text></svg><p class="ws-caption">0–4 ms 只计算 A。B 在 2 ms 到达，要等到 4 ms 才能参加；C 在 6 ms 到达，要等到 8 ms。</p></section>
+<section class="slide workshop" id="cb-trace-metrics"><div class="kicker">工程细节</div><h2>现在能把延迟和吞吐都算出来</h2><table class="ws-table"><thead><tr><th>请求</th><th>输出时刻 / ms</th><th>TTFT</th><th>ITL / ms</th></tr></thead><tbody><tr><td>A</td><td>8, 13, 16.5</td><td>8 − 0 = 8 ms</td><td>5, 3.5</td></tr><tr><td>B</td><td>8, 13</td><td>8 − 2 = 6 ms</td><td>5</td></tr><tr><td>C</td><td>16.5, 19.5</td><td>16.5 − 6 = 10.5 ms</td><td>3</td></tr></tbody></table><div class="ws-equation">输出吞吐 = 7 / 0.0195 ≈ 358.97 token/s</div><p class="ws-note">C 只有 3 个输入 token，却比 A 的首字更晚；它到达时已有两条 decode 占用预算。只按 prompt 长度估 TTFT 会漏掉排队。</p></section>
+<section class="slide workshop" id="cb-first-token"><div class="kicker">工程细节</div><h2>首 token 从哪里来，决定计数会不会差一轮</h2><pre class="ws-code">prefill(prompt_tokens) -&gt; logits_at_last_prompt_position
+first_output = sample(logits)
+# 此时 first_output 的 KV 还没写入
+decode(first_output, cached_prompt) -&gt; next_logits
+second_output = sample(next_logits)</pre><p class="">输出长度为 3，只需要首轮 prefill 加 2 次 decode。停止后，最后一个输出 token 的 KV 未必需要再计算。</p><p class="ws-note">调度表里的“已采样 token 数”和“已计算 KV 长度”是不同字段。错把两者相等，会引入无效位置、重复计算或错位的位置编码。</p></section>
+<section class="slide workshop" id="cb-pseudocode"><div class="kicker">工程细节</div><h2>一轮调度，分成计划、预留、执行、提交</h2><pre class="ws-code">ready = collect_arrived_requests(now)
+plan = pick_decode(ready, token_budget)
+plan += fill_prefill_chunks(ready, remaining_budget(plan))
+plan = fit_kv_capacity(plan)
+reserve_blocks(plan)             # 先让本轮所需位置有地址
+outputs = execute(plan)
+commit_kv_lengths_and_samples(outputs)
+release_finished_or_cancelled_requests()</pre><p class="ws-note">token 上限、序列数量上限、KV 块容量是三个约束。实现可以把选择与分配交错，但失败路径不能留下半完成的状态。</p></section>
 <section class="slide lesson" id="cb-budget">
 <div class="kicker">05 · Chunked prefill</div>
 <h2>先留出下一字，再把空余预算给提示词</h2>
@@ -371,6 +397,7 @@
 </div>
 <p class="note">这是 vLLM 的 decode 优先策略示意；总 token 数上限对应 max_num_batched_tokens。</p>
 </section>
+
 <section class="slide lesson" id="cb-chunks">
 <div class="kicker">06 · 时间轴</div>
 <h2>长提示词分几轮完成，老请求持续前进</h2>
@@ -418,6 +445,13 @@
 </div>
 <p class="note">表中每轮只标记调度内容，不按真实耗时等比例绘制；后续 chunk 仍会读前面 chunk 的 KV。</p>
 </section>
+<section class="slide workshop" id="cb-chunk-cost"><div class="kicker">工程细节</div><h2>把长 prompt 切成三段，究竟换来了什么？</h2><p class="">已有 2 条持续 decode。新 prompt 长 12，仍用 t = 2 + 0.5P + D ms；忽略网络，下一轮从 0 ms 开始。</p><table class="ws-table"><thead><tr><th>策略</th><th>每轮 P / D</th><th>prompt 完成时刻</th><th>老请求下一 token</th></tr></thead><tbody><tr><td>大段：C=14</td><td>12 / 2</td><td>10 ms</td><td>10 ms</td></tr><tr><td>小段：C=6</td><td>4 / 2，连续 3 轮</td><td>18 ms</td><td>6、12、18 ms</td></tr></tbody></table><p class="">小段让首个 decode 响应更早，也产生更多次固定调度开销。新请求的 prefill 反而更晚完成。</p><p class="ws-note">两种策略在 prompt 完成前做的 decode 工作量不同；这是用户等待时间的比较，不是同等总工作量的 GPU 加速比。</p></section>
+<section class="slide workshop" id="cb-chunk-animation"><div class="kicker">计算动画 · 计算粒度与等待</div><h2>屏障切短，老请求就能更早收到字</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><text x="15" y="35" class="">大段：一个 10 ms 屏障</text><rect x="20" y="55" width="600" height="48" rx="8" fill="var(--bg-soft)"/><rect class="bigprogress" x="20" y="55" width="0" height="48" rx="8" fill="var(--accent)"/><text x="660" y="88" class="">prefill：</text><text x="790" y="88" class="bigcount">0</text><text x="15" y="145" class="">小段：每 6 ms 放出一次 decode 结果</text><g class="chunk0" opacity="0.2"><rect x="20" y="165" width="335" height="45" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="187.5" y="195.5" text-anchor="middle">6 ms</text></g><g class="chunk1" opacity="0.2"><rect x="385" y="165" width="335" height="45" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="552.5" y="195.5" text-anchor="middle">12 ms</text></g><g class="chunk2" opacity="0.2"><rect x="750" y="165" width="335" height="45" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="917.5" y="195.5" text-anchor="middle">18 ms</text></g><text x="20" y="265" class="">小段已处理 prompt：</text><text x="290" y="265" class="smallcount">0</text><text x="370" y="265" class="">/ 12 token</text></svg><p class="ws-caption">条形表示轮次经过的时间；数字只统计已完成的 prefill。在 6 ms 时小段已交付下一字，到 18 ms 才完成全部 prompt。</p></section>
+<section class="slide workshop" id="cb-kv-admission"><div class="kicker">工程细节</div><h2>本轮能算 100 个 token，不代表还能再接 100 条</h2><p class="">教学例：KV 池 1,000 块，已有活跃请求占 900 块。新请求输入长度 1,600，块大小 16，光 prompt 就需要 100 块。</p><div class="ws-equation">首次入场需求 = ceil(1,600 / 16) = 100 块</div><p class="">如果全部接入，它处理完 prompt 时空闲块归零；其他请求一旦跨块边界，就可能触发抢占。chunked prefill 可以分段分配，但不会消除最终驻留的 KV。</p><p class="ws-note">入场规则应结合当前块需求、预计增长、并发上限与抢占成本；设预留余量时，要用业务长度分布验证。</p></section>
+<section class="slide workshop" id="cb-overload"><div class="kicker">工程细节</div><h2>吞吐到了平台期，排队就成了主要延迟</h2><div class="ws-equation">稳定系统：平均在途请求 L = 到达率 λ × 平均逗留时间 W</div><p class="">若完成能力约 20 请求/s，输入却持续 25 请求/s，队列平均每秒多 5 条。增加等待时间不能解决算力缺口。</p><p class="">在稳定运行的另一个观测窗口，λ = 16 请求/s，平均 W = 0.75 s，则平均在途 L = 12 条。这里包含等待和正在运行的请求。</p><p class="ws-note">先设置有界队列、超时和 admission control，再选择扩容或降级。Little 定律用于稳定窗口的平均值，不能拿它预测某一条请求的 P99。</p></section>
+<section class="slide workshop" id="cb-fairness"><div class="kicker">工程细节</div><h2>decode 优先也要给长 prompt 留下一条路</h2><div class="ws-cols"><div class="ws-card"><p class=""><b>饥饿怎样发生</b><br>token 预算 C=8，恰好总有 8 条 decode 等待；prefill 每轮拿到 0，输入队列一直增长。</p></div><div class="ws-card"><p class=""><b>可执行的修复</b><br>限制活跃 decode 数；为超时 prefill 保留少量预算；采用年龄权重或每租户配额，控制单个大请求占用。</p></div></div><p class="">有些服务愿意为现有会话保持低 ITL，有些更看重新请求 TTFT。把目标写成明确的 SLO，再选择调度权重。</p><p class="ws-note">“先到先服务”也需说明粒度：请求级、chunk 级或 token 级会给出不同结果。</p></section>
+<section class="slide workshop" id="cb-diagnose"><div class="kicker">工程细节</div><h2>吞吐提高了，用户却开始抱怨卡顿</h2><table class="ws-table"><thead><tr><th>教学实验：同一请求 trace</th><th>方案 A</th><th>方案 B</th></tr></thead><tbody><tr><td>prefill token 预算</td><td>512</td><td>4,096</td></tr><tr><td>输出吞吐</td><td>900 token/s</td><td>1,050 token/s</td></tr><tr><td>P99 ITL</td><td>35 ms</td><td>130 ms</td></tr><tr><td>P95 TTFT</td><td>700 ms</td><td>430 ms</td></tr></tbody></table><p class="">若 SLO 要求 P99 ITL ≤ 80 ms，B 不合格。先减小 chunk，或按观测耗时限制本轮 prefill；再检查吞吐仍能否覆盖到达率。</p><p class="ws-note">不要看到 GPU 利用率提高就宣布成功。把每轮 prefill 数量与 ITL 尖峰对齐，才能验证卡顿确实来自长轮次。</p></section>
+<section class="slide workshop" id="cb-load-test"><div class="kicker">工程细节</div><h2>让压测保留真实的“什么时候到达”</h2><div class="ws-cols"><div class="ws-card"><p class=""><b>固定并发压测</b><br>上一条结束后再发下一条。适合测饱和吞吐，但服务变慢时，发出的请求也会变少。</p></div><div class="ws-card"><p class=""><b>按时间重放</b><br>按预定到达时间发送，不等前一条结束。能看到突发、队列增长和 SLO 失守。</p></div></div><p class="">保存每条请求的到达时刻、首字时刻、所有流式 token 时刻、结束原因；同时保存服务器轮次、预算与 KV 占用。</p><p class="ws-note">按长短 prompt、租户、缓存命中状态分别分组，避免平均值掩盖某一群请求被饿住。</p></section>
 <section class="slide">
 <div class="kicker">07 · 两道预算</div>
 <h2>token 预算够，显存也得装得下</h2>
@@ -436,6 +470,7 @@
 <a href="/posts/paged-attention/">PagedAttention 如何按需分配 KV 块 →</a>
 </p>
 </section>
+
 <section class="slide">
 <div class="kicker">08 · 调参的目标</div>
 <h2>吞吐、首字时间、字间间隔，一起看</h2>
@@ -451,6 +486,13 @@
 </div>
 <p class="note">TTFT：到第一个输出 token 的时间。ITL：相邻输出 token 的间隔。吞吐：单位时间完成的工作量。用真实到达率与长度分布一起测。</p>
 </section>
+
+
+<section class="slide workshop" id="cb-ex1"><div class="kicker">练习 1 · 先计算，再展开</div><h2>同一条请求，四个延迟数该怎么填？</h2><div class="ws-prompt">请求在 10 ms 到达，30 ms 开始 prefill，70 ms 收到首 token，接着在 90、125、150 ms 收到 token。求排队、TTFT、平均 ITL 和 E2E；平均 ITL 能说明最坏停顿吗？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">排队 = 30−10 = 20 ms。TTFT = 70−10 = 60 ms。<br>ITL = [20,35,25] ms，均值 = 80/3 ≈ 26.67 ms。<br>E2E = 150−10 = 140 ms。最大间隔是 35 ms，均值不能替代尾延迟；多条请求还需统计分位数。</p></details></div></section>
+<section class="slide workshop" id="cb-ex2"><div class="kicker">练习 2 · 先计算，再展开</div><h2>12 个位置，先 decode 以后怎么切 prompt？</h2><div class="ws-prompt">预算 C=12，已有 5 条普通 decode；等待中的 A 还剩 10 个 prefill token，B 还剩 3 个。decode 优先、prefill 按 FIFO。单轮成本 2 + 0.5P + D ms，求本轮安排和用时。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">先给 decode 5 个位置，剩 12−5=7。A 处理 7，A 剩 3；B 本轮处理 0。<br>P=7、D=5，时长 2+0.5×7+5=10.5 ms。<br>若计划还要跨块分配，必须再通过 KV 容量检查；token 预算满足只是第一个条件。</p></details></div></section>
+<section class="slide workshop" id="cb-ex3"><div class="kicker">练习 3 · 先计算，再展开</div><h2>平均负载不高，为何新请求一直等？</h2><div class="ws-prompt">每轮预算 8，始终有 8 条长 decode 会话；prefill 队列累计 20 条。CPU 空闲，GPU 每轮都在工作。指出瓶颈并提出两种能验证效果的改法。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">这是策略造成的 prefill 饥饿：每轮 8 个位置都被 decode 消耗。<br>改法一：降低活跃 decode 上限或给老化的 prefill 留 1–2 个位置；观察 TTFT 降幅与 ITL 代价。<br>改法二：限制新长会话入场，按租户或等待年龄轮换；观察队列年龄和最慢租户，而不只看总体吞吐。</p></details></div></section>
+<section class="slide workshop" id="continuous-batching-lab"><div class="kicker">动手实验 · CPU 教学模拟</div><h2>修改预算，重新计算每一条时间线</h2><p class="">下载代码后，在保存代码的目录运行：</p><pre class="ws-code">python3 lab.py
+python3 lab.py --budget 6</pre><p class="ws-note">默认预算 4：A 的 TTFT=8 ms，B=6 ms，C=10.5 ms；总用时 19.5 ms，输出吞吐 358.97 token/s。</p><p class="">先在纸上改成预算 6，再比较输出。尝试加入一次 1,000-token 突发，观察短请求的首字等待；再实现每请求最大 chunk，让状态转换与 token 守恒断言继续通过。</p><a class="ws-lab-link" download href="/posts/continuous-batching/lab.py">下载 lab.py · Python 3 标准库</a></section>
 <section class="slide">
 <div class="kicker">参考与延伸阅读</div>
 <h2>把一个 batch，变成持续流动的队伍</h2>
@@ -468,11 +510,13 @@
 <a href="/posts/scaling-inference/">分布式推理</a> · <a href="/blog/">返回博客</a>
 </p>
 </section>
+
+
 </div>
 </main>
-<script src="/assets/slides.js">
+<script src="/assets/slides.js?v=03e51263994e">
 </script>
-<script src="/assets/anim.js">
+<script src="/assets/anim.js?v=9b723aa5f47d">
 </script>
 <script>
 (() => {
@@ -884,6 +928,25 @@
     });
     Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
     window.lessonTimelines[id] = tl;
+  });
+})();
+</script>
+<script>
+(() => {
+  const scenes = [{"id": "cb-trace-animation", "steps": [["第 1 轮结束", [[".cursor", {"x": 0}], [".clock", {"text": 4}], [".outputs", {"text": 0}]]], ["第 2 轮结束", [[".cursor", {"x": 225}], [".clock", {"text": 8}], [".outputs", {"text": 2}]]], ["第 3 轮结束", [[".cursor", {"x": 450}], [".clock", {"text": 13}], [".outputs", {"text": 4}]]], ["第 4 轮结束", [[".cursor", {"x": 675}], [".clock", {"text": 16.5}], [".outputs", {"text": 6}]]], ["第 5 轮结束", [[".cursor", {"x": 900}], [".clock", {"text": 19.5}], [".outputs", {"text": 7}]]]]}, {"id": "cb-chunk-animation", "steps": [["6 ms：小段先交付", [[".chunk0", {"opacity": 1}], [".smallcount", {"text": 4}], [".bigprogress", {"attr": {"width": 360}}]]], ["10 ms：大段完成", [[".bigprogress", {"attr": {"width": 600}}], [".bigcount", {"text": 12}]]], ["12 ms：第二段", [[".chunk1", {"opacity": 1}], [".smallcount", {"text": 8}]]], ["18 ms：第三段", [[".chunk2", {"opacity": 1}], [".smallcount", {"text": 12}]]]]}];
+  scenes.forEach(({id,steps}) => {
+    const slide = document.getElementById(id), tl = Anim.timeline({root:slide});
+    tl.label('起点',0);
+    let at=0;
+    steps.forEach(([label,actions])=>{
+      actions.forEach(([selector,props])=>{
+        if(typeof props.text === 'number') props.fmt=v=>Number.isInteger(props.text)?String(Math.round(v)):v.toFixed(1);
+        tl.to(selector,props,{at:at+.1,dur:.9});
+      });
+      at+=1.1;tl.label(label,at);
+    });
+    Anim.slide(slide,tl,{steps:true,controls:true,delay:0});
+    window.lessonTimelines[id]=tl;
   });
 })();
 </script>

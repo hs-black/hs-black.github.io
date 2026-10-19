@@ -4,16 +4,21 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Sparse attention：只看需要的历史 · Zunzhe Zhang</title>
-<meta name="description" content="动画讲解 causal mask、滑动窗口、全局 token、内容选择与 block sparse，理解少读哪些 KV、选择成本，以及稀疏访问和缓存压缩的区别。">
+<meta name="description" content="从稀疏 softmax 到选择器成本、块利用率、因果索引与 kernel 布局；用数值动画、算术练习和 CPU 实验验证正确性。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
 .scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
 .captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+
+.slide.workshop .course-number-scene .cn-value{font:36px var(--font-mono);fill:var(--accent)}
+.slide.workshop .course-number-scene .cn-label{font-size:20px;fill:var(--text-soft)}
+.slide.workshop .course-number-scene .cn-detail{font-size:19px}
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -36,6 +41,15 @@
 <p>稀疏化是在这个可见区域里再选一部分位置。只要 mask 允许，选中的位置照常做点积、softmax 和加权求和。</p>
 </div>
 </section>
+<section class="slide workshop" id="sparse-definition">
+<div class="kicker">工程细节</div><h2>稀疏 mask 在 softmax 之前生效</h2>
+<p class="ws-lead">第 i 个 query 允许读取的集合记作 Si。先选集合，再在集合内部重新归一化。</p><div class="ws-equation">logitᵢⱼ = qᵢᵀkⱼ / √d，j ∈ Sᵢ<br>aᵢⱼ = exp(logitᵢⱼ) / Σₖ∈Sᵢ exp(logitᵢₖ)<br>yᵢ = Σⱼ∈Sᵢ aᵢⱼ vⱼ</div><p class="ws-lead">不能先做完整 softmax，再把没选中的权重置零而不归一化。那会让权重和小于 1，输出幅值也改变。</p><p class="ws-note">Sᵢ 必须非空；通常至少保留当前 token 或局部窗口。实现用 masked fill(−∞)，再减去行最大值求 softmax。</p>
+</section>
+<section class="slide workshop" id="mask-arithmetic">
+<div class="kicker">工程细节</div><h2>同样的 V，换集合就会换输出</h2>
+<p class="ws-lead">logits = [0, ln 2, ln 3]，V = [2, 4, 8]。完整权重是 [1/6, 2/6, 3/6]，输出 17/3 ≈ 5.667。</p><div class="ws-equation">只选位置 {0, 2}：<br>权重 = [1/4, 3/4]<br>y = 1/4 × 2 + 3/4 × 8 = 6.5</div><p class="ws-lead">若把完整权重的中间项直接清零，得到 1/6 × 2 + 3/6 × 8 = 4.333；它并不是这个稀疏 mask 定义的 attention。</p><p class="ws-note">kernel 的正确性应与“相同 mask 的 dense 参考”比较；任务质量再与原始 full attention 比较。</p>
+</section>
+
 <section class="slide lesson" id="window">
 <div class="kicker">动画图解 LLM 系统</div>
 <h2>滑动窗口：只看最近的 w 个 token</h2>
@@ -49,6 +63,15 @@
 </div>
 <p class="note">窗口宽度 3 为演示值；计算成本按每个 query 访问的 key 数量计算。</p>
 </section>
+<section class="slide workshop" id="window-count">
+<div class="kicker">工程细节</div><h2>窗口的精确配对数，不只是 O(nw)</h2>
+<p class="ws-lead">含自己的因果窗口宽 w。前 w−1 行还没填满，后面每行恰好读 w 个位置；假设 n ≥ w。</p><div class="ws-equation">配对数 = 1 + 2 + … + (w−1) + w(n−w+1)<br>= nw − w(w−1)/2</div><p class="ws-lead">n = 4096、w = 256：配对数 = 1,048,576 − 32,640 = 1,015,936。full causal 是 4096 × 4097 / 2 = 8,390,656。</p><p class="ws-note">这组算术约少 8.26 倍配对。实际延迟还包括投影、softmax、访存和 kernel 调度。</p>
+</section>
+<section class="slide workshop" id="window-receptive-field">
+<div class="kicker">工程细节</div><h2>多层窗口扩大的是间接感受野</h2>
+<div class="ws-equation">L 层、每层宽 w → 最远可传播 L(w−1) 个位置<br>最终位置可受影响的范围宽度 ≤ 1 + L(w−1)</div><p class="ws-lead">L = 4、w = 3：最后一层位置 10 可以间接受到位置 2 的影响，范围宽 9；每层仍只直接读取 3 个位置。</p><p class="ws-lead">这条路径经过多次压缩与变换，不等同于最后一层直接拿到位置 2 的原始 KV。精确复制远处数字，可能仍需要远程读取。</p><p class="ws-note">推导假设每层都是相同因果局部窗口、没有全局 token 或跨层跳接扩大可见性。</p>
+</section>
+
 <section class="slide lesson" id="global">
 <div class="kicker">动画图解 LLM 系统</div>
 <h2>局部之外，再留少量远程入口</h2>
@@ -75,6 +98,23 @@
 </div>
 <p class="note">分数与选中位置为示意；最终集合还可以加入局部窗口和必要的保留位置。</p>
 </section>
+<section class="slide workshop" id="selector-break-even">
+<div class="kicker">工程细节</div><h2>选择器先要赚回自己的时间</h2>
+<div class="ws-equation">tsparse = tselect + tgather + tattn(k)<br>只有 tsparse < tattn(n)，attention 部分才更快</div><p class="ws-lead">假想测量：full attention 2.0 ms；选择 0.35 ms、gather 0.25 ms、稀疏计算 0.50 ms，总计 1.10 ms，attention 加速 1.82×。</p><p class="ws-lead">若其他网络层还花 6 ms，端到端从 8.0 降到 7.1 ms，只快 1.13×。小上下文中 full 只需 0.4 ms 时，选择开销可能已不划算。</p><p class="ws-note">选择器若扫描低维索引，仍然可能随 n 线性增长；“主 attention 只读 k 个”不是整个算法 O(k) 的保证。</p>
+</section>
+<section class="slide workshop" id="causal-topk">
+<div class="kicker">工程细节</div><h2>top-k 也必须遵守因果约束</h2>
+<pre class="ws-code">valid = key_position &lt;= query_position
+index_score = where(valid, index_score, -inf)
+chosen = topk(index_score, k=min(k, valid_count))
+chosen = sorted(unique(chosen + local_positions))
+y = attention(q, gather(K, chosen), gather(V, chosen))</pre><p class="ws-lead">先 mask 再 top-k，避免未来高分把过去候选挤掉。全局位置与局部窗口取并集时去重，否则同一个 token 会被重复计权。</p><p class="ws-note">多 query 的稀疏索引可不同。若为了方便共用一组块，块内每个 query 仍需自己的精确 causal mask。</p>
+</section>
+<section class="slide workshop" id="selected-softmax">
+<div class="kicker">逐步算一遍</div><h2>选择、重归一化、读取内容，顺序不能乱</h2>
+<p class="ws-lead">已缩放 logits 为 [0, ln 2, ln 3]，选择位置 {0, 2}，对应 V 为 [2, 8]。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="选择、重归一化、读取内容，顺序不能乱"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">候选 {0, 2}：exp logits = [1, 3]</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">在候选内归一化：权重 [0.25, 0.75]</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">读取 V：0.25 × 2 + 0.75 × 8</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
+</section>
+
 <section class="slide lesson" id="blocks">
 <div class="kicker">动画图解 LLM 系统</div>
 <h2>GPU 更喜欢整块读取</h2>
@@ -87,6 +127,24 @@
 <p>块越大，调度更规整，也会多读一些不太相关的 token。块大小需要与选择粒度一起权衡。</p>
 </div>
 </section>
+<section class="slide workshop" id="block-occupancy">
+<div class="kicker">逐步算一遍</div><h2>选了 3 个 token，为什么读了 12 个？</h2>
+<p class="ws-lead">历史长度 16，块宽 4，目标位置 {1, 6, 14}（从 0 编号）。每个目标落在不同块里。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="选了 3 个 token，为什么读了 12 个？"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">位置 1 → block 0 → 读取 [0, 1, 2, 3]</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">位置 6 → block 1 → 读取 [4, 5, 6, 7]</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">位置 14 → block 3 → 读取 [12, 13, 14, 15]</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">这里区分“选块后块内全部参与”与“块内仍做 token mask”；两者语义不同，读取成本可以相同。</p>
+</section>
+<section class="slide workshop" id="block-csr">
+<div class="kicker">工程细节</div><h2>把稀疏模式写成 kernel 能消费的索引</h2>
+<p class="ws-lead">按 query block 存储可见 key blocks。row_ptr 指出每行在 col_idx 中的范围，避免保存巨大布尔矩阵。</p><pre class="ws-code">row_ptr = [0, 1, 3, 5]     # 3 个 query blocks
+col_idx = [0, 0, 1, 0, 2]  # 依次存每行选中的 key blocks
+# query block 1: col_idx[1:3] == [0, 1]
+for key_block in col_idx[row_ptr[r]:row_ptr[r+1]]:
+    load(K[key_block], V[key_block])
+    update_online_softmax(q_block, k_block, v_block)</pre><p class="ws-note">query / key block 指的是逻辑位置块。分页 KV 还需要块表把逻辑位置映射到物理显存地址。</p>
+</section>
+<section class="slide workshop" id="block-boundaries">
+<div class="kicker">工程细节</div><h2>块可见，不等于块内所有元素都可见</h2>
+<p class="ws-lead">query block 覆盖位置 4…7，key block 也覆盖 4…7。它们处于因果矩阵对角线上。</p><table class="ws-table"><thead><tr><th>query</th><th>K4</th><th>K5</th><th>K6</th><th>K7</th></tr></thead><tbody><tr><td>Q4</td><td>✓</td><td>屏蔽</td><td>屏蔽</td><td>屏蔽</td></tr><tr><td>Q5</td><td>✓</td><td>✓</td><td>屏蔽</td><td>屏蔽</td></tr><tr><td>Q6</td><td>✓</td><td>✓</td><td>✓</td><td>屏蔽</td></tr><tr><td>Q7</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr></tbody></table><p class="ws-lead">跳过块内 mask 会泄露未来。只在整个 key block 的最大位置不超过最早 query 时，才可以整块免 mask。</p>
+</section>
+
 <section class="slide lesson" id="cost">
 <div class="kicker">动画图解 LLM 系统</div>
 <h2>少读多少？先看 k 与 n</h2>
@@ -100,6 +158,19 @@
 </div>
 <p class="note">示意 n = 16、k = 4；复杂度忽略层数与头数，且不计选择器。</p>
 </section>
+<section class="slide workshop" id="sparse-flops">
+<div class="kicker">工程细节</div><h2>把复杂度换成 FLOP 与读取字节</h2>
+<p class="ws-lead">单个 query head，n = 32768、k = 1024、d = 128、BF16。点积与 value 加权各约 2kd FLOP。</p><table class="ws-table"><thead><tr><th>部分</th><th>Full</th><th>Sparse 主 attention</th></tr></thead><tbody><tr><td>核心 FLOP</td><td>4nd = 16,777,216</td><td>4kd = 524,288</td></tr><tr><td>K/V 载荷</td><td>2nd × 2 = 16 MiB</td><td>2kd × 2 = 0.5 MiB</td></tr><tr><td>低维选择扫描</td><td>无</td><td>另计：例如 n × 16 × 2 = 1 MiB</td></tr></tbody></table><p class="ws-lead">如果索引维度是 16 且每步全扫，光索引就要读 1 MiB。还未计索引计算、输出 top-k、非连续访问与多个 head 的共享。</p><p class="ws-note">这是一个明确的教学配置。选择器与主 attention 的精度、头共享方式可以不同。</p>
+</section>
+<section class="slide workshop" id="selector-quality">
+<div class="kicker">工程细节</div><h2>漏选的损失比“命中几个”更有意义</h2>
+<p class="ws-lead">假设完整 attention 在三个关键位置上的权重为 0.80、0.15、0.05。选中两个位置的 recall 都是 2/3，但漏掉谁差别很大。</p><div class="ws-cols"><div class="ws-card"><h3>选中 0.80 + 0.15</h3><p>保留 attention mass 0.95，漏掉 0.05；重新归一化后主要信息可能仍保留。</p></div><div class="ws-card"><h3>选中 0.15 + 0.05</h3><p>保留 mass 0.20，漏掉最重要位置。虽然索引 recall 相同，输出可能完全改变。</p></div></div><p class="ws-note">attention mass 仍只是诊断指标；最终要检查模型输出与任务质量。采样部分层和 query 做 full 参考，避免评估本身太贵。</p>
+</section>
+<section class="slide workshop" id="sparse-training">
+<div class="kicker">工程细节</div><h2>训练阶段还要决定选择器怎么学</h2>
+<p class="ws-lead">固定窗口不需要学习索引；动态 top-k 对“哪些位置被选中”通常没有普通的连续梯度。</p><div class="ws-cols"><div class="ws-card"><h3>被选中的主路径</h3><p>Q、K、V 的 attention 运算可正常反传。未被选中的位置在该 query 上通常收不到这条 attention 梯度。</p></div><div class="ws-card"><h3>索引器的学习信号</h3><p>可通过辅助目标、蒸馏完整 attention 分布或架构专用训练设计学习。具体目标决定了它学会找什么。</p></div></div><p class="ws-note">把预训练 full 模型临时套上稀疏 mask，是一种近似推理策略；它与从训练阶段就采用该稀疏结构不是同一件事。</p>
+</section>
+
 <section class="slide lesson" id="different">
 <div class="kicker">动画图解 LLM 系统</div>
 <h2>少读历史，与压小历史，是两件事</h2>
@@ -134,6 +205,32 @@
 </div>
 </div>
 </section>
+<section class="slide workshop" id="sparse-diagnosis">
+<div class="kicker">工程细节</div><h2>稀疏后更慢，先看三段时间</h2>
+<p class="ws-lead">假想 trace：原 attention 1.4 ms；新方案选择 0.7 ms、gather 0.6 ms、稀疏计算 0.4 ms，共 1.7 ms。</p><table class="ws-table"><thead><tr><th>发现</th><th>可能原因</th><th>下一步实验</th></tr></thead><tbody><tr><td>选择占 0.7 ms</td><td>扫描过宽或 top-k 太贵</td><td>降低索引维度，测选块粒度</td></tr><tr><td>gather 占 0.6 ms</td><td>位置离散、重复搬运</td><td>排序索引、合并相邻块</td></tr><tr><td>计算仅 0.4 ms</td><td>主矩阵确实变小</td><td>不要继续只优化这一小段</td></tr></tbody></table><p class="ws-note">每次只改一个变量，并用相同 mask 对齐正确性。若质量下降，先查 causal、去重、位置编码和归一化，再调选择预算。</p>
+</section>
+<section class="slide workshop" id="exercise-pairs">
+<div class="kicker">练习 1</div><h2>长度 8，窗口 3，省掉多少配对？</h2>
+<div class="ws-prompt">窗口包含当前 token。求 full causal 与窗口 attention 的精确配对数。再问：4 层窗口 3 的最大感受野宽是多少？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">Full = 8 × 9 / 2 = 36。窗口 = 1 + 2 + 6 × 3 = 21，也等于 8 × 3 − 3 × 2 / 2。减少 15/36 ≈ 41.67%。</p><p class="ws-lead">4 层结构的理论上限为 1 + 4 × (3−1) = 9；本题序列仅 8 个 token，实际最多 min(8,9) = 8。多层间接传播不等于一层直接读取。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
+</section>
+<section class="slide workshop" id="exercise-blocks">
+<div class="kicker">练习 2</div><h2>块读取能兑现多少理论节省？</h2>
+<div class="ws-prompt">n = 1024，块宽 16，选中 32 个 token，分别落在 24 个不同块。假设每个块都完整读取，求读取 token 数、目标利用率、相对 full 的流量比例。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">读取 24 × 16 = 384 个 token。目标利用率 = 32 / 384 = 8.33%。</p><p class="ws-lead">相对 full 流量 = 384 / 1024 = 37.5%，节省 62.5%；不能按只读 32 个 token 声称节省 96.875%。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
+</section>
+<section class="slide workshop" id="exercise-sparse-debug">
+<div class="kicker">练习 3</div><h2>未来信息从哪里漏进来了？</h2>
+<div class="ws-prompt">一个 chunk 包含位置 8…11。选择器对每个 query 都先看完整 K0…K11，取 top-4 后再丢掉未来索引。这个流程有什么问题？如何修正并测试？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">未来高分会占用 top-4 名额，丢掉后候选可能不足，甚至为空；选择结果也依赖未来内容。</p><p class="ws-lead">先按各 query 的绝对位置屏蔽未来，再做 top-k。测试时修改未来 token，确认较早 query 的输出完全不变；同时覆盖候选数不足与全局 / 局部去重。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
+</section>
+<section class="slide workshop" id="engineering-lab">
+<div class="kicker">动手实验</div><h2>让 sparse gather 对上 dense masked 参考</h2>
+<p class="ws-lead">用 NumPy 在 CPU 上跑一个可检查的参考实现。小尺寸便于把中间张量打印出来。</p><div class="ws-cols"><pre class="ws-code">python3 -m pip install numpy
+python3 lab.py
+python3 lab.py --seed 7</pre><pre class="ws-code">masked dense vs gather: PASS
+future perturbation: PASS
+window pairs n=8,w=3: 21
+3 targets / 12 loaded = 25.0%</pre></div><p class="ws-lead">把窗口改成局部 + 固定全局位置，先去重；再故意让对角块免 mask，观察未来扰动检查失败。</p><a class="ws-lab-link" download href="/posts/sparse-attention/lab.py">下载实验代码 lab.py</a><p class="ws-note">这是正确性与成本的教学实验；耗时不代表 GPU kernel 性能。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">参考资料</div>
 <h2>参考与延伸阅读</h2>
@@ -155,7 +252,7 @@
 </p>
 </section>
 </div>
-</main><script src="/assets/slides.js"></script><script src="/assets/anim.js"></script><script>
+</main><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
 const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
@@ -179,4 +276,17 @@ let sel=B('query',40,125,230,75,'订单号是什么？','accentbox')+B('selector
 let blk=T(190,40,'零散 token','label')+T(190,180,'连续 block','label');for(let i=0;i<16;i++)blk+=R('dot'+i,350+i*39,20,30,40,[0,3,6,7,10,12].includes(i)?'accentbox':'box soft');for(let i=0;i<4;i++){blk+=B('block'+i,350+i*160,145,145,70,'block '+i,i===0||i===2?'accentbox':'box soft')}blk+=B('gpu',730,270,270,55,'GPU tile','greenbox ghost');scene('blocks',blk,[{name:'按连续块组织',run:(tl,t)=>{a(tl,t,'[id^=dot]',{opacity:.15});a(tl,t,'#block0,#block2',{y:15,scale:1.04})}},{name:'块进入 tiled kernel',run:(tl,t)=>{a(tl,t,'#gpu',{opacity:1});a(tl,t,'#block0',{x:340,y:90,scale:.6});a(tl,t,'#block2',{x:80,y:90,scale:.6},.25)}}]);
 scene('cost',T(190,83,'full：n = 16','label')+T(190,183,'sparse：k = 4','label')+T(190,283,'额外的选择工作','label')+R('full',360,50,400,55,'accentbox')+R('sparse',360,150,100,55,'greenbox')+R('overhead',360,250,0,55,'box')+T(925,84,'历史长度增长','label'),[{name:'历史翻倍，full 翻倍',run:(tl,t)=>{a(tl,t,'#full',{attr:{width:640}})}},{name:'核心节省加上选择成本',run:(tl,t)=>{a(tl,t,'#sparse',{scale:1.06});a(tl,t,'#overhead',{attr:{width:140}})}}]);
 let dif=T(280,30,'稀疏访问：位置仍然分开存','label')+T(840,30,'压缩表示：多个位置汇成摘要','label');for(let i=0;i<4;i++)dif+=B('left'+i,60+i*125,85,105,65,'t'+(i+1),'box')+B('right'+i,625+i*115,85,95,65,'t'+(i+1),'box');dif+=B('q',210,250,170,60,'Q','accentbox')+B('summary',755,250,200,60,'摘要 c','greenbox ghost')+L('r0',295,240,112,160,'hotwire ghost')+L('r3',295,240,487,160,'hotwire ghost');scene('different',dif,[{name:'跳读原始位置',run:(tl,t)=>{a(tl,t,'#r0,#r3',{opacity:1});a(tl,t,'#left1,#left2',{opacity:.22})}},{name:'把位置压成摘要',run:(tl,t)=>{for(let i=0;i<4;i++)a(tl,t,'#right'+i,{x:(1.5-i)*115,y:145,scale:.4,opacity:0},i*.08);a(tl,t,'#summary',{opacity:1},.65)}}]);
+
+function numberSteps(id,frames,captions){
+ const el=document.getElementById(id),tl=Anim.timeline({root:el});
+ const value=el.querySelector('.cn-value'),label=el.querySelector('.cn-label'),detail=el.querySelector('.cn-detail'),cap=el.querySelector('.cn-caption'),rows=[...el.querySelectorAll('.cn-row')];
+ const packets=rows.map((row,i)=>{const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx','625');c.setAttribute('cy',String(54+i*73));c.setAttribute('r','7');c.setAttribute('fill','var(--accent)');c.style.opacity='0';el.querySelector('svg').appendChild(c);return c});
+ const driver=document.createElement('span');driver.hidden=true;el.appendChild(driver);
+ const draw=v=>{const n=Math.min(frames.length-1,Math.floor(v+1e-7)),f=frames[n];label.textContent=f.label;detail.textContent=f.detail;cap.textContent=captions[n];rows.forEach((r,i)=>r.style.opacity=i===n-1?'1':'.45');return String(v)};
+ tl.set(driver,{text:0,fmt:draw},{at:0});tl.set(value,{text:frames[0].value,fmt:v=>v.toFixed(frames[0].digits??2)},{at:0});tl.label('起点',0);
+ frames.slice(1).forEach((f,i)=>{const t=i*1.5;tl.to(packets[i],{opacity:1},{at:t+.1,dur:.1});tl.to(packets[i],{x:100,y:135-(54+i*73)},{at:t+.2,dur:.8,ease:'linear'});tl.to(packets[i],{opacity:0},{at:t+1.1,dur:.1});tl.to(value,{text:f.value,fmt:v=>v.toFixed(f.digits??2)},{at:t+.1,dur:1.15,ease:'linear'});tl.set(driver,{text:i+1,fmt:draw},{at:t+.05});tl.label(f.stop,t+1.5)});
+ Anim.slide(el,tl,{steps:true,controls:true});
+}
+numberSteps("selected-softmax",[{"value": 0, "label": "候选内累计量", "detail": "原位置 1 不参与计算"}, {"value": 4, "label": "softmax 分母", "detail": "1 + 3 = 4", "stop": "只读选中的 K"}, {"value": 0.25, "label": "位置 0 的权重", "detail": "位置 2 的权重 = 0.75", "stop": "重新归一化"}, {"value": 6.5, "label": "稀疏 attention 输出", "detail": "0.5 + 6 = 6.5", "stop": "读取选中的 V"}],["索引记录原始位置，不能重新编码位置坐标。", "先只为选中的 logits 求指数和。", "候选内部权重和为 1。", "算子结果应与同一 mask 的 dense 实现一致。"]);
+numberSteps("block-occupancy",[{"value": 0, "label": "累计读取 token 数", "detail": "3 个目标 / 16 个历史", "digits": 0}, {"value": 4, "label": "累计读取 token 数", "detail": "1 个目标 / 4 个读取 = 25%", "digits": 0, "stop": "读第一块"}, {"value": 8, "label": "累计读取 token 数", "detail": "2 个目标 / 8 个读取 = 25%", "digits": 0, "stop": "读第二块"}, {"value": 12, "label": "累计读取 token 数", "detail": "3 个目标 / 12 个读取 = 25%", "digits": 0, "stop": "读第三块"}],["逻辑上只想用三个位置，物理执行却以块为单位。", "块内未选位置可以继续被 mask，但加载流量已经发生。", "相邻目标落在同一块时，读取利用率才更好。", "只省 25% token 读取；不是 1 − 3/16 = 81.25%。"]);
 </script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>

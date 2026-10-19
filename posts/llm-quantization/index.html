@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LLM 量化：字节、误差与计算 · Zunzhe Zhang</title>
-<meta name="description" content="用动画讲 scale、round、clamp、反量化、离群值、per-group 精度、低位 GEMM 数据流，以及权重、激活与 KV cache 的独立账本。">
+<meta name="description" content="从 INT4 编码与元数据算到量化 kernel、GPTQ 补偿、AWQ 和 SmoothQuant；含显存/带宽账本、4 道计算练习及可运行实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson {padding:38px 64px 86px;gap:12px;justify-content:flex-start}
 .slide.lesson h2{font-size:42px;line-height:1.2}.slide.lesson .kicker{font-size:16px}
@@ -17,6 +17,7 @@
 .lesson .reference-list{font-size:22px;line-height:1.6}.lesson .reference-list li+li{margin-top:12px}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.lesson .card{padding:24px;border:1px solid var(--border);background:var(--surface);border-radius:18px;font-size:24px}.lesson .card h3{font-size:28px;margin:0 0 14px}.lesson .card p+p{margin-top:16px}.lesson .mini{font-size:21px;line-height:1.55}.slide.center h1{font-size:76px}.slide.center .subtitle{font-size:30px;max-width:1000px;color:var(--text-soft)}
 
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -97,6 +98,76 @@
 <p class="note">十进制 GB；只算权重数据，不含 scale、zero-point、对齐、KV cache 与临时工作区。
 </p>
 </section>
+<section class="slide workshop" id="eng-linear-shapes">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>量化前，先固定线性层的维度约定</h2>
+<div class="ws-equation">X ∈ ℝᴹˣᴷ，W ∈ ℝᴺˣᴷ<br>Y = XWᵀ ∈ ℝᴹˣᴺ</div>
+<table class="ws-table">
+<thead>
+<tr>
+<th>维度</th>
+<th>在推理中的含义</th>
+<th>量化粒度示例</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>M</td>
+<td>本次参与计算的 token 数</td>
+<td>activation 可按 token 取 scale</td>
+</tr>
+<tr>
+<td>K</td>
+<td>输入通道 / reduction 维度</td>
+<td>weight 沿 K 每 g 个一组</td>
+</tr>
+<tr>
+<td>N</td>
+<td>输出通道</td>
+<td>每行拥有自己的分组 scale</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">W4A16 表示存储的权重 4 bit、激活 16 bit；它没有说明 KV 精度，也没有说明最终在哪种硬件指令上相乘。</p>
+</section>
+
+<section class="slide workshop" id="eng-integer-range">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>4 bit 有 16 个编码，数值范围由格式决定</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>格式</th>
+<th>可表示整数</th>
+<th>需要约定的细节</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>无符号 INT4</td>
+<td>0…15</td>
+<td>常配合 zero-point 表示负数</td>
+</tr>
+<tr>
+<td>有符号补码 INT4</td>
+<td>−8…7</td>
+<td>最高位有负权重，解码时符号扩展</td>
+</tr>
+<tr>
+<td>对称窄范围 INT4</td>
+<td>−7…7</td>
+<td>本实验不用编码 −8</td>
+</tr>
+<tr>
+<td>FP4 / NF4</td>
+<td>依格式定义的非均匀格点</td>
+<td>不能套用同一整数反量化公式</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">先问清格式、scale、zero-point、分组轴和打包顺序，再谈“4 bit 模型能否被这个 kernel 读取”。</p>
+</section>
+
 <section class="slide lesson" id="round">
 <div class="kicker">02 · 量化三步
 </div>
@@ -148,6 +219,62 @@
 <p class="note">此处采用对称的 −7…7 编码作教学示例；具体 INT4 kernel 的编码与 zero-point 约定可能不同。
 </p>
 </section>
+<section class="slide workshop" id="eng-affine">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>zero-point 让整数零点对齐实数 0</h2>
+<div class="ws-equation">q = clip(round(x/s) + z, qmin, qmax)<br>x̂ = s(q−z)</div>
+<p class="ws-lead">教学例子：x 的范围 [−1,2]，使用无符号 4 bit。s=(2−(−1))/15=0.2，z=5。</p>
+<table class="ws-table">
+<thead>
+<tr>
+<th>x</th>
+<th>q=round(x/0.2)+5</th>
+<th>反量化 x̂</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>−1</td>
+<td>0</td>
+<td>0.2×(0−5)=−1</td>
+</tr>
+<tr>
+<td>0</td>
+<td>5</td>
+<td>0</td>
+</tr>
+<tr>
+<td>0.6</td>
+<td>8</td>
+<td>0.6</td>
+</tr>
+<tr>
+<td>2</td>
+<td>15</td>
+<td>2</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">z 通常取整数并限制在编码范围内；一般范围的端点不一定都精确命中。全零组要单独处理，避免 scale=0 后除零。</p>
+</section>
+
+<section class="slide workshop" id="eng-error-bound">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>舍入误差有上界，裁剪误差可以大得多</h2>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>范围内的舍入</h3>
+<p class="ws-lead">若 x 没有被 clip，最近格点距离最多 s/2。取 s=0.125，x=0.1875 正好在 q=1 与 q=2 之间；ties-to-even 取 2，x̂=0.25。</p>
+</div>
+<div class="ws-card">
+<h3>范围外的裁剪</h3>
+<p class="ws-lead">同样 s=0.125、q∈[−7,7]，最大实数为 0.875。x=2 会被裁到 0.875，误差 1.125，远大于 s/2。</p>
+</div>
+</div>
+<div class="ws-equation">未裁剪：|x−x̂| ≤ s/2<br>高分辨率、近似均匀误差时：E[e²] ≈ s²/12</div>
+<p class="ws-note">s²/12 需要误差近似均匀等假设；比较实际 LLM 质量时仍要测真实数据、真实层输出与任务指标。</p>
+</section>
+
 <section class="slide lesson" id="dequant">
 <div class="kicker">03 · 反量化
 </div>
@@ -179,6 +306,35 @@
 <p class="note">一般仿射量化还带 zero-point z：q = clamp(round(x/s) + z)，x̂ = s(q − z)。
 </p>
 </section>
+<section class="slide workshop" id="eng-pack">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>两个 INT4，怎样真正装进一个字节</h2>
+<svg class="ws-visual" viewBox="0 0 1152 285" role="img" aria-label="两个4位补码通过掩码移位和按位或打包为0x79">
+<rect x="25" y="55" width="230" height="70" rx="5" fill="var(--accent)" opacity="1" id="pack-low"/>
+<text x="45" y="97" class="">q₀=−7 → 1001</text>
+<rect x="25" y="160" width="230" height="70" rx="5" fill="var(--accent-2)" opacity="1" id="pack-high"/>
+<text x="45" y="202" class="">q₁=+7 → 0111</text>
+<rect x="500" y="85" width="310" height="100" rx="5" fill="var(--surface)" opacity="1"/>
+<text x="525" y="125" class="">packed byte =</text>
+<text x="590" y="163" id="pack-hex" class="">0x00</text>
+<text x="865" y="110" class="">十进制</text>
+<text x="900" y="164" id="pack-dec" class="">0</text>
+<text x="400" y="260" class="ws-small">低半字节放 q₀，高半字节放 q₁</text>
+</svg>
+<div class="ws-equation">byte = (q₀ &amp; 0xF) | ((q₁ &amp; 0xF) &lt;&lt; 4)</div>
+<p class="ws-note">−7 的 4-bit 补码为 9；7 左移 4 位得 112。9|112=121=0x79。解码时 u≥8 就取 u−16，恢复符号。</p>
+</section>
+
+<section class="slide workshop" id="eng-integer-dot">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>真正的整数点积，要扣掉 zero-point</h2>
+<div class="ws-equation">y ≈ sₓs𝑤 Σₖ (qₓ,ₖ−zₓ)(q𝑤,ₖ−z𝑤)</div>
+<p class="ws-lead">取 qₓ=(6,3)、zₓ=4、sₓ=0.5；q𝑤=(5,2)、z𝑤=3、s𝑤=0.25。</p>
+<div class="ws-equation">整数累加 = (6−4)(5−3)+(3−4)(2−3)=5<br>y = 0.5×0.25×5 = 0.625</div>
+<p class="ws-lead">反量化后 x=(1,−0.5)，w=(0.5,−0.25)，浮点点积同样为 0.625。</p>
+<p class="ws-note">常见 INT8 路径在 INT32 中累加，再乘 scale。分组 scale 不同的部分要分别缩放；不能先把所有组加完再随便乘一个 scale。</p>
+</section>
+
 <section class="slide lesson" id="outlier">
 <div class="kicker">04 · 离群值
 </div>
@@ -235,6 +391,38 @@
 <p class="note">玩具权重；采用上一页的对称 −7…7 量化范围。
 </p>
 </section>
+<section class="slide workshop" id="eng-output-error">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>权重误差相同，对输出的影响可以差 100 倍</h2>
+<div class="ws-equation">Δy = Δw · x<br>|Δy| ≤ ‖Δw‖₂ ‖x‖₂</div>
+<p class="ws-lead">教学例子：x=(10,0.1)。误差 Δw=(0.01,0) 导致 Δy=0.1；误差 Δw=(0,0.01) 只导致 Δy=0.001。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>为什么要看激活</h3>
+<p class="ws-lead">同样的权重绝对误差，乘上不同输入会被放大或缩小。仅最小化 ‖W−Ŵ‖，可能忽略重要通道。</p>
+</div>
+<div class="ws-card">
+<h3>还要看通道相关性</h3>
+<p class="ws-lead">多个通道的误差会相加或抵消。校准数据的 XXᵀ 保存这些相关性，是二阶补偿的依据。</p>
+</div>
+</div>
+</section>
+
+<section class="slide workshop" id="eng-clipping">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>scale 的搜索，是舍入损失与裁剪损失的交换</h2>
+<p class="ws-lead">把少量 outlier 裁掉，能缩小 s，让大量常见数分得更细；代价是 outlier 自身误差变大。</p>
+<pre class="ws-code">
+<code>for clip_limit in candidate_limits:
+    scale = clip_limit / qmax
+    W_hat = dequant(quant(W, scale), scale)
+    loss = mean_square(X @ W.T - X @ W_hat.T)
+choose_limit_with_smallest_loss_on_calibration_data()</code>
+</pre>
+<p class="ws-lead">这里优化的是教学线性层输出重构误差。部署前还要用独立评估集看困惑度、任务准确率和长上下文行为。</p>
+<p class="ws-note">校准数据覆盖输入类型与长度；别用最终测试集挑参数，再把同一分数当成泛化效果。</p>
+</section>
+
 <section class="slide lesson" id="groups">
 <div class="kicker">05 · 更细的 scale
 </div>
@@ -297,6 +485,50 @@
 <p class="note">人为分组与最近偶数舍入仅展示原理；真实矩阵按通道或固定 group 分组。异常通道也可保留更高精度。
 </p>
 </section>
+<section class="slide workshop" id="eng-group-overhead">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>group 越小越灵活，也越要多存元数据</h2>
+<div class="ws-equation">每权重有效位数 = b + 8m/g</div>
+<p class="ws-lead">b 是权重位宽，m 是每组 metadata 字节，g 是组大小。取 INT4、每组一个 FP16 scale：m=2。</p>
+<table class="ws-table">
+<thead>
+<tr>
+<th>g</th>
+<th>bits/weight</th>
+<th>相对 FP16 压缩倍数</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>32</td>
+<td>4+16/32=4.5</td>
+<td>3.5556×</td>
+</tr>
+<tr>
+<td>128</td>
+<td>4+16/128=4.125</td>
+<td>3.8788×</td>
+</tr>
+<tr>
+<td>256</td>
+<td>4+16/256=4.0625</td>
+<td>3.9385×</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">有 zero-point、padding 或分组尾部时继续加账。真实文件与显存还含未量化层、索引、对齐与 workspace。</p>
+</section>
+
+<section class="slide workshop" id="eng-smoothquant">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>SmoothQuant 把激活的难点搬到权重</h2>
+<div class="ws-equation">XWᵀ = (XS⁻¹)(WS)ᵀ，S=diag(s₁…sₖ)</div>
+<p class="ws-lead">激活第 j 通道特别大时，把 X 的该通道除以 sⱼ，权重对应列乘以 sⱼ；浮点输出保持不变。</p>
+<div class="ws-equation">sⱼ = max|Xⱼ|ᵅ / max|W[:,j]|¹⁻ᵅ</div>
+<p class="ws-lead">α 控制迁移程度：更大 α 更压低激活范围，同时让权重更难量化。使用校准数据选择折中，面向 W8A8 等路径。</p>
+<p class="ws-note">等价变换只是起点。加入量化后是否变好，取决于新的 activation / weight 误差之和；scale 往往可融合进相邻算子。</p>
+</section>
+
 <section class="slide lesson" id="kernel">
 <div class="kicker">06 · 数据走到计算单元
 </div>
@@ -350,6 +582,43 @@
 <p class="note">图中采用 W4 → W16 的示意路径；实际 kernel 取决于硬件。W8A8、FP8 等可使用对应低精度矩阵指令。
 </p>
 </section>
+<section class="slide workshop" id="eng-runtime">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>W4A16 kernel 的真实工作不止“少读 4 倍”</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>阶段</th>
+<th>执行动作</th>
+<th>观察什么</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>HBM → 片上</td>
+<td>搬 packed weights、scales、activation</td>
+<td>读取字节与 cache 命中</td>
+</tr>
+<tr>
+<td>解包与反量化</td>
+<td>移位、符号扩展、减 z、乘 scale</td>
+<td>指令数量、寄存器压力</td>
+</tr>
+<tr>
+<td>矩阵乘法</td>
+<td>按 kernel 支持的精度执行 MMA</td>
+<td>形状、对齐、Tensor Core 利用率</td>
+</tr>
+<tr>
+<td>输出</td>
+<td>缩放、bias / activation 融合、写回</td>
+<td>中间张量与额外 launch</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">一种常见路径是在片上把 W4 转成 FP16 再乘 A16。若先把整个矩阵反量化写回 HBM，再调用普通 GEMM，会吃掉很多带宽收益。</p>
+</section>
+
 <section class="slide lesson" id="budget">
 <div class="kicker">07 · 别把三份精度混在一起
 </div>
@@ -372,6 +641,77 @@
 <p class="note">条形长度为示意，并非某一模型的实际显存占比。
 </p>
 </section>
+<section class="slide workshop" id="eng-memory-budget">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>能否装下模型，要把权重和 KV 分开算</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>教学模型与请求</th>
+<th>估算方式</th>
+<th>大小</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>7B 参数，BF16 权重</td>
+<td>7×10⁹×2 B</td>
+<td>约 13.04 GiB</td>
+</tr>
+<tr>
+<td>W4，g=128，FP16 scale</td>
+<td>7×10⁹×4.125/8 B</td>
+<td>约 3.36 GiB</td>
+</tr>
+<tr>
+<td>单请求 BF16 KV</td>
+<td>2×32 层×8 KV heads×128×32768×2 B</td>
+<td>4 GiB</td>
+</tr>
+<tr>
+<td>临时空间预留</td>
+<td>假设 2 GiB</td>
+<td>W4 合计约 9.36 GiB</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">这里忽略未量化层、额外对齐与分配碎片；真实分配会更大。把权重改成 W4 不会自动把 4 GiB 的 KV 也改成 INT4。</p>
+</section>
+
+<section class="slide workshop" id="eng-bandwidth-case">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>先算带宽下界，再解释为什么实测没到它</h2>
+<p class="ws-lead">教学设定：7B dense 权重，每个 decode step 全部读取；有效带宽 900 GB/s，暂不计 KV。</p>
+<table class="ws-table">
+<thead>
+<tr>
+<th>路径</th>
+<th>权重读取</th>
+<th>带宽下界</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>BF16</td>
+<td>14 GB</td>
+<td>14/900≈15.56 ms</td>
+</tr>
+<tr>
+<td>W4 g=128</td>
+<td>3.609375 GB</td>
+<td>3.609375/900≈4.01 ms</td>
+</tr>
+<tr>
+<td>W4 另有 2 ms 开销</td>
+<td>解包 / 同步等教学假设</td>
+<td>合计约 6.01 ms</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-lead">按这个账本，端到端加速约 15.56/6.01=2.59×。batch 增大后权重可被更多 token 复用，计算占比上升，收益还会变化。</p>
+<p class="ws-note">实际应分别测 prefill、decode 与不同 batch；确认真的调用量化 kernel，再检查解包、访存和算力限制。</p>
+</section>
+
 <section class="slide lesson" id="compute">
 <div class="kicker">08 · 计算精度
 </div>
@@ -425,6 +765,69 @@
 <p class="note">三个乘法为示意。支持的指令、累加类型与缩放粒度要和 GPU、模型及 kernel 一起选择。
 </p>
 </section>
+<section class="slide workshop" id="eng-gptq-objective">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>GPTQ 的目标是保住层输出，而非逐个权重</h2>
+<p class="ws-lead">把校准激活转置为 A=Xᵀ∈ℝᴷˣᴹ。对一个输出通道，原权重为 w，量化误差为 δ=ŵ−w。</p>
+<div class="ws-equation">损失 = ‖δA‖₂² = δ(AAᵀ)δᵀ<br>H = AAᵀ</div>
+<p class="ws-lead">H 的对角项描述通道能量，非对角项描述通道相关性。只对每个 w 四舍五入，相当于没有利用这些相关性。</p>
+<p class="ws-note">完整 Hessian 是 2H；比例因子不影响下面的最优补偿。实际会加 λI 让病态或低秩矩阵更稳定。</p>
+</section>
+
+<section class="slide workshop" id="eng-gptq-update">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>量化一列后，把误差分摊给仍可修改的列</h2>
+<div class="ws-equation">e = wⱼ−Q(wⱼ)，要求 δⱼ=−e<br>最小化 δHδᵀ，得到 δ = −e·H⁻¹[j,:]/H⁻¹[j,j]</div>
+<p class="ws-lead">推法：约束目标加上 λ(δⱼ+e)，求导得 2Hδᵀ+λeⱼ=0；用 δⱼ=−e 解出 λ，再代回。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>逐列执行</h3>
+<p class="ws-lead">当前列写成量化值；其余列先补偿，再接受下一列的量化误差。已经量化的列保持固定。</p>
+</div>
+<div class="ws-card">
+<h3>GPTQ 的工程实现</h3>
+<p class="ws-lead">采用固定列顺序、分块更新与逆 Hessian 的 Cholesky 形式，减少逐元素串行操作和重复矩阵处理。</p>
+</div>
+</div>
+</section>
+
+<section class="slide workshop" id="eng-compensation">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>手算两维补偿：让损失从 0.16 降到 0.12</h2>
+<svg class="ws-visual" viewBox="0 0 1152 285" role="img" aria-label="二阶补偿把第二维误差调整为0.2并降低重构目标">
+<text x="25" y="35" class="">固定第一维 δ₁=−0.4；第二维仍可调</text>
+<text x="25" y="98" class="">不补偿：δ=(−0.4,0)</text>
+<rect x="390" y="70" width="320" height="35" rx="5" fill="var(--accent)" opacity="1"/>
+<text x="755" y="98" class="">损失 0.1600</text>
+<text x="25" y="182" class="">补偿后：δ=(−0.4,δ₂)</text>
+<rect x="390" y="154" width="320" height="35" rx="5" fill="var(--accent)" opacity="1" id="comp-loss"/>
+<text x="755" y="182" id="comp-value" class="">0.1600</text>
+<text x="25" y="255" class="">δ₂ =</text>
+<text x="110" y="255" id="comp-delta" class="">0.0000</text>
+<text x="360" y="255" class="ws-mono">H = [[1, 0.5], [0.5, 1]]</text>
+</svg>
+<div class="ws-equation">L(δ₂)=0.16−0.4δ₂+δ₂²<br>∂L/∂δ₂=−0.4+2δ₂=0 → δ₂=0.2</div>
+<p class="ws-note">这是量化当前列之后、下一列尚未量化时的条件最优值；下一列最终仍要落到自己的格点。</p>
+</section>
+
+<section class="slide workshop" id="eng-awq">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>AWQ 用通道缩放保护更敏感的权重</h2>
+<div class="ws-equation">W′ = WS，X′ = XS⁻¹<br>量化后的输出：X′ Q(W′)ᵀ</div>
+<p class="ws-lead">激活更大的输入通道通常更敏感。把相应权重列放大，再把激活反向缩小，可以降低该通道反量化后的有效步长。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>搜索什么</h3>
+<p class="ws-lead">从激活统计构造候选通道 scale；对各候选量化权重，再比较校准数据上的层输出误差。</p>
+</div>
+<div class="ws-card">
+<h3>为什么不能无限放大</h3>
+<p class="ws-lead">组内最大值也可能被推高，使整组 scale 变粗，伤害其他通道。必须同时看整层重构误差。</p>
+</div>
+</div>
+<p class="ws-note">AWQ 不是把少数权重永远留在 FP16；核心是等价缩放，让统一的低位格式更好地保留重要通道。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">09 · 怎样量化一个真实模型
 </div>
@@ -453,6 +856,82 @@
 </div>
 </div>
 </section>
+<section class="slide workshop" id="exercise-codes">
+<div class="kicker">练习 1 · 计算与分析</div>
+<h2>算出整数码、重构值与打包字节</h2>
+<div class="ws-prompt">使用对称窄范围 INT4，s=0.125，ties-to-even。量化 x=(−0.875,−0.3125,0.1875,0.875)，两两打包，偶数索引放低半字节。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">x/s=(−7,−2.5,1.5,7)，舍入到偶数得 q=(−7,−2,2,7)。重构为 (−0.875,−0.25,0.25,0.875)。补码 nibble 为 (9,14,2,7)，字节为 0xE9、0x72。最大误差 0.0625=s/2。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-metadata">
+<div class="kicker">练习 2 · 计算与分析</div>
+<h2>一层 4096×4096，INT4 实际省多少？</h2>
+<div class="ws-prompt">沿 K 每 128 个权重一组；每组只存一个 FP16 scale，没有 zero-point。忽略 padding，求权重、scale 总大小与相对 FP16 压缩倍数。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">参数数 4096²=16,777,216。INT4 数据为 8,388,608 B=8 MiB；组数 131,072，scale 为 262,144 B=0.25 MiB。总计 8.25 MiB。FP16 为 32 MiB，压缩比 32/8.25≈3.8788×。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-gptq">
+<div class="kicker">练习 3 · 计算与分析</div>
+<h2>相关性反号，补偿也会反号吗？</h2>
+<div class="ws-prompt">H=[[1,−0.5],[−0.5,1]]。第一维量化误差固定 δ₁=−0.4，第二维尚未量化。求最小化 δHδᵀ 的 δ₂ 和最小损失。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">代入得 L=0.16+0.4δ₂+δ₂²。导数 0.4+2δ₂=0，所以 δ₂=−0.2。L=0.16−0.08+0.04=0.12。相关性符号改变，最优补偿方向也改变。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-diagnose">
+<div class="kicker">练习 4 · 计算与分析</div>
+<h2>文件缩小了，为什么 prefill 反而慢了？</h2>
+<div class="ws-prompt">教学 trace：BF16 prefill 为 20 ms；W4 路径先反量化到 HBM 用 7 ms，再调用同一个 FP16 GEMM 用 20 ms。模型文件小了约 4 倍，是否应该预期 prefill 加速？</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">这条路径至少要 27 ms，反而是 1.35× 的耗时。它重新写出了完整 FP16 权重，GEMM 也没变快。先检查是否有支持当前形状的融合 W4 kernel，再评估大 M 下的计算瓶颈；文件体积不能直接推出延迟收益。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="eng-lab">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>从字节到线性层误差，跑完一条小实验</h2>
+<pre class="ws-code">
+<code>python3 lab.py
+python3 lab.py --group-size 32</code>
+</pre>
+<p class="ws-lead">默认输出：INT4 codes=[−7,−2,2,7]；packed hex=e972；4.125 bits/weight；补偿目标 0.1600 → 0.1200；最后 PASS。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>动手改数值</h3>
+<p class="ws-lead">加入越界值观察 s/2 上界失效；改 group size 计算元数据开销；把 H 的相关性改为负数并预测补偿方向。</p>
+</div>
+<div class="ws-card">
+<h3>独立检查</h3>
+<p class="ws-lead">手写字节 0x79、0xF8 验证补码解包。实验还网格枚举第二维，检查二次目标的最优补偿。</p>
+</div>
+</div>
+<p class="ws-note">
+<a class="ws-lab-link" download href="/posts/llm-quantization/lab.py">下载 lab.py</a>
+</p>
+<p class="ws-note">只需 Python 标准库。实验展示格式和重构目标，不实现完整 GPTQ/AWQ，也不代表 GPU kernel 性能。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">参考与延伸阅读
 </div>
@@ -485,9 +964,9 @@
 </section>
 </div>
 </main>
-<script src="/assets/slides.js">
+<script src="/assets/slides.js?v=03e51263994e">
 </script>
-<script src="/assets/anim.js">
+<script src="/assets/anim.js?v=9b723aa5f47d">
 </script>
 <script>(()=>{'use strict';
 function bind(id,make){const el=document.getElementById(id);const tl=Anim.timeline({root:el});make(tl);Anim.slide(el,tl,{steps:true,controls:true});}
@@ -499,6 +978,10 @@ bind('groups',tl=>{tl.to('#group0,#group1,#group2,#group3',{opacity:1},{dur:.6,s
 bind('kernel',tl=>{tl.to('#weight-packet',{x:320,y:70},{dur:.8}).to('#scale-packet',{x:280,y:-70},{at:'<',dur:.8}).label('搬入压缩权重');tl.to('#weight-packet,#scale-packet',{opacity:0},{dur:.3}).to('#dequant-packet',{opacity:1},{at:'<',dur:.3}).to('#dequant-packet',{x:310},{dur:.8}).to('#activation-packet',{y:72},{at:'<',dur:.8}).label('局部反量化并计算');tl.to('#dequant-packet,#activation-packet',{opacity:0},{dur:.3}).to('#result-packet',{opacity:1},{at:'<',dur:.3}).to('#result-packet',{x:290},{dur:.7}).label('写回输出');});
 bind('budget',tl=>{tl.to('#memw',{attr:{width:115}},{dur:.85}).to('#label-memw',{x:-170},{at:'<',dur:.85}).label('权重量化');tl.to('#memkv',{stroke:'var(--accent-2)'},{dur:.5}).label('KV 大小未变');});
 bind('compute',tl=>{tl.to('[id^=prod]',{opacity:1},{dur:.55,stagger:.13}).label('并行乘法');tl.to('#intsum',{opacity:1},{dur:.6}).label('宽位累加');});
+
+bind('eng-pack',tl=>{tl.to('#pack-low',{x:455,y:30,opacity:.2},{dur:.8}).to('#pack-hex',{text:9,fmt:n=>'0x'+Math.round(n).toString(16).padStart(2,'0')},{at:'<',dur:.8}).to('#pack-dec',{text:9,fmt:n=>n.toFixed(0)},{at:'<',dur:.8}).label('低四位');tl.to('#pack-high',{x:455,y:-75,opacity:.2},{dur:.8}).to('#pack-hex',{text:121,fmt:n=>'0x'+Math.round(n).toString(16).padStart(2,'0')},{at:'<',dur:.8}).to('#pack-dec',{text:121,fmt:n=>n.toFixed(0)},{at:'<',dur:.8}).label('高四位合并');});
+bind('eng-compensation',tl=>{tl.during(t=>{const d=.2*t,loss=.16-.4*d+d*d;document.getElementById('comp-delta').textContent=d.toFixed(4);document.getElementById('comp-loss').setAttribute('width',String(2000*loss));document.getElementById('comp-value').textContent=loss.toFixed(4);},{at:0,dur:1.2}).label('移动到最优补偿');});
+
 })();
 </script>
 <script src="/assets/post-links.js">

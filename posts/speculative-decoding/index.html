@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>投机解码：先草拟，再验证 · Zunzhe Zhang</title>
-<meta name="description" content="用动画讲清并行验证、贪心前缀接受、p/q 接受概率、残差重采样、KV 回滚与投机解码的时间账本。">
+<meta name="description" content="从概率质量守恒推导投机采样，手算接受长度与加速比，排查 logits/KV 对齐；含数值动画、4 道练习和可运行 CPU 实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson {padding:38px 64px 86px;gap:12px;justify-content:flex-start}
 .slide.lesson h2{font-size:42px;line-height:1.2}.slide.lesson .kicker{font-size:16px}
@@ -17,6 +17,7 @@
 .lesson .reference-list{font-size:22px;line-height:1.6}.lesson .reference-list li+li{margin-top:12px}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.lesson .card{padding:24px;border:1px solid var(--border);background:var(--surface);border-radius:18px;font-size:24px}.lesson .card h3{font-size:28px;margin:0 0 14px}.lesson .card p+p{margin-top:16px}.lesson .mini{font-size:21px;line-height:1.55}.slide.center h1{font-size:76px}.slide.center .subtitle{font-size:30px;max-width:1000px;color:var(--text-soft)}
 
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -140,6 +141,65 @@
 <p class="narration">draft 给出候选及其概率 q。target 读入这些候选，算出每个位置的分布 p；最后再决定<b>哪些 token 可以写进正式答案</b>。
 </p>
 </section>
+<section class="slide workshop" id="eng-shapes">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>先把“一个位置”对应的张量说清楚</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>符号</th>
+<th>含义</th>
+<th>形状 / 单位</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>B、γ、V</td>
+<td>请求数、草稿长度、词表大小</td>
+<td>整数；示例 B=2，γ=4，V=32,000</td>
+</tr>
+<tr>
+<td>x₁…xγ</td>
+<td>草稿 token ID</td>
+<td>[B, γ]，整数</td>
+</tr>
+<tr>
+<td>q、p</td>
+<td>draft / target 的条件概率</td>
+<td>每个位置一行 V 维分布</td>
+</tr>
+<tr>
+<td>logits</td>
+<td>softmax 前的分数</td>
+<td>验证常需 [B, γ+1, V]</td>
+</tr>
+<tr>
+<td>L</td>
+<td>已写入 target KV 的前缀长度</td>
+<td>token；与已输出长度分开维护</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">同一行的 p 与 q 必须描述相同前缀。词表、token ID 或位置偏一位，概率比就失去了含义。</p>
+</section>
+
+<section class="slide workshop" id="eng-logit-memory">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>并行验证还要为 logits 和临时 KV 付账</h2>
+<div class="ws-equation">2 × (4+1) × 32,000 × 4 B = 1,280,000 B ≈ 1.22 MiB</div>
+<p class="ws-lead">这是 B=2、γ=4、FP32 logits 的一份缓冲。若同时保留 target 与 draft 全词表分布，还要额外占空间。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>只取候选的概率够吗？</h3>
+<p class="ws-lead">接受检验只需 p(x)、q(x)，但拒绝后的残差分布需要整行 max(p−q,0)。必须保留或重算该行。</p>
+</div>
+<div class="ws-card">
+<h3>先估临时空间</h3>
+<p class="ws-lead">候选 KV 可能被丢弃，峰值分配仍要容纳它们。扩大 γ 时一起观察 logits、KV 与 workspace。</p>
+</div>
+</div>
+</section>
+
 <section class="slide lesson" id="causal">
 <div class="kicker">03 · 并行验证
 </div>
@@ -188,6 +248,43 @@
 <p class="narration">同一轮可以计算所有行，每行仍然<b>只看左侧前缀</b>。如果 E 被拒绝，后面的分布基于错误前缀，后面的候选也就不能沿用。
 </p>
 </section>
+<section class="slide workshop" id="eng-shift">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>logits 的第 i 行，预测的是第 i+1 个 token</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>target 输入</th>
+<th>该位置的输出分布</th>
+<th>用途</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>前缀末尾 anchor D</td>
+<td>p(E | …,D)</td>
+<td>检查候选 E</td>
+</tr>
+<tr>
+<td>候选 E</td>
+<td>p(F | …,D,E)</td>
+<td>检查候选 F</td>
+</tr>
+<tr>
+<td>候选 F</td>
+<td>p(G | …,D,E,F)</td>
+<td>检查候选 G</td>
+</tr>
+<tr>
+<td>最后候选 H</td>
+<td>p(next | …,D,E,F,G,H)</td>
+<td>全部接受后采样 bonus</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">如果 D 的 KV 已缓存，可复用之前保存的首行 logits；如果 D 刚采样出来，要把 D 和候选一起送入前向。两种缓存约定都可以，行号必须一致。</p>
+</section>
+
 <section class="slide lesson" id="greedy">
 <div class="kicker">04 · 先理解贪心
 </div>
@@ -299,6 +396,55 @@
 <p class="note">示意分布；p、q 必须对应同一已接受前缀，并包含实际使用的 temperature / top-p 等采样变换。
 </p>
 </section>
+<section class="slide workshop" id="eng-proof">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>为什么接受概率恰好是 min(1, p/q)？</h2>
+<p class="ws-lead">候选 x 先以 q(x) 被抽到，再以 α(x) 被接受；两件事一起发生的概率是 q(x)α(x)。</p>
+<div class="ws-equation">q(x) · min(1, p(x)/q(x)) = min(p(x), q(x))</div>
+<p class="ws-lead">这个“重叠部分”已经放进输出。剩下缺的概率质量只有 p(x)−q(x) 为正的部分。</p>
+<div class="ws-equation">Z = 1 − Σₓ min(p(x),q(x))<br>r(x) = max(p(x)−q(x),0) / Z</div>
+<p class="ws-note">最终概率 = min(p,q) + Zr = p。若 Z=0，p=q，拒绝不发生，也无需计算残差。</p>
+</section>
+
+<section class="slide workshop" id="eng-mass">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>逐格补回概率，总量就回到 p</h2>
+<svg class="ws-visual" viewBox="0 0 1152 285" role="img" aria-label="接受质量与残差质量逐格恢复目标分布">
+<text x="20" y="62" class="">A  q=0.5  p=0.2</text>
+<rect x="255" y="40" width="0" height="30" rx="5" fill="var(--accent)" opacity="1" id="mass-a0"/>
+<rect x="435.0" y="40" width="0" height="30" rx="5" fill="var(--accent-2)" opacity="1" id="mass-r0"/>
+<text x="780" y="63" id="mass-v0" class="">0.00</text>
+<text x="20" y="130" class="">B  q=0.3  p=0.5</text>
+<rect x="255" y="108" width="0" height="30" rx="5" fill="var(--accent)" opacity="1" id="mass-a1"/>
+<rect x="525.0" y="108" width="0" height="30" rx="5" fill="var(--accent-2)" opacity="1" id="mass-r1"/>
+<text x="780" y="131" id="mass-v1" class="">0.00</text>
+<text x="20" y="198" class="">C  q=0.2  p=0.3</text>
+<rect x="255" y="176" width="0" height="30" rx="5" fill="var(--accent)" opacity="1" id="mass-a2"/>
+<rect x="435.0" y="176" width="0" height="30" rx="5" fill="var(--accent-2)" opacity="1" id="mass-r2"/>
+<text x="780" y="199" id="mass-v2" class="">0.00</text>
+<text x="20" y="268" class="ws-small">蓝色：接受得到的质量　橙色：拒绝后补回的质量</text>
+</svg>
+<p class="ws-lead">例子：p=(0.2,0.5,0.3)，q=(0.5,0.3,0.2)。接受总概率为 0.7，拒绝概率 Z=0.3。</p>
+<p class="ws-note">拒绝后 r=(0, 2/3, 1/3)；蓝色加橙色，得到最终 (0.2,0.5,0.3)。</p>
+</section>
+
+<section class="slide workshop" id="eng-tv">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>接受率衡量的是两份分布有多重合</h2>
+<div class="ws-equation">a = Σₓ min(p(x),q(x))<br>= 1 − ½ Σₓ |p(x)−q(x)| = 1 − TV(p,q)</div>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>为什么成立？</h3>
+<p class="ws-lead">min(p,q)=(p+q−|p−q|)/2。对词表求和，p 和 q 各自的总和都是 1。</p>
+</div>
+<div class="ws-card">
+<h3>数值例子</h3>
+<p class="ws-lead">|p−q|=(0.3,0.2,0.1)，L1 距离为 0.6；TV=0.3，因此接受率 a=0.7。</p>
+</div>
+</div>
+<p class="ws-note">top-1 猜对率只看最大的一项；随机采样接受率看整个分布。评估 draft 时要匹配实际温度与采样策略。</p>
+</section>
+
 <section class="slide lesson" id="residual">
 <div class="kicker">06 · 拒绝之后
 </div>
@@ -332,6 +478,40 @@
 <p class="note">同一位置先接受或拒绝；发生拒绝后结束这一轮，丢弃其后的草稿。
 </p>
 </section>
+<section class="slide workshop" id="eng-sample-code">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>一轮采样：第一次拒绝就结束</h2>
+<pre class="ws-code">
+<code>for k in range(gamma):
+    x = candidates[k]          # x ~ q[k]
+    if uniform() &lt; min(1, p[k][x] / q[k][x]):
+        accepted.append(x)
+    else:
+        r = maximum(p[k] - q[k], 0)
+        correction = sample(r / sum(r))
+        return accepted + [correction]
+return accepted + [sample(p[gamma])]  # bonus</code>
+</pre>
+<p class="ws-note">q[k] 是真正产生 candidates[k] 的概率。若 p(x)=0，候选必拒绝；q(x)=0 的 token 不会从 q 被采到。</p>
+</section>
+
+<section class="slide workshop" id="eng-sampling-transform">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>温度、top-p、logits processor 都属于分布定义</h2>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>正确对齐</h3>
+<p class="ws-lead">先让 target 的 logits 经过温度、重复惩罚、top-p 等配置，归一化为 p。q 也必须对应 draft 实际使用的采样分布。</p>
+</div>
+<div class="ws-card">
+<h3>常见错误</h3>
+<p class="ws-lead">用截断前的 q 计算 p/q，却从 top-p 后的 q 抽样；或者验证时忘记更新 repetition penalty 的候选前缀。</p>
+</div>
+</div>
+<div class="ws-equation">temperature: pᵢ = exp(zᵢ/T) / Σⱼ exp(zⱼ/T)</div>
+<p class="ws-note">数学上的分布保持以这些实际分布为准。贪心解码另用逐位置 argmax 一致的规则；随机种子相同也不保证逐 token 轨迹相同。</p>
+</section>
+
 <section class="slide lesson" id="cache">
 <div class="kicker">07 · 显存也跟着回滚
 </div>
@@ -374,6 +554,59 @@
 <p class="narration">验证可以提前算出候选的 KV。E、F 被接受就保留；G、H 的位置被回收。<b>纠正的 X 在后续前向中补出 KV</b>，成为下一轮的起点。
 </p>
 </section>
+<section class="slide workshop" id="eng-kv-invariant">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>输出长度，比 target KV 长一格是正常状态</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>时刻</th>
+<th>已确认输出</th>
+<th>target 已有 KV</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>开始</td>
+<td>A B D</td>
+<td>A B；D 是待处理 anchor</td>
+</tr>
+<tr>
+<td>验证 D E F G H 后</td>
+<td>A B D</td>
+<td>A B D E F G H（含临时候选）</td>
+</tr>
+<tr>
+<td>接受 E F，拒绝 G</td>
+<td>A B D E F X</td>
+<td>A B D E F</td>
+</tr>
+<tr>
+<td>下一轮消费 X</td>
+<td>A B D E F X</td>
+<td>A B D E F X</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">提交长度 = 原 KV 长度 + anchor 数 + 已接受候选数。X 是新采样的结果，还没有经过 forward，不能把 G 的 KV 改名为 X。</p>
+</section>
+
+<section class="slide workshop" id="eng-boundaries">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>EOS、输出上限和双份缓存也要守住边界</h2>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>截断正式输出</h3>
+<p class="ws-lead">一轮可能产出 γ+1 个 token。先按第一个 EOS 或剩余 max_new_tokens 截断；丢弃其后的结果与缓存，不继续展示后缀。</p>
+</div>
+<div class="ws-card">
+<h3>同步 draft 与 target</h3>
+<p class="ws-lead">两个模型都要回滚到共同接受的前缀。草稿缓存也不能保留被拒绝的后缀；新纠正 token 要先消费再续写。</p>
+</div>
+</div>
+<p class="ws-lead">建议记录每轮 prefix_len、accepted_len、target_kv_len、draft_kv_len。用 γ=0、首位拒绝、全接受、首位 EOS 四种小例子检查状态机。</p>
+</section>
+
 <section class="slide lesson" id="cost">
 <div class="kicker">08 · 速度账本
 </div>
@@ -410,6 +643,115 @@
 <p class="note">示例数字不是测量结果。平均输出数包含拒绝位置的纠正 token，或全部接受后的额外 token。
 </p>
 </section>
+<section class="slide workshop" id="eng-expectation">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>平均接受长度，用“活到这一格”的概率来算</h2>
+<p class="ws-lead">令 A 是连续接受的候选数。A 至少为 j，当且仅当前 j 个候选全部通过。</p>
+<div class="ws-equation">E[A] = Σⱼ₌₁ᵞ P(A ≥ j)<br>E[输出数] = 1 + Σⱼ₌₁ᵞ P(A ≥ j)</div>
+<p class="ws-lead">若每步给定前缀的条件接受率都相同为 a，前 j 格全通过的概率为 aʲ。</p>
+<div class="ws-equation">E[输出数] = 1 + a + a² + … + aᵞ</div>
+<p class="ws-note">一般情况下应按条件概率计算前缀存活率，不能直接相乘不同样本的边际平均值。这里忽略 EOS 与输出上限截断。</p>
+</section>
+
+<section class="slide workshop" id="eng-survival">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>4 个候选，不等于一轮输出 4 个 token</h2>
+<svg class="ws-visual" viewBox="0 0 1152 285" role="img" aria-label="按前缀存活概率累加每轮输出期望">
+<text x="40" y="35" class="">条件接受率都为 0.8；第 j 个草稿能保留的概率为 0.8ʲ</text>
+<text x="40" y="88" class="">j=1</text>
+<rect x="120" y="65" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="survive-0"/>
+<text x="620" y="88" id="survive-value-0" class="">0.0000</text>
+<text x="40" y="130" class="">j=2</text>
+<rect x="120" y="107" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="survive-1"/>
+<text x="620" y="130" id="survive-value-1" class="">0.0000</text>
+<text x="40" y="172" class="">j=3</text>
+<rect x="120" y="149" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="survive-2"/>
+<text x="620" y="172" id="survive-value-2" class="">0.0000</text>
+<text x="40" y="214" class="">j=4</text>
+<rect x="120" y="191" width="0" height="27" rx="5" fill="var(--accent)" opacity="1" id="survive-3"/>
+<text x="620" y="214" id="survive-value-3" class="">0.0000</text>
+<text x="850" y="100" class="">每轮输出期望</text>
+<text x="860" y="155" id="expected-output" class="">1.0000</text>
+<text x="820" y="215" class="ws-small">含 1 个纠正 / bonus</text>
+</svg>
+<p class="ws-lead">1+0.8+0.64+0.512+0.4096 = 3.3616 token。后面的候选收益越来越小，却仍消耗草拟与验证资源。</p>
+</section>
+
+<section class="slide workshop" id="eng-cost-example">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>把每轮账本换成用户等一个 token 的时间</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>教学设定</th>
+<th>数值</th>
+<th>计算</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>普通 decode</td>
+<td>10 ms/token</td>
+<td>作为基线</td>
+</tr>
+<tr>
+<td>draft + verify + 调度</td>
+<td>2 + 11 + 1 = 14 ms</td>
+<td>同一轮的端到端耗时</td>
+</tr>
+<tr>
+<td>平均输出</td>
+<td>3.3616 token/round</td>
+<td>a=0.8，γ=4</td>
+</tr>
+<tr>
+<td>投机后</td>
+<td>14 / 3.3616 = 4.1647 ms/token</td>
+<td>加速比 10/4.1647 ≈ 2.40</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">很多轮总耗时 / 总输出 token 才是平均单 token 成本。不要先算每轮 T/N 再简单平均；它会过分放大短输出轮的权重。</p>
+</section>
+
+<section class="slide workshop" id="eng-length-choice">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>一次比较三个 γ，找出有用的末端</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>γ</th>
+<th>E[输出]，a=0.8</th>
+<th>假设实测轮耗时</th>
+<th>ms/token</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>2</td>
+<td>2.4400</td>
+<td>10 ms</td>
+<td>4.0984</td>
+</tr>
+<tr>
+<td>4</td>
+<td>3.3616</td>
+<td>14 ms</td>
+<td>4.1647</td>
+</tr>
+<tr>
+<td>8</td>
+<td>4.3289</td>
+<td>24 ms</td>
+<td>5.5441</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-lead">这组教学数据中 γ=2 最快。γ=8 接受得更多，但新增收益不足以抵消验证成本。</p>
+<div class="ws-equation">新增位置值得做 ⇔ Δ期望输出 / Δ耗时 > 当前总输出 / 总耗时</div>
+<p class="ws-note">在真实硬件上扫 γ、batch、上下文长度，并同时看吞吐和 p95 延迟；不要拿低负载最优值直接覆盖高负载。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">09 · 为什么要调长度
 </div>
@@ -440,6 +782,119 @@
 <p class="note">0.8 为示意；真实条件接受率会随位置、上下文和任务变化。
 </p>
 </section>
+<section class="slide workshop" id="eng-debug">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>接受率 80%，为什么用户还是没变快？</h2>
+<table class="ws-table">
+<thead>
+<tr>
+<th>教学 trace 观察</th>
+<th>优先怀疑</th>
+<th>下一项测量</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>GPU 验证 9 ms，轮耗时 19 ms</td>
+<td>host 调度 / 同步空隙</td>
+<td>CUDA timeline 与 CPU trace 对齐</td>
+</tr>
+<tr>
+<td>draft 自己耗时 8 ms</td>
+<td>草稿过重或串行长度过大</td>
+<td>扫 γ 并拆 backbone / LM head</td>
+</tr>
+<tr>
+<td>单请求快，高并发慢</td>
+<td>验证后缀挤占有效 batch</td>
+<td>每轮候选数与正式输出数</td>
+</tr>
+<tr>
+<td>输出分布异常，速度正常</td>
+<td>p/q、position 或 KV 对齐</td>
+<td>小词表精确枚举与缓存断言</td>
+</tr>
+</tbody>
+</table>
+<p class="ws-note">至少同时报告 draft time、verify time、端到端 round time、连续接受长度和实际输出数。只报“接受率”很容易漏掉瓶颈。</p>
+</section>
+
+<section class="slide workshop" id="exercise-mass">
+<div class="kicker">练习 1 · 计算与分析</div>
+<h2>算一遍接受概率与残差分布</h2>
+<div class="ws-prompt">p=(0.6,0.1,0.3)，q=(0.2,0.5,0.3)。求每个 token 的接受概率、总接受率与拒绝后的 r。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">逐项 min(1,p/q)=(1,0.2,1)。接受质量 qα=(0.2,0.1,0.3)，总和 0.6，故 Z=0.4。正残差为 (0.4,0,0)，归一化 r=(1,0,0)。最终输出=(0.2,0.1,0.3)+0.4×(1,0,0)=p。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-speed">
+<div class="kicker">练习 2 · 计算与分析</div>
+<h2>什么时候 3 个候选能带来加速？</h2>
+<div class="ws-prompt">条件接受率 a=0.5，γ=3。普通 decode 每 token 8 ms，投机一轮 13 ms。求平均输出、加速比，以及盈亏平衡轮耗时。</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">E[N]=1+0.5+0.25+0.125=1.875。投机成本 13/1.875≈6.9333 ms/token；加速比 8/6.9333≈1.154。盈亏平衡轮耗时 8×1.875=15 ms，超过它就更慢。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-cache">
+<div class="kicker">练习 3 · 计算与分析</div>
+<h2>拒绝之后，哪一格缓存可以保留？</h2>
+<div class="ws-prompt">target KV 起初有 100 个 token。输入一个 anchor 与 4 个候选；前 2 个候选接受，第 3 个拒绝并采样 X。正式输出和 target KV 分别到多长？</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">验证临时长度为 100+1+4=105。已确认前缀为 100+1+2=103 个，KV 截到 103；输出加上新 X 后为 104。下一轮输入 X 才能得到其 KV。把 KV 截到 104 会错误保留第 3 个候选。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="exercise-prob-bug">
+<div class="kicker">练习 4 · 计算与分析</div>
+<h2>发现“拒绝就从 p 重采样”的偏差</h2>
+<div class="ws-prompt">p=(0.8,0.2)，q=(0.5,0.5)。接受检验正确，但拒绝时直接从 p 采样。最后 P(A) 是多少？</div>
+<div class="widget" data-interactive>
+<details class="ws-answer">
+<summary>展开参考解答</summary>
+<p class="ws-lead">接受质量是 (0.5,0.2)，拒绝总概率 0.3。错误算法 P(A)=0.5+0.3×0.8=0.74，P(B)=0.26。正确残差 r=(1,0)，才能得到 0.8 与 0.2。</p>
+</details>
+</div>
+<p class="ws-note">先自己算一遍，再展开解答。</p>
+</section>
+
+<section class="slide workshop" id="eng-lab">
+<div class="kicker">工程 · 算清楚，再实现</div>
+<h2>在 3 个词的世界里验证整个概率账本</h2>
+<pre class="ws-code">
+<code>python3 lab.py
+python3 lab.py --alpha 0.5 --length 3</code>
+</pre>
+<p class="ws-lead">默认输出：精确分布 [0.2, 0.5, 0.3]；E[output]=3.3616；每 token 4.1647 ms；最后一行 PASS。</p>
+<div class="ws-cols">
+<div class="ws-card">
+<h3>动手修改</h3>
+<p class="ws-lead">把拒绝重采样改为 p，观察随机分布检查失败；把接受长度改为 0 或 4，跟踪缓存长度。</p>
+</div>
+<div class="ws-card">
+<h3>检查自己的预测</h3>
+<p class="ws-lead">改变 alpha 和 length 前先算 E[N]。实验同时用“首个拒绝位置枚举”和尾和公式互相核对。</p>
+</div>
+</div>
+<p class="ws-note">
+<a class="ws-lab-link" download href="/posts/speculative-decoding/lab.py">下载 lab.py</a>
+</p>
+<p class="ws-note">标准库即可运行。时间来自设定模型；这个实验验证算法和状态，不模拟真实 GPU 性能。</p>
+</section>
+
 <section class="slide lesson">
 <div class="kicker">参考与延伸阅读
 </div>
@@ -467,9 +922,9 @@
 </section>
 </div>
 </main>
-<script src="/assets/slides.js">
+<script src="/assets/slides.js?v=03e51263994e">
 </script>
-<script src="/assets/anim.js">
+<script src="/assets/anim.js?v=9b723aa5f47d">
 </script>
 <script>(()=>{'use strict';
 function bind(id,make){const el=document.getElementById(id);const tl=Anim.timeline({root:el});make(tl);Anim.slide(el,tl,{steps:true,controls:true});}
@@ -481,6 +936,10 @@ bind('sampling',tl=>{[0,1,2].forEach(i=>tl.to('#a'+i,{opacity:1,x:-15},{dur:.55}
 bind('residual',tl=>{tl.to('#residual0',{opacity:1},{dur:.7}).label('残差补回');tl.to('[id^=final]',{opacity:1},{dur:.4,stagger:.12}).label('恢复目标分布');});
 bind('cache',tl=>{tl.to('#kv2 rect,#kv3 rect',{stroke:'var(--accent)'},{dur:.5}).label('提交前缀');tl.to('#kv4,#kv5',{y:55,opacity:0},{dur:.6,stagger:.1}).to('#temporary',{opacity:0},{dur:.3}).label('回收后缀');tl.to('#corrected-kv,#next-round',{opacity:1},{dur:.5}).label('继续生成');});
 bind('cost',tl=>{tl.to('#cost-draft',{opacity:1},{dur:.5}).label('草拟成本');tl.to('#cost-verify',{opacity:1},{dur:.65}).to('#cost-output',{opacity:1},{dur:.4}).label('每轮收益');});
+
+bind('eng-mass',tl=>{[.2,.3,.2].forEach((v,i)=>{tl.to('#mass-a'+i,{attr:{width:v*900}},{at:0,dur:.7});tl.to('#mass-v'+i,{text:v,fmt:n=>n.toFixed(2)},{at:0,dur:.7});});tl.label('接受重叠质量');[0,.2,.1].forEach((v,i)=>{tl.to('#mass-r'+i,{attr:{width:v*900}},{at:.9,dur:.8});tl.to('#mass-v'+i,{text:[.2,.5,.3][i],fmt:n=>n.toFixed(2)},{at:.9,dur:.8});});tl.label('拒绝残差补齐');});
+bind('eng-survival',tl=>{let total=1;[.8,.64,.512,.4096].forEach((v,i)=>{const at=i*.9;total+=v;tl.to('#survive-'+i,{attr:{width:480*v}},{at,dur:.65});tl.to('#survive-value-'+i,{text:v,fmt:n=>n.toFixed(4)},{at,dur:.65});tl.to('#expected-output',{text:total,fmt:n=>n.toFixed(4)},{at,dur:.65});tl.label('前'+(i+1)+'个候选');});});
+
 })();
 </script>
 <script src="/assets/post-links.js">

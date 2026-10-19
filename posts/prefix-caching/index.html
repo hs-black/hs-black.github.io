@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prefix caching：相同的开头，只算一次 · Zunzhe Zhang</title>
-<meta name="description" content="用动画讲清 prefix cache 的精确前缀匹配、满块哈希链、KV 复用、共享引用计数、缓存命中与驱逐。">
+<meta name="description" content="从哈希链与满块边界，到计算身份、引用驱逐、显存收益和延迟模型；附数值演算、三道练习与缓存模拟代码。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
@@ -24,7 +24,11 @@
 .slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
 .slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
 .slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
+
+.serving-visual text{fill:var(--text);font:23px var(--font-sans)}
+.serving-visual .clock,.serving-visual .answer,.serving-visual .outputs{font-weight:700;fill:var(--accent)}
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -36,6 +40,7 @@
 <p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
 <p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
 </section>
+
 <section class="slide lesson" id="pc-repeat">
 <div class="kicker">01 · 重复工作</div>
 <h2>开头一样，为什么每次都从头算？</h2>
@@ -81,6 +86,7 @@
 </div>
 <p class="note">图中文字只表示提示词片段；匹配发生在分词后的 token 和模型执行上下文上。</p>
 </section>
+
 <section class="slide lesson" id="pc-exact">
 <div class="kicker">02 · 精确前缀</div>
 <h2>中间改了一个 token，后面也会跟着变</h2>
@@ -151,6 +157,14 @@
 </div>
 <p class="note">标准因果 attention 中，某个 token 的表示依赖它之前的整个前缀；这里的逐 token 匹配用于解释原理。</p>
 </section>
+<section class="slide workshop" id="pc-identity"><div class="kicker">工程细节</div><h2>复用成立的条件，是同一个计算状态</h2><div class="ws-equation">KV(prefix) = f(权重, adapter, 输入, 位置, attention 规则)</div><p class="">相同文本只是起点。缓存池必须绑定模型版本、数值格式和位置/attention 配置；请求身份还可能包括 LoRA、图像内容与隔离域。</p><div class="ws-cols"><div class="ws-card"><p class=""><b>通常放进池的 namespace</b><br>权重修订版本、KV dtype/布局、位置编码配置、tokenizer 与模板版本。</p></div><div class="ws-card"><p class=""><b>通常随请求进入 hash</b><br>实际 token IDs、adapter 身份、多模态内容摘要、cache salt。</p></div></div><p class="ws-note">字段可以由池边界固定，也可以进入 key；关键是不同计算状态不能落到同一可复用身份。</p></section>
+<section class="slide workshop" id="pc-shapes"><div class="kicker">工程细节</div><h2>命中 H 个 token，省掉的是哪些张量？</h2><p class="">普通 GQA：每层前缀 K、V 各为 [H, Hkv, d]。对于后缀 query，仍需把命中前缀与新后缀的 K、V 一起读取。</p><div class="ws-equation">后缀 Q：[N−H, Hq, d]；可见 KV：[N, Hkv, d]</div><p class="">对前缀的投影、attention、MLP 不再重算；后缀仍经过全部层。因果掩码必须保留原来的绝对位置，不能把后缀重新编号为从 0 开始。</p><p class="ws-note">共享前缀也共享物理 KV 块，活跃请求持有引用；执行 attention 时按各自的 block table 访问。</p></section>
+<section class="slide workshop" id="pc-hash-code"><div class="kicker">工程细节</div><h2>用规范序列化，把“前面是谁”写进 key</h2><pre class="ws-code">parent = sha256(serialize(namespace, salt))
+for block in complete_token_blocks:
+    payload = serialize(parent, block.token_ids, extras)
+    key = sha256(payload)
+    parent = key
+    yield key</pre><p class="">不要直接拼接字符串：("ab", "c") 与 ("a", "bc") 会变成相同字节串。带类型和长度的稳定序列化能避免这种歧义。</p><p class="ws-note">SHA-256 降低碰撞风险，但字段遗漏、错版本、缓存越权都不是换 hash 算法能修复的。</p></section>
 <section class="slide lesson" id="pc-hash">
 <div class="kicker">03 · 查找</div>
 <h2>用一条哈希链，记住“这个块之前是什么”</h2>
@@ -198,6 +212,18 @@
 </div>
 <p class="note">H 表示哈希；vLLM 还把 LoRA、图像内容标识、cache salt 等必要条件纳入键。模型实例定义复用边界。</p>
 </section>
+<section class="slide workshop" id="pc-boundary-work"><div class="kicker">工程细节</div><h2>共同开头长 5，块大小 4，为什么只省 4？</h2><p class="">按从 0 开始的位置编号，两条 13-token prompt 在位置 5 首次不同。共有位置 0–4，但完整相同块只有 [0,1,2,3]。</p><div class="ws-equation">可复用满块 token 数 H = B × floor(C / B)</div><div class="ws-equation">B = 4，C = 5 ⇒ H = 4；需重算 N−H = 9</div><p class="ws-note">第二块即使前三个 token 相同，块身份仍不同。后面 token 值即使完全一样，parent hash 已改变，也不能直接复用后续块。</p></section>
+<section class="slide workshop" id="pc-boundary-animation"><div class="kicker">计算动画 · 满块边界与依赖</div><h2>一个 token 改动，沿哈希链把后面一起改掉</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><g class="block0" opacity="1"><rect x="20" y="45" width="340" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="190.0" y="88.0" text-anchor="middle">位置 0–3：相同</text></g><g class="block1" opacity="1"><rect x="395" y="45" width="340" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="565.0" y="88.0" text-anchor="middle">位置 4–7：含改动</text></g><g class="block2" opacity="1"><rect x="770" y="45" width="340" height="70" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="940.0" y="88.0" text-anchor="middle">位置 8–11：值相同</text></g><text x="20" y="170" class="">h₀ 保持不变</text><text x="395" y="170" class="hash1">h₁ → h₁′</text><text x="770" y="170" class="hash2">h₂ → h₂′</text><text x="20" y="245" class="">复用 token：</text><text x="190" y="245" class="hit">0</text><text x="450" y="245" class="">重算 token：</text><text x="630" y="245" class="miss">13</text><circle class="delta" cx="430" cy="205" r="12" fill="var(--accent-2)"/></svg><p class="ws-caption">继续向后找“局部相同块”会破坏因果语义。查找的是从起点连续命中的前缀，遇到第一个 miss 就停止。</p></section>
+<section class="slide workshop" id="pc-full-hit"><div class="kicker">工程细节</div><h2>整段 prompt 都在缓存里，首字 logits 在哪？</h2><p class="">KV 保存了注意力需要的历史，并不自动保存最后一层 hidden state 或下一 token 的 logits。</p><div class="ws-equation">仅缓存 KV 的接口：至少保留一个输入位置重算</div><p class="">若接口只按完整块复用，N=12、B=4 时，可把前 8 个 token 直接接上，再处理最后 4 个。N=13 时可复用 12 个，再处理最后 1 个。</p><p class="ws-note">支持更细粒度边界，或另外缓存最终状态的实现，可以有不同处理方式。评估“100% 命中”时先看它统计的是已有块还是实际跳过的计算位置。</p></section>
+<section class="slide workshop" id="pc-lookup-code"><div class="kicker">工程细节</div><h2>命中以后，先保护块，再把地址交给请求</h2><pre class="ws-code">hits = longest_contiguous_cached_prefix(keys)
+needed = blocks_for_new_suffix(request, hits)
+if not enough_reclaimable_blocks(needed):
+    wait_or_preempt()
+else:
+    pin(hits)                  # 引用 +1，从空闲队列取走
+    tail = allocate(needed)
+    request.block_table = hits + tail
+    schedule_uncached_suffix(request)</pre><p class="ws-note">生产实现需要把“检查、pin、分配”协调起来，防止刚命中的块被另一条请求驱逐。CPU 返回一个 hash 命中还不等于 GPU 上的 KV 已可用。</p></section>
 <section class="slide lesson" id="pc-reuse">
 <div class="kicker">04 · 命中</div>
 <h2>直接接上 KV，只计算没见过的后缀</h2>
@@ -241,6 +267,7 @@
 </div>
 <p class="note">满块缓存示意；为了得到首个输出的 logits，提示词全命中时，引擎仍可能保留最后一个 token 做计算。</p>
 </section>
+
 <section class="slide lesson" id="pc-share">
 <div class="kicker">05 · 共享</div>
 <h2>两条请求，读同一份 KV</h2>
@@ -275,6 +302,8 @@
 </div>
 <p class="note">请求生成的不同后缀各用自己的块；共享前缀保持只读。</p>
 </section>
+<section class="slide workshop" id="pc-memory-work"><div class="kicker">工程细节</div><h2>三条相同长前缀请求，真正省了多少显存？</h2><p class="">每 token KV=128 KiB，块大小 16。三条请求各有 1,024-token 公共前缀与 128-token 私有后缀；所有长度都恰好对齐块。</p><div class="ws-equation">不共享：3 × (1,024+128) = 3,456 个物理位置</div><div class="ws-equation">共享：1,024 + 3 × 128 = 1,408 个物理位置</div><p class="">省 2,048 × 128 KiB = 256 MiB。物理 KV 从 432 MiB 降至 176 MiB；每个请求自己的逻辑长度仍是 1,152。</p><p class="ws-note">共享比例算的是物理块，不能只把各请求 block table 的长度加起来。表中多个条目可能指向同一物理块。</p></section>
+<section class="slide workshop" id="pc-domains"><div class="kicker">工程细节</div><h2>缓存隔离的边界，要和服务的信任边界一致</h2><p class="">同一公共文档可在授权用户组内共享；不同私有租户使用不同 namespace 或由服务端管理的 salt。</p><div class="ws-cols"><div class="ws-card"><p class=""><b>为什么需要域</b><br>命中会改变延迟。跨租户共享不仅有地址权限问题，还可能让另一方推测某段前缀是否被使用过。</p></div><div class="ws-card"><p class=""><b>域里放什么</b><br>模型版本 + 租户/信任组身份；salt 稳定到足以复用，又不能让未授权客户端随意冒用。</p></div></div><p class="ws-note">图像占位 token 相同，不代表图像相同；多模态缓存必须包含真实输入内容或其稳定摘要。LoRA 变化也必须失效。</p></section>
 <section class="slide lesson" id="pc-evict">
 <div class="kicker">06 · 生命周期</div>
 <h2>没人使用，可以先留着，也可以被替换</h2>
@@ -312,6 +341,8 @@
 </div>
 <p class="note">vLLM 通过空闲队列管理可回收块；仍被活跃请求引用的块不能被直接覆盖。</p>
 </section>
+<section class="slide workshop" id="pc-eviction-case"><div class="kicker">工程细节</div><h2>refcount 为 0，说明可驱逐，不说明必须立刻擦掉</h2><table class="ws-table"><thead><tr><th>块</th><th>活跃引用</th><th>状态</th><th>当前能否回收</th></tr></thead><tbody><tr><td>P1</td><td>2</td><td>两个请求正在读</td><td>不能</td></tr><tr><td>P2</td><td>0</td><td>保留 hash 与旧 KV</td><td>能，先删除旧身份</td></tr><tr><td>P3</td><td>0</td><td>无缓存内容</td><td>能直接分配</td></tr></tbody></table><p class="">若需要两块，先使用 P3，再驱逐 P2。用 P2 写新数据前，必须从旧 hash→块映射中移除它，否则下一次“命中”会读到别人的内容。</p><p class="ws-note">LRU 一类策略只在可回收块集合上选择。活跃请求正在读的块，哪怕很久没被新请求命中，也不能直接覆盖。</p></section>
+<section class="slide workshop" id="pc-chain-gap"><div class="kicker">工程细节</div><h2>后面的块还在，为什么也可能省不了计算？</h2><p class="">请求有块链 A→B→C。A 被驱逐了，B 与 C 还在池中。新请求不能从 B 开始跳过前缀：计算前面的 query 时，缺少所需的前序 KV。</p><div class="ws-equation">可跳过长度 = 从起点连续命中的块数 × B</div><p class="">重算 A 以后，系统可以重新评估后续复用；简单的入场查找通常在第一个 miss 就停止。本实验采用这个明确的规则。</p><p class="ws-note">驱逐策略可考虑共同前缀的覆盖价值。大量只命中冷门长后缀的块，可能不如一个大家都使用的短公共前缀有用。</p></section>
 <section class="slide">
 <div class="kicker">07 · 实际提示词</div>
 <h2>稳定的内容放前面，可变的内容放后面</h2>
@@ -330,6 +361,11 @@
 </div>
 </div>
 </section>
+<section class="slide workshop" id="pc-latency-work"><div class="kicker">工程细节</div><h2>省 76.8% 输入 token，TTFT 不会自动快 4.3 倍</h2><p class="">教学模型：N=4,000，命中 H=3,072；prefill 每 token 成本 0.05 ms，排队、tokenization、网络等合计固定 55 ms。</p><div class="ws-equation">冷：55 + 4,000 × 0.05 = 255 ms</div><div class="ws-equation">热：55 + 928 × 0.05 = 101.4 ms</div><p class="">prefill token 减少 76.8%，TTFT 只缩短 60.24%，加速比约 2.515×。固定开销越大，省掉计算对首字延迟的影响越小。</p><p class="ws-note">这是线性近似；真实 prefill 成本与长度、batch、attention 类型、硬件有关。用模型解释趋势，再用实测替换系数。</p></section>
+<section class="slide workshop" id="pc-latency-animation"><div class="kicker">计算动画 · 省 token 到省时间</div><h2>把固定开销和可省的计算分开看</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><text x="20" y="30" class="">冷请求：55 ms 固定 + 200 ms prefill</text><rect x="20" y="50" width="165" height="58" fill="var(--text-faint)"/><rect class="coldbar" x="185" y="50" width="0" height="58" fill="var(--accent)"/><text x="835" y="90" class="coldms">0</text><text x="20" y="155" class="">热请求：55 ms 固定 + 46.4 ms 后缀 prefill</text><rect x="20" y="175" width="165" height="58" fill="var(--text-faint)"/><rect class="hotbar" x="185" y="175" width="0" height="58" fill="var(--accent-2)"/><text x="390" y="215" class="hotms">0</text><text x="20" y="275" class="">同样的固定等待仍然存在；缓存减少的是 prefill 部分。</text></svg><p class="ws-caption">如果队列已经堆积，缓存还可能通过减少总工作量降低其他请求的排队；这个系统效应要在同样到达率下测。</p></section>
+<section class="slide workshop" id="pc-attention-pairs"><div class="kicker">工程细节</div><h2>后缀仍要读前缀：attention 工作量这样数</h2><div class="ws-equation">每个 query 头：完整因果 attention 对数 = N(N+1)/2</div><div class="ws-equation">命中 H 后剩余 = [N(N+1) − H(H+1)] / 2</div><p class="">N=4,096，H=3,072：完整 8,390,656 对；剩余 3,670,528 对。跳过 75% 的 query token，只省约 56.25% 的 query-key 对。</p><p class="ws-note">后面的 query 更长，每一个都要看之前的前缀。投影/MLP 的成本更接近按跳过的 token 数下降，整体收益要按各算子占比加权。</p></section>
+<section class="slide workshop" id="pc-metrics"><div class="kicker">工程细节</div><h2>命中率高，可能只是命中了很多很短的请求</h2><table class="ws-table"><thead><tr><th>指标</th><th>定义</th><th>能回答什么</th></tr></thead><tbody><tr><td>请求命中率</td><td>有任意命中的请求 / 请求总数</td><td>有多少请求受益</td></tr><tr><td>token 命中率</td><td>跳过 token 总数 / 输入 token 总数</td><td>省掉多少输入位置</td></tr><tr><td>TTFT 分布</td><td>按输入长度和命中长度分组</td><td>用户实际快了多少</td></tr><tr><td>重用距离 / 驱逐量</td><td>两次使用间隔 / 回收块数</td><td>工作集是否超过池容量</td></tr></tbody></table><p class="ws-note">100 条 10-token 请求全命中，加上一条 10,000-token 请求全 miss：请求命中率约 99%，token 命中率仅约 9.1%。</p></section>
+<section class="slide workshop" id="pc-debug"><div class="kicker">工程细节</div><h2>看起来相同的 prompt，为什么一次也没命中？</h2><table class="ws-table"><thead><tr><th>教学观测</th><th>检查方向</th></tr></thead><tbody><tr><td>每次位置 2 的 token ID 都变</td><td>时间戳 / request ID 放在共同前缀前面</td></tr><tr><td>token IDs 一致，adapter 字段不同</td><td>计算身份不同，miss 是正确行为</td></tr><tr><td>刚结束时能命中，过一会儿全部 miss</td><td>工作集过大或池压力导致驱逐</td></tr><tr><td>token 命中率高，TTFT 变化小</td><td>排队 / CPU / 网络占主导，或统计边界错</td></tr></tbody></table><p class="ws-note">打印首个不同 token 的位置与块边界，核对 namespace，再看驱逐日志。不要先把 key 里的字段删掉来追求命中率。</p></section>
 <section class="slide">
 <div class="kicker">08 · 省在哪里</div>
 <h2>更快开始回答，后面的生成仍要继续</h2>
@@ -348,6 +384,14 @@
 <br>
 <a href="/posts/paged-attention/">PagedAttention 管“KV 放在哪里”</a> · Prefix caching 管“哪段已经算过”</p>
 </section>
+
+
+<section class="slide workshop" id="pc-ex1"><div class="kicker">练习 1 · 先计算，再展开</div><h2>完整前缀长 35，块大小 16，能省多少？</h2><div class="ws-prompt">两条 prompt 都长 80；从 0 开始的第 35 个位置首次不同，也就是共同前缀有 35 个 token。求满块命中、重算长度、token 命中率；若在位置 0 插入日期，会怎样？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">命中 H=16×floor(35/16)=32；重算 80−32=48。<br>token 命中率=32/80=40%。<br>日期放在最前面且每次变化，会使第一个块和后续 hash 链全部变化，H=0。稳定系统说明放前面、变化字段后置，前提是保持应用语义。</p></details></div></section>
+<section class="slide workshop" id="pc-ex2"><div class="kicker">练习 2 · 先计算，再展开</div><h2>缓存值得多占 100 MiB 吗？</h2><div class="ws-prompt">每块 2 MiB。一个公共前缀占 50 块，未来 20 次请求都能复用它，每次省 40 ms prefill。若固定开销 60 ms，冷 prefill 50 ms，求热 TTFT、单请求加速比与总省下的计算时间。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">公共前缀占 50×2=100 MiB。热 prefill=50−40=10 ms；热 TTFT=60+10=70 ms。<br>冷 TTFT=110 ms，加速比=110/70≈1.571×。20 次合计省 800 ms prefill 计算。<br>是否保留还要比较被挤走请求的收益与命中概率；800 ms 不是保证能直接兑现的墙钟缩短。</p></details></div></section>
+<section class="slide workshop" id="pc-ex3"><div class="kicker">练习 3 · 先计算，再展开</div><h2>同样的图像占位 token，能不能共用 KV？</h2><div class="ws-prompt">两条请求 token IDs 完全相同，但图片内容不同；另一对请求图片相同、LoRA adapter 不同。程序只 hash token IDs 和 parent hash。指出问题并设计测试。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">两组都可能错误命中：图像 embedding 与模型 adapter 都影响 KV。把图像内容摘要、adapter 身份纳入 key 或独立 namespace。<br>测试：保持文本 token 不变，只换图像 / adapter，应该 miss；完全相同输入和身份则 hit；更换租户隔离域也应 miss。再与禁用缓存的输出做数值对照。</p></details></div></section>
+<section class="slide workshop" id="prefix-caching-lab"><div class="kicker">动手实验 · CPU 教学模拟</div><h2>改变一个位置，观察整条 hash 链</h2><p class="">下载代码后，在保存代码的目录运行：</p><pre class="ws-code">python3 lab.py
+python3 lab.py --change-position 9
+python3 lab.py --block-size 8</pre><p class="ws-note">默认改位置 5：reused=4，recompute=9。改位置 9：reused=8，recompute=5。B=8、改位置5：reused=0。</p><p class="">先预测每种情况的命中边界。代码测试跨租户和跨模型失效、前缀缺块停止、整段命中时的末位置处理。再实现有限容量 LRU，重放重复与独有文档混合的轨迹，比较请求命中率和 token 命中率。</p><a class="ws-lab-link" download href="/posts/prefix-caching/lab.py">下载 lab.py · Python 3 标准库</a></section>
 <section class="slide">
 <div class="kicker">参考与延伸阅读</div>
 <h2>缓存的是计算过的历史</h2>
@@ -363,11 +407,13 @@
 <a href="/posts/paged-attention/">回到显存分页</a> · <a href="/posts/continuous-batching/">回到连续调度</a> · <a href="/blog/">返回博客</a>
 </p>
 </section>
+
+
 </div>
 </main>
-<script src="/assets/slides.js">
+<script src="/assets/slides.js?v=03e51263994e">
 </script>
-<script src="/assets/anim.js">
+<script src="/assets/anim.js?v=9b723aa5f47d">
 </script>
 <script>
 (() => {
@@ -661,6 +707,25 @@
     });
     Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
     window.lessonTimelines[id] = tl;
+  });
+})();
+</script>
+<script>
+(() => {
+  const scenes = [{"id": "pc-boundary-animation", "steps": [["第一个完整块可复用", [[".block0 rect", {"stroke": "var(--accent)"}], [".hit", {"text": 4}], [".miss", {"text": 9}]]], ["改动使第二块失效", [[".delta", {"y": -125}], [".block1", {"opacity": 0.35}]]], ["parent 变化传播到第三块", [[".delta", {"x": 375, "y": -125}], [".block2", {"opacity": 0.35}]]]]}, {"id": "pc-latency-animation", "steps": [["冷请求完成", [[".coldbar", {"attr": {"width": 600}}], [".coldms", {"text": 255}]]], ["热请求只计算后缀", [[".hotbar", {"attr": {"width": 139.2}}], [".hotms", {"text": 101.4}]]]]}];
+  scenes.forEach(({id,steps}) => {
+    const slide = document.getElementById(id), tl = Anim.timeline({root:slide});
+    tl.label('起点',0);
+    let at=0;
+    steps.forEach(([label,actions])=>{
+      actions.forEach(([selector,props])=>{
+        if(typeof props.text === 'number') props.fmt=v=>Number.isInteger(props.text)?String(Math.round(v)):v.toFixed(1);
+        tl.to(selector,props,{at:at+.1,dur:.9});
+      });
+      at+=1.1;tl.label(label,at);
+    });
+    Anim.slide(slide,tl,{steps:true,controls:true,delay:0});
+    window.lessonTimelines[id]=tl;
   });
 })();
 </script>

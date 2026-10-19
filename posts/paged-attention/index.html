@@ -4,10 +4,10 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang</title>
-<meta name="description" content="用可回放动画理解 KV cache 分页、逻辑块到物理块的映射、按需分配与释放，以及共享前缀和写时复制。">
+<meta name="description" content="从 KV 容量与地址计算，到块池分配、COW、引用计数和 OOM 抢占；配有计算动画、三道习题与可运行的分页模拟。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css">
+<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
 <style>
 .slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
@@ -24,7 +24,11 @@
 .slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
 .slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
 .slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
+
+.serving-visual text{fill:var(--text);font:23px var(--font-sans)}
+.serving-visual .clock,.serving-visual .answer,.serving-visual .outputs{font-weight:700;fill:var(--accent)}
 </style>
+<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
 </head>
 <body class="deck-page">
 <main class="deck">
@@ -36,6 +40,7 @@
 <p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
 <p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
 </section>
+
 <section class="slide lesson" id="pg-reserve">
 <div class="kicker">01 · 问题</div>
 <h2>答案有多长，开始时并不知道</h2>
@@ -161,6 +166,9 @@
 </div>
 <p class="note">每个方格代表一个 token 在各层的 KV；图中容量仅用于演示。</p>
 </section>
+<section class="slide workshop" id="pg-shapes"><div class="kicker">工程细节</div><h2>先数清楚：一个 token 要留下多少数据</h2><p class="">普通 GQA 的 K、V 各有一个四维张量。这里只算 KV，不把权重、临时 workspace 混进来。</p><div class="ws-equation">K, V ∈ [L, T, H<sub>kv</sub>, d]</div><table class="ws-table"><thead><tr><th>符号</th><th>含义</th><th>教学模型</th></tr></thead><tbody><tr><td>L</td><td>Transformer 层数</td><td>32</td></tr><tr><td>Hkv / d</td><td>每层 KV 头数 / 每头宽度</td><td>8 / 128</td></tr><tr><td>b</td><td>每个元素的存储字节数</td><td>BF16：2 B</td></tr></tbody></table><p class="ws-note">若做张量并行，用每张卡实际存储的 KV 头数代入；复制的 KV 不能按卡数再除一次。</p></section>
+<section class="slide workshop" id="pg-bytes"><div class="kicker">工程细节</div><h2>128 KiB：每新增一个位置的账单</h2><div class="ws-equation">m<sub>token</sub> = 2 × L × H<sub>kv</sub> × d × b</div><p class="">前面的 2 是 K 和 V。代入：2 × 32 × 8 × 128 × 2 = 131,072 B = 128 KiB。</p><div class="ws-equation">m<sub>block</sub> = B × m<sub>token</sub> = 16 × 128 KiB = 2 MiB</div><div class="ws-cols"><div class="ws-card"><p class="">逻辑块装 B 个 token 的 KV。所有层通常共用 token→物理块编号，底层各层有自己的 KV 存储。</p></div><div class="ws-card"><p class="">计量统一用 KiB / MiB / GiB：分别是 2¹⁰ / 2²⁰ / 2³⁰ B。不要把 GB 的十进制单位混入容量题。</p></div></div></section>
+<section class="slide workshop" id="pg-capacity"><div class="kicker">工程细节</div><h2>24 GiB 的 KV 池，能同时容纳多少请求？</h2><p class="">延续上页模型，块大小 16，池内共有 24 × 1024 / 2 = 12,288 个物理块。</p><div class="ws-equation">每条长度 4,097：ceil(4,097 / 16) = 257 块</div><div class="ws-equation">最大并发 = floor(12,288 / 257) = 47 条</div><p class="">47 条占 12,079 块，还剩 209 块。第 48 条需要 257 块，差 48 块；“总 token 数看着还够”不足以证明能放下。</p><p class="ws-note">这里每条长度固定、不共享块；真实服务还要留增长余量，pool 容量应来自运行时完成权重和 workspace 预留之后的测量。</p></section>
 <section class="slide lesson" id="pg-map">
 <div class="kicker">02 · 分页</div>
 <h2>顺序留在表里，数据放进空闲块</h2>
@@ -240,6 +248,7 @@
 </div>
 <p class="note">教学块大小 B = 4；实际引擎按模型与 kernel 选择块大小。</p>
 </section>
+
 <section class="slide lesson" id="pg-read">
 <div class="kicker">03 · 寻址</div>
 <h2>读 token 6，先查表，再找偏移</h2>
@@ -291,6 +300,13 @@
 </div>
 <p class="note">token 编号从 0 开始，token 6 是第 7 个；图中只画一层、一个 KV head 的寻址。</p>
 </section>
+<section class="slide workshop" id="pg-address-work"><div class="kicker">计算动画 · 从逻辑编号到字节</div><h2>把 token 6 变成真正的内存地址</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><g class="" opacity="1"><rect x="10" y="35" width="190" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="105.0" y="75.5" text-anchor="middle">token t = 6</text></g><g class="" opacity="1"><rect x="270" y="35" width="230" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="385.0" y="75.5" text-anchor="middle">q = 1，r = 2</text></g><g class="" opacity="1"><rect x="570" y="35" width="190" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="665.0" y="75.5" text-anchor="middle">table[1] = P1</text></g><g class="" opacity="1"><rect x="830" y="35" width="300" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="980.0" y="75.5" text-anchor="middle">K 地址偏移：110 B</text></g><text x="18" y="165" class="">B = 4；Hkv = 2；d = 4；b = 2</text><text x="18" y="210" class="">元素偏移 = ((P × B + r) × Hkv + h) × d + j</text><text x="18" y="255" class="">取 h = 1、j = 3，元素偏移 = </text><text x="555" y="255" class="answer">0</text><circle class="packet" cx="105" cy="125" r="12" fill="var(--accent)"/></svg><p class="ws-note">教学布局：K 和 V 分开，每个 K 池按 [物理块, 块内位置, KV 头, 头内维度] 连续存放。</p><p class="ws-caption">先做整除和取余，再查 block table；最后按 stride 展开。实际 kernel 可重排维度，但映射必须等价。</p></section>
+<section class="slide workshop" id="pg-kernel-layout"><div class="kicker">工程细节</div><h2>分页以后，attention 仍然按完整历史归一化</h2><pre class="ws-code">for logical_block in range(ceil(length / B)):
+    physical = block_table[logical_block]
+    K_tile, V_tile = load_kv(physical)
+    valid = logical_block * B + arange(B) &lt; length
+    scores = (q @ K_tile.T) * scale
+    online_softmax_update(scores, V_tile, mask=valid)</pre><p class="">尾块里的未写位置必须 mask。每块独立 softmax 再把结果相加，会丢失块之间的归一化权重。</p><p class="ws-note">block table 是整数元数据，通常远小于 KV。性能更依赖合并访存、向量化和跨块归约。</p></section>
 <section class="slide lesson" id="pg-grow">
 <div class="kicker">04 · 生长</div>
 <h2>写满一块，再拿下一块</h2>
@@ -345,6 +361,7 @@
 </div>
 <p class="note">一般只有尾块会留下未用槽位；不同模型的分层存储细节由引擎处理。</p>
 </section>
+
 <section class="slide lesson" id="pg-release">
 <div class="kicker">05 · 回收</div>
 <h2>请求结束，块就能交给下一位</h2>
@@ -387,6 +404,7 @@
 </div>
 <p class="note">启用 prefix caching 时，引用计数归零的满块可以先保留内容，等有新需求再驱逐。</p>
 </section>
+
 <section class="slide lesson" id="pg-cow">
 <div class="kicker">06 · 共享</div>
 <h2>只读时共用，要写入时再分开</h2>
@@ -433,6 +451,20 @@
 </div>
 <p class="note">这是分支采样的写时复制示意；满块 prefix cache 命中通常直接共享，不必复制。</p>
 </section>
+<section class="slide workshop" id="pg-refcount"><div class="kicker">工程细节</div><h2>引用计数管理“谁还在读”，长度管理“哪里能写”</h2><div class="ws-cols"><div class="ws-card"><p class=""><b>每个请求</b><br>block_table：逻辑块到物理块<br>length：已写 KV 的 token 数<br>状态：运行 / 等待 / 完成</p></div><div class="ws-card"><p class=""><b>每个物理块</b><br>refcount：活跃请求引用数<br>valid length：尾块有效范围<br>free queue：可再分配块</p></div></div><p class="">没有 prefix cache 时，refcount 变成 0 可以直接归还。启用 prefix cache 时，还可能留下有效 hash 和内容，直到被驱逐。</p><p class="ws-note">引用计数不是 token 数；同一块被两个请求读取，哪怕只写了三个 token，refcount 仍然是 2。</p></section>
+<section class="slide workshop" id="pg-cow-work"><div class="kicker">数据流动画 · COW 与计数</div><h2>一次写入，为什么会先少掉一个空闲块？</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><g class="atable-new" opacity="0"><rect x="20" y="35" width="220" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="130" y="73" text-anchor="middle">A → P3</text></g><g class="atable" opacity="1"><rect x="20" y="35" width="220" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="130.0" y="73.0" text-anchor="middle">A → P2</text></g><g class="" opacity="1"><rect x="20" y="140" width="220" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="130.0" y="178.0" text-anchor="middle">B → P2</text></g><g class="old" opacity="1"><rect x="360" y="55" width="310" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="515.0" y="105.5" text-anchor="middle">P2 [4, 5, 6, _]</text></g><g class="new" opacity="0"><rect x="790" y="55" width="310" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="945.0" y="105.5" text-anchor="middle">P3 [4, 5, 6, _]</text></g><text x="360" y="190" class="">P2 引用：</text><text x="485" y="190" class="oldref">2</text><text x="790" y="190" class="">P3 引用：</text><text x="915" y="190" class="newref">0</text><text x="20" y="265" class="">空闲块：</text><text x="135" y="265" class="free">4</text><text x="945" y="105.5" text-anchor="middle" class="write" opacity="0">P3 [4, 5, 6, 1001]</text><path class="copyline" d="M670 95 L790 95" stroke="var(--accent)" stroke-width="5" opacity="0"/></svg><p class="ws-caption">B = 4，两个请求共享未满的尾块 P2。A 要继续写：先分配并复制 P3，再把 A 的映射切过去，最后写 1001。</p><p class="ws-note">如果尾块已经满，下一 token 直接申请新块；不用复制已经写满的前缀。</p></section>
+<section class="slide workshop" id="pg-allocate-code"><div class="kicker">工程细节</div><h2>先确保分配成功，再改变可见状态</h2><pre class="ws-code">if tail_is_full:
+    new = allocate_or_fail()
+    table.append(new)
+elif refcount[tail] &gt; 1:
+    new = allocate_or_fail()      # 失败时旧映射完全不动
+    copy_valid_kv(tail, new)
+    wait_until_copy_is_visible()
+    refcount[tail] -= 1
+    table[-1] = new
+write_token(table[-1], token)</pre><p class="ws-note">GPU stream / event 要保证 copy 和 write 的顺序。请求取消、异常返回也要走释放路径；只靠正常完成释放会慢慢漏掉整个池。</p></section>
+<section class="slide workshop" id="pg-oom-case"><div class="kicker">工程细节</div><h2>三个空闲块，四个请求同时跨边界</h2><p class="">池里只剩 3 块。A、B、C、D 本轮各需要一个新块，token 预算却足够安排四人。</p><div class="ws-cols"><div class="ws-card"><p class=""><b>可行的调度</b><br>本轮只运行其中 3 条，另一条等待；或者先抢占一个可释放足够块的请求，再分配。</p></div><div class="ws-card"><p class=""><b>必须避免</b><br>先给四条都追加映射，再在 GPU kernel 中发现地址无效。容量检查要在发布这轮 block table 前完成。</p></div></div><div class="ws-equation">本轮新增块数 ≤ 空闲块数 + 本轮可安全释放块数</div><p class="ws-note">不能回收仍被其他请求引用的共享块；“抢占了一个请求”不等于“释放了它表里的所有块”。</p></section>
+<section class="slide workshop" id="pg-preemption-cost"><div class="kicker">工程细节</div><h2>腾出显存以后，还要付一次恢复成本</h2><p class="">教学估算：某条请求已处理 4,000 个 token；保留 token ID，释放 KV，之后以 20,000 token/s 重新 prefill。</p><div class="ws-equation">重算成本 ≈ 4,000 / 20,000 s = 200 ms</div><p class="">若改为搬运 500 MiB KV，链路有效带宽 25 GiB/s，单向理想搬运时间是 500 / 25 / 1024 s ≈ 19.5 ms。</p><p class="ws-note">换出再换回合计至少 39.1 ms，还需 CPU 内存、同步和调度。选择重算还是搬运，要测实际开销，并看这段时间会阻塞谁。</p></section>
 <section class="slide">
 <div class="kicker">07 · 容量</div>
 <h2>把浪费限制在尾块里</h2>
@@ -449,6 +481,11 @@
 </div>
 <p class="note">这里计算的是 KV 的 token 槽位，不含 block table、模型权重和临时工作区；共享还会进一步减少实际块数。</p>
 </section>
+<section class="slide workshop" id="pg-waste-work"><div class="kicker">工程细节</div><h2>把“尾块浪费”算成可观测的数</h2><table class="ws-table"><thead><tr><th>长度 T</th><th>B = 16 的块数</th><th>分配位置</th><th>尾部空位</th></tr></thead><tbody><tr><td>17</td><td>2</td><td>32</td><td>15</td></tr><tr><td>32</td><td>2</td><td>32</td><td>0</td></tr><tr><td>63</td><td>4</td><td>64</td><td>1</td></tr><tr><td>合计 112</td><td>8</td><td>128</td><td>16</td></tr></tbody></table><div class="ws-equation">尾部浪费率 = 16 / 128 = 12.5%</div><p class="ws-note">每请求最多浪费 B−1 个位置。若长度对 B 的余数均匀，平均浪费 (B−1)/2；真实长度常集中在模板附近，应从 trace 统计。</p></section>
+<section class="slide workshop" id="pg-block-tradeoff"><div class="kicker">工程细节</div><h2>块越小，省下的是空位，多出来的是管理</h2><table class="ws-table"><thead><tr><th>同一组长度 17 / 32 / 63</th><th>B = 4</th><th>B = 16</th><th>B = 64</th></tr></thead><tbody><tr><td>总块数</td><td>29</td><td>8</td><td>3</td></tr><tr><td>分配位置</td><td>116</td><td>128</td><td>192</td></tr><tr><td>空位</td><td>4</td><td>16</td><td>80</td></tr><tr><td>128 KiB/token 的空位容量</td><td>0.5 MiB</td><td>2 MiB</td><td>10 MiB</td></tr></tbody></table><p class="">小块减少尾部浪费，让共享边界更细；大块减少表项、哈希和分配操作，也可能更适合某个 kernel 的访存布局。</p><p class="ws-note">选择引擎与 kernel 支持的块大小，再用相同请求轨迹测延迟、吞吐和块占用。不要只最小化浪费率。</p></section>
+<section class="slide workshop" id="pg-bandwidth"><div class="kicker">工程细节</div><h2>容量优化不会抹掉读取历史的成本</h2><p class="">教学模型：32 条请求，每条历史长度 4,096，每个历史位置占 128 KiB KV。一次 decode 读取全部历史：</p><div class="ws-equation">32 × 4,096 × 128 KiB = 16 GiB</div><div class="ws-equation">理想读取下界 = 16 GiB / (2 TiB/s) = 7.8125 ms</div><p class="">这是按每份 KV 恰读一次的带宽下界，未含权重、通信和 kernel 开销。分页解决放置和共享，attention kernel 才决定读得多有效率。</p><p class="ws-note">若跨请求复用了同一物理前缀，缓存层次可能改变实际 HBM 流量；不能直接把逻辑读取量当实测带宽。</p></section>
+<section class="slide workshop" id="pg-debug"><div class="kicker">工程细节</div><h2>占用率只有 70%，为什么请求还是进不来？</h2><table class="ws-table"><thead><tr><th>教学日志</th><th>读法</th></tr></thead><tbody><tr><td>物理块 1,000；活跃 700；闲置缓存 300</td><td>闲置缓存可驱逐，不等于不可用</td></tr><tr><td>新请求需 350 块；剩余可用 300</td><td>差 50 块，入场条件不成立</td></tr><tr><td>取消 100 条请求后 refcount 没变</td><td>引用释放缺失，是泄漏线索</td></tr></tbody></table><p class="">先分清 allocated / active / cached / free 的定义，再看拒绝入场的原因。空闲率平均值掩盖了长请求一次所需的大额分配。</p><p class="ws-note">核对守恒：活跃唯一块 + 可驱逐缓存块 + 未缓存空闲块 = 物理池容量。</p></section>
+<section class="slide workshop" id="pg-checklist"><div class="kicker">工程细节</div><h2>一次有效的块大小实验，固定四件事</h2><div class="ws-cols"><div class="ws-card"><p class=""><b>输入固定</b><br>相同到达时间、输入/输出长度、共享前缀比例、随机种子。先保存 trace，再重放。</p></div><div class="ws-card"><p class=""><b>预算固定</b><br>同一 KV 池字节数、同一调度 token 预算、相同并发限制、相同精度。</p></div></div><p class="">输出同时记录：尾部空位 MiB、块表长度、抢占次数、P50/P99 TTFT 与 ITL、完成请求/s。</p><p class="ws-note">若把块变小后还提高了 KV 总容量，就无法判断改善来自粒度还是额外显存。</p></section>
 <section class="slide">
 <div class="kicker">08 · 合起来看</div>
 <h2>调度决定谁上场，分页决定住哪里</h2>
@@ -461,6 +498,13 @@
 <a href="/posts/prefix-caching/">Prefix caching：相同的开头，只算一次</a> · <a href="/posts/scaling-memory/">显存预算</a>
 </p>
 </section>
+
+
+<section class="slide workshop" id="pg-ex1"><div class="kicker">练习 1 · 先计算，再展开</div><h2>8 GiB 池能容纳多少条 1,025-token 请求？</h2><div class="ws-prompt">模型 L = 24，Hkv = 4，d = 128，BF16。块大小 B = 16，不共享。求每 token / 每块字节数、块数、最大并发及剩余块。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">① 每 token：2 × 24 × 4 × 128 × 2 = 49,152 B = 48 KiB。<br>② 每块：16 × 48 = 768 KiB；池有 floor(8 × 2²⁰ / 768) = 10,922 块。<br>③ 每请求 ceil(1,025 / 16) = 65 块。<br>④ floor(10,922 / 65) = 168 条，剩 2 块；池还有不足一块的 512 KiB 未分配。</p></details></div></section>
+<section class="slide workshop" id="pg-ex2"><div class="kicker">练习 2 · 先计算，再展开</div><h2>共享尾块之后，谁该释放哪一块？</h2><div class="ws-prompt">B = 4。A、B 共享一个已有 3 token 的块 P2，refcount = 2，空闲块数 5。A 追加一个 token，随后 A 完成，最后 B 完成。无 prefix cache。逐步写出引用与空闲数。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">① A 写前 COW：申请 P3；P2=1、P3=1，空闲 4。<br>② A 完成：P3 从 1→0，归还，空闲 5；P2 保持 1。<br>③ B 完成：P2 从 1→0，归还，空闲 6。<br>最后比最初多一块，因为最初已有 P2 被占用。直接清空 P2 会破坏 B。</p></details></div></section>
+<section class="slide workshop" id="pg-ex3"><div class="kicker">练习 3 · 先计算，再展开</div><h2>逻辑顺序没错，为什么 attention 输出还是错？</h2><div class="ws-prompt">长度 6，B = 4，block table=[5,1]。kernel 从第二个物理块读满 4 个位置，却没有 mask 最后两个位置。另一个实现把每块 softmax 结果等权平均。两个错误分别怎么修？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">① 第二块仅位置 4、5 有效；把逻辑位置 ≥ 6 的 score 设为 −∞，不读未初始化值参与计算。<br>② 各块的归一化分母不同，不能等权平均；使用全局 softmax 或可合并的在线 softmax 状态 (m, l, o)。<br>验证时随机打乱物理块编号，与连续 KV 的 dense attention 比较；包含长度 0/1/B/B+1 等边界。</p></details></div></section>
+<section class="slide workshop" id="paged-attention-lab"><div class="kicker">动手实验 · CPU 教学模拟</div><h2>用一个小内存池，亲手触发 COW 和 OOM</h2><p class="">下载代码后，在保存代码的目录运行：</p><pre class="ws-code">python3 lab.py --block-size 16
+python3 lab.py --block-size 4</pre><p class="ws-note">B=16：blocks=8，slots=128，useful=112，tail_waste=16。B=4：blocks=29，tail_waste=4；两次均输出 PASS。</p><p class="">先预测块数，再修改 lengths。代码还验证共享后写入互不污染、最后一个引用归还、COW 分配失败不破坏旧映射。把 refs 检查删掉再故意漏一次 release，观察池怎样耗尽。</p><a class="ws-lab-link" download href="/posts/paged-attention/lab.py">下载 lab.py · Python 3 标准库</a></section>
 <section class="slide">
 <div class="kicker">参考与延伸阅读</div>
 <h2>从内存池走到推理引擎</h2>
@@ -476,11 +520,13 @@
 <a href="/blog/">返回博客</a> · <a href="/posts/continuous-batching/">下一站：连续批处理 →</a>
 </p>
 </section>
+
+
 </div>
 </main>
-<script src="/assets/slides.js">
+<script src="/assets/slides.js?v=03e51263994e">
 </script>
-<script src="/assets/anim.js">
+<script src="/assets/anim.js?v=9b723aa5f47d">
 </script>
 <script>
 (() => {
@@ -831,6 +877,25 @@
     });
     Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
     window.lessonTimelines[id] = tl;
+  });
+})();
+</script>
+<script>
+(() => {
+  const scenes = [{"id": "pg-address-work", "steps": [["整除与取余", [[".packet", {"x": 280}]]], ["查表得到物理块", [[".packet", {"x": 560}]]], ["按 stride 展开", [[".packet", {"x": 860}], [".answer", {"text": 55}]]]]}, {"id": "pg-cow-work", "steps": [["分配并复制", [[".new,.copyline", {"opacity": 1}], [".free", {"text": 3}]]], ["切换 A 的映射", [[".atable", {"opacity": 0}], [".atable-new", {"opacity": 1}], [".oldref", {"text": 1}], [".newref", {"text": 1}]]], ["写入私有尾块", [[".new text", {"opacity": 0}], [".write", {"opacity": 1}]]]]}];
+  scenes.forEach(({id,steps}) => {
+    const slide = document.getElementById(id), tl = Anim.timeline({root:slide});
+    tl.label('起点',0);
+    let at=0;
+    steps.forEach(([label,actions])=>{
+      actions.forEach(([selector,props])=>{
+        if(typeof props.text === 'number') props.fmt=v=>Number.isInteger(props.text)?String(Math.round(v)):v.toFixed(1);
+        tl.to(selector,props,{at:at+.1,dur:.9});
+      });
+      at+=1.1;tl.label(label,at);
+    });
+    Anim.slide(slide,tl,{steps:true,controls:true,delay:0});
+    window.lessonTimelines[id]=tl;
   });
 })();
 </script>

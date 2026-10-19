@@ -26,15 +26,21 @@ body = json.dumps(links, ensure_ascii=False, indent=1)
     'window.POST_LINKS = ' + body + ';\n', encoding='utf-8')
 print(sum(len(v) for v in links.values()), 'links across', len(links), 'posts')
 
-# GitHub Pages caches JS independently from the HTML. Keep archive data URLs
-# tied to their contents so a fresh archive cannot reuse an older post list.
-archive = root / 'blog' / 'index.html'
-html = archive.read_text(encoding='utf-8')
-for name in ('posts.js', 'series.js'):
-    version = hashlib.sha256((root / 'assets' / name).read_bytes()).hexdigest()[:12]
-    html = re.sub(
-        r'(/assets/' + re.escape(name) + r')(?:\?[^"\s]*)?(?=")',
-        lambda match: match.group(1) + '?v=' + version,
-        html,
-    )
-archive.write_text(html, encoding='utf-8')
+# GitHub Pages caches assets independently from HTML. A new catalog or lesson
+# must load matching data, styles and player behavior.
+def version_assets(page, names):
+    html = page.read_text(encoding='utf-8')
+    for name in names:
+        version = hashlib.sha256((root / 'assets' / name).read_bytes()).hexdigest()[:12]
+        html = re.sub(
+            r'(/assets/' + re.escape(name) + r')(?:\?[^"\s]*)?(?=")',
+            lambda match: match.group(1) + '?v=' + version,
+            html,
+        )
+    page.write_text(html, encoding='utf-8')
+
+
+version_assets(root / 'blog' / 'index.html', ('posts.js', 'series.js'))
+for page in sorted((root / 'posts').glob('*/index.html')):
+    if '/assets/course.css' in page.read_text(encoding='utf-8'):
+        version_assets(page, ('course.css', 'slides.css', 'slides.js', 'anim.js'))
