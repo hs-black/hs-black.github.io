@@ -63,8 +63,8 @@
     <nav class="series" data-series="smol"></nav>
 
     <article class="prose">
-      <p>做模型的人大多很在意架构和数据，却很少了解基础设施：租几张 GPU、装好 PyTorch，似乎就完事了。可 SmolLM3 在 384 张 H100 上训了将近一个月、11T token，一路上遇到的节点故障、存储问题和重启（见<a href="/posts/smol-marathon/">训练马拉松</a>），几乎都是基础设施问题。这一篇的主题是：<strong>知道瓶颈在哪里，并把它修掉</strong>。</p>
-      <p>要找瓶颈，就得知道每一级到底有多快。我们沿着数据的路径走一遍：从 GPU 内部的计算和显存，到 CPU、节点内的其他 GPU、其他节点，最后到存储。每一级都给出理论值和在 AWS p5 集群（每节点 8 张 H100）上用 nvbandwidth、nccl-tests、gdsio 等工具量出来的实测值。最后把这些数字放进两个交互里：一个可以点击路径的节点拓扑图，一个「需要多少张卡」的计算器。</p>
+      <p>做模型的人大多很在意架构和数据，却很少了解基础设施：租几张 GPU、装好 PyTorch，似乎就完事了。可 SmolLM3 在 384 张 H100 上训了将近一个月、11T token，一路上遇到的节点故障、存储问题和重启（见<a href="/posts/smol-marathon/">训练马拉松</a>），几乎都是基础设施问题。基础设施要回答的其实只有一件事：<strong>瓶颈在哪里，怎么修掉</strong>。</p>
+      <p>要找瓶颈，就得知道数据路径上每一级到底有多快：GPU 内部的计算和显存、CPU、节点内的其他 GPU、其他节点、存储。理论值和实测值常常差得不少，这里的实测数字都来自 AWS p5 集群（每节点 8 张 H100），用 nvbandwidth、nccl-tests、gdsio 等工具量出。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -138,7 +138,7 @@
       <p>两条边界交于<strong>脊点</strong> \(I^* = P_{\text{peak}}/B_{\text{mem}}\)。用 H100 的 BF16 数字：\(990\times10^{12} / 3.35\times10^{12} \approx 296\) FLOPs/byte。算术强度低于它的 kernel 受内存限制，提高算力没用，要减少访存（融合、更好的访问模式）；高于它的受计算限制，优化访存没用，要更好的算法或用上 Tensor Core。举个例子：BF16 矩阵乘 \((M\times K)\cdot(K\times N)\) 做 \(2MNK\) 次 FLOP，至少读写 \(2(MK+KN+MN)\) 字节；\(M=N=K=8192\) 时 \(I = 2\cdot8192^3 / (2\cdot3\cdot8192^2) \approx 2731\)，远在脊点右边，是计算受限的；而逐元素的 GELU 每个元素 1 次读 1 次写（4 字节）只做个位数 FLOP，\(I\) 远小于 1，完全受内存限制。Nsight Compute 能直接画出某个 kernel 在 roofline 图上的位置，离边界越远，优化空间越大。（roofline 的完整推导见本站<a href="/posts/scaling-roofline/">规模化训练系列</a>。）</p>
 
       <h2 id="cpu">3. CPU ↔ GPU：PCIe、延迟与 NUMA</h2>
-      <p>GPU 不是孤立工作的：数据要先进显存，CPU 要调度 kernel，分布式训练里 GPU 之间还要不停交换激活、梯度和权重。GPU 对外的连接可以分成四条：CPU–GPU、节点内 GPU–GPU、节点间 GPU–GPU、GPU–存储，下面依次来看。实验机器是 AWS p5 实例（8 张 H100 80GB HBM3）。</p>
+      <p>GPU 不是孤立工作的：数据要先进显存，CPU 要调度 kernel，分布式训练里 GPU 之间还要不停交换激活、梯度和权重。GPU 对外的连接可以分成四条：CPU–GPU、节点内 GPU–GPU、节点间 GPU–GPU、GPU–存储。实验机器是 AWS p5 实例（8 张 H100 80GB HBM3）。</p>
       <p>CPU 是编排者：启动 kernel、管理显存分配、协调数据传输。它和 GPU 之间走 <strong>PCIe</strong>。用 <code>lstopo</code> 看 p5 的拓扑：</p>
       <ul>
         <li>两个 <strong>NUMA</strong> 节点（每个 CPU 插槽一个内存域），CPU 是 AMD EPYC 7R13，2 路、每路 48 核；</li>
@@ -267,7 +267,7 @@
       <p>这指向 375–400 张 H100，他们拿到了 384 张：既和并行策略对得上（\(384 = 2^7\times3\)），又给节点故障、重启留了余量。实际训练时每卡吞吐约 13,750 tokens/s，按 \(6N\) 算是 \(248\) TFLOPs/s，比规划的 216 略高，所以 11T token 用了约 24 天，而不是 4 周。</p>
       <p><strong>Amdahl 定律：卡不是越多越好。</strong>并行加速比受不可并行部分的限制：</p>
       $$\text{最大加速比} = \frac{1}{\text{串行比例} + \dfrac{\text{并行比例}}{\text{处理器数}}}.$$
-      <p>训练里「串行」部分主要是通信：梯度、权重、激活的同步。如果通信占每步 10%，加多少卡都不会超过 10 倍加速。更糟的是卡越多通信比例往往越大：all-reduce 参与者更多、网络带宽/延迟成为瓶颈、小模型的计算量不足以掩盖通信。SmolLM3 用的是<strong>弱扩展</strong>：全局 batch 随卡数一起放大，每张卡分到的工作量保持不变（下一节的配置里是每个数据并行副本每步 12k token），让计算/通信比保持合理。</p>
+      <p>训练里「串行」部分主要是通信：梯度、权重、激活的同步。如果通信占每步 10%，加多少卡都不会超过 10 倍加速。更糟的是卡越多通信比例往往越大：all-reduce 参与者更多、网络带宽/延迟成为瓶颈、小模型的计算量不足以掩盖通信。SmolLM3 用的是<strong>弱扩展</strong>：全局 batch 随卡数一起放大，每张卡分到的工作量保持不变（SmolLM3 的配置里是每个数据并行副本每步 12k token），让计算/通信比保持合理。</p>
 
       <h2 id="calc">11. 交互：GPU 数量与 Amdahl 定律</h2>
       <p>左边是上面的估算公式；默认值就是 SmolLM3 的那组输入，应该得到约 379 张。下面的曲线是 Amdahl 定律在给定通信（串行）比例下的理想加速比，是一个简化模型：它假设串行比例不随卡数变化，而实际中通常会变大。</p>
