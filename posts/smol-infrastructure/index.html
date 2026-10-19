@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>基础设施：GPU 集群、通信与存储 · Zunzhe Zhang</title>
+  <meta name="description" content="读 Smol Training Playbook 的基础设施一章：H100 内部、PCIe/NVLink/EFA 实测带宽、nccl-tests、存储分层、节点健康与 checkpoint，以及需要多少张 GPU。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig svg, .chart svg, .topo svg { width: 100%; height: auto; display: block; }
+    .fig text, .topo text { font-family: var(--font-sans); fill: var(--text); }
+    .fig .soft, .topo .soft { fill: var(--text-soft); }
+    .fig .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .fig .acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .fig .acc2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .topo .node { fill: none; stroke: var(--border); stroke-width: 1.5; stroke-dasharray: 6 4; }
+    .topo .c { fill: var(--surface); stroke: var(--text-faint); stroke-width: 1.2; transition: fill .2s, stroke .2s; }
+    .topo .c.hl { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 2.2; }
+    .topo .w { stroke: var(--border); stroke-width: 1.6; fill: none; transition: stroke .2s; }
+    .topo .w.hl { stroke: var(--accent-2); stroke-width: 3.5; }
+    .topo .t { font-size: 10px; }
+    .topo .tb { font-size: 12px; font-weight: 600; }
+    .chart .grid { stroke: var(--border); stroke-width: 1; }
+    .chart .axis { fill: var(--text-faint); font-size: 11px; font-family: var(--font-mono); }
+    .chart .curve { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .chart .ideal { stroke: var(--text-faint); stroke-width: 1.5; fill: none; stroke-dasharray: 5 4; }
+    .chart .lbl { fill: var(--text-soft); font-size: 12px; font-family: var(--font-sans); }
+    .chart .bar { fill: var(--border); }
+    .chart .bar.hl { fill: var(--accent); }
+    .chart .bart { font-size: 11.5px; fill: var(--text-soft); font-family: var(--font-sans); }
+    .note { font-size: 14px; color: var(--text-soft); line-height: 1.7; margin-top: 10px; }
+    .ib { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .ib label { display: grid; gap: 4px; font-size: 13px; color: var(--text-soft); }
+    .ib input, .ib select { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); color: var(--text); }
+    .topo { overflow-x: auto; -webkit-overflow-scrolling: touch; margin-top: 10px; }
+    #tp-bars { overflow-x: auto; }
+    @media (max-width: 600px) { .topo svg { min-width: 580px; } #tp-bars svg { min-width: 460px; } }
+    .pathinfo { margin-top: 10px; padding: 12px 14px; border-radius: 10px; background: var(--bg-soft); font-size: 14px; line-height: 1.7; }
+    .pathinfo b { color: var(--accent); }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>基础设施：GPU 集群、通信与存储</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="smol"></nav>
+
+    <article class="prose">
+      <p>做模型的人大多很在意架构和数据，却很少了解基础设施：租几张 GPU、装好 PyTorch，似乎就完事了。<a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">Smol Training Playbook</a> 的最后一章「Infrastructure — The Unsung Hero」想补上这个缺口。SmolLM3 在 384 张 H100 上训了将近一个月、11T token，一路上遇到节点故障、存储问题和重启（见<a href="/posts/smol-marathon/">训练马拉松</a>）。这一章的主题是：<strong>找到并修掉瓶颈</strong>。</p>
+      <p>这一章最有价值的地方是<strong>实测数字</strong>：他们在自己的 AWS p5 集群上，用 nvbandwidth、nccl-tests、gdsio 等工具，把从 HBM 到网络存储的每一级带宽都量了一遍。我把这些数字整理成两个交互：一个可以点击路径的节点拓扑图，一个「需要多少张卡」的计算器。下文所有带「实测」字样的数字都来自 playbook 的测量；理论值来自 NVIDIA 规格或 playbook 引用的规格表。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#gpu">GPU 内部：SM、Tensor Core 与 FLOPs</a></li>
+          <li><a href="#mem">显存层级与 roofline</a></li>
+          <li><a href="#cpu">CPU ↔ GPU：PCIe、延迟与 NUMA</a></li>
+          <li><a href="#intra">节点内 GPU ↔ GPU：三条路与 NVLink</a></li>
+          <li><a href="#inter">节点间 GPU ↔ GPU：EFA / InfiniBand / RoCE</a></li>
+          <li><a href="#trouble">互联排障清单</a></li>
+          <li><a href="#storage">GPU ↔ 存储</a></li>
+          <li><a href="#topo">交互：点一条路径，看带宽层级</a></li>
+          <li><a href="#resilience">韧性：节点健康、checkpoint 与自动评测</a></li>
+          <li><a href="#howmany">需要多少张 GPU</a></li>
+          <li><a href="#calc">交互：GPU 数量与 Amdahl 定律</a></li>
+          <li><a href="#parallel">为 SmolLM3 找并行配置</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="gpu">1. GPU 内部：SM、Tensor Core 与 FLOPs</h2>
+      <p>GPU 是为<strong>吞吐</strong>而不是延迟优化的大规模并行处理器。CPU 擅长快速执行少数复杂的指令流；GPU 靠同时执行成千上万个简单操作取胜。最高层面上它只做两件事：搬运和存储数据（存储系统），以及用数据做有用的计算（计算流水线）。性能取决于两者的配合：理论算力再高，数据喂不进来也是白搭。</p>
+      <p><strong>FLOPs</strong>（floating-point operations per second）衡量计算速度，一次 FLOP 就是一次像 \(a+b\) 这样的浮点运算。GPU 的基本计算单元是<strong>流式多处理器（SM）</strong>，每个 SM 里有两类核：处理普通浮点运算的 CUDA core，和专门做矩阵乘法的 <strong>Tensor Core</strong>。H100 SXM5 有 132 个 SM。每个 SM 以 32 个线程为一组（称为 <strong>warp</strong>）同步执行同一条指令（SIMT，单指令多线程）；warp 调度器在一个 warp 等数据时切换到另一个 warp，以此隐藏延迟。上百个 SM、每个同时跑多个 warp，一张卡上能同时有数万个线程。</p>
+      <p>FLOPs 和<strong>精度</strong>强相关：Tensor Core 支持 FP64、FP32、FP16/BF16、FP8、FP4 等格式，精度越低，每次搬的数据越少、同样硅面积能塞下的运算越多，吞吐可以差几个数量级。理论峰值（TFLOPs，稠密）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>精度</th><th class="num">A100</th><th class="num">H100</th><th class="num">H200</th><th class="num">B100</th><th class="num">B200</th></tr></thead>
+          <tbody>
+            <tr><td>FP64</td><td class="num">9.7</td><td class="num">34</td><td class="num">34</td><td class="num">40</td><td class="num">40</td></tr>
+            <tr><td>FP32</td><td class="num">19.5</td><td class="num">67</td><td class="num">67</td><td class="num">80</td><td class="num">80</td></tr>
+            <tr><td>FP16/BF16</td><td class="num">312</td><td class="num">990</td><td class="num">990</td><td class="num">1,750</td><td class="num">2,250</td></tr>
+            <tr><td>FP8</td><td class="num">–</td><td class="num">3,960</td><td class="num">3,960</td><td class="num">4,500</td><td class="num">5,000</td></tr>
+            <tr><td>FP4</td><td class="num">–</td><td class="num">–</td><td class="num">–</td><td class="num">9,000</td><td class="num">10,000</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>（这是 playbook 引用自 NVIDIA 和 SemiAnalysis 的表。H100 的 FP8 一栏 3,960 是带 2:4 结构化稀疏的数字，稠密是一半，约 1,979；playbook 后面用它算利用率时没区分，这里提一句。）</p>
+
+      <h3>实测：理论峰值能拿到多少</h3>
+      <p>他们用 SemiAnalysis 的 GEMM 基准，在 Llama 70B 训练中真实出现的矩阵形状上测 H100：</p>
+      <ul>
+        <li><strong>BF16</strong>：714–758 TFLOPs，约为理论 990 的 72–77%。对真实负载来说是很好的利用率。</li>
+        <li><strong>TF32</strong>（PyTorch 在 Tensor Core 上处理 FP32 张量的默认格式）：356–396 TFLOPs，约为稠密峰值（~495）的 72–80%。NVIDIA 规格表常写的 989 是 2:4 稀疏下的数字。</li>
+        <li><strong>FP64</strong>：49–56 TFLOPs。</li>
+        <li><strong>FP8</strong>：<code>torch._scaled_mm</code>（e4m3）1,210–1,457 TFLOPs；Transformer Engine 的 <code>TE.Linear</code> 只有 547–1,121。同一硬件、同一精度，<strong>换个内核 API 能差 2–3 倍</strong>。playbook 把 FP8 利用率低归因于这些形状下变得更受内存带宽限制。</li>
+      </ul>
+      <p><strong>MFU</strong>（model FLOPs utilization）是端到端训练效率：模型有用计算量 / 硬件理论峰值。kernel 层面的 72–77% 是上限，端到端还要扣掉非矩阵乘的算子、通信等开销。参考值：Meta 训练 Llama 3 405B 时 MFU 38–41%；DeepSeek-V3 约 20–30%（MoE 带来更紧的通信瓶颈）；SmolLM3 约 30%。相对可达的 77% 来说，这些端到端数字大约是「可达 matmul 性能」的 50–55%，差距主要来自节点间通信。</p>
+      <p><strong>Compute capability（CC）</strong>是 NVIDIA 对硬件代际的版本号，决定能用哪些指令和特性。H100 是 9.0（内核名里会出现 <code>sm90</code>）。他们遇到过 PyTorch 在 H100 上选了 <code>sm_75</code>（Turing 代）的内核，导致莫名其妙的变慢——同一块硬件上 720 和 500 TFLOPs 的区别。用预编译库或自定义内核时，确认它是为目标 CC 编译的；<code>nvidia-smi --query-gpu=compute_cap</code> 可以查。</p>
+
+      <h2 id="mem">2. 显存层级与 roofline</h2>
+      <p>GPU 存储是一个层级：越靠近计算单元越快、越小。H100 上（playbook 的数字）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>层级</th><th>容量</th><th>带宽</th><th>说明</th></tr></thead>
+          <tbody>
+            <tr><td>寄存器（RMEM）</td><td>每线程私有</td><td>每 SM 约 100 TB/s 量级</td><td>紧挨计算单元</td></tr>
+            <tr><td>L1 / 共享内存（SMEM）</td><td>每 SM 256 KB（两者共用）</td><td>每 SM 约 31 TB/s</td><td>共享内存由程序员管理</td></tr>
+            <tr><td>L2 缓存</td><td>50 MB</td><td>约 13 TB/s</td><td>全卡共享的 SRAM</td></tr>
+            <tr><td>HBM3（全局显存）</td><td>80 GB</td><td>理论 3.35 TB/s</td><td>DRAM，最大也最慢</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>层级的成因是物理：SRAM 快但面积大、贵；DRAM 密度高、便宜但慢。所以快的存储只能少量地放在计算旁边。现代 AI 负载经常是<strong>受内存限制（memory-bound）</strong>的：瓶颈在搬数据，不在算。Horace He 举过一个例子：「读内存 → 自乘两次 → 写回」和「读内存 → 自乘一次 → 写回」耗时几乎一样，计算相对访存是「免费」的。</p>
+      <p>这就是<strong>算子融合</strong>有效的原因：把多个操作合进一个 kernel，中间结果留在 SRAM 里，不写回 HBM。FlashAttention 是典型：标准注意力要把 \(N\times N\) 的分数矩阵写进 HBM、softmax 时再读出来写回、乘 V 时再读一次；FlashAttention 把 Q、K、V 切成能放进 SRAM 的块，分块计算并在线更新 softmax，中间分数从不离开片上存储，只把最终输出写回 HBM。HBM 访问量从 \(O(N^2)\) 降到 \(O(N)\)，playbook 写的加速是 2–4 倍。</p>
+      <p><strong>实测 HBM 带宽。</strong>用 NVIDIA 的 nvbandwidth 跑 <code>device_local_copy</code>：小于 1 MB 的消息受延迟限制，达不到峰值；1 MB 以上稳定在约 1,519 GB/s。这是一次拷贝（读和写同时发生），读 + 写合起来约 3 TB/s，接近 3.35 TB/s 的规格。</p>
+
+      <h3>Roofline</h3>
+      <p>判断一个 kernel 是计算受限还是内存受限，决定了哪种优化有用。<strong>算术强度</strong> \(I\) = FLOPs / 访存字节数。kernel 能达到的性能上限是</p>
+      $$P = \min\bigl(P_{\text{peak}},\ I \times B_{\text{mem}}\bigr).$$
+      <p>两条边界交于<strong>脊点</strong> \(I^* = P_{\text{peak}}/B_{\text{mem}}\)。用 H100 的 BF16 数字：\(990\times10^{12} / 3.35\times10^{12} \approx 296\) FLOPs/byte。算术强度低于它的 kernel 受内存限制，提高算力没用，要减少访存（融合、更好的访问模式）；高于它的受计算限制，优化访存没用，要更好的算法或用上 Tensor Core。举个例子：BF16 矩阵乘 \((M\times K)\cdot(K\times N)\) 做 \(2MNK\) 次 FLOP，至少读写 \(2(MK+KN+MN)\) 字节；\(M=N=K=8192\) 时 \(I = 2\cdot8192^3 / (2\cdot3\cdot8192^2) \approx 2731\)，远在脊点右边，是计算受限的；而逐元素的 GELU 每个元素 1 次读 1 次写（4 字节）只做个位数 FLOP，\(I\) 远小于 1，完全受内存限制。Nsight Compute 能直接画出某个 kernel 在 roofline 图上的位置，离边界越远，优化空间越大。（roofline 的完整推导见本站<a href="/posts/scaling-roofline/">规模化训练系列</a>。）</p>
+
+      <h2 id="cpu">3. CPU ↔ GPU：PCIe、延迟与 NUMA</h2>
+      <p>GPU 不是孤立工作的：数据要先进显存，CPU 要调度 kernel，分布式训练里 GPU 之间还要不停交换激活、梯度和权重。playbook 把对外的连接分成四条：CPU–GPU、节点内 GPU–GPU、节点间 GPU–GPU、GPU–存储，下面依次实测。实验机器是 AWS p5 实例（8 张 H100 80GB HBM3）。</p>
+      <p>CPU 是编排者：启动 kernel、管理显存分配、协调数据传输。它和 GPU 之间走 <strong>PCIe</strong>。用 <code>lstopo</code> 看 p5 的拓扑：</p>
+      <ul>
+        <li>两个 <strong>NUMA</strong> 节点（每个 CPU 插槽一个内存域），CPU 是 AMD EPYC 7R13，2 路、每路 48 核；</li>
+        <li>每个 CPU 插槽通过 <strong>PCIe Gen4 x8</strong>（15.75 GB/s）连 4 个 PCIe 交换机；</li>
+        <li>每个 PCIe 交换机通过 <strong>PCIe Gen5 x16</strong>（63.02 GB/s）连 1 张 H100；同一个交换机下还挂着 4 张 EFA 网卡和 1 块 NVMe 盘。</li>
+      </ul>
+      <p>PCIe 每代单通道速率翻倍：Gen3 8 GT/s（x1 约 0.985 GB/s）、Gen4 16 GT/s（1.969 GB/s）、Gen5 32 GT/s（3.938 GB/s）、Gen6 64 GT/s。GT/s 是原始信号速率，GB/s 扣除了编码开销。所以 Gen4 x8 ≈ 8 × 1.969 = 15.75 GB/s，Gen5 x16 ≈ 16 × 3.938 = 63 GB/s。</p>
+      <p>CPU 到 GPU 要过两跳：CPU → 交换机（Gen4 x8，15.75 GB/s），交换机 → GPU（Gen5 x16，63 GB/s）。<strong>瓶颈是第一跳</strong>。nvbandwidth 的 <code>host_to_device_memcpy_ce</code> 实测大消息约 <strong>14.2 GB/s</strong>，是理论值的约 90%。往返延迟（<code>host_device_latency_sm</code>，用指针追逐 kernel 访问主机内存）约 <strong>1.4 μs</strong>，这解释了 ML 负载里常见的几微秒 kernel 启动开销。</p>
+      <ul>
+        <li><strong>CUDA Graphs</strong>：把一串操作捕获下来作为一个整体重放，省掉每个 kernel 启动的 CPU–GPU 往返。对大量小 kernel 或频繁同步的负载特别有用。</li>
+        <li><strong>MoE 与 CPU–GPU 同步</strong>：有些 MoE 实现每次迭代都要 CPU–GPU 同步来调度选中的专家。MakoGenerate 优化 DeepSeek MoE kernel 的例子里，参考实现每次前向派发 1,043 个 kernel、67 个同步点；重构路由后变成 533 个 kernel、3 个同步点，同步开销减少 97%，端到端延迟减少 44%。现代实现通常把路由完全留在 GPU 上。</li>
+        <li><strong>Grace Hopper</strong>：1:1 的 GPU:CPU 比例（x86+Hopper 是 4:1），每张 GPU 的 CPU 内存带宽高 3.5 倍；NVLink-C2C 取代 PCIe，CPU–GPU 带宽 900 GB/s 对 128 GB/s。</li>
+      </ul>
+      <p><strong>NUMA 亲和性。</strong>GPU 进程如果跑在另一个插槽的 CPU 核上，访问就要穿过 CPU 互联（AMD Infinity Fabric）。<code>numactl --hardware</code> 显示的节点距离是本地 10、跨插槽 32，访存延迟相差约 3.2 倍。每张 GPU 应该绑定到同一 NUMA 节点上的 CPU 核。</p>
+
+      <h2 id="intra">4. 节点内 GPU ↔ GPU：三条路与 NVLink</h2>
+      <p>同一节点里的两张 GPU 有三种通信方式，用错环境变量会让带宽差两个数量级。</p>
+      <ol>
+        <li><strong>经过 CPU（SHM）</strong>：GPU1 → PCIe 交换机 → CPU → 主机内存 → CPU → PCIe 交换机 → GPU2。多次内存拷贝，挤占 PCIe 和 CPU 内存总线，四张 GPU 共享同一组 CPU 内存总线时更糟。设置 <code>NCCL_P2P_DISABLE=1</code> 和 <code>FI_PROVIDER=tcp</code> 可以强制走这条路，<code>NCCL_DEBUG=INFO</code> 会打印 <code>via SHM/direct/direct</code>。受 Gen4 x8 限制。</li>
+        <li><strong>经 EFA 网卡的 GPUDirect RDMA</strong>：GPUDirect RDMA 让网卡直接读写 GPU 显存，不经过 CPU 和系统内存的缓冲区。p5 上每张 GPU 能用 4 张 EFA（AWS 自研、基于以太网的高性能网卡，传输协议是 SRD），每张 100 Gbps = 12.5 GB/s，所以每张 GPU 50 GB/s，每节点 \(100\times4\times8 = 3{,}200\) Gbps = 400 GB/s。设 <code>FI_PROVIDER=efa</code>、<code>NCCL_P2P_DISABLE=1</code> 时日志显示 <code>via NET/Libfabric/0/GDRDMA</code>。</li>
+        <li><strong>NVLink</strong>：NVIDIA 的 GPU 直连互联。H100 用 NVLink 4.0：18 条链路、每条 50 GB/s 双向，合计 <strong>900 GB/s 双向</strong>（单向 450）。前几代：Volta 300 GB/s，Ampere 600 GB/s（Blackwell 的 NVLink 5.0 是 1.8 TB/s，这一项 playbook 表里空着，数字来自 NVIDIA 规格）。DGX H100 里 4 个 NVSwitch 连接 8 张 GPU，每张 GPU 分别以 5+4+4+5 条链路连到 4 个交换机，任意两张卡之间都只隔一个 NVSwitch，全网 3.6 TB/s 双向带宽。NCCL 默认优先用 NVLink（日志 <code>via P2P/CUMEM</code>，CUMEM 表示用 cuMem API 的显存句柄）；没有 NVLink 时退回到 PCIe 上的 GPUDirect P2P 或 SHM。</li>
+      </ol>
+      <p><strong>实测（NCCL SendRecv，单节点两卡）</strong>：NVLink <strong>364.93 GB/s</strong>，EFA <strong>38.16 GB/s</strong>，经 CPU <strong>3.24 GB/s</strong>。NVLink 比 EFA 快 9 倍、比经 CPU 快 112.6 倍。nvbandwidth 的双向拷贝测试在所有 GPU 对之间都是约 <strong>786 GB/s</strong>，是理论 900 的 85%。</p>
+
+      <h3>集合通信：algbw 与 busbw</h3>
+      <p>nccl-tests 报两个带宽。<strong>algbw</strong> = 数据量 \(S\) / 耗时 \(t\)，直观但不能跨卡数比较。<strong>busbw</strong> 换算成「每张卡链路上实际走的流量速率」，可以直接和硬件链路带宽比。以 all-reduce 为例：\(n\) 张卡的 ring all-reduce 里，每张卡要发送（和接收）\(2(n-1)/n\cdot S\) 字节（reduce-scatter 和 all-gather 各 \((n-1)/n\cdot S\)），所以</p>
+      $$\text{busbw}_{\text{all-reduce}} = \text{algbw}\times\frac{2(n-1)}{n},\qquad \text{busbw}_{\text{all-gather / reduce-scatter / all-to-all}} = \text{algbw}\times\frac{n-1}{n}.$$
+      <p>单节点 all-reduce 实测 busbw 达到 <strong>480 GB/s</strong>，超过了 NVLink 4.0 单向的理论 450 GB/s。原因是 <strong>NVLink SHARP（NVLS）</strong>：NVSwitch 本身能做规约运算（硬件加速集合通信），数据不必在 GPU 之间来回传，单节点 H100 上给 all-reduce 带来约 1.3 倍加速。all-to-all 用不上 NVLS，实测 <strong>340 GB/s</strong>，只依赖 NVLink 的基础带宽。想精细控制 NVLink/NVLS 操作，可以关注 PyTorch 的 SymmetricMemory API；ThunderKittens 这类内核会专门分配一些 warp 发起 NVLink 传输，其余 warp 继续计算，在 SM 级别重叠通信和计算。</p>
+
+      <h2 id="inter">5. 节点间 GPU ↔ GPU：EFA / InfiniBand / RoCE</h2>
+      <p>跨节点要走网络。三类主要技术：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th>以太网（25–100 Gbps）</th><th>以太网（200–400 Gbps）</th><th>RoCE</th><th>InfiniBand</th></tr></thead>
+          <tbody>
+            <tr><td>厂商</td><td>多家</td><td>多家</td><td>多家</td><td>NVIDIA/Mellanox</td></tr>
+            <tr><td>单向带宽（Gbps）</td><td>25–100</td><td>200–400</td><td>100</td><td>400</td></tr>
+            <tr><td>端到端延迟（μs）</td><td>10–30</td><td>N/A</td><td>~1</td><td>&lt;1</td></tr>
+            <tr><td>RDMA</td><td>否</td><td>否</td><td>是</td><td>是</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>RoCE（RDMA over Converged Ethernet）在以太网上提供 RDMA，用显式拥塞通知（ECN）而不是 TCP 机制做拥塞控制；InfiniBand 是 NVIDIA 的交换网络，有 RDMA，配合 GPUDirect RDMA 可以绕过主机 CPU 直接读写对端 GPU 显存。p5 用的是 EFA。GPU 和它的网卡挂在同一个 PCIe 交换机下，GPUDirect RDMA 只需经过这个交换机，不碰其他交换机和 CPU 内存总线。理论上 8 个交换机 × 4 张 EFA × 100 Gbps = 3,200 Gbps = 400 GB/s 每节点。</p>
+      <p><strong>实测带宽</strong>（nccl-tests，配置参照 aws-samples/awsome-distributed-training）：</p>
+      <ul>
+        <li><strong>SendRecv</strong>：2–4 节点约 42–43 GB/s（理论每卡 50 GB/s）；5 个节点以上掉到约 21 GB/s。原因是超过 4 个节点时 NCCL 自动把每个对端的点对点通道数从 2 减到 1。设 <code>NCCL_NCHANNELS_PER_NET_PEER=2</code> 能恢复，但可能伤害 all-to-all（见 NCCL issue #1272），要小心。</li>
+        <li><strong>All-reduce</strong>：单节点 480 GB/s，2 节点 479 GB/s，3–16 节点稳定在 <strong>320–350 GB/s</strong>。跨出节点时因为从 NVLink 换到网络有一次下降，之后基本不随节点数变化。这正是数据并行能扩展到成百上千张卡的原因；这种行为是「8-rail 优化的胖树（fat tree）」网络的典型特征：每个节点的 8 张 GPU 各接一个独立的交换机「轨道」，最大化对分带宽。</li>
+        <li><strong>All-to-all</strong>：单节点 344 GB/s，2 节点骤降到 81 GB/s，更多节点约 45–58 GB/s。每张卡都要和所有其他卡交换数据，网络拥塞严重得多——这对需要大量 all-to-all 的 MoE 专家并行是坏消息。</li>
+      </ul>
+      <p><strong>实测延迟</strong>：SendRecv 在多节点下 40–53 μs，基本由网络往返时间决定；all-reduce 单节点 12.9 μs，2 节点 55.5 μs，之后几乎线性增长，16 节点 235 μs；all-to-all 单节点 7.6 μs，2 节点 60 μs，16 节点 621 μs，超线性增长。</p>
+      <p>对 MoE 这类 all-to-all 密集的负载，<strong>NVSHMEM</strong> 越来越重要：它把多张 GPU 的显存组成一个分区全局地址空间（PGAS），由 GPU 自己发起异步的单边通信（借助 GPUDirect Async），不需要 CPU 编排，小消息（&lt;1 KiB）吞吐最高可高 9.5 倍。支持 InfiniBand/RoCE（Mellanox CX-4 及以上）、Slingshot-11 和 Amazon EFA。</p>
+
+      <h2 id="trouble">6. 互联排障清单</h2>
+      <p>带宽低于预期时，按这个顺序查：</p>
+      <ol>
+        <li><strong>库版本</strong>：NCCL、EFA、CUDA 太旧可能缺少优化或修复；重要实验要记录版本。</li>
+        <li><strong>CPU 亲和性</strong>：错误的绑核会造成跨 NUMA 流量。NCCL issue #1017 里，<code>NCCL_IGNORE_CPU_AFFINITY=1</code> 加 <code>--cpu-bind none</code> 显著降低了容器内的延迟。</li>
+        <li><strong>网络拓扑与放置</strong>：云上的 placement group 不保证最少跳数；胖树里挂在不同顶层交换机下的实例延迟更高、带宽可能更低。AWS 的 Instance Topology API 能看到每台实例挂在哪个网络节点下；小规模消融时尽量让实例在同一个交换机下。</li>
+        <li><strong>环境变量</strong>：网卡相关的 NCCL 标志（自适应路由、GPU 发起传输、缓冲区大小等）缺失或错误会严重限制带宽，按 AWS EFA cheatsheet 等官方推荐配置。</li>
+        <li><strong>容器</strong>：Docker 默认共享内存和锁页内存很小，要加 <code>--shm-size=1g --ulimit memlock=-1</code>；Docker 默认禁用 NUMA 支持，会让 cuMem 主机分配失败，加 <code>--cap-add SYS_NICE</code>；正确挂载 <code>/sys</code>，让 NCCL 能发现 GPU 和网卡的真实 PCI 拓扑。</li>
+      </ol>
+
+      <h2 id="storage">7. GPU ↔ 存储</h2>
+      <p>训练期间 GPU 要不断读数据、定期写 checkpoint，I/O 也会成为瓶颈。p5 上每张 GPU 对应一块 NVMe SSD，同样挂在那个 PCIe 交换机下。<strong>GPUDirect Storage（GDS）</strong>让存储控制器附近的 DMA 引擎直接把数据搬进/出 GPU 显存，不经过 CPU 的中转缓冲区，降低 CPU 开销和延迟。<code>gdscheck.py -p</code> 可以查配置；他们的集群里 GDS 只对 NVMe 配置了，实际并未启用。</p>
+      <p>节点上可用的存储（<code>lsblk</code>、<code>df -h</code>）：</p>
+      <ul>
+        <li><code>/</code>：291 GB 的 Amazon EBS 根文件系统（EBS 是 AWS 的块存储服务）；</li>
+        <li><code>/scratch</code>：8 块 3.5 TB 的本地 NVMe 实例盘组成 RAID 0（条带化，不冗余），XFS，共约 28 TB；</li>
+        <li><code>/fsx</code>：393 TB 的 WekaFS（名字是从 FSx 迁移过来时沿用的），面向 AI 的高性能并行文件系统；</li>
+        <li><code>/admin</code>：4.5 TB 的 FSx for Lustre。Lustre 把元数据和数据服务分开以并行访问，大文件好，但元数据密集、小文件多的 AI 负载容易吃力。</li>
+      </ul>
+      <p>用 <code>gdsio</code> 在不同线程数和 I/O 大小下测吞吐和 <strong>IOPS</strong>（每秒完成的 I/O 操作数，衡量处理大量小而分散的访问的能力），并比较三种传输方式：GPU_DIRECT（直接进显存）、CPU_GPU（先进主机内存再拷到 GPU）、CPUONLY（不涉及 GPU 的基线）。结果：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>存储</th><th class="num">峰值吞吐</th><th class="num">峰值 IOPS</th><th>备注</th></tr></thead>
+          <tbody>
+            <tr><td>/scratch（本地 NVMe RAID）</td><td class="num">26.59 GiB/s</td><td class="num">337k</td><td>峰值 IOPS 时延迟 190 μs；64 线程、1M I/O 时吞吐最高</td></tr>
+            <tr><td>/fsx（WekaFS）</td><td class="num">4.21 GiB/s</td><td class="num">51k</td><td>共享数据的最佳选择</td></tr>
+            <tr><td>/admin（FSx Lustre）</td><td class="num">1.13 GiB/s</td><td class="num">17k</td><td>小操作多时比 EBS 好得多</td></tr>
+            <tr><td>/（EBS）</td><td class="num">约 1.1 GiB/s</td><td class="num">730</td><td>只适合大块顺序操作</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>本地 NVMe 的吞吐是 Weka 的 6.3 倍、IOPS 是 6.6 倍。所有存储都在 1M 的 I/O 大小时吞吐最高，在最小的 64k 时 IOPS 最高：大 I/O 拿带宽，小 I/O 拿并发。写大 checkpoint 时，<code>/scratch</code> 上 1–8M 的 I/O 大小最合适。这些数字也解释了<a href="/posts/smol-marathon/">马拉松</a>里谜案 1 的修复：把 24 TB 训练数据从 Weka 搬到每个节点的 <code>/scratch</code> 上。</p>
+
+      <h2 id="topo">8. 交互：点一条路径，看带宽层级</h2>
+      <p>下面是 p5 节点的简化拓扑（按 playbook 的 lstopo 描述重画，只画出两个 NUMA 域、8 个 PCIe 交换机、每个交换机下的 GPU / 4×EFA / NVMe，以及 NVSwitch、另一个节点和网络存储）。点上方按钮选择一条数据路径，图中会高亮它经过的部件，下方的条形图在对数刻度上对比所有路径的实测带宽。可以输入一个数据量，看搬运需要多久。</p>
+      <div class="demo" id="topo-box">
+        <div class="demo-label">p5 节点拓扑与带宽层级</div>
+        <div class="seg" id="tp-sel" style="margin-top:12px"></div>
+        <div class="topo" id="tp-svg"></div>
+        <div class="pathinfo" id="tp-info"></div>
+        <div class="ib" style="margin-top:10px">
+          <label>要搬的数据量（GB）<input type="number" id="tp-gb" value="80" min="0.001" step="10"></label>
+        </div>
+        <div class="chart" id="tp-bars"></div>
+        <p class="note">条形长度按实测带宽的对数画；SendRecv / 拷贝 / 存储的实测值见各条注释。NVLink 的 786 GB/s 是双向合计，其余均为单向或单流的实测值，严格比较时要注意口径。</p>
+      </div>
+
+      <h2 id="resilience">9. 韧性：节点健康、checkpoint 与自动评测</h2>
+      <p>硬件快只是底线。训练跑几周到几个月，要的是能扛住必然发生的故障、不用人盯、出事能灵活调整的系统。</p>
+      <h3>节点健康监控与替换</h3>
+      <p>开训前他们跑了两套诊断：内部工具 <strong>GPU Fryer</strong>（压测降频、显存错误和性能异常），以及 NVIDIA 的 <strong>DCGM Diagnostics</strong>（覆盖计算、PCIe 连通性、显存完整性、温度稳定性）。DCGM 有四个级别：r1（几秒，PCIe/NVLink、显存、显存带宽）、r2（2 分钟内，加诊断和定向压力测试）、r3（30 分钟内，加定向功耗、NVBandwidth、显存压力）、r4（1–2 小时，全部测试）。这些测试找出了两张有问题的 GPU。在他们的 <code>dcgmi diag -r 2</code> 输出里能看到 GPU 到主机 14.26 GB/s、主机到 GPU 8.66 GB/s 等 PCIe 读数。</p>
+      <p>训练期间，固定的 48 节点 Slurm 预留让他们能长期跟踪同一批节点；用 Prometheus 采集所有 GPU 的 DCGM 指标、Grafana 可视化，Slack 机器人在节点行为异常时报警，在它拖垮整个训练之前主动换掉。</p>
+      <p><strong>降频。</strong>规格假设散热完美，实际 GPU 过热会自动降低时钟。他们监控 DCGM 的 <code>DCGM_FI_DEV_CLOCK_THROTTLE_REASONS</code> 指标，非零就说明在降频。降频不只伤害那一张卡：压测时 all-reduce 带宽在超过 14 个节点后从 350 GB/s 骤降到 100 GB/s（预期应保持在 300 以上），原因是<strong>一个节点上一张降频的 GPU</strong>，所有其他节点在梯度同步时都要等它。分布式训练的速度由最慢的那个节点决定。开训前压测、持续监控温度、确认 GPU 时钟设在最高性能档。</p>
+
+      <h3>Checkpoint 管理</h3>
+      <p>Checkpoint 的用途：故障恢复、评测追踪进度、给社区分享中间模型。恢复最重要：如果每 4 小时存一次，立即恢复的话最多损失 4 小时（平均是一半）。两个细节：保存要在后台进行，不影响吞吐；注意存储——24 天、每 4 小时一次就是约 144 个 checkpoint，带上优化器状态体积很大。Nanotron 训练时他们每 2 小时在本地存一次，立刻上传 S3，确认备份成功后删掉本地那份；恢复时如果本地没有最新的就从 S3 拉。Slurm 上用 <code>#SBATCH --requeue</code> 自动从最新 checkpoint 重启。</p>
+      <p>一个惨痛教训：第一次大规模训练（StarCoder-15B）一路重启都没事，最后一天却发现整个 checkpoint 目录被删了——脚本末尾留着一条早年测吞吐时的 <code>rm -rf $CHECKPOINT_PATH</code>，只有 Slurm 任务真正结束时才会执行，之前的重启都没触发。幸好前一天的 checkpoint 另有备份，只损失了一天。教训：生产脚本里不要留破坏性命令；保存后立即自动备份。</p>
+      <div class="callout">
+        <p><strong>多久存一次？</strong>这一点 playbook 没给公式，我补充一个经典近似（Young, 1974）：设写一次 checkpoint 的开销为 \(C\)（训练被阻塞的时间），平均无故障时间为 \(M\)。间隔为 \(\tau\) 时，单位时间的损失约为 \(C/\tau + \tau/(2M)\)（存储开销 + 故障时平均重算半个间隔），对 \(\tau\) 求导得最优间隔</p>
+        $$\tau^* \approx \sqrt{2CM}.$$
+        <p>例如阻塞式保存要 \(C = 2\) 分钟、整个集群平均每 \(M = 24\) 小时出一次故障，\(\tau^* \approx \sqrt{2\times 2\times 1440} \approx 76\) 分钟。后台异步保存让 \(C\) 接近 0，就可以存得更频繁，此时主要约束变成存储空间和上传带宽。</p>
+      </div>
+
+      <h3>自动评测</h3>
+      <p>手动跑评测很快成为瓶颈。SmolLM3 用 LightEval 评测 Nanotron 的 checkpoint，每存一个 checkpoint 就在集群上触发一个评测任务，结果直接推到 Weights &amp; Biases 或 Trackio。playbook 的原话：如果只能自动化一件事，就自动化评测。</p>
+
+      <h2 id="howmany">10. 需要多少张 GPU</h2>
+      <p>该租或买多少张卡？基本的估算公式：</p>
+      $$\text{GPU 数} = \frac{\text{总 FLOPs}}{\text{每卡实际吞吐} \times \text{目标训练时长}}.$$
+      <p>关键是用<strong>实际</strong>吞吐（乘上 MFU），而不是规格峰值。SmolLM3：3B 参数、11T token、目标约 4 周、预期 MFU 30%。总 FLOPs 用 \(6N\) 近似：</p>
+      $$6 \times 3\times10^{9} \times 11\times10^{12} = 1.98\times10^{23}\ \text{FLOPs}.$$
+      <p>每卡有效吞吐 \(720\times10^{12}\times0.30 = 216\times10^{12}\) FLOPs/s。注意 playbook 这里用的「峰值」是 720 TFLOPs——也就是前面实测的 BF16 matmul 可达值，而不是规格上的 990；这样算出来的 30% 是相对可达性能的利用率。代入：</p>
+      $$\frac{1.98\times10^{23}}{216\times10^{12} \times 4 \times 604{,}800} \approx 379\ \text{张 GPU}.$$
+      <p>这指向 375–400 张 H100，他们拿到了 384 张：既和并行策略对得上（\(384 = 2^7\times3\)），又给节点故障、重启留了余量。</p>
+      <p><strong>Amdahl 定律：卡不是越多越好。</strong>并行加速比受不可并行部分的限制：</p>
+      $$\text{最大加速比} = \frac{1}{\text{串行比例} + \dfrac{\text{并行比例}}{\text{处理器数}}}.$$
+      <p>训练里「串行」部分主要是通信：梯度、权重、激活的同步。如果通信占每步 10%，加多少卡都不会超过 10 倍加速。更糟的是卡越多通信比例往往越大：all-reduce 参与者更多、网络带宽/延迟成为瓶颈、小模型的计算量不足以掩盖通信。SmolLM3 用的是<strong>弱扩展</strong>：全局 batch 随卡数一起放大（playbook 说保持每卡约 8k token），让计算/通信比保持合理。</p>
+
+      <h2 id="calc">11. 交互：GPU 数量与 Amdahl 定律</h2>
+      <p>左边是上面的估算公式；默认值就是 SmolLM3 的那组输入，应该得到约 379 张。下面的曲线是 Amdahl 定律在给定通信（串行）比例下的理想加速比，是一个简化模型：它假设串行比例不随卡数变化，而实际中通常会变大。</p>
+      <div class="demo" id="calc-box">
+        <div class="demo-label">需要多少张 GPU</div>
+        <div class="ib" style="margin-top:12px">
+          <label>参数量 N（十亿）<input type="number" id="c-n" value="3" min="0.1" step="0.5"></label>
+          <label>训练 token（万亿）<input type="number" id="c-d" value="11" min="0.01" step="0.5"></label>
+          <label>每卡「峰值」
+            <select id="c-peak">
+              <option value="720" selected>H100 实测可达 BF16 720 TF（playbook 用法）</option>
+              <option value="990">H100 规格 BF16 990 TF</option>
+              <option value="312">A100 BF16 312 TF</option>
+              <option value="2250">B200 BF16 2250 TF</option>
+            </select>
+          </label>
+          <label>MFU（%）<input type="number" id="c-mfu" value="30" min="1" max="100" step="1"></label>
+          <label>目标时长（天）<input type="number" id="c-days" value="28" min="1" step="1"></label>
+          <label>额外余量（故障/重启，%）<input type="number" id="c-buf" value="0" min="0" step="5"></label>
+        </div>
+        <div class="readout">
+          <div><span class="k">总 FLOPs（6ND）</span><span class="v" id="c-o1">–</span></div>
+          <div><span class="k">每卡有效吞吐</span><span class="v" id="c-o2">–</span></div>
+          <div><span class="k">需要 GPU</span><span class="v" id="c-o3">–</span></div>
+          <div><span class="k">取整到 8 卡节点</span><span class="v" id="c-o4">–</span></div>
+          <div><span class="k">GPU·小时</span><span class="v" id="c-o5">–</span></div>
+        </div>
+        <div class="ctrls" style="margin-top:16px">
+          <div class="ctrl"><span>通信/串行比例</span><input type="range" id="c-f" min="0.001" max="0.3" step="0.001" value="0.1"><output id="c-f-v"></output></div>
+        </div>
+        <div class="chart" id="c-chart"></div>
+        <p class="note" id="c-note"></p>
+      </div>
+
+      <h2 id="parallel">12. 为 SmolLM3 找并行配置</h2>
+      <p>拿到卡之后要决定怎么切模型。playbook 沿用 Ultra-Scale Playbook 的三步法：先让一个训练步放进显存，再达到目标全局 batch，最后最大化吞吐。（各种并行方式的细节见本站的<a href="/posts/scaling-5d/">5D 并行</a>等文章。）</p>
+      <p><strong>第 1 步：放进显存。</strong>用 Nanotron 的 <code>predict_memory</code> 工具估算参数、优化器状态、梯度和激活，3B 模型单卡峰值约 74 GB，逼近 H100 的 80 GB。所以至少需要一种降低单卡显存的并行：张量并行（TP，层内切权重矩阵）、流水线并行（PP，按层深度切）或 ZeRO（切优化器状态）。</p>
+      <p><strong>第 2 步：达到目标全局 batch。</strong>目标全局 batch（GBS）约 2M token：</p>
+      $$\text{GBS} = \text{DP}\times\text{MBS}\times\text{GRAD\_ACC}\times\text{SEQLEN} \approx 2\text{M tokens},$$
+      <p>DP 是数据并行副本数，MBS 是每卡每个微批的序列数，GRAD_ACC 是梯度累积步数，SEQLEN 在第一阶段是 4,096。硬件约束是 \(\text{DP}\times\text{TP}\times\text{PP} = 384 = 2^7\times3\)。这两个方程定义了搜索空间。</p>
+      <p><strong>第 3 步：最大化吞吐。</strong>硬件有两种互联：节点内 NVLink（900 GB/s）和节点间 EFA（约 50 GB/s 每卡），自然地至少要两种并行去匹配。模型方面：不是 MoE，不需要专家并行；第一阶段序列长 4,096，不需要上下文并行。于是只剩 DP、TP、PP 三个维度，扫描：</p>
+      <ul>
+        <li>DP 搭配 ZeRO-0 / 1 / 3：1 到 384，必须是 2 和/或 3 的倍数；</li>
+        <li>TP ∈ {1, 2, 3, 4, 6, 8}：限制在节点内，充分利用 NVLink；</li>
+        <li>PP ∈ 1..48；</li>
+        <li>MBS ∈ {2, 3, 4, 5}；</li>
+        <li>激活重计算：无 / 选择性 / 全部；</li>
+        <li>内核优化：CUDA Graphs 和可用的优化内核。</li>
+      </ul>
+      <p>组合很多，实用的办法是先逐维度单独测，砍掉明显伤吞吐的选项。他们发现 PP 表现差：3B 模型小，跨节点的流水线气泡同步开销抵消了收益，而且当时没有能消除气泡的高效调度。ZeRO 级别高于 0 时引入的 all-gather 和 reduce-scatter 对吞吐的伤害大于省下的显存。剩下的就是「数据并行 + 适度的张量并行」。每个配置跑 5 次迭代，记录<strong>每卡每秒 token 数</strong>。</p>
+      <p>结果：<strong>DP = 192</strong>（梯度同步走节点间 EFA），<strong>TP = 2</strong>（留在节点内走 NVLink），<strong>MBS = 3</strong>，<strong>ZeRO-0</strong>，PP = 1，GRAD_ACC = 1。全局 batch \(192\times3\times1\times4096 = 2{,}359{,}296 \approx 2.36\)M token（playbook 写作约 2.3M）。按这个算，每张卡每步处理 \(3\times4096 = 12{,}288\) 个 token 的样本，但 TP=2 的两张卡处理的是同一批数据，所以「全局 batch / 卡数」是 \(2.36\text{M}/384 \approx 6.1\)k token。这里和 playbook 文中「每卡约 8k token」的说法对不上，我无法确认它的口径，按配置计算的结果列在这里。</p>
+      <p>playbook 也说明，这些选择受当时库的状态影响：Nanotron 还不支持 ZeRO-3，也没有能消除气泡的 PP 调度。框架演进后结论可能会变。完整配置在 SmolLM 仓库的 <code>stage1_8T.yaml</code>。顺带一提，这个 TP=2 就是马拉松篇里那个随机种子 bug 的来源。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>（2025），<a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#infrastructurethe-unsung-hero">Infrastructure — The Unsung Hero</a> 一章：Inside a GPU（Compute Units and FLOPs、GPU Memory Hierarchy、Roofline Model）、Outside a GPU（CPU-to-GPU、GPU-to-GPU Intranode / Internode、Troubleshooting Interconnect、GPU-to-Storage）、Building Resilient Training Systems、Optimizing Training Throughput。本文所有实测数字均出自这一章。</li>
+        <li>NVIDIA. <a href="https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md">nccl-tests PERFORMANCE.md</a>（algbw 与 busbw 的换算）；<a href="https://github.com/NVIDIA/nvbandwidth">nvbandwidth</a>；<a href="https://docs.nvidia.com/datacenter/dcgm/latest/user-guide/dcgm-diagnostics.html">DCGM Diagnostics</a>。</li>
+        <li>NVIDIA. H100 / NVLink / NVSwitch 规格与 <a href="https://resources.nvidia.com/en-us-grace-cpu/nvidia-grace-hopper">Grace Hopper Superchip Architecture</a> 白皮书。</li>
+        <li>Dao et al. <a href="https://arxiv.org/abs/2205.14135">FlashAttention</a>（2022）。</li>
+        <li>Williams, Waterman, Patterson. <a href="https://doi.org/10.1145/1498765.1498785">Roofline: An Insightful Visual Performance Model for Multicore Architectures</a>（2009）。</li>
+        <li>Young. <a href="https://doi.org/10.1145/361147.361115">A first order approximation to the optimum checkpoint interval</a>（CACM, 1974）。</li>
+        <li>Tazi et al. <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>（并行配置三步法）。</li>
+        <li>aws-samples. <a href="https://github.com/aws-samples/awsome-distributed-training">awsome-distributed-training</a>（nccl-tests 脚本、Prometheus/Grafana 监控示例）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="smol"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, attrs, parent, text) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (text !== undefined) e.textContent = text; if (parent) parent.appendChild(e); return e; };
+
+    /* ---------- topology ---------- */
+    (() => {
+      const W = 720, H = 400;
+      const svg = el('svg', { viewBox: `0 0 ${W} ${H}`, role: 'img', 'aria-label': 'p5 节点拓扑' });
+      const wires = el('g', {}, svg), comps = el('g', {}, svg);
+      const C = {}, Wr = {};
+      const box = (id, x, y, w, h, label, cls = 't') => { const g = el('g', {}, comps); C[id] = el('rect', { x, y, width: w, height: h, rx: 4, class: 'c' }, g); el('text', { x: x + w / 2, y: y + h / 2 + 3.5, 'text-anchor': 'middle', class: cls }, g, label); return { x, y, w, h, cx: x + w / 2, cy: y + h / 2 }; };
+      const wire = (id, pts) => { Wr[id] = el('path', { d: pts.map((p, i) => (i ? 'L' : 'M') + p[0] + ' ' + p[1]).join(''), class: 'w' }, wires); };
+      el('rect', { x: 6, y: 6, width: 462, height: 340, rx: 10, class: 'node' }, svg);
+      el('text', { x: 16, y: 22, class: 't soft' }, svg, '节点 A（p5，8×H100）');
+      const cpu0 = box('cpu0', 30, 34, 190, 30, 'CPU 0（NUMA 0）+ 主机内存', 'tb');
+      const cpu1 = box('cpu1', 254, 34, 190, 30, 'CPU 1（NUMA 1）+ 主机内存', 'tb');
+      wire('ifab', [[220, 49], [254, 49]]);
+      const sw = [], gpu = [], efa = [], nvme = [];
+      for (let i = 0; i < 8; i++) {
+        const x = 18 + i * 56;
+        sw[i] = box('sw' + i, x, 96, 48, 24, 'PCIe SW');
+        efa[i] = box('efa' + i, x, 146, 22, 34, 'EFA');
+        nvme[i] = box('nvme' + i, x + 26, 146, 22, 34, 'SSD');
+        gpu[i] = box('gpu' + i, x, 206, 48, 34, 'GPU' + i, 'tb');
+        const cpu = i < 4 ? cpu0 : cpu1;
+        wire('c' + i, [[cpu.x + 20 + (i % 4) * 48, 64], [sw[i].cx, 96]]);
+        wire('e' + i, [[sw[i].x + 11, 120], [efa[i].cx, 146]]);
+        wire('n' + i, [[sw[i].x + 37, 120], [nvme[i].cx, 146]]);
+        wire('g' + i, [[sw[i].cx, 120], [sw[i].cx, 136], [sw[i].x + 24, 136], [sw[i].x + 24, 196], [gpu[i].cx, 206]]);
+        wire('v' + i, [[gpu[i].cx, 240], [gpu[i].cx, 278]]);
+      }
+      box('nvs', 18, 278, 440, 26, 'NVSwitch ×4（NVLink 4.0，每卡 900 GB/s 双向）', 'tb');
+      el('text', { x: 238, y: 330, 'text-anchor': 'middle', class: 't soft' }, svg, 'CPU→交换机：PCIe Gen4 x8（15.75 GB/s）；交换机→GPU：Gen5 x16（63 GB/s）');
+      // node B
+      el('rect', { x: 500, y: 6, width: 214, height: 200, rx: 10, class: 'node' }, svg);
+      el('text', { x: 510, y: 22, class: 't soft' }, svg, '节点 B');
+      const befa = box('befa', 520, 60, 70, 34, '4×EFA ×8');
+      const bgpu = box('bgpu', 620, 60, 80, 34, 'GPU ×8', 'tb');
+      box('bnvs', 520, 140, 180, 26, 'NVSwitch', 't');
+      wire('bg', [[590, 77], [620, 77]]);
+      // fabric
+      const fab = box('fab', 482, 250, 230, 26, 'EFA 网络（8-rail 胖树）', 'tb');
+      wire('fa', [[efa[7].x + 4, 180], [efa[7].x + 4, 192], [475, 192], [475, 263], [482, 263]]);
+      wire('fb', [[555, 94], [555, 250]]);
+      // storage
+      const weka = box('weka', 482, 300, 72, 40, 'Weka /fsx', 't');
+      const lus = box('lus', 560, 300, 72, 40, 'Lustre/EBS', 't');
+      const s3 = box('s3', 640, 300, 72, 40, 'S3', 't');
+      wire('st', [[444, 40], [470, 40], [470, 360], [597, 360], [597, 340]]);
+      wire('stw', [[518, 360], [518, 340]]);
+      wire('sts', [[597, 360], [676, 360], [676, 340]]);
+      el('text', { x: 482, y: 386, class: 't soft' }, svg, '网络存储（未启用 GDS，经 CPU 内存）');
+      $('tp-svg').appendChild(svg);
+
+      const P = [
+        { id: 'hbm', short: 'HBM', name: 'GPU 本地 HBM', hl: ['gpu0'], bw: 3038, theo: '3.35 TB/s（HBM3）', meas: '约 3 TB/s（nvbandwidth device_local_copy：1,519 GB/s 读 + 1,519 GB/s 写）', note: '最快的一级。memory-bound 的 kernel 受它限制，所以要融合算子、少回写 HBM。' },
+        { id: 'nvl', short: 'NVLink', name: '同节点 GPU↔GPU（NVLink）', hl: ['gpu0', 'v0', 'nvs', 'v1', 'gpu1'], bw: 786, theo: '900 GB/s 双向（每方向 450）', meas: '786 GB/s 双向（nvbandwidth）；SendRecv 364.93 GB/s；all-reduce busbw 480 GB/s（NVLS）；all-to-all 340 GB/s', note: '只经过一个 NVSwitch。张量并行这种每层都要通信的并行应该放在这一级。' },
+        { id: 'efai', short: '节点内经 EFA', name: '同节点 GPU↔GPU（经 EFA，NCCL_P2P_DISABLE=1）', hl: ['gpu0', 'g0', 'sw0', 'e0', 'efa0', 'efa1', 'e1', 'sw1', 'g1', 'gpu1'], bw: 38.16, theo: '每卡 4×100 Gbps = 50 GB/s', meas: 'SendRecv 38.16 GB/s', note: 'GPUDirect RDMA 绕开了 CPU，但走的是网卡，比 NVLink 慢约 9 倍。只有在 NVLink 被禁用时才会走这里。' },
+        { id: 'shm', short: '节点内经 CPU', name: '同节点 GPU↔GPU（经 CPU / SHM）', hl: ['gpu0', 'g0', 'sw0', 'c0', 'cpu0', 'c1', 'sw1', 'g1', 'gpu1'], bw: 3.24, theo: '受 PCIe Gen4 x8 限制（~16 GB/s）', meas: 'SendRecv 3.24 GB/s', note: '多次内存拷贝，比 NVLink 慢 112.6 倍。NCCL_P2P_DISABLE=1 + FI_PROVIDER=tcp 会落到这里——环境变量设错的代价。' },
+        { id: 'h2d', short: 'CPU→GPU', name: 'CPU → GPU', hl: ['cpu0', 'c0', 'sw0', 'g0', 'gpu0'], bw: 14.2, theo: 'Gen4 x8 15.75 GB/s（瓶颈），Gen5 x16 63 GB/s', meas: '14.2 GB/s（host_to_device_memcpy_ce）；往返延迟约 1.4 μs', note: '第一跳 CPU→PCIe 交换机是瓶颈。跨 NUMA 访问还要多过一次 Infinity Fabric（距离 10 vs 32）。' },
+        { id: 'inter', short: '跨节点 EFA', name: '跨节点 GPU↔GPU（EFA）', hl: ['gpu7', 'g7', 'sw7', 'e7', 'efa7', 'fa', 'fab', 'fb', 'befa', 'bg', 'bgpu'], bw: 42.5, theo: '每卡 50 GB/s，每节点 400 GB/s', meas: 'SendRecv 42–43 GB/s（2–4 节点），~21 GB/s（≥5 节点，通道数减半）；all-reduce busbw 320–350 GB/s（3–16 节点）；all-to-all 45–58 GB/s；延迟 40–53 μs', note: 'GPU 和网卡在同一个 PCIe 交换机下，GPUDirect RDMA 只经过这个交换机。数据并行的梯度同步放在这一级。' },
+        { id: 'nvme', short: '本地 NVMe', name: 'GPU ↔ 本地 NVMe RAID（/scratch）', hl: ['gpu0', 'g0', 'sw0', 'n0', 'nvme0', 'n1', 'nvme1', 'n2', 'nvme2', 'n3', 'nvme3', 'n4', 'nvme4', 'n5', 'nvme5', 'n6', 'nvme6', 'n7', 'nvme7', 'sw1', 'sw2', 'sw3', 'sw4', 'sw5', 'sw6', 'sw7'], bw: 26.59 * 1.0737, theo: '8 块 NVMe 条带化（RAID 0）', meas: '26.59 GiB/s，337k IOPS（gdsio，最佳在 64 线程、1M I/O）', note: '最快的存储，适合训练数据和 checkpoint。SmolLM3 最终把 24 TB 数据放在每个节点的 /scratch 上。' },
+        { id: 'weka', short: 'Weka', name: 'GPU ↔ Weka（/fsx）', hl: ['gpu4', 'g4', 'sw4', 'c4', 'cpu1', 'st', 'stw', 'weka'], bw: 4.21 * 1.0737, theo: '共享网络文件系统', meas: '4.21 GiB/s，51k IOPS', note: '容量满时会把冷文件逐出到 S3——马拉松篇谜案 1 的成因。' },
+        { id: 'lus', short: 'Lustre/EBS', name: 'GPU ↔ Lustre / EBS', hl: ['gpu4', 'g4', 'sw4', 'c4', 'cpu1', 'st', 'lus'], bw: 1.13 * 1.0737, theo: '—', meas: 'Lustre 1.13 GiB/s、17k IOPS；EBS 约 1.1 GiB/s、730 IOPS', note: '只适合不频繁的大块读写。' },
+      ];
+      const sel = $('tp-sel');
+      P.forEach((p, i) => { const b = document.createElement('button'); b.textContent = p.short; b.dataset.v = p.id; b.setAttribute('aria-pressed', i === 1 ? 'true' : 'false'); sel.appendChild(b); });
+      let cur = 'nvl';
+      const bars = $('tp-bars');
+      function draw() {
+        const p = P.find((x) => x.id === cur);
+        Object.values(C).forEach((e) => e.classList.remove('hl'));
+        Object.values(Wr).forEach((e) => e.classList.remove('hl'));
+        p.hl.forEach((id) => { (C[id] || Wr[id]).classList.add('hl'); });
+        const gb = Math.max(0, +$('tp-gb').value || 0);
+        const t = gb / p.bw;
+        const ts = t < 1 ? (t * 1000).toFixed(1) + ' ms' : t < 120 ? t.toFixed(2) + ' s' : (t / 60).toFixed(1) + ' min';
+        $('tp-info').innerHTML = `<b>${p.name}</b><br>理论：${p.theo}<br>实测：${p.meas}<br>按 ${p.bw >= 100 ? Math.round(p.bw) : p.bw.toFixed(1)} GB/s 计，搬 ${gb} GB 约需 <b>${ts}</b>。${p.note}`;
+        // bars
+        const BW = 600, rowH = 26, BH = P.length * rowH + 28, L0 = 110;
+        const s = el('svg', { viewBox: `0 0 ${BW} ${BH}`, role: 'img', 'aria-label': '各路径带宽（对数）' });
+        const lmin = 0, lmax = Math.log10(5000);
+        const X = (v) => L0 + (Math.log10(v) - lmin) / (lmax - lmin) * (BW - L0 - 60);
+        [1, 10, 100, 1000].forEach((v) => { el('line', { x1: X(v), x2: X(v), y1: 4, y2: BH - 22, class: 'grid' }, s); el('text', { x: X(v), y: BH - 8, 'text-anchor': 'middle', class: 'axis' }, s, v + ' GB/s'); });
+        [...P].sort((a, b) => b.bw - a.bw).forEach((q, i) => {
+          const y = 6 + i * rowH;
+          const r = el('rect', { x: L0, y, width: Math.max(2, X(q.bw) - L0), height: rowH - 8, rx: 3, class: 'bar' + (q.id === cur ? ' hl' : '') }, s);
+          r.style.cursor = 'pointer'; r.addEventListener('click', () => pick(q.id));
+          el('text', { x: L0 - 6, y: y + rowH / 2, 'text-anchor': 'end', class: 'bart' }, s, q.short);
+          el('text', { x: X(q.bw) + 4, y: y + rowH / 2, class: 'axis' }, s, q.bw >= 100 ? Math.round(q.bw) : q.bw.toFixed(1));
+        });
+        bars.replaceChildren(s);
+      }
+      function pick(id) { cur = id; sel.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b.dataset.v === id ? 'true' : 'false')); draw(); }
+      sel.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => pick(b.dataset.v)));
+      $('tp-gb').addEventListener('input', draw);
+      draw();
+    })();
+
+    /* ---------- GPU count + Amdahl ---------- */
+    (() => {
+      const fmtE = (x) => { const e = Math.floor(Math.log10(x)); return (x / Math.pow(10, e)).toFixed(2) + '×10^' + e; };
+      function upd() {
+        const N = +$('c-n').value * 1e9, D = +$('c-d').value * 1e12, peak = +$('c-peak').value * 1e12;
+        const mfu = +$('c-mfu').value / 100, days = +$('c-days').value, buf = +$('c-buf').value / 100;
+        const F = 6 * N * D, eff = peak * mfu;
+        const g = F / (eff * days * 86400) * (1 + buf);
+        $('c-o1').textContent = fmtE(F);
+        $('c-o2').textContent = (eff / 1e12).toFixed(0) + ' TFLOPs/s';
+        $('c-o3').textContent = isFinite(g) ? g.toFixed(0) : '–';
+        $('c-o4').textContent = isFinite(g) ? Math.ceil(g / 8) * 8 + '（' + Math.ceil(g / 8) + ' 节点）' : '–';
+        $('c-o5').textContent = isFinite(g) ? (F / eff / 3600 / 1e3).toFixed(0) + 'k' : '–';
+        const f = +$('c-f').value; $('c-f-v').textContent = (f * 100).toFixed(1) + '%';
+        const Wd = 680, Hd = 240, Pd = { l: 52, r: 14, t: 12, b: 30 };
+        const nmax = 4096;
+        const X = (n) => Pd.l + Math.log2(n) / Math.log2(nmax) * (Wd - Pd.l - Pd.r);
+        const ymax = Math.log10(nmax);
+        const Y = (s) => Pd.t + (1 - Math.log10(s) / ymax) * (Hd - Pd.t - Pd.b);
+        const s = el('svg', { viewBox: `0 0 ${Wd} ${Hd}`, role: 'img', 'aria-label': 'Amdahl 加速比曲线' });
+        [1, 10, 100, 1000].forEach((v) => { el('line', { x1: Pd.l, x2: Wd - Pd.r, y1: Y(v), y2: Y(v), class: 'grid' }, s); el('text', { x: Pd.l - 6, y: Y(v) + 4, 'text-anchor': 'end', class: 'axis' }, s, v + '×'); });
+        [1, 8, 64, 512, 4096].forEach((n) => el('text', { x: X(n), y: Hd - 10, 'text-anchor': 'middle', class: 'axis' }, s, n));
+        const ns = []; for (let k = 0; k <= 120; k++) ns.push(Math.pow(nmax, k / 120));
+        el('path', { d: ns.map((n, i) => (i ? 'L' : 'M') + X(n).toFixed(1) + ' ' + Y(n).toFixed(1)).join(''), class: 'ideal' }, s);
+        const sp = (n) => 1 / (f + (1 - f) / n);
+        el('path', { d: ns.map((n, i) => (i ? 'L' : 'M') + X(n).toFixed(1) + ' ' + Y(sp(n)).toFixed(1)).join(''), class: 'curve' }, s);
+        el('text', { x: Wd - Pd.r, y: Y(1 / f) - 6, 'text-anchor': 'end', class: 'lbl' }, s, '上限 1/f = ' + (1 / f).toFixed(1) + '×');
+        el('text', { x: Pd.l + 6, y: Pd.t + 12, class: 'lbl' }, s, '虚线：理想线性加速；实线：Amdahl（横轴 GPU 数）');
+        $('c-chart').replaceChildren(s);
+        const n0 = isFinite(g) && g >= 1 ? Math.round(g) : 384;
+        $('c-note').textContent = `串行比例 ${(f * 100).toFixed(1)}% 时，${n0} 张卡的加速比上限为 ${sp(n0).toFixed(1)}×（理想 ${n0}×），并行效率 ${(sp(n0) / n0 * 100).toFixed(1)}%。这条曲线把通信当作不可并行的固定比例，是最悲观的看法；实际训练里通信可以和计算重叠，弱扩展（batch 随卡数增大）也会让每卡的计算量保持不变。`;
+      }
+      ['c-n', 'c-d', 'c-peak', 'c-mfu', 'c-days', 'c-buf', 'c-f'].forEach((id) => $(id).addEventListener('input', upd));
+      upd();
+    })();
+  })();
+  </script>
+</body>
+</html>

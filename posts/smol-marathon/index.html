@@ -1,0 +1,733 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>训练马拉松：吞吐、loss spike 与中途调整 · Zunzhe Zhang</title>
+  <meta name="description" content="读 Smol Training Playbook 的长跑一章：起跑检查清单、SmolLM3 的四个谜案、loss spike 的诊断与处理、多阶段 mid-training 与 4k→128k 长上下文扩展。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig svg { width: 100%; height: auto; display: block; }
+    .fig text { font-family: var(--font-sans); fill: var(--text); }
+    .fig .soft { fill: var(--text-soft); }
+    .fig .faint { fill: var(--text-faint); }
+    .fig .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .fig .boxs { fill: var(--bg-soft); stroke: var(--border); stroke-width: 1.2; }
+    .fig .acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .fig .acc2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .fig .line { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    .fig .aline { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .fig .a2line { stroke: var(--accent-2); stroke-width: 2; fill: none; }
+    .chart svg { width: 100%; height: auto; display: block; }
+    .chart .grid { stroke: var(--border); stroke-width: 1; }
+    .chart .axis { fill: var(--text-faint); font-size: 11px; font-family: var(--font-mono); }
+    .chart .base { stroke: var(--text-faint); stroke-width: 1.5; stroke-dasharray: 4 4; fill: none; }
+    .chart .curve { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .chart .curve2 { stroke: var(--accent-2); stroke-width: 2; fill: none; }
+    .chart .mark { stroke: var(--accent-2); stroke-width: 1.5; stroke-dasharray: 3 3; }
+    .chart .lbl { fill: var(--text-soft); font-size: 12px; }
+    .note { font-size: 14px; color: var(--text-soft); line-height: 1.7; margin-top: 10px; }
+    .chk { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 14px; margin: 8px 0; }
+    .chk label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .diag { margin-top: 10px; padding: 10px 14px; border-radius: 10px; background: var(--bg-soft); font-size: 14px; line-height: 1.7; }
+    .diag b { color: var(--accent); }
+    .ib { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px; }
+    .ib label { display: grid; gap: 4px; font-size: 13px; color: var(--text-soft); }
+    .ib input, .ib select { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); color: var(--text); }
+    .mystery { border-left: 3px solid var(--accent-2); padding-left: 14px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-soft); margin-top: 6px; }
+    .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>训练马拉松：吞吐、loss spike 与中途调整</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="smol"></nav>
+
+    <article class="prose">
+      <p>这一篇读的是 Hugging Face 的 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a> 中「The Training Marathon」一章：架构、数据配比和超参都定好了以后，真正按下「开始训练」之后会发生什么。主角是 SmolLM3：一个 3B 的稠密模型，在 384 张 H100（48 个节点）上训了将近一个月，一共 11T token。</p>
+      <p>这一章没有新算法，讲的是一次真实大规模训练里的各种意外：吞吐突然塌掉、数据加载器有隐藏的扩展性问题、loss 变得更抖、一个张量并行的随机种子 bug 让模型在 1T token 时落后于预期，最后不得不重启。然后是怎么监控、遇到 loss spike 怎么办、训练中途怎么换数据配比，以及怎么把上下文从 4k 扩到 128k。我按「先把账算清 → 起跑检查 → 四个谜案 → 监控与 spike → mid-training → 长上下文」的顺序写，每一部分都尽量把背后的机制讲到能自己复现推理的程度。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#ledger">先把账算清：吞吐、MFU 与完成时间</a></li>
+          <li><a href="#preflight">起跑前检查清单</a></li>
+          <li><a href="#eta">交互：吞吐与完成日期计算器</a></li>
+          <li><a href="#mysteries">规模化带来的四个谜案</a></li>
+          <li><a href="#monitor">监控：只看 loss 曲线不够</a></li>
+          <li><a href="#spikes">Loss spike：分类、成因、预防与急救</a></li>
+          <li><a href="#diag">交互：loss 曲线诊断台</a></li>
+          <li><a href="#restart">重启还是在线修复</a></li>
+          <li><a href="#midtrain">Mid-training：多阶段数据配比</a></li>
+          <li><a href="#longctx">长上下文扩展：4k → 64k 训练，YaRN 到 128k</a></li>
+          <li><a href="#rope-demo">交互：RoPE 频率、ABF 与 YaRN</a></li>
+          <li><a href="#lessons">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="ledger">1. 先把账算清：吞吐、MFU 与完成时间</h2>
+      <p>长跑之前，先定义几个整篇都会用到的量。</p>
+      <ul>
+        <li><strong>吞吐（throughput）</strong>：训练系统每秒处理多少 token。可以按整个集群算，也可以按单卡算（tokens/s/GPU）。playbook 在基础设施一章里明确说，比较并行配置时他们看的就是「每卡每秒 token 数」。</li>
+        <li><strong>训练 FLOPs</strong>：稠密 Transformer 每个训练 token 大约要 \(6N\) 次浮点运算，\(N\) 是参数量。其中前向 \(2N\)（每个参数一次乘加 = 2 FLOPs），反向约是前向的两倍 \(4N\)。这个近似忽略了注意力里与序列长度相关的那部分计算，对 4k 上下文的 3B 模型来说误差不大。</li>
+        <li><strong>MFU（model FLOPs utilization）</strong>：模型「有用」计算速度占硬件理论峰值的比例：
+          $$\text{MFU} = \frac{6N \cdot \text{tokens/s/GPU}}{\text{峰值 FLOPs/s}}.$$
+        </li>
+      </ul>
+      <p>把 SmolLM3 的数字代进去。playbook 说他们的配置目标是约 30% MFU，监控时预期的稳定吞吐是 13,500–14,000 tokens/s（playbook 没写这是单卡还是整体，但只有按单卡理解，下面的账才对得上）。取中间值 13,750：</p>
+      $$6 \times 3\times 10^{9} \times 13{,}750 \approx 2.48\times 10^{14}\ \text{FLOPs/s} \approx 248\ \text{TFLOPs/s}.$$
+      <p>H100 的 BF16 稠密峰值是 990 TFLOPs/s，所以按 \(6N\) 算出来的 MFU 约 25%；如果把注意力的 FLOPs 也算上会再高一点，和「约 30%」是一个量级。整个集群的吞吐是 \(384 \times 13{,}750 \approx 5.28\text{M}\) tokens/s，11T token 需要</p>
+      $$\frac{11\times 10^{12}}{5.28\times 10^{6}} \approx 2.08\times 10^{6}\ \text{s} \approx 24\ \text{天}.$$
+      <p>这和 playbook 在 checkpoint 一节里随口提到的「24 天的训练」吻合。这笔账说明了为什么吞吐是基础设施上最重要的指标：<strong>吞吐掉一半，一个月的训练就变成两个月。</strong>账上每一项都是乘法关系，任何一项塌掉都直接体现在完成日期上。</p>
+
+      <h2 id="preflight">2. 起跑前检查清单</h2>
+      <p>按下开始键之前，playbook 会把下面五件事从头到尾过一遍。每一条后面其实都对应着一次「以前吃过的亏」。</p>
+      <ol>
+        <li><strong>基础设施就绪。</strong>如果集群调度系统（Slurm）支持预留（reservation），就用。SmolLM3 整个训练期间有一个固定的 48 节点预留：不用排队、吞吐稳定，还能长期跟踪<em>同一批</em>节点的健康状况。开训前对 GPU 做压力测试（他们用内部工具 GPU Fryer 和 NVIDIA 的 DCGM Diagnostics），检查降频和性能退化——SmolLM3 开训前就这样找出了两张会降频的卡并换掉了。另外要防止存储膨胀：每个 checkpoint 存完后上传到 S3，下一个 checkpoint 存好就删掉本地那份，所以本地高速 SSD 上永远只有一份。</li>
+        <li><strong>评测流水线。</strong>评测比看起来更耗时间：手动跑、记结果、画图，一次就是几个小时。尽量全自动化，并且在开训之前确认它能正常运行和记录。SmolLM3 每保存一个 checkpoint 就自动在集群上触发一个评测任务，结果写进 Wandb 和 Trackio。</li>
+        <li><strong>Checkpoint 与自动恢复。</strong>确认 checkpoint 存得对，并且训练任务能在无人干预的情况下从最新的 checkpoint 恢复。Slurm 上用 <code>--requeue</code>：任务失败后自动重新排队，并从最近的 checkpoint 接着跑。</li>
+        <li><strong>指标记录。</strong>确认所有关心的指标都在记录：评测分数、吞吐（tokens/s）、训练 loss、梯度范数、节点健康（GPU 利用率、温度、显存占用），以及本次训练特有的调试指标。</li>
+        <li><strong>配置自查。</strong>训练配置、启动脚本、Slurm 提交命令再核对一遍。</li>
+      </ol>
+      <p>这几条看起来朴素，但后文每一个谜案的排查都依赖它们：没有节点监控就看不出吞吐下跌和磁盘读延迟相关；没有自动评测和参考 checkpoint，就发现不了 TP 的 bug；没有自动恢复，每次掉节点都要有人半夜起来重启。</p>
+
+      <h2 id="eta">3. 交互：吞吐与完成日期计算器</h2>
+      <p>把第 1 节的账做成一个小工具。输入模型大小、目标 token 数、卡数和单卡吞吐，再估计一下中途会挂几次、每次损失多少时间，就能得到预计完成日期。默认值是 SmolLM3 的配置；故障次数、每次恢复耗时和 checkpoint 间隔是我编的示意值，不是 playbook 报告的数字。</p>
+      <p>每次故障损失的时间按「恢复开销 + 半个 checkpoint 间隔」估算：故障发生的时刻在两个 checkpoint 之间大致均匀分布，所以平均要重算半个间隔的训练。</p>
+
+      <div class="demo" id="eta-demo">
+        <div class="demo-label">吞吐 / 完成日期计算器</div>
+        <div class="ib" style="margin-top:12px">
+          <label>参数量 N（十亿）<input type="number" id="e-n" value="3" min="0.1" step="0.1"></label>
+          <label>目标 token 数（万亿）<input type="number" id="e-d" value="11" min="0.01" step="0.1"></label>
+          <label>GPU 数<input type="number" id="e-g" value="384" min="1" step="8"></label>
+          <label>单卡吞吐（tokens/s）<input type="number" id="e-tps" value="13750" min="100" step="250"></label>
+          <label>单卡峰值
+            <select id="e-peak">
+              <option value="990">H100 BF16 稠密 990 TF</option>
+              <option value="312">A100 BF16 312 TF</option>
+              <option value="2250">B200 BF16 2250 TF</option>
+            </select>
+          </label>
+          <label>开始日期<input type="date" id="e-start" value="2025-01-01"></label>
+          <label>预计故障次数（示意）<input type="number" id="e-fail" value="8" min="0" step="1"></label>
+          <label>每次恢复开销（小时，示意）<input type="number" id="e-rec" value="0.5" min="0" step="0.25"></label>
+          <label>checkpoint 间隔（小时）<input type="number" id="e-ck" value="2" min="0.25" step="0.25"></label>
+        </div>
+        <div class="ctrls">
+          <div class="ctrl"><span>吞吐下跌</span><input type="range" id="e-drop" min="0" max="70" step="1" value="0"><output id="e-drop-v">0%</output></div>
+        </div>
+        <div class="readout">
+          <div><span class="k">集群吞吐</span><span class="v" id="e-o-agg">–</span></div>
+          <div><span class="k">估算 MFU（6N）</span><span class="v" id="e-o-mfu">–</span></div>
+          <div><span class="k">纯计算时间</span><span class="v" id="e-o-days">–</span></div>
+          <div><span class="k">故障损失</span><span class="v" id="e-o-lost">–</span></div>
+          <div><span class="k">预计完成</span><span class="v" id="e-o-end">–</span></div>
+        </div>
+        <p class="note" id="e-o-note"></p>
+      </div>
+
+      <p>拖一下「吞吐下跌」：跌 50% 时纯计算时间直接翻倍。这就是 playbook 把吞吐当作头号红线指标的原因——下一节的前两个谜案，都是吞吐出了问题。</p>
+
+      <h2 id="mysteries">4. 规模化带来的四个谜案</h2>
+      <p>SmolLM3 的消融做得很充分：3B 模型在 100B token 上的消融结果不错；相对 SmolLM2 的架构改动（GQA、NoPE、文档内注意力掩码、新分词器）都被验证过，要么提升要么持平；数据配比也在英文、多语言、代码和数学之间找到了平衡；整套配置在 48 个节点上调到了约 30% 的 MFU，开训前还专门在 48 节点上验证过吞吐。即便如此，正式开始 11T token 的长跑之后，问题一个接一个。</p>
+
+      <h3 class="mystery">谜案 1：消失的吞吐</h3>
+      <p><strong>症状。</strong>开训几个小时内，吞吐就大幅下跌，而且是反复的、陡峭的下跌。消融里从没出现过。</p>
+      <p><strong>什么变了？</strong>排查的第一步是列出「正式训练和吞吐消融相比，到底有什么不同」。答案只有三项：</p>
+      <ol>
+        <li>训练数据集的规模：现在用的是完整的约 24 TB 数据，消融只用了子集（数据来源相同）；</li>
+        <li>训练步数：按 11T token 设置的真实步数，而不是 100B token 的消融步数；</li>
+        <li>可能还有硬件状态：长时间满负载下，消融时正常的 GPU 可能出故障，网络连接可能退化。</li>
+      </ol>
+      <p>其余一切——节点数、dataloader 配置、模型布局、并行方式——都和吞吐消融完全一样。直觉上数据集大小和步数都不该影响吞吐，所以先怀疑硬件。查看节点监控后发现：<strong>吞吐的大幅下跌和磁盘读延迟的尖峰同时出现</strong>。矛头指向数据存储。</p>
+      <p><strong>集群的三层存储。</strong>他们的集群里训练数据可以放在三个地方：</p>
+      <ul>
+        <li><strong>FSx（实际是 Weka）</strong>：网络附加存储，采用「保热」缓存模型——常访问的文件留在本地，容量快满时把不活跃的「冷」文件逐出到 S3；</li>
+        <li><strong>Scratch</strong>：每个节点上的本地 NVMe RAID（8 块 3.5 TB 的 NVMe 盘），比 FSx 快，但只有本节点能访问；</li>
+        <li><strong>S3</strong>：远端对象存储，放冷数据和备份。</li>
+      </ul>
+      <p>24 TB 的数据一开始放在 Weka 上。加上其他团队已经占用的空间，Weka 被推到了容量极限，于是它开始在训练中途<strong>逐出数据分片</strong>。被逐出的分片下次读取时要从 S3 拉回来，训练就卡住等数据——这就是吞吐断崖。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 260" role="img" aria-label="三层存储与逐出示意">
+          <rect class="box" x="20" y="30" width="200" height="90" rx="10"/>
+          <text x="120" y="58" text-anchor="middle" font-weight="600">Weka（/fsx）</text>
+          <text x="120" y="80" text-anchor="middle" class="soft" font-size="13">共享网络存储，「保热」缓存</text>
+          <text x="120" y="100" text-anchor="middle" class="soft" font-size="13">满了就把冷文件逐出到 S3</text>
+          <rect class="boxs" x="20" y="170" width="200" height="60" rx="10"/>
+          <text x="120" y="197" text-anchor="middle" font-weight="600">S3</text>
+          <text x="120" y="217" text-anchor="middle" class="soft" font-size="13">远端对象存储（冷数据）</text>
+          <path class="a2line" d="M100 120 L100 170" marker-end="url(#ar2)"/>
+          <text x="92" y="150" text-anchor="end" font-size="12" class="soft">逐出</text>
+          <path class="a2line" d="M140 170 L140 120" marker-end="url(#ar2)"/>
+          <text x="148" y="150" font-size="12" class="soft">取回 = 卡顿</text>
+          <rect class="acc" x="300" y="30" width="190" height="200" rx="10"/>
+          <text x="395" y="55" text-anchor="middle" font-weight="600">训练节点 ×48</text>
+          <rect class="box" x="320" y="70" width="150" height="40" rx="6"/>
+          <text x="395" y="95" text-anchor="middle" font-size="13">8 × H100</text>
+          <rect class="box" x="320" y="125" width="150" height="50" rx="6"/>
+          <text x="395" y="146" text-anchor="middle" font-size="13">本地 NVMe RAID</text>
+          <text x="395" y="164" text-anchor="middle" font-size="12" class="soft">/scratch，存一份完整数据</text>
+          <text x="395" y="205" text-anchor="middle" font-size="12" class="soft">修复后：数据读本地盘</text>
+          <path class="line" d="M220 75 L300 75" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+          <text x="260" y="68" text-anchor="middle" font-size="11" class="faint">原方案</text>
+          <rect class="acc2" x="560" y="70" width="140" height="110" rx="10"/>
+          <text x="630" y="98" text-anchor="middle" font-weight="600">备用节点</text>
+          <text x="630" y="120" text-anchor="middle" font-size="12" class="soft">在预留内、数据预载</text>
+          <text x="630" y="140" text-anchor="middle" font-size="12" class="soft">坏节点 → 立刻替换</text>
+          <text x="630" y="160" text-anchor="middle" font-size="12" class="soft">闲时跑评测/开发任务</text>
+          <path class="line" d="M490 125 L560 125" marker-end="url(#ar)"/>
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--text-faint)"/></marker>
+            <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent-2)"/></marker>
+          </defs>
+        </svg>
+        <figcaption>谜案 1 的成因与修复（根据 playbook 的文字描述重画）。</figcaption>
+      </figure>
+
+      <p><strong>修复 1：换数据存储位置。</strong>他们找不到办法让 Weka 在整个训练期间把数据目录固定为「热」，于是换存储。直接从 S3 流式读太慢，最后决定在<strong>每个节点的本地 scratch 盘上各放一份完整数据</strong>。</p>
+      <p>这带来一个新问题：节点坏掉被替换时，新节点上没有数据。用 s5cmd 从 S3 下载 24 TB 要 3 小时；改用 fpsync 从同机房另一个健康节点复制，缩短到 1.5 小时。换算一下有效带宽：\(24\,\text{TB}/3\,\text{h}\approx 2.2\,\text{GB/s}\)，\(24\,\text{TB}/1.5\,\text{h}\approx 4.4\,\text{GB/s}\)。但每次故障还是要停 1.5 小时，而且需要有人立刻手动去复制数据。真正让它变得可以忍受的是一个朴素的办法：<strong>在 Slurm 预留里多留一个备用节点，数据预先装好</strong>。哪个节点坏了就直接换成备用节点，恢复延迟为零；备用节点闲着的时候跑评测或开发任务，不算浪费。</p>
+      <p>这解决了谜案 1……他们当时是这么以为的。</p>
+
+      <h3 class="mystery">谜案 2：挥之不去的吞吐下跌</h3>
+      <p><strong>症状。</strong>数据搬到本地盘以后，个别的吞吐下跌仍然存在，而且硬件监控里看不到任何异常。和消融时的吞吐曲线对比，下跌反而变得更尖锐了。</p>
+      <p><strong>缩小范围。</strong>仍然先怀疑硬件：384 张卡，总有一张出问题的概率不小。于是在更少的节点上测试——结果<strong>在单个节点上就能复现完全一样的下跌，无论换哪个节点</strong>。这排除了硬件。</p>
+      <p>回到三个变量：存储已经换了，硬件排除了，只剩<strong>步数</strong>。他们把步数从 3.2M 缩回 32k（其余配置不变，只改 <code>train_steps</code>、<code>lr_decay_starting_step</code>、<code>lr_decay_steps</code> 三个字段），下跌就变小了；步数越大，下跌越尖、越频繁。问题不在硬件，而在软件，而且几乎只可能是 dataloader：训练里其他组件对每个 batch 的处理都与总步数无关。</p>
+      <p><strong>根因。</strong>SmolLM2 当年是用一个从 Megatron-LM 派生的 dataloader（TokenizedBytes）训练的，通过内部封装接到 Nanotron 上，吞吐一直平稳。SmolLM3 换成了 Nanotron 自带的 dataloader（nanosets），而他们<strong>从没用它做过大规模预训练</strong>。读了实现以后发现：它会天真地构建一个随训练步数增长的巨大索引。步数非常大时，这个索引占用的共享内存越来越多，引发了吞吐下跌。</p>
+      <p><strong>修复 2：换回 TokenizedBytes。</strong>为了确认，他们用内部的 SmolLM2 框架加 TokenizedBytes、同样的数据跑了 48 个节点：没有下跌。最快的路径是把这个 dataloader 直接拷进 Nanotron。下跌消失，吞吐回到目标值。</p>
+
+      <h3 class="mystery">谜案 3：变得更抖的 loss</h3>
+      <p><strong>症状。</strong>换了 dataloader 以后吞吐没问题了，但 loss 曲线比用 nanosets 时更抖。</p>
+      <p>这让他们想起几年前调过的一个 bug：文档是打乱了，但一个 batch 里的序列没有打乱，导致出现小的 loss 尖峰。检查新 dataloader，果然：它<strong>从每个文档里按顺序读取序列</strong>。对短文件没问题；但在代码这类领域，一个很长的低质量文件会被切成许多连续序列，可能填满整整一个 batch，造成 loss 尖峰。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 200" role="img" aria-label="顺序读取与序列级打乱">
+          <text x="20" y="28" font-weight="600" font-size="14">顺序读取：一个长文件连续占满一个 batch</text>
+          <g id="seqrow"></g>
+          <text x="20" y="128" font-weight="600" font-size="14">序列级打乱：每个 batch 混入各种来源</text>
+          <g id="shufrow"></g>
+        </svg>
+        <figcaption>每个小方块是一条 4k token 的训练序列，颜色代表它来自哪个文档；竖线分隔 batch。橙色是一个很长的低质量代码文件。</figcaption>
+      </figure>
+
+      <p><strong>修复 3：在序列级别打乱。</strong>两个选择：</p>
+      <ul>
+        <li>改 dataloader，支持随机访问（风险：内存占用更高）；</li>
+        <li>离线把 tokenize 好的序列预先打乱。</li>
+      </ul>
+      <p>集群预留在烧钱、时间很紧，他们选了第二个，更安全也更快：数据已经在每个节点上了，本地重新打乱很便宜（约 1 小时）。而且<strong>每个 epoch 用不同的种子各生成一份打乱顺序</strong>，避免多个 epoch 重复同样的打乱模式。</p>
+      <div class="callout">
+        <p><strong>补丁还是修好？</strong>时间紧时，采用一个经过验证的现成方案或临时绕过，往往比调试自己坏掉的实现更快：谜案 2 直接搬来 TokenizedBytes 而不是修 nanosets 的索引，谜案 3 用离线预打乱而不是改 dataloader。但 playbook 也提醒，捷径走多了，系统会变成一堆难以维护和优化的补丁。</p>
+      </div>
+
+      <p><strong>第二次起跑。</strong>到这时他们有了：稳定的吞吐（本地 scratch 存储 + 备用节点）、不再随步数下跌（TokenizedBytes）、干净的序列级打乱（每个 epoch 离线预打乱）。重新启动后，loss 平滑，吞吐稳定。</p>
+
+      <h3 class="mystery">谜案 4：不达预期的效果</h3>
+      <p><strong>症状。</strong>前两天一切顺利，日志里看不出任何问题。但在约 1T token 处，评测结果出乎意料。他们手里有 SmolLM2（1.7B，配方相近）的中间 checkpoint，可以对比两个模型在同一训练阶段的表现。结果：<strong>参数更多、数据配比更好的 3B 模型，在同一训练位置反而比 1.7B 的差</strong>。loss 仍在下降、评测分数仍在上升，只是提升速度明显低于预期。</p>
+      <p><strong>缩小范围。</strong>相对 SmolLM2 的每一处架构和数据改动都单独验证过，所以怀疑转向训练框架。两套设置之间尚未测试的差异只剩几处，最明显的是<strong>张量并行（TP）</strong>：SmolLM2 单卡放得下，训练时没开 TP；SmolLM3 需要 TP=2 才放得进显存。之前没想过专门测试它，因为 3B 消融也用了 TP，结果看起来合理。</p>
+      <p><strong>验证。</strong>用和 SmolLM3 完全相同的设置（文档掩码、NoPE、同样的数据和超参）训练一个 1.7B 模型，一组开 TP、一组不开。差别立刻显现：开 TP 的版本 loss 一直更高、下游表现更差。确认是 TP 相关的 bug。</p>
+      <p><strong>根因。</strong>对比 TP 和非 TP 训练的权重后发现：<strong>所有 TP rank 用的是同一个随机种子</strong>，而每个 rank 本应用不同的种子来初始化自己那一片权重。修复只有几行：</p>
+<pre><code># nanotron/trainer.py（playbook 给出的 diff，略去上下文）
+- set_random_seed(self.config.general.seed)
++ # 每个 TP rank 用不同的种子，保证各分片初始化不同
++ tp_rank = dist.get_rank(self.parallel_context.tp_pg)
++ set_random_seed(self.config.general.seed + tp_rank)</code></pre>
+
+      <p>为什么同一个种子会出问题？回忆一下张量并行怎么切一个线性层。以 MLP 第一层为例，权重 \(W \in \mathbb{R}^{d \times 4d}\) 按列切成两半 \(W = [W_1 \mid W_2]\)，rank 0 存 \(W_1\)、rank 1 存 \(W_2\)，各自算出一半的中间激活；第二层按行切，各自算部分和再 all-reduce。每个 rank 都是「生成一个形状为 \(d\times 2d\) 的随机矩阵」——如果两个 rank 的随机数生成器状态相同，就会得到 \(W_1 = W_2\)。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 210" role="img" aria-label="张量并行列切分与相同种子">
+          <text x="20" y="24" font-weight="600" font-size="14">正确：每个 rank 种子不同</text>
+          <rect class="acc" x="20" y="36" width="140" height="80" rx="6"/>
+          <text x="90" y="80" text-anchor="middle">W₁（rank 0）</text>
+          <rect class="acc2" x="165" y="36" width="140" height="80" rx="6"/>
+          <text x="235" y="80" text-anchor="middle">W₂（rank 1）</text>
+          <text x="162" y="140" text-anchor="middle" class="soft" font-size="13">两片独立初始化 → 4d 个不同的神经元</text>
+          <text x="390" y="24" font-weight="600" font-size="14">bug：所有 rank 种子相同</text>
+          <rect class="acc" x="390" y="36" width="140" height="80" rx="6"/>
+          <text x="460" y="80" text-anchor="middle">W₁（rank 0）</text>
+          <rect class="acc" x="535" y="36" width="140" height="80" rx="6"/>
+          <text x="605" y="80" text-anchor="middle">W₁ 的拷贝（rank 1）</text>
+          <text x="532" y="140" text-anchor="middle" class="soft" font-size="13">两片完全相同 → 一半神经元是另一半的复制</text>
+          <text x="360" y="190" text-anchor="middle" class="faint" font-size="12">注意力层同理：按头切分的 Q/K/V 在两个 rank 上初始化成一样的头</text>
+        </svg>
+        <figcaption>张量并行下种子相同的后果（示意）。</figcaption>
+      </figure>
+
+      <p>下面是我自己的分析，不是 playbook 的原话：如果两片权重完全相同，而且后续每一步的更新也完全对称（同样的输入、同样的下游权重，所以同样的梯度），那这两片永远保持相同——等于把 MLP 和注意力的有效宽度砍掉了一半。实际中对称性能被打破多少，取决于实现细节（比如哪些参数并不按 TP 切分、数值误差等）。playbook 的描述是：权重初始化在分片之间相关，影响了收敛；不是灾难性的，模型照样在学、在进步，但效率损失足以解释在规模上观察到的差距。他们的原话是「我们一半的权重没有被正确初始化」。</p>
+      <p>修好种子后，他们重复了消融，确认 TP 与非 TP 的 loss 曲线和下游表现一致；又做了额外的健全性检查：分别训练 SmolLM2 风格（架构和数据）的 3B 模型和 SmolLM3 的 3B 模型，与 SmolLM2 的 checkpoint 对比。结果符合预期：1.7B 的 SmolLM2 弱于 3B 的 SmolLM2 变体，后者又被 SmolLM3-3B 超过。</p>
+      <p>值得注意的是这个 bug 被定位的速度：从发现差距到修好只用了一天。原因是其他所有组件都被消融验证过，TP 是唯一可疑的、没被单独测试过的部分。playbook 把这一点归功于前面反复强调的原则：扎实的消融不只是为了做出好模型，更是为了训练出问题时，能对每个决定有信心，迅速知道哪些部分没被充分测试。之后剩下的一个月基本平静，只有偶尔因为节点故障触发的重启。</p>
+
+      <h2 id="monitor">5. 监控：只看 loss 曲线不够</h2>
+      <p>TP bug 能被发现，靠的不是 loss 曲线——loss 看起来一切正常——而是<strong>下游评测落后于预期</strong>。而 SmolLM2 的中间 checkpoint 评测结果是关键的参照物：它让团队很早就意识到 3B 模型没走在正轨上。由此得到两条建议：</p>
+      <ul>
+        <li>训练大模型时，尽早开始跑下游评测，不要等训练结束；</li>
+        <li>如果要和某个开源模型对比，问问作者能否提供中间 checkpoint，它们作为参照点非常有价值。</li>
+      </ul>
+      <p>基础设施这边，最重要的指标是吞吐。SmolLM3 预期整个训练期间吞吐稳定在 13,500–14,000 tokens/s，任何持续偏离都是红灯。但只看吞吐不够，还需要持续的硬件健康监控来预判和发现硬件故障：GPU 温度、显存占用、计算利用率等。他们把这些指标接进 Grafana 仪表盘，并为硬件异常设置了实时 Slack 告警（细节见本系列的<a href="/posts/smol-infrastructure/">基础设施篇</a>）。</p>
+      <p>把这些合在一起，监控其实分三层，每一层抓不同的问题：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>层</th><th>看什么</th><th>本次能抓到的问题</th></tr></thead>
+          <tbody>
+            <tr><td>系统</td><td>吞吐、磁盘读延迟、GPU 温度/降频/显存、节点存活</td><td>谜案 1（读延迟尖峰）、谜案 2（吞吐下跌）、降频 GPU、坏节点</td></tr>
+            <tr><td>优化</td><td>训练 loss、梯度范数</td><td>谜案 3（loss 变抖）、loss spike、发散</td></tr>
+            <tr><td>能力</td><td>中间 checkpoint 的下游评测，与参考模型同阶段对比</td><td>谜案 4（TP 种子 bug：loss 正常但学得慢）</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="spikes">6. Loss spike：分类、成因、预防与急救</h2>
+      <p>SmolLM3 在 1T token 处重启了。那么，训练出问题时是不是总得重启？取决于问题的严重程度和根因。最常见的「中途问题」是 <strong>loss spike</strong>：训练 loss 突然跳高，可能只是小插曲，也可能是发散的前兆。playbook 引用了 Stas Bekman 在《Machine Learning Engineering Open Book》里的比喻：训练 loss 曲线像心电图，有好的、坏的、和「你该担心了」的。</p>
+
+      <h3>两大类</h3>
+      <ul>
+        <li><strong>可恢复的 spike</strong>：要么很快恢复（spike 之后立刻回到原来的轨迹），要么慢慢恢复（要再训一段才回到 spike 前的轨迹）。通常可以直接训过去。如果恢复非常慢，可以回滚到之前的 checkpoint 并跳过出问题的 batch。</li>
+        <li><strong>不可恢复的 spike</strong>：模型要么发散，要么停在比 spike 之前更差的平台上。这需要比「回滚」更大的干预。</li>
+      </ul>
+
+      <h3>常见成因</h3>
+      <p>我们并不完全理解训练不稳定，但知道规模越大越常见。在架构和优化器都比较保守的前提下，常见的罪魁祸首有：</p>
+      <ul>
+        <li><strong>学习率过高</strong>：在训练早期引起不稳定，降学习率即可。</li>
+        <li><strong>坏数据</strong>：通常是可恢复 spike 的主因，但恢复可能很慢。问题可能在训练很深入时才出现，也就是模型遇到低质量数据的时候。谜案 3 里长代码文件填满 batch 就是例子。</li>
+        <li><strong>数据与参数状态的交互</strong>：PaLM（Chowdhery et al., 2022）观察到 spike 往往来自「特定数据 batch」和「特定参数状态」的组合，而不仅仅是「坏数据」：从另一个 checkpoint 出发、在同样的问题 batch 上训练，并不能复现 spike。</li>
+        <li><strong>初始化不佳</strong>：OLMo 2 的工作发现，把 scaled initialization 换成简单的正态分布（均值 0、标准差 0.02）提升了稳定性。</li>
+        <li><strong>精度问题</strong>：现在已经没人用 FP16 训练了，但 BLOOM 当年发现 FP16 比 BF16 不稳定得多。原因是 FP16 只有 5 位指数，最大值约 65504，容易溢出；BF16 有 8 位指数，动态范围与 FP32 相同。</li>
+      </ul>
+
+      <h3>预防：在 spike 发生之前把稳定性做进去</h3>
+      <p>小模型、保守的学习率、好的数据，很少出 spike；更大的模型需要主动的稳定性措施：</p>
+      <ul>
+        <li><strong>数据过滤与打乱。</strong>确保数据干净且充分打乱。例如 OLMo 2 发现，去掉含有大量重复 n-gram 的文档（1 到 13 个 token 的片段重复 32 次以上）能显著降低 spike 频率。</li>
+        <li><strong>Z-loss。</strong>在 loss 里加一项，防止输出 logits 变得过大。记 softmax 的配分函数为 \(Z = \sum_{i} e^{z_i}\)（\(z_i\) 是词表上的 logits），则
+          $$\mathcal{L}_{\text{z-loss}} = \lambda \cdot \log^2 Z.$$
+          它把 \(\log Z\) 往 0 拉，也就是让 logits 的整体尺度不要漂移；交叉熵对 logits 整体平移不敏感，所以这一项基本不影响模型本身要学的东西。playbook 的 1B 消融里加 z-loss 不影响 loss 和下游表现；SmolLM3 最后没用，因为他们的实现有额外开销，开训前没来得及优化。</li>
+        <li><strong>Embedding 不做权重衰减。</strong>OLMo 2 发现这能提升稳定性。原因是 weight decay 会让 embedding 的范数逐渐变小，而 LayerNorm 的雅可比与输入范数成反比，范数小会让前几层梯度变大。</li>
+        <li><strong>QK-norm。</strong>在算注意力之前对 query 和 key 做归一化，防止注意力 logits 过大。OLMo 2 等团队发现它有助于稳定；有意思的是，Marin 团队发现它甚至可以在<em>训练中途</em>加进去，用来修复发散。不过 playbook 在架构一章也提到，有工作发现 QK-norm 损害长上下文检索，所以 SmolLM3 没用（3B 模型本来也不太容易不稳定）。</li>
+      </ul>
+
+      <h3>急救：spike 还是发生了</h3>
+      <ul>
+        <li><strong>跳过问题 batch</strong>：回滚到 spike 之前的 checkpoint，跳过出问题的 batch。这是最常见的处理。Falcon 团队为解决 spike 跳过了 1B token；PaLM 团队发现跳过 spike 附近的 200–500 个 batch 能防止复发。结合上面「数据与参数状态交互」的观察，这个做法之所以有效，是因为它同时改变了「在哪个参数状态上看到哪批数据」。</li>
+        <li><strong>临时收紧梯度裁剪</strong>：把梯度范数阈值调低一段时间。梯度裁剪的公式是
+          $$g \leftarrow g \cdot \min\!\left(1, \frac{c}{\lVert g \rVert_2}\right),$$
+          \(c\) 越小，单步更新的最大幅度越小，异常 batch 能造成的破坏就越有限。</li>
+        <li><strong>架构修补</strong>：如上所述，QK-norm 可能有效。</li>
+      </ul>
+
+      <h2 id="diag">7. 交互：loss 曲线诊断台</h2>
+      <p>下面把上面的分类和处理方法做成一个可以动手的玩具。所有曲线都是<strong>编出来的示意曲线</strong>：基线是 \(L(t)=a+b\,t^{-c}\) 形式的幂律下降加噪声，再叠上不同类型的异常；每种处理办法的「效果」是按上一节的定性规律硬编码的（比如不可恢复的 spike 只回滚不够），不是从真实训练里模拟出来的。它的作用是帮你记住「什么症状 → 想到什么原因 → 该用哪个处理」。</p>
+
+      <div class="demo" id="spike-demo">
+        <div class="demo-label">Loss 曲线诊断台（示意）</div>
+        <div class="seg" id="sp-type" style="margin-top:12px">
+          <button data-t="fast" aria-pressed="true">快速恢复</button>
+          <button data-t="slow" aria-pressed="false">缓慢恢复</button>
+          <button data-t="diverge" aria-pressed="false">发散</button>
+          <button data-t="plateau" aria-pressed="false">卡在更差的平台</button>
+          <button data-t="noisy" aria-pressed="false">持续抖动</button>
+          <button data-t="earlylr" aria-pressed="false">早期不稳</button>
+        </div>
+        <div class="chk" id="sp-fix">
+          <label><input type="checkbox" value="rewind">回滚并跳过问题 batch</label>
+          <label><input type="checkbox" value="lr">降低学习率</label>
+          <label><input type="checkbox" value="clip">收紧梯度裁剪</label>
+          <label><input type="checkbox" value="qk">中途加 QK-norm</label>
+          <label><input type="checkbox" value="shuffle">序列级打乱数据</label>
+        </div>
+        <div class="chart" id="sp-chart"></div>
+        <div class="legend"><span><i style="background:var(--text-faint)"></i>无异常时的轨迹</span><span><i style="background:var(--accent)"></i>当前曲线</span><span><i style="background:var(--accent-2)"></i>回滚点</span></div>
+        <div class="diag" id="sp-diag"></div>
+      </div>
+
+      <h2 id="restart">8. 重启还是在线修复</h2>
+      <p>回到开头的问题：SmolLM3 为什么选择在 1T token 处重启，而不是在线修？playbook 的理由是：TP 种子 bug 意味着「起跑就站错了脚」，一半的权重没有被正确初始化。当时模型的表现和 SmolLM2 相近，并且在相似的位置趋于平缓——也就是说继续训下去，大概率得到一个和 SmolLM2 差不多、但训练成本几乎翻倍的模型。这时重启才划算。</p>
+      <p>把它抽象一下，判断的依据大致是：</p>
+      <ul>
+        <li><strong>问题是否已经「写进」了参数状态</strong>，而且后续训练无法纠正？初始化错误属于这一类，坏 batch 造成的可恢复 spike 不属于。</li>
+        <li><strong>修好以后，继续训练的终点</strong>能否达到目标？如果只能得到一个与旧模型相当的结果，已花的算力是沉没成本。</li>
+        <li><strong>修复的代价</strong>：回滚几个小时、跳过一些 batch，通常远比从头再来便宜。很多问题可以在线修正，避免浪费算力——这正是 loss spike 的处理方式。</li>
+      </ul>
+
+      <h2 id="midtrain">9. Mid-training：多阶段数据配比</h2>
+      <p>现代 LLM 的预训练通常分多个阶段，每个阶段数据配比不同，最后往往还有一个扩展上下文的阶段。例如 Qwen3 用了三阶段：先在 30T token、4k 上下文上做通用训练；再用 5T 更高质量、偏 STEM 和代码的 token 做推理阶段；最后在几千亿 token、32k 上下文上做长上下文阶段。SmolLM3 的思路类似：既有<strong>计划内</strong>的干预（引入更高质量的数据集、扩展上下文），也有根据监控做的<strong>反应式</strong>调整。</p>
+      <ul>
+        <li><strong>计划内</strong>：SmolLM3 从一开始就打算在第 2 阶段引入更高质量的 FineMath4+ 和 Stack-Edu，在最后的学习率衰减阶段加入精选的问答和推理数据。</li>
+        <li><strong>反应式</strong>：在 SmolLM2 时，他们发现数学和代码表现落后于目标，就专门做了全新的数据集（FineMath 和 Stack-Edu），在训练中途引入。</li>
+      </ul>
+      <p>SmolLM3 的三个阶段（各阶段配置和精确权重在 SmolLM 的 GitHub 仓库里）：</p>
+      <ul>
+        <li><strong>阶段 1，基础训练（8T token，4k 上下文）</strong>：核心预训练配比——网页数据（FineWeb-Edu、DCLM、FineWeb2、FineWeb2-HQ）、代码（The Stack v2、StarCoder2）、数学（FineMath3+、InfiWebMath3+）。</li>
+        <li><strong>阶段 2，注入高质量数据（2T token，4k 上下文）</strong>：引入更严格过滤的数据——代码用 Stack-Edu，数学用 FineMath4+、InfiWebMath4+，以及面向高级数学推理的 MegaMath（加入其中的 Qwen 问答数据、合成改写和文本-代码交错块）。</li>
+        <li><strong>阶段 3，学习率衰减 + 推理与问答数据（1.1T token，4k 上下文）</strong>：进一步上采样高质量代码和数学，并引入 OpenMathReasoning、OpenCodeReasoning、OpenMathInstruct 等指令和推理数据。问答样本只是简单地拼接、用换行分隔。</li>
+      </ul>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 230" role="img" aria-label="SmolLM3 训练阶段时间线">
+          <line x1="40" y1="170" x2="700" y2="170" class="line"/>
+          <rect class="acc" x="40" y="60" width="440" height="100" rx="6"/>
+          <text x="260" y="98" text-anchor="middle" font-weight="600">阶段 1：8T</text>
+          <text x="260" y="120" text-anchor="middle" font-size="12" class="soft">网页 / 代码 / 数学，4k</text>
+          <rect class="acc" x="482" y="60" width="110" height="100" rx="6" style="fill:color-mix(in srgb, var(--accent) 22%, transparent)"/>
+          <text x="537" y="98" text-anchor="middle" font-weight="600">阶段 2</text>
+          <text x="537" y="118" text-anchor="middle" font-size="12" class="soft">2T，高质量</text>
+          <rect class="acc2" x="594" y="60" width="61" height="100" rx="6"/>
+          <text x="624" y="98" text-anchor="middle" font-weight="600" font-size="13">阶段 3</text>
+          <text x="624" y="118" text-anchor="middle" font-size="11" class="soft">1.1T 衰减</text>
+          <rect class="boxs" x="657" y="60" width="20" height="100" rx="3"/>
+          <rect class="boxs" x="679" y="60" width="20" height="100" rx="3"/>
+          <text x="689" y="50" text-anchor="middle" font-size="11" class="soft">长上下文</text>
+          <path class="a2line" d="M40 55 L50 32 L594 32 L655 52"/>
+          <text x="320" y="24" text-anchor="middle" font-size="12" class="soft">学习率（WSD：预热 → 恒定 → 衰减）</text>
+          <text x="40" y="190" font-size="11" class="faint">0</text>
+          <text x="480" y="190" text-anchor="middle" font-size="11" class="faint">8T</text>
+          <text x="592" y="190" text-anchor="middle" font-size="11" class="faint">10T</text>
+          <text x="655" y="190" text-anchor="middle" font-size="11" class="faint">11.1T</text>
+          <text x="690" y="215" text-anchor="end" font-size="11" class="faint">4k→32k、32k→64k 各 50B（宽度未按比例）</text>
+        </svg>
+        <figcaption>SmolLM3 预训练的阶段划分（token 数按 playbook；学习率形状只是示意 WSD 调度）。</figcaption>
+      </figure>
+      <p>为什么配比能在训练中途换、而且换在衰减阶段特别有效？架构一章里 playbook 用的是 WSD（warmup–stable–decay）调度：大部分时间学习率恒定，最后一段快速衰减。衰减阶段模型「定型」，这时看到的数据对最终能力影响最大，所以把最高质量、最稀缺的数据留到这时上采样，单位 token 的收益最高。这一点在系列的上一篇<a href="/posts/smol-optim-data/">分词器、优化器、超参与数据配比</a>里有更多讨论。</p>
+
+      <h2 id="longctx">10. 长上下文扩展：4k → 64k 训练，YaRN 到 128k</h2>
+      <p>上下文长度决定模型一次能处理多少文本：分析长文档、维持多轮对话的连贯、处理整个代码库都需要它。SmolLM3 以 4k 开训，但实际应用需要 128k。</p>
+
+      <h3>为什么放在训练后段扩展</h3>
+      <p>从一开始就用长上下文训练很贵：注意力的计算量随序列长度平方增长。而且研究表明（Gao et al., 2025，《How to Train Long-Context Language Models (Effectively)》），在训练末尾或继续预训练时，用几十到一百 B token 做上下文扩展，就足以得到不错的长上下文能力。</p>
+
+      <h3>逐级扩展：4k → 32k → 64k</h3>
+      <p>他们没有一步跳到 128k，而是分两个阶段逐步扩展，给模型时间适应每一个长度：先 4k → 32k，再 32k → 64k；128k 的能力来自推理时的外推，不是训练出来的。一个具体发现：<strong>每个阶段重新开一个学习率调度、训练 50B token</strong>，比在主衰减阶段的最后 100B token 里扩展上下文效果更好。每个阶段都通过消融选择长上下文数据配比和 RoPE θ，并用 RULER 评测。</p>
+      <div class="callout">
+        <p><strong>基座模型上的长上下文评测。</strong>消融时他们发现，HELMET 在基座模型上噪声很大：同样的训练换个种子，结果差异明显。Gao et al. 建议在上面先做 SFT 来降低方差；SmolLM3 团队选择改用 RULER，在基座模型层面信号更可靠。</p>
+      </div>
+      <p><strong>数据：上采样长文档没带来提升。</strong>这个阶段常见的做法是上采样长文档，比如长网页和书。他们试了上采样书籍、文章，甚至仿照 Qwen2.5-1M 的方法，用 FineWeb-Edu 和 Python-Edu 合成检索、填空（fill-in-the-middle）类任务的文档。出乎意料，这些都不比直接沿用阶段 3 的配比好——后者在 RULER 上已经能和 Llama 3.2 3B、Qwen2.5-3B 竞争。他们的猜测：基线配比里本来就有来自网页和代码的长文档（估计约占 10% 的 token），而且 NoPE 帮了忙。（这里的 NoPE 指 RNoPE：每四层里有一层不用位置编码，其余层用 RoPE，见系列的<a href="/posts/smol-architecture/">架构篇</a>。）</p>
+      <p>扩展阶段他们还顺手进一步上采样了数学、代码和推理问答数据，并加入了几十万条 ChatML 格式的样本。另外试过在 4k → 32k 扩展时用滑动窗口注意力（窗口 4k、8k、16k），RULER 上都不如全注意力。</p>
+
+      <h3>RoPE 回顾：为什么要调 θ</h3>
+      <p>RoPE 把 query/key 向量的维度两两配对，每一对看作平面上的一个点，按位置 \(m\) 旋转角度 \(m\,\theta_k\)。第 \(k\) 对（\(k=0,\dots,d/2-1\)，\(d\) 是每个头的维度）的角频率是</p>
+      $$\theta_k = b^{-2k/d},$$
+      <p>\(b\) 就是常说的「RoPE theta / base」，原始值是 10,000。两个 token 在位置 \(m, n\) 的点积只依赖相对位置 \(m-n\)。第 \(k\) 对转满一圈所需的位置数（波长）是</p>
+      $$\lambda_k = \frac{2\pi}{\theta_k} = 2\pi\, b^{2k/d}.$$
+      <p>\(k\) 小的维度对转得快（波长短，分辨局部顺序），\(k\) 大的转得慢（波长长，编码远距离信息）。问题在于：如果训练时上下文只有 4k，那些波长远大于 4k 的低频维度，在训练中只见过「转了一小段弧」的情形；推理时把上下文拉长到 32k，这些维度会出现训练中没见过的角度，注意力行为就不可预期。同时，随着距离增大，旋转造成的点积衰减也会让远处 token 的注意力分数衰减过快（Xiong et al., 2023；Rozière et al., 2024）。</p>
+      <p><strong>RoPE ABF（Adjusted Base Frequency，Xiong et al., 2023）</strong> 的做法就是把 \(b\) 调大：所有维度的旋转都变慢，同样的角度对应更远的距离，远处 token 的注意力不会衰减得那么快。可以一次调大，也可以随着上下文逐级调大。</p>
+      <p>SmolLM3 的取值：4k → 32k 时 θ 调到 2M，32k → 64k 时调到 5M。（同一团队的 <a href="https://huggingface.co/blog/smollm3">SmolLM3 发布博客</a>写的第一阶段是 1.5M，与 playbook 的 2M 不一致，这里以 playbook 为准并注明。）他们发现更大的值如 10M 能让 RULER 略好一点，但会伤害一些短上下文任务（比如 GSM8k），所以停在 5M——这个值不影响那些任务。作为对比，Qwen3 在把上下文从 4k 扩到 32k 时把 θ 从 10k 调到了 1M，然后用 YaRN 做 4 倍外推到 131k。</p>
+
+      <h3>YaRN：推理时外推到 128k</h3>
+      <p>他们希望 SmolLM3 推理时能处理 128k，但在 128k 序列上训练太贵，于是用 <strong>YaRN</strong>（Yet another RoPE extensioN，Peng et al., 2023）让模型外推到训练长度之外。和 ABF「所有维度一起调慢」不同，YaRN 对不同频率的维度区别对待。设原训练长度为 \(L\)、扩展倍数为 \(s = L'/L\)，对第 \(d\) 对维度计算「训练长度内转了几圈」：</p>
+      $$r(d) = \frac{L}{\lambda_d}.$$
+      <p>然后用一个斜坡函数 \(\gamma\) 决定这一对维度要不要插值（论文对 Llama 推荐 \(\alpha=1,\ \beta=32\)）：</p>
+      $$\gamma(r) = \begin{cases} 0, & r \lt \alpha \\ 1, & r \gt \beta \\ \dfrac{r-\alpha}{\beta-\alpha}, & \text{其他} \end{cases}
+      \qquad
+      \theta_d' = \bigl(1-\gamma(r(d))\bigr)\frac{\theta_d}{s} + \gamma(r(d))\,\theta_d .$$
+      <p>含义是：在训练长度内转了很多圈的高频维度（\(r\gt\beta\)）已经见过所有角度，不需要动；连一圈都没转满的低频维度（\(r\lt\alpha\)）按 \(1/s\) 做位置插值，把新长度压回训练见过的角度范围；中间的线性过渡。此外 YaRN 还给注意力 logits 加一个温度：\(\text{softmax}\bigl(q^\top k / (t\sqrt{d})\bigr)\)，其中 \(\sqrt{1/t} = 0.1\ln s + 1\)，用来补偿插值后注意力分布变「平」的问题。</p>
+      <p>playbook 写道，理论上 YaRN 允许把序列长度扩大四倍。实践中他们发现：<strong>用 64k 的 checkpoint 外推到 128k，比用 32k 的 checkpoint 效果更好</strong>，说明训练长度越接近目标推理长度越好；但推到 256k（64k 的 4 倍）时 RULER 表现下降，所以他们建议只用到 128k。</p>
+
+      <h2 id="rope-demo">11. 交互：RoPE 频率、ABF 与 YaRN</h2>
+      <p>下面画出每一对维度的波长 \(\lambda_k = 2\pi b^{2k/d}\)（纵轴是对数刻度），横线分别是训练长度 \(L\) 和目标长度 \(L'\)。波长高于训练长度横线的维度对，在训练中连一圈都没转满。调大 θ（ABF）会把整条曲线往上抬；打开 YaRN 会显示每一对维度的插值比例 \(\gamma\)，以及插值后的有效波长。</p>
+
+      <div class="demo" id="rope-demo-box">
+        <div class="demo-label">RoPE 波长与 YaRN 插值</div>
+        <div class="ctrls">
+          <div class="ctrl"><span>RoPE θ（base）</span><input type="range" id="r-b" min="4" max="7.3" step="0.01" value="4"><output id="r-b-v"></output></div>
+          <div class="ctrl"><span>训练长度 L</span><input type="range" id="r-l" min="11" max="17" step="1" value="12"><output id="r-l-v"></output></div>
+          <div class="ctrl"><span>目标长度 L′</span><input type="range" id="r-lp" min="11" max="18" step="1" value="15"><output id="r-lp-v"></output></div>
+        </div>
+        <div class="chk">
+          <label>每头维度 d <select id="r-d"><option value="64">64</option><option value="128" selected>128</option></select></label>
+          <label><input type="checkbox" id="r-yarn">应用 YaRN（α=1, β=32）</label>
+        </div>
+        <div class="chart" id="r-chart"></div>
+        <div class="legend"><span><i style="background:var(--accent)"></i>原始波长</span><span><i style="background:var(--accent-2)"></i>YaRN 后有效波长</span><span><i style="background:var(--text-faint)"></i>L 与 L′</span></div>
+        <div class="readout">
+          <div><span class="k">训练中没转满一圈的维度对</span><span class="v" id="r-o1">–</span></div>
+          <div><span class="k">在 L′ 内也没转满的维度对</span><span class="v" id="r-o2">–</span></div>
+          <div><span class="k">YaRN 完全插值 / 部分 / 不动</span><span class="v" id="r-o3">–</span></div>
+          <div><span class="k">YaRN 注意力温度 √(1/t)</span><span class="v" id="r-o4">–</span></div>
+        </div>
+        <p class="note">试试：d=128、θ=10k、L=4k 时，「没转满一圈」的维度对有多少；再把 θ 拉到 2M（SmolLM3 的 4k→32k 设置），把 L 调到 32k 看看。这里只按公式计算几何量，不代表模型实际效果。</p>
+      </div>
+
+      <h2 id="lessons">12. 小结</h2>
+      <p>playbook 对整个预训练的总结很朴素：规划确定哪些东西值得测，消融验证每个决定，监控尽早发现问题，出问题时，系统性的去风险告诉你去哪里找。SmolLM3 最终得到了一个 11T token 训练的 3B 模型，在数学、代码、多语言和长上下文上有竞争力，位于 Qwen3 系列模型的帕累托前沿上。把这一章的经验按我自己的理解压缩成几条：</p>
+      <ol>
+        <li><strong>排查从「什么变了」开始。</strong>谜案 1、2 都是先列出正式训练与消融的全部差异，再逐个排除：硬件（换节点、缩到单节点复现）、存储、步数。</li>
+        <li><strong>能在小规模复现就在小规模复现。</strong>谜案 2 在单节点复现，谜案 4 在 1.7B 上复现，调试成本从「几百张卡」降到「几张卡」。</li>
+        <li><strong>没用过的组件就是风险。</strong>nanosets 和 TP 都是「以前没在这个规模用过」的东西，问题就出在它们身上。</li>
+        <li><strong>loss 正常不代表一切正常。</strong>要有下游评测和参照模型的同阶段 checkpoint。</li>
+        <li><strong>多数 spike 可以在线处理</strong>：回滚、跳 batch、收紧裁剪；只有问题写进了参数、且继续训练无法达到目标时，才值得重启。</li>
+        <li><strong>长上下文放在后段逐级扩</strong>，每级单独调 RoPE θ 和数据、单独开学习率调度，最后用 YaRN 外推，但别外推太远。</li>
+      </ol>
+      <p>基座模型训完以后还要做后训练才能变成一个助手，这是下一篇的内容；而这一篇里反复出现的存储、网络、降频、checkpoint，在<a href="/posts/smol-infrastructure/">基础设施篇</a>里有完整的测量数据。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Ben Allal, Tunstall, Tazi, Bakouch, Beeching, Patiño, Fourrier, Frere, Lozhkov, Raffel, et al. <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook: The Secrets to Building World-Class LLMs</a>（2025）。本文主要依据其中 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#the-training-marathon">The Training Marathon</a> 一章的 Preflight Checklist、Scaling Surprises（Mystery #1–#4）、Staying the Course、Mid-Training 各节，以及 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#positional-encoding-and-long-context">Positional Encoding and Long Context</a>、<a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#improving-stability">Improving Stability</a> 两节。</li>
+        <li>Hugging Face. <a href="https://huggingface.co/blog/smollm3">SmolLM3: smol, multilingual, long-context reasoner</a>（发布博客，长上下文阶段的 θ 取值与 playbook 略有出入）。</li>
+        <li>Chowdhery et al. <a href="https://arxiv.org/abs/2204.02311">PaLM: Scaling Language Modeling with Pathways</a>（2022）：数据与参数状态交互引发 spike、跳过 200–500 个 batch、z-loss。</li>
+        <li>OLMo Team. <a href="https://arxiv.org/abs/2501.00656">2 OLMo 2 Furious</a>（2025）：初始化、embedding 不做权重衰减、重复 n-gram 过滤、QK-norm。</li>
+        <li>Almazrouei et al. <a href="https://arxiv.org/abs/2311.16867">The Falcon Series of Open Language Models</a>（2023）。</li>
+        <li>Xiong et al. <a href="https://arxiv.org/abs/2309.16039">Effective Long-Context Scaling of Foundation Models</a>（2023）：RoPE ABF。</li>
+        <li>Peng, Quesnelle, Fan, Shippole. <a href="https://arxiv.org/abs/2309.00071">YaRN: Efficient Context Window Extension of Large Language Models</a>（2023）：斜坡函数 \(\gamma\)、温度 \(\sqrt{1/t}=0.1\ln s+1\)。</li>
+        <li>Gao, Wettig, Yen, Chen. <a href="https://arxiv.org/abs/2410.02660">How to Train Long-Context Language Models (Effectively)</a>（2024/2025）。</li>
+        <li>Hsieh et al. <a href="https://arxiv.org/abs/2404.06654">RULER: What's the Real Context Size of Your Long-Context Language Models?</a>（2024）。</li>
+        <li>Qwen Team. <a href="https://arxiv.org/abs/2505.09388">Qwen3 Technical Report</a>（2025）：三阶段预训练、ABF 与 YaRN 设置。</li>
+        <li>Stas Bekman. <a href="https://github.com/stas00/ml-engineering">Machine Learning Engineering Open Book</a>。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="smol"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const fmt = (x, d = 1) => x.toLocaleString('zh-CN', { maximumFractionDigits: d, minimumFractionDigits: d });
+
+    /* ---------- shuffling figure ---------- */
+    (() => {
+      const seq = document.getElementById('seqrow');
+      const shuf = document.getElementById('shufrow');
+      const colors = ['var(--accent)', 'color-mix(in srgb, var(--accent) 55%, var(--bg-soft))', 'var(--text-faint)', 'color-mix(in srgb, var(--accent) 30%, var(--bg-soft))', 'var(--border)'];
+      // sequential: docs in order; doc 'L' (long code file) spans 16 sequences
+      const order = [];
+      [[0, 3], [1, 2], ['L', 10], [2, 3], [3, 2], [4, 3], [0, 2], [1, 2], [2, 2], [3, 3]].forEach(([d, n]) => { for (let i = 0; i < n; i++) order.push(d); });
+      const N = 32, w = 20, gap = 1.5, x0 = 20;
+      const fill = (d) => d === 'L' ? 'var(--accent-2)' : colors[d];
+      order.slice(0, N).forEach((d, i) => el('rect', { x: x0 + i * (w + gap), y: 40, width: w, height: 40, rx: 3, fill: fill(d) }, seq));
+      // pseudo-random shuffle (fixed seed)
+      let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
+      const sh = order.slice(0, N);
+      for (let i = sh.length - 1; i > 0; i--) { const j = Math.floor(rnd() * (i + 1)); [sh[i], sh[j]] = [sh[j], sh[i]]; }
+      sh.forEach((d, i) => el('rect', { x: x0 + i * (w + gap), y: 140, width: w, height: 40, rx: 3, fill: fill(d) }, shuf));
+      for (let b = 1; b < 4; b++) {
+        const x = x0 + b * 8 * (w + gap) - gap / 2 - 1;
+        el('line', { x1: x, y1: 34, x2: x, y2: 86, stroke: 'var(--text)', 'stroke-width': 2 }, seq);
+        el('line', { x1: x, y1: 134, x2: x, y2: 186, stroke: 'var(--text)', 'stroke-width': 2 }, shuf);
+      }
+    })();
+
+    /* ---------- ETA calculator ---------- */
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const ids = ['e-n', 'e-d', 'e-g', 'e-tps', 'e-peak', 'e-start', 'e-fail', 'e-rec', 'e-ck', 'e-drop'];
+      function upd() {
+        const N = +$('e-n').value * 1e9, D = +$('e-d').value * 1e12, G = +$('e-g').value;
+        const drop = +$('e-drop').value / 100;
+        $('e-drop-v').textContent = Math.round(drop * 100) + '%';
+        const tps = +$('e-tps').value * (1 - drop), peak = +$('e-peak').value * 1e12;
+        const agg = tps * G;
+        const mfu = 6 * N * tps / peak;
+        const secs = D / agg;
+        const days = secs / 86400;
+        const lostH = +$('e-fail').value * (+$('e-rec').value + +$('e-ck').value / 2);
+        const totalDays = days + lostH / 24;
+        $('e-o-agg').textContent = fmt(agg / 1e6, 2) + 'M tok/s';
+        $('e-o-mfu').textContent = isFinite(mfu) ? fmt(mfu * 100, 1) + '%' : '–';
+        $('e-o-days').textContent = isFinite(days) ? fmt(days, 1) + ' 天' : '–';
+        $('e-o-lost').textContent = fmt(lostH, 1) + ' 小时';
+        const st = new Date($('e-start').value + 'T00:00:00');
+        if (!isNaN(st) && isFinite(totalDays)) {
+          const end = new Date(st.getTime() + totalDays * 86400e3);
+          $('e-o-end').textContent = end.getFullYear() + '-' + String(end.getMonth() + 1).padStart(2, '0') + '-' + String(end.getDate()).padStart(2, '0');
+        }
+        const gpuh = G * totalDays * 24;
+        $('e-o-note').textContent = '总计约 ' + fmt(totalDays, 1) + ' 天，消耗约 ' + fmt(gpuh / 1e3, 0) + 'k GPU·小时；训练 FLOPs ≈ 6ND = ' + (6 * N * D).toExponential(2) + '。' + (drop > 0 ? '吞吐下跌 ' + Math.round(drop * 100) + '% 让纯计算时间变为原来的 ' + fmt(1 / (1 - drop), 2) + ' 倍。' : '');
+      }
+      ids.forEach((id) => $(id).addEventListener('input', upd));
+      upd();
+    })();
+
+    /* ---------- loss spike diagnosis ---------- */
+    (() => {
+      const chart = document.getElementById('sp-chart');
+      const diag = document.getElementById('sp-diag');
+      let type = 'fast';
+      const W = 680, H = 260, P = { l: 44, r: 12, t: 12, b: 28 };
+      const T = 400, t0 = 220;
+      function noise(seed) { let s = seed; return () => { s = (s * 16807) % 2147483647; return s / 2147483647 - 0.5; }; }
+      const base = (t) => 2.1 + 2.2 * Math.pow(t + 8, -0.45) * 3;
+      function build(fix) {
+        const rn = noise(42), rn2 = noise(9);
+        const ys = [], bs = [];
+        const rewind = fix.has('rewind'), lr = fix.has('lr'), clip = fix.has('clip'), qk = fix.has('qk'), shuffle = fix.has('shuffle');
+        let msg = '';
+        const nonRecFix = lr || qk || clip;
+        for (let t = 0; t < T; t++) {
+          const b = base(t);
+          let y = b + rn() * 0.035;
+          bs.push(b);
+          const dt = t - t0;
+          switch (type) {
+            case 'fast':
+              if (dt >= 0 && !rewind) y += (clip ? 0.35 : 0.7) * Math.exp(-dt / 3);
+              break;
+            case 'slow':
+              if (dt >= 0 && !rewind) y += (clip ? 0.3 : 0.6) * Math.exp(-dt / 55);
+              break;
+            case 'diverge': {
+              if (rewind && nonRecFix) break;
+              const start = rewind ? t0 + 70 : t0; // rewinding alone: problem recurs later
+              const d2 = t - start;
+              if (d2 >= 0) {
+                if (!rewind && nonRecFix) y += 0.5 * (1 - Math.exp(-d2 / 10)) + 0.15; // damage frozen in: elevated plateau
+                else y += 0.6 * Math.exp(-d2 / 4) + Math.max(0, d2) * 0.012 * (1 + d2 / 80);
+              }
+              break;
+            }
+            case 'plateau': {
+              if (rewind && nonRecFix) break;
+              const start = rewind ? t0 + 70 : t0;
+              const d2 = t - start;
+              if (d2 >= 0) { const lock = base(start) + 0.35; y = Math.max(b, lock - d2 * 0.0002) + rn() * 0.035 + 0.6 * Math.exp(-d2 / 4); }
+              break;
+            }
+            case 'noisy':
+              if (!shuffle && t > 30) { const r = rn2(); y += (r > 0.42 ? (r - 0.42) * 1.6 : 0) + rn() * 0.05; }
+              break;
+            case 'earlylr':
+              if (!lr && t < 150) y += (clip ? 0.5 : 1) * (0.25 * Math.max(0, Math.sin(t / 3.3)) * Math.exp(-t / 60) + (t > 20 && t < 60 && (t % 11 === 0) ? 0.5 * Math.exp(-t / 70) : 0));
+              break;
+          }
+          ys.push(y);
+        }
+        // diagnosis text
+        const has = (k) => fix.has(k);
+        const D = {
+          fast: ['可恢复（快速）。', '常见于偶发的坏数据。曲线自己就回到了原轨迹，<b>继续训练即可</b>，不需要任何干预；回滚只会白白浪费算力。'],
+          slow: ['可恢复（缓慢）。', '多半是一段低质量数据。可以训过去；如果恢复太慢，<b>回滚到 spike 前的 checkpoint 并跳过问题 batch</b>（PaLM 跳过附近 200–500 个 batch，Falcon 跳过了 1B token）。收紧梯度裁剪能减小幅度。'],
+          diverge: ['不可恢复（发散）。', '只回滚、不改别的，问题往往在稍后重现（数据与参数状态的交互）。需要<b>回滚 + 更大的干预</b>：降学习率、收紧梯度裁剪、或像 Marin 那样中途加 QK-norm。不回滚而只加干预，损伤已经写进参数，曲线停在更高的位置。'],
+          plateau: ['不可恢复（卡在更差的平台）。', '模型停在比 spike 前更差的水平。同样需要<b>回滚 + 改变训练条件</b>（降学习率 / 收紧裁剪 / QK-norm），只回滚可能再次出现。'],
+          noisy: ['持续抖动，不是单次 spike。', '对应谜案 3：dataloader 按顺序从长文档里读序列，一个低质量长文件填满整个 batch。<b>在序列级别打乱</b>（SmolLM3 离线预打乱，每个 epoch 换种子）。其他办法都治标不治本。'],
+          earlylr: ['训练早期的不稳定。', '典型原因是<b>学习率过高</b>，降低学习率即可；收紧裁剪只能减轻。'],
+        }[type];
+        const applied = [...fix].length ? '当前已选处理：' + [...fix].map((k) => ({ rewind: '回滚并跳 batch', lr: '降学习率', clip: '收紧裁剪', qk: 'QK-norm', shuffle: '序列级打乱' }[k])).join('、') + '。' : '未选择任何处理。';
+        msg = '<b>' + D[0] + '</b>' + D[1] + '<br><span style="color:var(--text-faint)">' + applied + '</span>';
+        return { ys, bs, msg, rewindAt: (has('rewind') && ['slow', 'diverge', 'plateau', 'fast'].includes(type)) ? t0 - 15 : null };
+      }
+      function draw() {
+        const fix = new Set([...document.querySelectorAll('#sp-fix input:checked')].map((i) => i.value));
+        const { ys, bs, msg, rewindAt } = build(fix);
+        const ymin = 2.2, ymax = 4.6;
+        const X = (t) => P.l + (t / (T - 1)) * (W - P.l - P.r);
+        const Y = (v) => P.t + (1 - (Math.min(Math.max(v, ymin), ymax) - ymin) / (ymax - ymin)) * (H - P.t - P.b);
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+        svg.setAttribute('role', 'img');
+        svg.setAttribute('aria-label', '示意 loss 曲线');
+        for (let v = 2.5; v <= 4.5; v += 0.5) {
+          el('line', { x1: P.l, x2: W - P.r, y1: Y(v), y2: Y(v), class: 'grid' }, svg);
+          const tx = el('text', { x: P.l - 6, y: Y(v) + 4, 'text-anchor': 'end', class: 'axis' }, svg); tx.textContent = v.toFixed(1);
+        }
+        const tl = el('text', { x: W - P.r, y: H - 8, 'text-anchor': 'end', class: 'axis' }, svg); tl.textContent = '训练步数 →（示意）';
+        const yl = el('text', { x: P.l, y: H - 8, class: 'axis' }, svg); yl.textContent = 'loss';
+        el('path', { d: bs.map((v, t) => (t ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(v).toFixed(1)).join(''), class: 'base' }, svg);
+        el('path', { d: ys.map((v, t) => (t ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(v).toFixed(1)).join(''), class: 'curve' }, svg);
+        if (rewindAt !== null) {
+          el('line', { x1: X(rewindAt), x2: X(rewindAt), y1: P.t, y2: H - P.b, class: 'mark' }, svg);
+          const t = el('text', { x: X(rewindAt) + 4, y: P.t + 12, class: 'lbl' }, svg); t.textContent = '回滚点';
+        }
+        chart.replaceChildren(svg);
+        diag.innerHTML = msg;
+      }
+      document.querySelectorAll('#sp-type button').forEach((b) => b.addEventListener('click', () => {
+        type = b.dataset.t;
+        document.querySelectorAll('#sp-type button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        draw();
+      }));
+      document.querySelectorAll('#sp-fix input').forEach((i) => i.addEventListener('change', draw));
+      draw();
+    })();
+
+    /* ---------- RoPE / YaRN ---------- */
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const chart = $('r-chart');
+      const W = 680, H = 280, P = { l: 52, r: 12, t: 14, b: 30 };
+      const human = (n) => n >= 1e6 ? fmt(n / 1e6, n >= 1e7 ? 0 : 1).replace(/\.0$/, '') + 'M' : n >= 1e3 ? Math.round(n / 1e3) + 'k' : String(Math.round(n));
+      const hk = (n) => n >= 1024 ? Math.round(n / 1024) + 'k' : String(n);
+      function upd() {
+        const b = Math.pow(10, +$('r-b').value);
+        const L = Math.pow(2, +$('r-l').value), Lp = Math.pow(2, +$('r-lp').value);
+        const d = +$('r-d').value, yarn = $('r-yarn').checked;
+        $('r-b-v').textContent = human(b);
+        $('r-l-v').textContent = hk(L);
+        $('r-lp-v').textContent = hk(Lp);
+        const s = Math.max(1, Lp / L);
+        const half = d / 2;
+        const lam = [], lamY = [], gam = [];
+        let notFullL = 0, notFullLp = 0, full = 0, part = 0, keep = 0;
+        for (let k = 0; k < half; k++) {
+          const th = Math.pow(b, -2 * k / d);
+          const l = 2 * Math.PI / th;
+          lam.push(l);
+          if (l > L) notFullL++;
+          if (l > Lp) notFullLp++;
+          const r = L / l;
+          const g = r < 1 ? 0 : r > 32 ? 1 : (r - 1) / 31;
+          gam.push(g);
+          if (g === 0) full++; else if (g === 1) keep++; else part++;
+          const thp = (1 - g) * th / s + g * th;
+          lamY.push(2 * Math.PI / thp);
+        }
+        $('r-o1').textContent = notFullL + ' / ' + half;
+        $('r-o2').textContent = notFullLp + ' / ' + half;
+        $('r-o3').textContent = s > 1 ? full + ' / ' + part + ' / ' + keep : '无需扩展';
+        $('r-o4').textContent = fmt(0.1 * Math.log(s) + 1, 3);
+        const lmin = 0, lmax = 9;
+        const X = (k) => P.l + (k / (half - 1)) * (W - P.l - P.r);
+        const Y = (v) => P.t + (1 - (Math.log10(Math.max(v, 1)) - lmin) / (lmax - lmin)) * (H - P.t - P.b);
+        const svg = document.createElementNS(NS, 'svg');
+        svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
+        svg.setAttribute('role', 'img');
+        svg.setAttribute('aria-label', 'RoPE 各维度对的波长');
+        for (let e = 0; e <= 9; e += 1) {
+          el('line', { x1: P.l, x2: W - P.r, y1: Y(Math.pow(10, e)), y2: Y(Math.pow(10, e)), class: 'grid' }, svg);
+          const t = el('text', { x: P.l - 6, y: Y(Math.pow(10, e)) + 4, 'text-anchor': 'end', class: 'axis' }, svg); t.textContent = '1e' + e;
+        }
+        [[L, 'L'], [Lp, 'L′']].forEach(([v, n]) => {
+          el('line', { x1: P.l, x2: W - P.r, y1: Y(v), y2: Y(v), class: 'base' }, svg);
+          const t = el('text', { x: W - P.r - 2, y: Y(v) - 4, 'text-anchor': 'end', class: 'lbl' }, svg); t.textContent = n + ' = ' + hk(v);
+        });
+        el('path', { d: lam.map((v, k) => (k ? 'L' : 'M') + X(k).toFixed(1) + ' ' + Y(v).toFixed(1)).join(''), class: 'curve' }, svg);
+        if (yarn && s > 1) el('path', { d: lamY.map((v, k) => (k ? 'L' : 'M') + X(k).toFixed(1) + ' ' + Y(v).toFixed(1)).join(''), class: 'curve2' }, svg);
+        const xl = el('text', { x: W - P.r, y: H - 8, 'text-anchor': 'end', class: 'axis' }, svg); xl.textContent = '维度对 k →（高频 … 低频）';
+        const yl = el('text', { x: P.l, y: H - 8, class: 'axis' }, svg); yl.textContent = '波长（token，对数）';
+        chart.replaceChildren(svg);
+      }
+      ['r-b', 'r-l', 'r-lp', 'r-d', 'r-yarn'].forEach((id) => $(id).addEventListener('input', upd));
+      upd();
+    })();
+  })();
+  </script>
+</body>
+</html>

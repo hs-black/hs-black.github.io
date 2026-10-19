@@ -1,0 +1,705 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>后训练：SFT、偏好优化与 RL · Zunzhe Zhang</title>
+  <meta name="description" content="读 Smol Training Playbook 的后训练一章：评测先行、chat template 与 loss 掩码、SFT 超参与 packing、推理 mid-training、DPO/APO 推导、GRPO 与长度惩罚、on-policy 蒸馏。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig svg, .chart svg { width: 100%; height: auto; display: block; }
+    .fig text { font-family: var(--font-sans); fill: var(--text); }
+    .fig .soft { fill: var(--text-soft); }
+    .fig .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .fig .acc { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .fig .acc2 { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .fig .line { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    .chart .grid { stroke: var(--border); stroke-width: 1; }
+    .chart .axis { fill: var(--text-faint); font-size: 11px; font-family: var(--font-mono); }
+    .chart .curve { stroke: var(--accent); stroke-width: 2; fill: none; }
+    .chart .curve2 { stroke: var(--accent-2); stroke-width: 2; fill: none; stroke-dasharray: 5 4; }
+    .chart .dot { fill: var(--accent-2); }
+    .chart .lbl { fill: var(--text-soft); font-size: 12px; font-family: var(--font-sans); }
+    .note { font-size: 14px; color: var(--text-soft); line-height: 1.7; margin-top: 10px; }
+    .chk { display: flex; flex-wrap: wrap; gap: 8px 16px; font-size: 14px; margin: 10px 0; align-items: center; }
+    .chk label { display: inline-flex; align-items: center; gap: 6px; cursor: pointer; }
+    .toks { display: flex; flex-wrap: wrap; gap: 3px; font-family: var(--font-mono); font-size: 12.5px; line-height: 1.3; margin-top: 10px; padding: 12px; border-radius: 10px; background: var(--bg-soft); }
+    .tok { padding: 2px 4px; border-radius: 4px; border: 1px solid var(--border); background: var(--surface); color: var(--text-faint); white-space: pre; }
+    .tok.sp { font-weight: 600; }
+    .tok.loss { background: var(--accent-soft); border-color: var(--accent); color: var(--text); }
+    .tok.think { border-style: dashed; }
+    .tok.nl { color: var(--text-faint); }
+    .br { flex-basis: 100%; height: 0; }
+    .gtab { width: 100%; border-collapse: collapse; font-size: 13.5px; font-variant-numeric: tabular-nums; }
+    .gtab th, .gtab td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: right; }
+    .gtab th:first-child, .gtab td:first-child { text-align: left; }
+    .gtab input[type=number] { width: 5.5em; font: inherit; font-size: 13px; padding: 2px 4px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-soft); color: var(--text); }
+    .gtab .pos { color: var(--accent); font-weight: 600; }
+    .gtab .neg { color: var(--accent-2); font-weight: 600; }
+    .okbtn { font: inherit; font-size: 13px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); background: var(--bg-soft); color: var(--text-soft); cursor: pointer; }
+    .okbtn[aria-pressed=true] { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .ib { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; }
+    .ib label { display: grid; gap: 4px; font-size: 13px; color: var(--text-soft); }
+    .ib input, .ib select { width: 100%; box-sizing: border-box; font: inherit; font-size: 14px; padding: 5px 8px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-soft); color: var(--text); }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>后训练：SFT、偏好优化与 RL</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="smol"></nav>
+
+    <article class="prose">
+      <p>预训练给了模型知识和原始能力，但它只是一个「预测下一个 token」的模型。人们要的是助手和代码 agent。把前者变成后者的过程叫<strong>后训练（post-training）</strong>：监督微调（SFT）、偏好优化、强化学习，以及模型合并等。这一篇读 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">Smol Training Playbook</a> 的「Beyond Base Models — Post-Training in 2025」一章，跟着 SmolLM3 从一个 3B 基座模型变成一个<strong>混合推理（hybrid reasoning）</strong>模型的全过程。</p>
+      <p>playbook 本身偏经验，很多算法只给了一句话的定义。我在对应位置补上了推导：DPO 是怎么从 RLHF 目标里来的、APO 和 ORPO、KTO 的损失长什么样、GRPO 的优势函数和它的几个已知偏差、DAPO 的长度惩罚。这些推导来自原论文，我在文中标注了出处。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#hybrid">目标：混合推理模型</a></li>
+          <li><a href="#compass">后训练的罗盘与「小」消融</a></li>
+          <li><a href="#evals">评测先行</a></li>
+          <li><a href="#frameworks">框架</a></li>
+          <li><a href="#sft">为什么几乎都从 SFT 开始</a></li>
+          <li><a href="#template">Chat template</a></li>
+          <li><a href="#mask-demo">交互：chat template 与 loss 掩码</a></li>
+          <li><a href="#baselines">Baby baseline、vibe test 与多轮推理</a></li>
+          <li><a href="#hparams">SFT 超参：掩码、packing、学习率、epoch</a></li>
+          <li><a href="#midtrain">推理 mid-training 与「融化的 GPU」</a></li>
+          <li><a href="#bf16-demo">交互：为什么需要 FP32 主权重</a></li>
+          <li><a href="#po">偏好优化：数据与 DPO 推导</a></li>
+          <li><a href="#dpo-demo">交互：DPO / APO 损失与梯度</a></li>
+          <li><a href="#po-variants">KTO、ORPO、APO 与 SmolLM3 的调参</a></li>
+          <li><a href="#rl">RL：RLHF、RLVR 与 GRPO 推导</a></li>
+          <li><a href="#grpo-demo">交互：GRPO 组内优势计算器</a></li>
+          <li><a href="#rlvr-hybrid">把 RLVR 用在混合推理模型上</a></li>
+          <li><a href="#onpolicy">RL 之外：online DPO 与 on-policy 蒸馏</a></li>
+          <li><a href="#merge">模型合并（简述）</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="hybrid">1. 目标：混合推理模型</h2>
+      <p><strong>混合推理模型</strong>有两种工作模式：一种给出简洁、直接的回答；另一种先做长的逐步推理，再给答案。模式通常由用户在 system 消息里指定。SmolLM3 沿用 Qwen3 的做法，用两个轻量指令显式控制：<code>/think</code> 打开扩展推理，<code>/no_think</code> 要求简洁回答。推理过程写在 <code>&lt;think&gt; … &lt;/think&gt;</code> 之间；在 <code>/no_think</code> 模式下，这对标签之间是空的。</p>
+
+      <h2 id="compass">2. 后训练的罗盘与「小」消融</h2>
+      <p>预训练一章的「为什么 → 训练什么 → 怎么训」罗盘在后训练里同样适用。</p>
+      <ul>
+        <li><strong>为什么要后训练？</strong>研究（比如探索 RL 能否解锁新的推理能力）、生产（为了延迟把大模型蒸馏成小模型）、或者战略性开源（某个用例没有好的开放模型）。区别在于后训练是在已有能力上加工，而不是从零创造。动手之前先问：真的需要吗？现在许多开放权重模型在大量任务上已经接近闭源模型，如果只要一个通用助手，Hub 上现成的可能就够了。有没有高质量的领域数据？能不能衡量成功？没有清楚的评测标准，就不知道后训练到底有没有用。</li>
+        <li><strong>后训练要达到什么？</strong>一个很少跑题的指令遵循者？能切换语气和角色的助手？能做数学、代码、agent 任务的推理引擎？多语言对话？</li>
+        <li><strong>怎么做？</strong>SFT 灌输核心能力；偏好优化（PO）从人类或 AI 偏好中学习；RL 在监督数据之外提升可靠性和推理；数据整理平衡多样性与质量；评测追踪进展、及早发现退化。</li>
+      </ul>
+      <p>SmolLM3 的回答：<em>为什么</em>——基座模型要发布就必须后训练；同时 Qwen3 这类混合推理模型很流行，但公开的训练配方很少，他们想给出一个完全开放的配方，和 Qwen3 的 1.7B、4B 一起站在帕累托前沿上。<em>训练什么</em>——一个发挥 SmolLM3 长处的混合推理模型，尤其是推理质量在英语以外的语言上也要保持；再加上工具调用和长上下文。</p>
+      <p>一个值得注意的方法论差别：预训练里「小消融」意味着更小的模型和数据；后训练里「小」意味着<strong>更小的数据集和更简单的算法</strong>。他们几乎从不换一个基座模型来做消融，因为后训练的行为太依赖具体模型，而且后训练跑得够快，可以直接在目标模型上迭代。例外是从 Hub 选现成基座的时候：同样大小、一个训了 1T token 一个训了 10T token，差别非常大，这时比较不同基座是有意义的。</p>
+
+      <h2 id="evals">3. 评测先行</h2>
+      <p>后训练的第一步和预训练一样：确定评测集。既然 LLM 主要被当作助手用，playbook 认为目标应该是「好用」，而不是追逐抽象的「智能」基准。一个好助手至少要能：处理含糊的指令、逐步规划、写代码、在合适的时候调用工具。他们的评测是分层的：</p>
+      <ul>
+        <li><strong>能力评测</strong>：知识（GPQA Diamond 是主要的科学知识评测——研究生水平的选择题，对小模型远未饱和，比 MMLU 一类信号更好且更快；SimpleQA 测事实性，但小模型知识有限，普遍很差）；数学（最新一年的 AIME；MATH-500 对小模型仍是有用的健全性检查，但对推理模型基本饱和）；代码（最新版 LiveCodeBench；SWE-bench Verified 对小模型太难）；多语言（Global MMLU，以及测多语言数学的 MGSM）。</li>
+        <li><strong>综合任务评测</strong>：长上下文（大海捞针 NIAH 太浅，更全面的是 RULER、HELMET，以及 OpenAI 的 MRCR、GraphWalks）；指令遵循（IFEval 用「可验证指令」自动打分，IFBench 约束更多样；多轮用 Multi-IF 或 MultiChallenge）；对齐（人工或 LMArena 很贵，常用 LLM 评委代理：AlpacaEval、ArenaHard、MixEval，其中 MixEval 与 LMArena 人类 Elo 相关性最强）；工具调用（BFCL、TAU-Bench）。</li>
+        <li><strong>防过拟合评测</strong>：比如 GSMPlus，对 GSM8k 的题目做扰动，看模型能否解同等难度的变体。</li>
+        <li><strong>内部评测</strong>：公开基准替代不了针对自己需求的评测。SmolLM3 需要测多轮推理，于是实现了一个 Multi-IF 的变体。</li>
+        <li><strong>Vibe 评测</strong>：直接和中间 checkpoint 聊天，往往能发现分数抓不到的怪癖——后面会看到，vibe test 发现了一个把所有 system 消息都删掉的数据处理 bug。</li>
+      </ul>
+      <p>另外一定要对训练数据做<strong>去污染（decontamination）</strong>：特别是合成数据，很容易生成和目标基准相似的题目。做法是和评测集做 n-gram 匹配（Open-R1 里有脚本）。</p>
+      <p>SmolLM3 最终的评测集：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>基准</th><th>类别</th><th class="num">题数</th><th>指标</th></tr></thead>
+          <tbody>
+            <tr><td>AIME25</td><td>竞赛数学</td><td class="num">30</td><td>avg@64</td></tr>
+            <tr><td>LiveCodeBench v4（正式发布用 v5）</td><td>竞赛编程</td><td class="num">100（268）</td><td>avg@16</td></tr>
+            <tr><td>GPQA Diamond</td><td>研究生水平推理</td><td class="num">198</td><td>avg@8</td></tr>
+            <tr><td>IFEval</td><td>指令遵循</td><td class="num">541</td><td>准确率</td></tr>
+            <tr><td>MixEval Hard</td><td>对齐</td><td class="num">1000</td><td>准确率</td></tr>
+            <tr><td>BFCL v3</td><td>工具使用</td><td class="num">4441</td><td>混合</td></tr>
+            <tr><td>Global MMLU（验证用 lite）</td><td>多语言问答</td><td class="num">590,000（6,400）</td><td>准确率</td></tr>
+            <tr><td>GSMPlus（验证用 mini）</td><td>鲁棒性</td><td class="num">10,000（2,400）</td><td>准确率</td></tr>
+            <tr><td>RULER</td><td>长上下文</td><td class="num">6,500</td><td>准确率</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>表里的 <strong>avg@k</strong> 是对每道题采样 \(k\) 次、取平均正确率。为什么题少的基准要这么做？设单次采样的正确率是 \(p\)，\(n\) 道题、每题采 1 次，准确率的标准误约为 \(\sqrt{p(1-p)/n}\)。AIME 只有 30 题，\(p=0.5\) 时标准误约 9 个百分点——两个 checkpoint 差 5 分完全可能是噪声。每题采 64 次以后，抽样带来的那部分方差下降为约 \(1/64\)（题目本身难度分布带来的方差不会消失，但我们比较的是同一套题上的两个模型，关心的正是抽样噪声）。playbook 的经验法则：题数少于约 2k 的评测，都应该采 \(k\) 次报告 avg@k。</p>
+      <p>其他从数千个模型评测中总结出来的规则：</p>
+      <ul>
+        <li>开发期用小子集加速，比如 LiveCodeBench v4 与 v5 高度相关但只用一半时间；或者用 tinyBenchmarks 之类方法找能复现全集结果的最小子集。</li>
+        <li><strong>评测推理模型时，把思维链从打分输出里去掉</strong>。既避免误判，也直接影响 IFEval 这种「诗写在 50 字以内」的约束。</li>
+        <li>用 LLM 评委时固定评委模型和版本；最好用开放权重模型，保证可复现。</li>
+        <li>小心基座模型本身的污染：AIME 2025 发布之前的模型普遍在 2025 上比 2024 差很多。</li>
+        <li>消融里用过的都算验证集，留一组基准做最终报告（类似 Tulu 3 的做法）。</li>
+        <li>实现新评测时，先复现几个模型的公开结果；否则以后修实现时要重评所有 checkpoint。</li>
+        <li>拿不准时，回去看评测数据本身，看看你到底给模型喂了什么 prompt。</li>
+      </ul>
+      <p>playbook 也坦白：实际情况比上面说的乱。截止时间很紧，他们在很多评测还没实现时就开始训练了（RULER 直到发布前几天才可用）。事后看这是个错误：应该早早和预训练团队商量好哪些核心评测要贯穿后训练，并在基座训完之前实现好。</p>
+
+      <h2 id="frameworks">4. 框架</h2>
+      <p>后训练框架很多：TRL、Axolotl、OpenInstruct、Unsloth、verl、Prime RL、PipelineRL、ART、TorchForge、NemoRL、OpenRLHF，支持的算法（SFT / PO / RL）、是否多模态、全参微调（FullFT）还是 LoRA、是否分布式各有不同。<strong>LoRA</strong>（低秩适配）冻结基座，只训练插在权重旁边的低秩矩阵 \(W + BA\)（\(B\in\mathbb{R}^{d\times r}, A\in\mathbb{R}^{r\times k}, r \ll d\)），参数和显存省很多。Hugging Face 维护 TRL，SmolLM3 就是用 TRL（实际上是 TRL 的内部 fork，便于快速加功能，之后再合回上游）训的。</p>
+      <p>对「什么都应该自己从头写」的观点，playbook 的态度很明确：PPO、GRPO 这类算法出了名地难写对，归一化或 KL 惩罚上的一个小错就能浪费好几天算力；单文件实现也很难从 1B 扩到 100B+。从头实现一次 PPO 是很好的学习，但大多数时候应该挑一个框架，然后按需改它。</p>
+
+      <h2 id="sft">5. 为什么几乎都从 SFT 开始</h2>
+      <p>RL 很热，但几乎所有有效的后训练流程仍然从<strong>监督微调（SFT）</strong>开始：在「prompt → 理想回答」的数据上做下一个 token 预测。理由很直接：</p>
+      <ul>
+        <li><strong>便宜</strong>：算力比 RL 少得多；</li>
+        <li><strong>稳定</strong>：RL 对奖励设计和超参非常敏感，SFT「直接能用」；</li>
+        <li><strong>是正确的基线</strong>：好的 SFT checkpoint 通常已经拿到大部分收益，也让后面的 DPO 或 RL 有效得多。基座模型（除了少数例外）太「生」，直接用高级方法收益不大。</li>
+      </ul>
+      <p>例外是 DeepSeek-R1-Zero：在前沿，没有更强的模型可蒸馏，人工标注对长思维链又太嘈杂，于是他们跳过 SFT 直接做 RL，去发现标准监督教不出来的推理行为。playbook 的评价是：如果你处在那个位置，确实可以先 RL；但处在那个位置的人大概不会读这份指南。</p>
+      <p><strong>选基座模型</strong>看三点：大小（按实际部署选；大模型泛化更好、样本效率更高）；架构（MoE 服务效率高但根据他们的经验更难微调，小规模上稠密模型更简单、常常更好）；后训练口碑（社区里已经有很多基于它的好微调模型，说明它「好训」）。他们的经验是 Qwen、Mistral、DeepSeek 的基座最适合后训练，Qwen 尤其受欢迎，因为同一系列覆盖的尺寸范围很大（Qwen3 从 0.6B 到 235B），方便放大。</p>
+
+      <h2 id="template">6. Chat template</h2>
+      <p>SmolLM3 的初始 SFT 数据由几个数据集组成，分 <code>/think</code> 和 <code>/no_think</code> 两种模式：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>数据集</th><th>模式</th><th class="num">样本数</th><th class="num">样本占比</th><th class="num">token（M）</th><th class="num">token 占比</th><th class="num">平均回答长度</th></tr></thead>
+          <tbody>
+            <tr><td>Everyday Conversations</td><td>/no_think</td><td class="num">2,260</td><td class="num">2.3%</td><td class="num">0.6</td><td class="num">0.8%</td><td class="num">94.0</td></tr>
+            <tr><td>SystemChats 30k</td><td>/no_think</td><td class="num">33,997</td><td class="num">35.2%</td><td class="num">21.5</td><td class="num">28.2%</td><td class="num">267.7</td></tr>
+            <tr><td>Tulu 3 SFT Personas IF</td><td>/no_think</td><td class="num">29,970</td><td class="num">31.0%</td><td class="num">13.3</td><td class="num">17.5%</td><td class="num">380.7</td></tr>
+            <tr><td>Everyday Conversations（Qwen3-32B）</td><td>/think</td><td class="num">2,057</td><td class="num">2.1%</td><td class="num">3.1</td><td class="num">4.1%</td><td class="num">1,385.6</td></tr>
+            <tr><td>SystemChats 30k（Qwen3-32B）</td><td>/think</td><td class="num">27,436</td><td class="num">28.4%</td><td class="num">29.4</td><td class="num">38.6%</td><td class="num">1,042.7</td></tr>
+            <tr><td>s1k-1.1</td><td>/think</td><td class="num">835</td><td class="num">0.9%</td><td class="num">8.2</td><td class="num">10.8%</td><td class="num">9,728.5</td></tr>
+            <tr><td>合计</td><td></td><td class="num">96,555</td><td class="num">100%</td><td class="num">76.1</td><td class="num">100%</td><td class="num">2,149.9</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>两个要点。第一，混合推理不能简单地把数据集混在一起，每条样本要明确标出该用哪种模式，最好还有「同一 prompt 两种模式」的平行样本，教模型什么时候切换。第二，<strong>配比要按 token 算，不按样本数算</strong>：s1k-1.1 只占样本的 0.9%，却占了 10.8% 的 token，因为它的推理回答很长。梯度贡献和 token 数成正比，按样本数配比会严重低估长推理数据的权重。</p>
+      <p>不同数据集格式各异，需要一个统一的 <strong>chat template</strong>：把一组消息（system / user / assistant / tool）渲染成一个 token 序列的规则。选 template 时要问：</p>
+      <ul>
+        <li>用户能不能自定义 system 角色（「像个海盗一样说话」）？</li>
+        <li>模型要不要调工具？template 要容纳结构化的工具调用和返回。</li>
+        <li>是不是推理模型？要用 <code>&lt;think&gt;</code> 分隔思考和答案；有的模型在多轮对话中会丢弃之前轮次的推理，template 要处理这个逻辑。</li>
+        <li>和推理引擎兼容吗？vLLM、SGLang 有专门的推理和工具解析器，兼容它们能省很多事，尤其是对工具调用一致性要求高的 agent 评测。</li>
+      </ul>
+      <p>playbook 比较了几种常见 template：ChatML（简单、适合大多数情况，但不支持推理）、Qwen3（混合推理）、DeepSeek-R1（用 <code>&lt;think&gt;</code> 预填推理，不支持自定义 system 和工具）、Llama 3（内置 Python 解释器等工具）、Gemma 3（system 写在第一轮 user 里）、Command A Reasoning（一个模型多个 template）、gpt-oss（基于 Harmony 格式，复杂但灵活）。多数情况下 ChatML 或 Qwen 的 template 是好起点。</p>
+      <p>SmolLM3 需要混合推理，Qwen3 的 template 是少数各方面平衡得好的，但有一个他们不满意的地方：<strong>除最后一轮外，所有轮次的推理内容都被丢掉</strong>（和 OpenAI 的推理模型类似）。推理时这样做合理，可以避免上下文爆炸；但他们认为<strong>训练时应该保留所有轮次的推理 token</strong>，才能正确地给模型提供条件。于是他们自己设计了 template：结构化的 system prompt（类似 Llama 3），也允许整体覆盖；支持「代码 agent」——执行任意 Python 代码而不是 JSON 工具调用；在 system 消息里显式控制推理模式。下面是 SmolLM3 template 渲染出来的样子（来自 playbook 的例子，按 ChatML 风格的特殊 token 组织）：</p>
+<pre><code>&lt;|im_start|&gt;system
+## Metadata
+
+Knowledge Cutoff Date: June 2025
+Today Date: 28 October 2025
+Reasoning Mode: /no_think
+
+## Custom Instructions
+
+You are a vampire technologist
+
+&lt;|im_start|&gt;user
+I'm trying to set up my iPhone, can you help?&lt;|im_end|&gt;
+&lt;|im_start|&gt;assistant
+&lt;think&gt;
+
+&lt;/think&gt;
+Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
+      <p>注意 <code>/no_think</code> 模式下 assistant 仍然输出一对空的 think 标签。这样两种模式的回答在格式上完全一致，只是 think 块是否为空，下文的 ThinkFollow 评测正是靠检查它来判断模型有没有切换模式。</p>
+
+      <h2 id="mask-demo">7. 交互：chat template 与 loss 掩码</h2>
+      <p>SFT 的损失只是一个带掩码的交叉熵。把整段对话渲染、分词后得到 \(x_1,\dots,x_T\)，掩码 \(m_t\in\{0,1\}\) 决定哪些位置计损失：</p>
+      $$\mathcal{L}_{\text{SFT}} = -\frac{1}{\sum_t m_t}\sum_{t=1}^{T} m_t \log \pi_\theta(x_t \mid x_{\lt t}).$$
+      <p>下面把一段两轮对话按上面的格式渲染出来（分词是我手工切的示意，不是 SmolLM3 分词器的真实结果）。高亮的 token 会计入损失。可以切换：只训练 assistant 还是全部 token、推理模式、历史轮次的推理是保留还是丢弃（Qwen3 风格），以及复现 vibe test 发现的那个 bug。</p>
+
+      <div class="demo" id="mask-demo-box">
+        <div class="demo-label">Chat template 渲染与 loss 掩码（示意分词）</div>
+        <div class="chk">
+          <span>损失：</span>
+          <span class="seg" id="mk-mode"><button data-v="asst" aria-pressed="true">只算 assistant</button><button data-v="all" aria-pressed="false">全部 token</button></span>
+        </div>
+        <div class="chk">
+          <span>推理模式：</span>
+          <span class="seg" id="mk-think"><button data-v="think" aria-pressed="true">/think</button><button data-v="nothink" aria-pressed="false">/no_think</button></span>
+          <label><input type="checkbox" id="mk-drop">丢弃历史轮次的推理（Qwen3 风格）</label>
+          <label><input type="checkbox" id="mk-bug">bug：custom_instructions = None</label>
+        </div>
+        <div class="toks" id="mk-toks"></div>
+        <div class="readout">
+          <div><span class="k">总 token</span><span class="v" id="mk-o1">–</span></div>
+          <div><span class="k">计入损失</span><span class="v" id="mk-o2">–</span></div>
+          <div><span class="k">其中推理 token</span><span class="v" id="mk-o3">–</span></div>
+        </div>
+        <p class="note" id="mk-note"></p>
+      </div>
+
+      <h2 id="baselines">8. Baby baseline、vibe test 与多轮推理</h2>
+      <p>在调超参、榨性能之前，先训几个「baby baseline」：不追求 SOTA，只验证 chat template 是否如预期工作、初始超参能否稳定训练。训练 SFT baseline 时要考虑：</p>
+      <ul>
+        <li>全参微调还是 LoRA / QLoRA？Thinking Machines 的博客（LoRA Without Regret）显示 LoRA 在一定条件下（主要由数据集大小决定）能追平全参微调。</li>
+        <li>需要什么并行？小模型或 LoRA 用数据并行就够；大模型用 FSDP2 或 DeepSpeed ZeRO-3 分片权重和优化器状态；长上下文用上下文并行。</li>
+        <li>能用 FlashAttention、Liger 这类内核就用，显著省显存。</li>
+        <li>只在 assistant token 上算损失（下一节）。</li>
+        <li>调学习率：除了数据，它是决定模型「一般」还是「很好」的最重要因素。</li>
+        <li>打包样本（packing），让序列长度匹配数据分布，大幅加速。</li>
+      </ul>
+      <p>第一组实验是一个健全性检查：template 真的能引出混合推理吗？他们比较三种数据：只用非推理样本（Instruct）、只用推理样本（Thinking）、全部（Hybrid）。每种都在 SmolLM3-3B-Base 上做全参 SFT：学习率 1e-5、有效 batch size 128、训练 1 个 epoch（他们发现这组超参对多数模型和数据都是不错的基线）。数据小，所以不打包，Instruct 子集序列截到 8,192，其余截到 32,768。单节点 8 张 H100，每个实验 30–90 分钟。</p>
+      <p>结果揭示了混合模型的一种「<strong>裂脑</strong>」现象：一种模式的数据对另一种模式几乎没有影响。大多数评测在三种数据上分数相近，例外是 LiveCodeBench v4 和 IFEval，混合数据能提升整体表现。</p>
+      <p><strong>Vibe test 抓到的 bug。</strong>评测看起来没问题，但让混合模型扮演角色（比如海盗）时，它总是无视 system 消息。查下去发现：template 暴露了一个 <code>custom_instructions</code> 参数存放 system prompt，而数据处理代码里有个 bug，把它设成了 <code>None</code>——<strong>相当于删掉了每一条训练样本的 system 消息</strong>，全都换成了默认的「You are a helpful AI assistant named SmolLM…」。这对 SystemChats 子集影响尤其大：它的人设全靠 custom_instructions 定义，于是模型学会了在对话中途随机换人设。修好这个 bug 对评测分数没有影响，但他们终于确信 template 和数据格式是对的。规则：<strong>即使评测看起来没问题，也一定要和模型聊一聊</strong>，多半会发现数据里的隐藏 bug。（上面演示里勾上「bug」就能看到这个效果。）</p>
+      <p><strong>多轮推理。</strong>在 Open-R1 的开发中他们注意到：只在单轮推理数据上训练的模型，无法泛化到多轮推理——没见过的分布自然不会。借鉴 Qwen3 团队的内部评测 ThinkFollow（随机插入 <code>/think</code> 或 <code>/no_think</code>，测模型能否稳定切换），他们用 Multi-IF 的 prompt，检查模型输出的 think 块是否为空。混合 baseline 在第一轮之后几乎完全无法打开推理模式。修复办法是构造一个新数据集 <strong>IFThink</strong>：以 Multi-IF 的流程为基础，取 Tulu 3 指令遵循子集的单轮指令，用 Qwen3-32B 扩展成多轮对话，同时生成可验证的指令和推理轨迹。加进 baseline 后效果大幅改善。</p>
+
+      <h2 id="hparams">9. SFT 超参：掩码、packing、学习率、epoch</h2>
+      <h3>掩码 user 轮次</h3>
+      <p>聊天数据里 user 和 assistant 消息交替出现。如果对所有 token 都算损失，模型实际上也在学「自动补全用户的问题」，而不是专注于产生好回答。掩掉 user 轮次能避免这一点。TRL 里的做法是在 template 中用 <code>{% generation %}</code> … <code>{% endgeneration %}</code> 包住 assistant 的部分，<code>apply_chat_template(..., return_assistant_tokens_mask=True)</code> 就会返回一个 <code>assistant_masks</code>，assistant token 为 1、其余为 0。playbook 的经验是：掩码通常只带来几个点的提升，对 SmolLM3 影响最大的是 IFEval——模型更少复述 prompt，更严格地遵守各种约束。</p>
+
+      <h3>打包还是不打包</h3>
+      <p>SFT 数据长度参差不齐，不打包时每个 batch 要用大量 padding 补齐到最长样本，浪费算力。<strong>Packing</strong> 把多条样本拼接到目标最大长度。TRL 用的是「best-fit decreasing」策略（Ding et al., 2024）：先按长度降序排列，再把每条样本放进剩余空间最合适的那个包里，这样既少截断文档，又少 padding。（拼接时通常还要配合位置 id 重置或文档内注意力掩码，防止样本之间互相看到；这是我补充的一般做法，playbook 这一节没展开。）</p>
+      <p>在他们的 baseline 数据上，<strong>packing 让吞吐提升了 3–5 倍</strong>；有效 batch size 超过 32 后运行时间不再下降，因为 32 是不开梯度累积的最大值。打包后每个 batch 的非 padding token 数随 batch size 线性增长，最多是不打包时的 33 倍。但这意味着每个 epoch 的优化步数变少：比如在有效 batch size 128 时，打包让 IFEval 等评测明显下降；总体上，对这个模型和数据集，有效 batch size 超过 32 后打包带来平均性能下降。一个粗略的算账方法：数据共 \(S\) 条样本、平均 \(\bar\ell\) token，不打包时每步处理 \(B\) 条，每 epoch \(S/B\) 步；打包到长度 \(L\) 后每步 \(B\) 个包、约 \(BL/\bar\ell\) 条样本，每 epoch 只有约 \(S\bar\ell/(BL)\) 步——样本平均越短，步数砍得越狠。</p>
+      <p>结论：大规模 SFT（数据海量）时打包几乎总是划算；数据小或很多样（领域微调、有限的人工数据）时，可以考虑不打包，让每条样本干净地贡献梯度。最好的办法是实验：先开 packing，同时看吞吐和下游评测。</p>
+
+      <h3>学习率</h3>
+      <p>SFT 的最优学习率通常比预训练小一个数量级或更多：模型已经有丰富的表示，激进的更新会导致灾难性遗忘。与预训练不同，后训练跑得快，可以做完整的学习率扫描。他们发现最优学习率随模型系列、大小和是否打包而变；开 packing 时稍微调低学习率更安全（高学习率可能梯度爆炸）。他们的结果：3e-6 或 1e-5 比更大的值整体更好，AIME25 在学习率大于 1e-5 时急剧下降。建议的初始扫描范围是 [1e-6, 3e-6, 1e-5, 3e-5, 1e-4]，覆盖两个数量级。</p>
+
+      <h3>Epoch 数</h3>
+      <p>消融通常只训 1 个 epoch；配比和学习率定了以后，再加 epoch 做最终训练。在 baseline 配比上训 5 个 epoch 能再挤出几个百分点的平均分；在 LiveCodeBench v4 的扩展推理模式下，几乎是 1 个 epoch 的两倍。</p>
+      <p><strong>优化器</strong>：AdamW 仍然是后训练的默认。一个开放问题是：用 Muon 等预训练的模型，后训练是否该用同样的优化器？Kimi 团队在 Moonlight 上发现前后用同一个优化器效果最好。</p>
+
+      <h2 id="midtrain">10. 推理 mid-training 与「融化的 GPU」</h2>
+      <p><strong>继续预训练</strong>（时髦叫法是 mid-training）是在 SFT 之前，拿基座模型在大量领域 token 上再训一段。当 SFT 的目标能力共享一个核心技能（代码、推理）时它特别有用：先把核心技能学进去，SFT 就能专注于具体话题，而不是用算力从零学核心技能。三段式「通用预训练 → mid-training → 后训练」可以追溯到 ULMFiT（Howard &amp; Ruder, 2018）。Phi-4-Mini-Reasoning 的做法是用 DeepSeek-R1 蒸馏出的推理 token 做 mid-training，结果每一阶段都有大幅提升：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>模型</th><th class="num">AIME24</th><th class="num">MATH-500</th><th class="num">GPQA Diamond</th></tr></thead>
+          <tbody>
+            <tr><td>Phi-4-Mini</td><td class="num">10.0</td><td class="num">71.8</td><td class="num">36.9</td></tr>
+            <tr><td>+ 蒸馏 mid-training</td><td class="num">30.0</td><td class="num">82.9</td><td class="num">42.6</td></tr>
+            <tr><td>+ 蒸馏微调</td><td class="num">43.3</td><td class="num">89.3</td><td class="num">48.3</td></tr>
+            <tr><td>+ Roll-out DPO</td><td class="num">50.0</td><td class="num">93.6</td><td class="num">49.0</td></tr>
+            <tr><td>+ RL（Phi-4-Mini-Reasoning）</td><td class="num">57.5</td><td class="num">94.6</td><td class="num">52.0</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>SmolLM3 的候选数据：Mixture of Thoughts（35 万条 DeepSeek-R1 蒸馏的数学、代码、科学推理样本）、Llama-Nemotron-Post-Training-Dataset（只保留 DeepSeek-R1 的输出，约 364 万条、187 亿 token）、OpenThoughts3-1.2M（120 万条 QwQ-32B 蒸馏样本，165 亿 token）。Mixture of Thoughts 留给最终 SFT，后两者用于 mid-training。mid-training 用 ChatML 而不是 SmolLM3 的 template，避免过早把 template「烧」进模型；训练 5 个 epoch，学习率 2e-5，8 个节点，有效 batch size 128。</p>
+      <p>顺序上 mid-training 在 SFT 之前，但是否需要它，往往要先跑过 SFT、发现短板才知道。实践中常常是迭代的：SFT → 找弱项 → 针对性 mid-training → 再 SFT。</p>
+      <p><strong>融化的 GPU。</strong>这些实验在他们的集群上很难跑：老化的 GPU 会在不同时间降频，导致硬件故障和强制重启。起初怀疑 DeepSpeed，于是换成数据并行——有点帮助，但 loss 变得截然不同！后来发现是 Hugging Face Accelerate 数据并行的一个 bug：<strong>权重和梯度以模型原生精度（BF16）存储</strong>，导致数值不稳定，以及梯度累积和优化过程中的精度损失。大多数训练框架会用 FP32 存「主权重」（master weights）和优化器状态，只在前向和反向时转成 BF16。最终他们换回 DeepSpeed，加上频繁的 checkpoint，尽量减少 GPU 过热「掉线」造成的损失。（事后看，这种规模的长任务用久经考验、吞吐更高的 Nanotron 更合理。）规则：频繁保存 checkpoint 并推到远端存储（比如 Hub），框架要能自动从故障中恢复。</p>
+      <p>结果：NVIDIA 的数据比 OpenThoughts 好，两者合起来最好。在 mid-training 后的 checkpoint 上用同样的 baseline SFT 配比：扩展推理模式下 AIME25 和 LiveCodeBench v4 几乎翻了三倍，GPQA-D 提高整整 10 分；推理核心甚至部分迁移到了 <code>/no_think</code> 模式，推理基准提高约 4–6 分。结论：对推理模型，如果基座在预训练时没见过很多推理数据，几乎总值得做一些 mid-training。反过来，如果基座已经有这个技能，或者只想引出风格、闲聊这类浅层能力，就跳过 mid-training，把算力留给偏好优化或 RL。</p>
+
+      <h2 id="bf16-demo">11. 交互：为什么需要 FP32 主权重</h2>
+      <p>BF16 有 8 位指数、7 位显式尾数。在 \([1, 2)\) 区间，相邻两个可表示数的间隔是 \(2^{-7}\approx 0.0078\)。一次更新 \(\Delta w = -\eta g\) 如果小于半个间隔，加到 BF16 权重上会被舍入掉，等于没更新。后训练的学习率又特别小（1e-5 量级甚至更小），这个问题会被放大。下面用真实的 BF16 舍入（把 FP32 的高 16 位按最近偶数舍入）计算：同一个更新连续加 \(n\) 次，BF16 权重和 FP32 主权重分别走到哪里。</p>
+      <div class="demo" id="bf16-box">
+        <div class="demo-label">BF16 权重 vs FP32 主权重</div>
+        <div class="ctrls">
+          <div class="ctrl"><span>初始权重 w</span><input type="range" id="bf-w" min="-3" max="1" step="0.01" value="0"><output id="bf-w-v"></output></div>
+          <div class="ctrl"><span>每步更新 Δw</span><input type="range" id="bf-d" min="-7" max="-1" step="0.05" value="-4"><output id="bf-d-v"></output></div>
+          <div class="ctrl"><span>步数 n</span><input type="range" id="bf-n" min="1" max="2000" step="1" value="1000"><output id="bf-n-v"></output></div>
+        </div>
+        <div class="readout">
+          <div><span class="k">FP32 主权重结果</span><span class="v" id="bf-o1">–</span></div>
+          <div><span class="k">直接在 BF16 上累加</span><span class="v" id="bf-o2">–</span></div>
+          <div><span class="k">w 附近的 BF16 间隔</span><span class="v" id="bf-o3">–</span></div>
+          <div><span class="k">丢失的更新比例</span><span class="v" id="bf-o4">–</span></div>
+        </div>
+        <p class="note">FP32 主权重的做法：在 FP32 中累加更新，每步再把结果转成 BF16 用于前向/反向，所以不会丢失小更新。</p>
+      </div>
+
+      <h2 id="po">12. 偏好优化：数据与 DPO 推导</h2>
+      <p>SFT 是<strong>模仿学习</strong>：模型只学会复现数据里的模式。继续加数据收益递减，还会出现诸如「不会修自己写错的代码」的失败模式。即使数据里既有「一次做对」的轨迹，也有「先犯错再改正」的轨迹，模型也可能学到「先犯个错」是期望行为的一部分。<strong>偏好优化</strong>给模型比较式的反馈（「A 比 B 好」），提供了关于质量的更直接的信号；而且它通常比 SFT 需要的数据少得多。</p>
+
+      <h3>怎么造偏好数据</h3>
+      <ul>
+        <li><strong>强 vs 弱</strong>：对一组 prompt \(x\)，用一个弱模型和一个强模型各生成一个回答，强模型的作为 chosen \(y_c\)（下文也记作 \(y_w\)），弱模型的作为 rejected \(y_r\)（\(y_l\)）。简单，前提是强模型的输出确实更好。例：Intel 把一个同时有 GPT-3.5 和 GPT-4 回答的 SFT 数据集变成偏好数据。</li>
+        <li><strong>On-policy + 评分</strong>：用待训练的模型自己对同一 prompt 生成多个候选（因此是 on-policy 的，反映了模型自然的输出分布），再用外部评分器（验证器或奖励模型）打分、排出偏好。可以随着模型变强不断自举，但质量取决于评分器是否可靠。例：SnorkelAI 把 UltraFeedback 的 prompt 分成三份，迭代应用这个流程。</li>
+      </ul>
+      <p>做 SmolLM3 时还没有带推理轨迹的偏好数据，所以他们用「强 vs 弱」自己造：取 Ai2 Tulu 3 偏好混合数据的 prompt，用 Qwen3-0.6B 和 Qwen3-32B 在 <code>/think</code> 模式下生成，得到 25 万+ 对偏好。</p>
+
+      <h3>从 RLHF 目标推出 DPO</h3>
+      <p>DPO（Direct Preference Optimization，Rafailov et al., 2023）是第一个在开源界被广泛采用的偏好优化算法。它的出发点是经典 RLHF 的目标：在奖励 \(r(x,y)\) 下最大化期望奖励，同时用 KL 散度约束策略 \(\pi\) 不要离参考策略 \(\pi_{\text{ref}}\)（通常是 SFT 模型）太远：</p>
+      $$\max_{\pi}\ \mathbb{E}_{x\sim\mathcal{D},\,y\sim\pi(\cdot|x)}\bigl[r(x,y)\bigr] - \beta\, \mathbb{D}_{\text{KL}}\bigl(\pi(\cdot|x)\,\Vert\,\pi_{\text{ref}}(\cdot|x)\bigr).$$
+      <p><strong>第 1 步：求最优策略的闭式解。</strong>对固定的 \(x\)，把目标写成</p>
+      $$\mathbb{E}_{y\sim\pi}\Bigl[r(x,y) - \beta\log\frac{\pi(y|x)}{\pi_{\text{ref}}(y|x)}\Bigr]
+      = -\beta\,\mathbb{E}_{y\sim\pi}\Bigl[\log\frac{\pi(y|x)}{\pi_{\text{ref}}(y|x)\exp(r(x,y)/\beta)}\Bigr].$$
+      <p>定义配分函数 \(Z(x) = \sum_y \pi_{\text{ref}}(y|x)\exp(r(x,y)/\beta)\) 和归一化的分布 \(\pi^*(y|x) = \pi_{\text{ref}}(y|x)\exp(r(x,y)/\beta)/Z(x)\)，上式就等于</p>
+      $$-\beta\,\mathbb{D}_{\text{KL}}\bigl(\pi(\cdot|x)\,\Vert\,\pi^*(\cdot|x)\bigr) + \beta\log Z(x).$$
+      <p>\(Z(x)\) 与 \(\pi\) 无关，KL 散度非负且仅在两个分布相等时为 0，所以最优策略就是 \(\pi^*\)。</p>
+      <p><strong>第 2 步：反解奖励。</strong>对 \(\pi^*\) 的定义取对数并移项：</p>
+      $$r(x,y) = \beta\log\frac{\pi^*(y|x)}{\pi_{\text{ref}}(y|x)} + \beta\log Z(x).$$
+      <p>也就是说，任何奖励都可以用「它诱导的最优策略」相对参考策略的对数比来表示，外加一个只依赖 \(x\) 的项。</p>
+      <p><strong>第 3 步：代入 Bradley–Terry 偏好模型。</strong>假设人类偏好服从 \(p(y_w \succ y_l \mid x) = \sigma\bigl(r(x,y_w) - r(x,y_l)\bigr)\)，\(\sigma\) 是 sigmoid。两个回答的奖励相减时，\(\beta\log Z(x)\) 正好抵消——这是整个推导的关键，因为 \(Z(x)\) 要对所有可能的回答求和，根本算不出来：</p>
+      $$p(y_w \succ y_l \mid x) = \sigma\Bigl(\beta\log\frac{\pi^*(y_w|x)}{\pi_{\text{ref}}(y_w|x)} - \beta\log\frac{\pi^*(y_l|x)}{\pi_{\text{ref}}(y_l|x)}\Bigr).$$
+      <p><strong>第 4 步：最大似然。</strong>把 \(\pi^*\) 换成参数化的 \(\pi_\theta\)，在偏好数据上做最大似然，就得到 DPO 损失。记隐式奖励 \(\hat r_\theta(x,y) = \beta\log\frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}\)：</p>
+      $$\mathcal{L}_{\text{DPO}} = -\mathbb{E}_{(x,y_w,y_l)}\Bigl[\log\sigma\bigl(\hat r_\theta(x,y_w) - \hat r_\theta(x,y_l)\bigr)\Bigr].$$
+      <p>不需要训练奖励模型，也不需要采样，只要对 chosen 和 rejected 各做一次前向（策略和参考模型各一次），就是一个分类损失。这就是它简单、稳定的原因。</p>
+      <p><strong>梯度。</strong>记 \(\Delta = \hat r_\theta(y_w) - \hat r_\theta(y_l)\)，利用 \(\frac{d}{dz}\log\sigma(z) = \sigma(-z)\)：</p>
+      $$\nabla_\theta\mathcal{L}_{\text{DPO}} = -\beta\,\mathbb{E}\Bigl[\underbrace{\sigma(-\Delta)}_{\text{权重}}\bigl(\nabla_\theta\log\pi_\theta(y_w|x) - \nabla_\theta\log\pi_\theta(y_l|x)\bigr)\Bigr].$$
+      <p>它提高 chosen 的似然、降低 rejected 的似然，权重 \(\sigma(-\Delta)\) 在隐式奖励「排错了」（\(\Delta \lt 0\)）时接近 1，排对且差距大时趋于 0。注意 DPO 只关心<em>差值</em>：两者的似然同时下降，只要 rejected 降得更快，损失也会减小——这正是下面 APO 想要控制的。</p>
+      <p>\(\beta\) 的含义：它是 KL 约束的强度。\(\beta\) 越小，KL 惩罚越弱，最优策略可以离参考模型越远；对损失本身来说，\(\beta\) 把对数比放大成隐式奖励，\(\beta\) 小时需要更大的对数比差才能把损失降下去。（playbook 原文说「较低的值鼓励靠近参考模型」，这和 RLHF 目标里 \(\beta\) 作为 KL 系数的含义正好相反；按公式，\(\beta\) 越大越接近参考模型。我在这里以公式为准。）</p>
+
+      <h2 id="dpo-demo">13. 交互：DPO / APO 损失与梯度</h2>
+      <p>拖动 chosen 和 rejected 的对数比 \(\rho = \log\frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}\)（训练开始时 \(\pi_\theta=\pi_{\text{ref}}\)，两者都是 0），看不同损失的值，以及损失对 \(\rho_w\)、\(\rho_l\) 的梯度：负的 \(\partial\mathcal{L}/\partial\rho_w\) 表示梯度下降会推高 chosen 的似然。APO 的两个变体按 TRL 的实现计算（与论文公式差一个常数）。</p>
+      <div class="demo" id="dpo-box">
+        <div class="demo-label">偏好损失可视化</div>
+        <div class="seg" id="dp-type" style="margin-top:12px">
+          <button data-v="dpo" aria-pressed="true">DPO</button>
+          <button data-v="apo0" aria-pressed="false">APO-zero</button>
+          <button data-v="apod" aria-pressed="false">APO-down</button>
+        </div>
+        <div class="ctrls">
+          <div class="ctrl"><span>β</span><input type="range" id="dp-b" min="0.01" max="1" step="0.01" value="0.1"><output id="dp-b-v"></output></div>
+          <div class="ctrl"><span>ρ_w（chosen）</span><input type="range" id="dp-w" min="-30" max="30" step="0.5" value="0"><output id="dp-w-v"></output></div>
+          <div class="ctrl"><span>ρ_l（rejected）</span><input type="range" id="dp-l" min="-30" max="30" step="0.5" value="0"><output id="dp-l-v"></output></div>
+        </div>
+        <div class="chart" id="dp-chart"></div>
+        <div class="readout">
+          <div><span class="k">损失</span><span class="v" id="dp-o1">–</span></div>
+          <div><span class="k">∂L/∂ρ_w</span><span class="v" id="dp-o2">–</span></div>
+          <div><span class="k">∂L/∂ρ_l</span><span class="v" id="dp-o3">–</span></div>
+          <div><span class="k">隐式偏好概率 σ(βΔρ)</span><span class="v" id="dp-o4">–</span></div>
+        </div>
+        <p class="note" id="dp-note"></p>
+      </div>
+
+      <h2 id="po-variants">14. KTO、ORPO、APO 与 SmolLM3 的调参</h2>
+      <p>DPO 刚出来时（2023 年中），网上争论它能否比得上 RL，也没有工业规模的配方。Hugging Face 几个月后发布的 Zephyr 7B 全部用合成数据训练，展示了 DPO 的显著收益。此后它成了「上 RL 之前先改进 SFT 模型」的默认方法。playbook 列出了他们觉得最有效的几个变体：</p>
+      <ul>
+        <li><strong>KTO</strong>（Kahneman–Tversky Optimization，Ethayarajh et al., 2024）：不需要成对数据，只需要每个回答「好 / 不好」的标签（比如用户的 👍/👎）。论文里的形式：记 \(r_\theta = \log\frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}\)，参考点 \(z_0\) 是策略相对参考模型的 KL 的一个批内估计（截断到非负），
+        $$v(x,y) = \begin{cases}\lambda_D\,\sigma\bigl(\beta(r_\theta - z_0)\bigr) & y \text{ 可取}\\ \lambda_U\,\sigma\bigl(\beta(z_0 - r_\theta)\bigr) & y \text{ 不可取}\end{cases},\qquad
+        \mathcal{L}_{\text{KTO}} = \mathbb{E}\bigl[\lambda_y - v(x,y)\bigr].$$
+        sigmoid 形状借鉴了前景理论的价值函数：围绕参考点，收益和损失的边际效用递减。</li>
+        <li><strong>ORPO</strong>（Odds Ratio Preference Optimization，Hong et al., 2024）：把偏好优化直接并入 SFT，在交叉熵上加一项赔率比损失，不需要参考模型，也不需要单独的 SFT 阶段。定义按长度归一化的似然 \(P_\theta(y|x) = \exp\bigl(\frac{1}{m}\sum_t\log P_\theta(y_t|x,y_{\lt t})\bigr)\) 和赔率 \(\text{odds}_\theta(y|x) = \frac{P_\theta(y|x)}{1-P_\theta(y|x)}\)：
+        $$\mathcal{L}_{\text{ORPO}} = \mathcal{L}_{\text{SFT}}(y_w) + \lambda\cdot\Bigl[-\log\sigma\Bigl(\log\frac{\text{odds}_\theta(y_w|x)}{\text{odds}_\theta(y_l|x)}\Bigr)\Bigr].$$</li>
+        <li><strong>APO</strong>（Anchored Preference Optimization，D'Oosterlinck et al., 2024）：一个更可控的目标，显式规定 chosen 和 rejected 的似然各自该往哪个方向移动，而不只是优化它们的差。用 \(r_\theta = \beta\log\frac{\pi_\theta}{\pi_{\text{ref}}}\)：
+        $$\mathcal{L}^{\text{APO}}_{\text{zero}} = -\sigma\bigl(r_\theta(x,y_w)\bigr) + \sigma\bigl(r_\theta(x,y_l)\bigr),\qquad
+        \mathcal{L}^{\text{APO}}_{\text{down}} = \sigma\bigl(r_\theta(x,y_w)\bigr) - \sigma\bigl(r_\theta(x,y_w) - r_\theta(x,y_l)\bigr).$$
+        APO-zero 把 chosen 往上推、rejected 往下推，两项独立，以 0（即参考模型）为锚点；适合 chosen 比模型当前输出更好的情形。APO-down 让 chosen 的似然也下降，但要求 rejected 降得更多；适合 chosen 其实比模型当前输出差的情形。「强 vs 弱」数据里 chosen 来自 Qwen3-32B，明显强于 3B 模型自己的输出，所以 APO-zero 是自然的选择。</li>
+      </ul>
+      <p>在 TRL 的 <code>DPOTrainer</code> 里切换这些损失只是改一行。他们的初始实验：用 Ai2 的 Tulu 3 Preference Personas IF 数据集测 <code>/no_think</code> 模式下 IFEval 的提升；复用它的 prompt，用 Qwen3-32B 和 Qwen3-0.6B 生成「强 vs 弱」对，作为 <code>/think</code> 模式的偏好数据；训练 1 个 epoch，看域内 IFEval 的提升和域外（如 AIME25）的影响。两种模式的域内提升都很显著：<strong>APO-zero 在 IFEval 上比 SFT checkpoint 高 15–20 个百分点</strong>，域外表现也最好，于是之后的消融都用 APO-zero。playbook 特别强调：偏好优化不只是让模型更有帮助，它<strong>也能教模型推理得更好</strong>。</p>
+
+      <h3>调参</h3>
+      <p>偏好优化通常只有三个超参真正影响训练动态：学习率、\(\beta\)、batch size。SmolLM3 的实验从在整个 smoltalk2 上训好的 SFT checkpoint 出发（SFT 学习率 2e-5）：</p>
+      <ul>
+        <li><strong>学习率</strong>：扫描了比 SFT 小约 200 倍（1e-7）到约 2 倍（1e-5）的范围。小约 10 倍的学习率在两种模式下都提升了 SFT 模型，超过这个界限的都让扩展推理模式变差。<code>/no_think</code> 模式更稳定，最佳在 5e-6，但主要由 LiveCodeBench v4 一个基准驱动，所以最终用了 1e-6。建议扫描比 SFT 学习率小 5–20 倍的范围。</li>
+        <li><strong>β</strong>：扫描了 0.01 到 0.99。不开扩展推理时各值表现稳定；β=0.1 在两种模式下都最好，且优于 SFT checkpoint；更小的 β 反而比 SFT 还差。建议在 0.01–0.5 之间扫描：更大的值可能抹掉评测没覆盖到的 SFT 能力。</li>
+        <li><strong>数据量</strong>：测了 2k 到 340k 对，表现都比较稳定；超过 100k 对时扩展推理模式有下降，但幅度不如学习率的影响大。最终用了 169k 对，但小数据集也能比 SFT 好——迭代期可以用小数据快速试。</li>
+      </ul>
+      <p>汇总起来，得到最终的 SmolLM3-3B：同尺寸最好，和 Qwen 自己的混合推理模型一起位于帕累托前沿。规则总结：别怕自己造偏好数据（推理已经便宜到「不用计量」）；先用 DPO 做基线再迭代，视数据类型 ORPO、KTO、APO 可能显著更好；学习率约为 SFT 的 1/10；β 在 0.01–0.5 扫描；多数偏好算法一个 epoch 后就过拟合，所以把数据分块、迭代训练。</p>
+      <p>偏好优化的根本限制是：它只能和你收集到的离线偏好数据一样好。静态数据集的信号总会用完，这时就需要能在模型和 prompt / 环境交互中在线产生反馈的方法。</p>
+
+      <h2 id="rl">15. RL：RLHF、RLVR 与 GRPO 推导</h2>
+      <p>如果希望模型稳定地解数学题、生成能运行的代码、做多步规划，往往需要一个奖励信号，而不仅是「A 比 B 好」。RL 适合这些情形：能自动判对错（单元测试、数学证明、API 调用），或有高质量验证器 / 奖励模型；任务需要多步推理或规划，局部偏好捕捉不到长期成败；想优化偏好标签之外的目标。LLM 的 RL 有两大流派：</p>
+      <ul>
+        <li><strong>RLHF</strong>：InstructGPT 推广，人类比较模型输出，训练一个奖励模型去预测偏好，再用 RL 让策略最大化这个学到的奖励。由于奖励模型只是近似，可能出现<strong>奖励黑客（reward hacking）</strong>：策略输出一些分布外的序列（比如「the the the the」），却拿到虚高的奖励，并被 RL 循环固化进模型。</li>
+        <li><strong>RLVR</strong>（RL with Verifiable Rewards）：DeepSeek-R1 推广，用验证器检查输出是否满足明确的正确性标准（代码能否编译并通过所有测试、数学答案是否正确）。</li>
+      </ul>
+      <p>二者定义了优化什么，没规定怎么优化。效率和稳定性很大程度取决于算法是 on-policy 还是 off-policy。<strong>On-policy</strong>：生成样本的策略就是正在被优化的策略。GRPO 大体是 on-policy 的，但有两点保留：为了提高生成效率，常常一次采样多批，然后对模型做 \(k\) 次更新，第一批是 on-policy 的，后面几批就略微 off-policy；为此要用重要性采样和裁剪来修正。实际中生成策略落后于优化策略通常不超过 16 步。生成很慢，所以 verl、PipelineRL 等框架加入了异步生成和「飞行中」的权重更新，实现复杂但训练速度能比同步方法快 4–5 倍，对长尾长度分布的推理模型尤其明显。</p>
+
+      <h3>从策略梯度到 GRPO</h3>
+      <p>把生成一个回答看成一个回合：prompt \(q\) 是初始状态，每个 token 是一个动作。目标是最大化期望奖励 \(J(\theta) = \mathbb{E}_{o\sim\pi_\theta(\cdot|q)}[R(q,o)]\)。<strong>策略梯度定理</strong>（REINFORCE）给出</p>
+      $$\nabla_\theta J = \mathbb{E}_{o\sim\pi_\theta}\Bigl[R(q,o)\sum_{t}\nabla_\theta\log\pi_\theta(o_t\mid q,o_{\lt t})\Bigr].$$
+      <p>推导只用到 \(\nabla\pi = \pi\nabla\log\pi\)。这个估计方差很大。因为 \(\mathbb{E}_{o_t\sim\pi}[\nabla\log\pi(o_t|\cdot)] = \nabla\sum_{o_t}\pi(o_t|\cdot) = \nabla 1 = 0\)，可以从 \(R\) 里减去任何不依赖当前动作的<strong>基线</strong> \(b\) 而不改变期望，只降低方差；\(R - b\) 叫<strong>优势（advantage）</strong>。</p>
+      <p>PPO 用一个和策略同样大的<strong>价值模型</strong>来估计基线（再用 GAE 算逐 token 优势），代价是多一个大模型要训练、要放显存。<strong>GRPO</strong>（Group Relative Policy Optimization，Shao et al., 2024，DeepSeekMath）的想法是：对同一个 prompt 采样一组 \(G\) 个回答 \(\{o_1,\dots,o_G\}\)，拿到奖励 \(\{r_1,\dots,r_G\}\)，<strong>用组内平均作为基线，并用组内标准差归一化</strong>：</p>
+      $$\hat A_{i,t} = \frac{r_i - \operatorname{mean}(\mathbf{r})}{\operatorname{std}(\mathbf{r})}.$$
+      <p>同一回答内所有 token 共享这个优势。于是不再需要价值模型。完整目标借用 PPO 的裁剪重要性比来处理略微 off-policy 的数据，并直接加一个对参考模型的 KL 惩罚：</p>
+      $$\mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}\Biggl[\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\Bigl\{\min\bigl(\rho_{i,t}\hat A_{i,t},\ \operatorname{clip}(\rho_{i,t},1-\varepsilon,1+\varepsilon)\hat A_{i,t}\bigr) - \beta\,\mathbb{D}_{\text{KL}}\Bigr\}\Biggr],
+      \quad \rho_{i,t} = \frac{\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})}{\pi_{\theta_{\text{old}}}(o_{i,t}\mid q,o_{i,\lt t})}.$$
+      <p>KL 用的是逐 token 的无偏、恒非负的估计 \(\mathbb{D}_{\text{KL}} = \frac{\pi_{\text{ref}}}{\pi_\theta} - \log\frac{\pi_{\text{ref}}}{\pi_\theta} - 1\)。裁剪的作用：当优势为正时，重要性比超过 \(1+\varepsilon\) 后不再给更多奖励；优势为负时，低于 \(1-\varepsilon\) 后不再继续惩罚——单步更新不会把策略推得太远。</p>
+      <p><strong>已知的偏差与修正。</strong>playbook 推荐的 Dr. GRPO（Liu et al., 2025）指出 GRPO 有两个「内置」偏差：</p>
+      <ul>
+        <li><strong>长度归一化 \(1/|o_i|\)</strong>：对错误回答（负优势），回答越长每个 token 的惩罚越小，于是鼓励「错的时候写长一点」；对正确回答，越短奖励越集中。Dr. GRPO 去掉这一项（改为除以一个常数）。</li>
+        <li><strong>标准差归一化</strong>：组内奖励方差小的题（几乎全对或几乎全错，即太容易或太难的题）会被放大权重。Dr. GRPO 去掉除以 std，只减均值。</li>
+      </ul>
+      <p>DAPO（Yu et al., 2025）则提出了一组让 R1-Zero 式训练稳定的改动：裁剪上下界解耦（clip-higher，\(\varepsilon_{\text{low}}\ne\varepsilon_{\text{high}}\)）；动态采样，过滤掉组内全对或全错的 prompt（这时优势全为 0，没有梯度）；token 级损失，即对整批的所有 token 做平均（\(\frac{1}{\sum_i|o_i|}\sum_i\sum_t\)），长回答里的每个 token 和短回答里的权重一样；以及下面要用到的超长惩罚。</p>
+
+      <h2 id="grpo-demo">16. 交互：GRPO 组内优势计算器</h2>
+      <p>下面是一组 \(G=8\) 个回答。点「对 / 错」切换验证器奖励（对 = 1，错 = 0），改回答长度，看每个回答的优势和每个 token 分到的梯度权重如何变化。可以打开 DAPO 的超长惩罚、关掉 std 归一化（Dr. GRPO），以及切换三种损失聚合方式。数字全部按公式实时计算；默认的对错和长度是我随手设的示意值。</p>
+      <div class="demo" id="grpo-box">
+        <div class="demo-label">GRPO 组内优势</div>
+        <div class="chk">
+          <label><input type="checkbox" id="gr-std" checked>除以组内 std</label>
+          <label><input type="checkbox" id="gr-pen">超长惩罚（DAPO）</label>
+          <label>L<sub>max</sub> <input type="number" id="gr-lmax" value="3072" min="256" step="256" style="width:6em"></label>
+          <label>L<sub>cache</sub> <input type="number" id="gr-lc" value="512" min="64" step="64" style="width:5em"></label>
+        </div>
+        <div class="chk">
+          <span>损失聚合：</span>
+          <span class="seg" id="gr-agg">
+            <button data-v="seq" aria-pressed="true">GRPO：每条回答内平均</button>
+            <button data-v="tok" aria-pressed="false">DAPO：全组 token 平均</button>
+            <button data-v="const" aria-pressed="false">Dr. GRPO：除以常数 L<sub>max</sub></button>
+          </span>
+        </div>
+        <div class="table-wrap">
+          <table class="gtab" id="gr-tab"></table>
+        </div>
+        <p class="note" id="gr-note"></p>
+      </div>
+      <p>DAPO 的超长惩罚（soft overlong punishment）定义为：</p>
+      $$R_{\text{length}}(y) = \begin{cases}0, & |y| \le L_{\max} - L_{\text{cache}}\\[2pt] \dfrac{(L_{\max}-L_{\text{cache}}) - |y|}{L_{\text{cache}}}, & L_{\max}-L_{\text{cache}} \lt |y| \le L_{\max}\\[6pt] -1, & L_{\max} \lt |y|\end{cases}$$
+      <p>它加到正确性奖励上：长度在安全区内不罚，进入最后 \(L_{\text{cache}}\) 个 token 的缓冲区后线性加罚，超过 \(L_{\max}\) 罚满 \(-1\)。</p>
+
+      <h2 id="rlvr-hybrid">17. 把 RLVR 用在混合推理模型上</h2>
+      <p>SmolLM3 发布时跳过了 RL：时间紧，而且离线偏好优化后的模型已经是同尺寸最好。发布之后他们重新研究了这个问题。混合推理模型给 RLVR 带来额外的复杂度：两种模式的生成长度差别很大。在最终的 APO checkpoint 上看 AIME25 的输出长度，<code>/no_think</code> 的中位数约 2k token，<code>/think</code> 的中位数约 16k，而且是长尾分布。理想情况下，RLVR 应该同时提升两种模式，又不大幅改变各自的长度分布。</p>
+      <p>他们先只优化 <code>/no_think</code> 模式，用 Big-Math（25 万+ 道答案经过验证的数学题）的子集。出乎意料，<strong>直接用 GRPO 导致了一种奖励黑客</strong>：模型从没被要求输出长思维链，却学会了利用自己的基础推理能力来提高奖励——奖励上去了，回答长度也一起上去了。读输出会发现它开始写长 CoT，甚至出现「Wait, …」这类推理模型的认知行为。换句话说，GRPO 把 <code>/no_think</code> 模式变成了另一个 <code>/think</code> 模式。</p>
+      <p>缓解办法是 DAPO 的超长惩罚。用它可以直接控制输出长度分布，并测量长度和效果之间的权衡。他们把惩罚长度从 1.5k 扫到 4k（步长 512）：惩罚限制了每条 rollout 的长度，也降低了平均奖励；在 AIME25 上，2–4k 的惩罚带来显著提升，同时把 token 分布控制住。最终 <strong>2.5–3k 的长度惩罚给出了最好的权衡，GRPO 让 AIME 2025 的成绩比 APO 等离线方法几乎翻倍</strong>。</p>
+      <p>下一步本该是同时在两种模式上训练，但他们发现这很难：每种模式需要自己的长度惩罚，两者的相互作用至今训练不稳定。这正是 RL 用在混合推理模型上的主要难点，也解释了为什么 Qwen 等开发者开始把 instruct 版和推理版分开发布。</p>
+
+      <h2 id="onpolicy">18. RL 之外：online DPO 与 on-policy 蒸馏</h2>
+      <p>还有一些更轻量的 on-policy 方法，把偏好优化和蒸馏变成迭代循环，让训练信号随模型更新：</p>
+      <ul>
+        <li><strong>Online DPO</strong>：不是在固定数据上训一次，而是不断采样新回答、用奖励模型或 LLM 评委打新标签、再更新，保持 on-policy，减少数据和当前行为之间的偏移（Guo et al., 2024）。</li>
+        <li><strong>On-policy 蒸馏</strong>：信号来自更强的教师模型。学生每一步自己采样回答，在这些样本上计算学生与教师 logits 之间的 KL 散度作为学习信号（Agarwal et al., 2024）。不需要偏好标签或验证器。和 RL 相比，每个 prompt 只需采样一条，再由教师在一次前向中给每个 token 打分，信号是稠密的（每个 token 都有），而不是一条回答一个标量。</li>
+      </ul>
+      <p>怎么选：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>算法</th><th>何时用</th><th>权衡</th><th>模型规模</th></tr></thead>
+          <tbody>
+            <tr><td>Online DPO</td><td>能便宜地拿到偏好标签</td><td>易迭代扩展，比 RL 稳定；依赖标签质量和覆盖；框架支持少</td><td>任意规模</td></tr>
+            <tr><td>On-policy 蒸馏</td><td>有更强的教师，想高效迁移能力</td><td>简单便宜；继承教师偏差，上限受教师限制；只有 TRL、NemoRL 支持</td><td>中小模型（&lt;30B）最有效</td></tr>
+            <tr><td>强化学习</td><td>有可验证奖励，或需要多步推理/规划的任务</td><td>灵活强大；贵、难稳定，需要仔细设计奖励</td><td>中大模型（20B+）</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Qwen3 技术报告里，小于 32B 的模型都是从旗舰模型做强到弱蒸馏得到的。报告对比了蒸馏和 RL：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>方法</th><th class="num">AIME24</th><th class="num">AIME25</th><th class="num">MATH500</th><th class="num">LCB v5</th><th class="num">MMLU-Redux</th><th class="num">GPQA-D</th><th class="num">GPU 小时</th></tr></thead>
+          <tbody>
+            <tr><td>Off-policy 蒸馏</td><td class="num">55.0</td><td class="num">42.8</td><td class="num">92.4</td><td class="num">42.0</td><td class="num">86.4</td><td class="num">55.6</td><td class="num">–</td></tr>
+            <tr><td>+ 强化学习</td><td class="num">67.6</td><td class="num">55.5</td><td class="num">94.8</td><td class="num">52.9</td><td class="num">86.9</td><td class="num">61.3</td><td class="num">17,920</td></tr>
+            <tr><td>+ On-policy 蒸馏</td><td class="num">74.4</td><td class="num">65.5</td><td class="num">97.0</td><td class="num">60.3</td><td class="num">88.3</td><td class="num">63.3</td><td class="num">1,800</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>On-policy 蒸馏以约 1/10 的 GPU 小时全面超过 RL。Thinking Machines 还展示了它能缓解灾难性遗忘：Qwen3-8B 在内部数据上微调后 IFEval 大跌，用廉价的蒸馏可以恢复。它的一个弱点是师生必须共享分词器；Hugging Face 为此提出了 GOLD（General On-Policy Logit Distillation），允许任意教师蒸馏到任意学生。FAIR 的 Lanchantin et al.（2025）则比较了完全离线到在线的 DPO，semi-online（每 \(s\) 步同步一次生成模型）也能接近 GRPO：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>训练方法</th><th class="num">Math500</th><th class="num">NuminaMath</th><th class="num">AMC23</th></tr></thead>
+          <tbody>
+            <tr><td>Seed（Llama-3.1-8B-Instruct）</td><td class="num">47.4</td><td class="num">33.9</td><td class="num">23.7</td></tr>
+            <tr><td>Offline DPO（s = ∞）</td><td class="num">53.7</td><td class="num">36.4</td><td class="num">28.8</td></tr>
+            <tr><td>Semi-online DPO（s = 100）</td><td class="num">58.9</td><td class="num">39.3</td><td class="num">35.1</td></tr>
+            <tr><td>Semi-online DPO（s = 10）</td><td class="num">57.2</td><td class="num">39.4</td><td class="num">31.4</td></tr>
+            <tr><td>Online DPO（s = 1）</td><td class="num">58.7</td><td class="num">39.6</td><td class="num">32.9</td></tr>
+            <tr><td>GRPO</td><td class="num">58.1</td><td class="num">38.8</td><td class="num">33.6</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="merge">19. 模型合并（简述）</h2>
+      <p>playbook 在引言里把「模型合并的黑魔法」列为后训练的一部分，但正文没有展开。SmolLM3 的<a href="https://huggingface.co/blog/smollm3">发布博客</a>里有具体做法：APO 之后长上下文能力（RULER）下降，他们用 MergeKit 做了两步合并——先把各个 APO checkpoint 做成一个「model soup」（权重平均），再把 soup 和一个长上下文能力强的 mid-training checkpoint 做线性合并，权重 0.9 / 0.1。这样恢复了基座在 128k 以内的 RULER 分数，最终发布的就是这个合并后的模型。线性合并就是 \(\theta = \sum_k w_k\theta_k\)，能成立的前提是这些模型都从同一个初始化微调而来、位于同一个低损失区域附近。</p>
+      <p>playbook 对整章的收尾是：评测先行，SFT 配比迭代，偏好优化，再视情况上 RL；vibe test 能抓到指标抓不到的 bug；chat template 能悄无声息地破坏指令遵循；后训练的数据配比和预训练一样重要。训练只是故事的一半，下一篇讲<a href="/posts/smol-infrastructure/">基础设施</a>。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>（2025），主要依据 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#beyond-base-modelspost-training-in-2025">Beyond Base Models — Post-Training in 2025</a> 一章各节：Post-Training Compass、First Things First: Evals、Tools of the Trade、Why (Almost) Every Post-Training Pipeline Starts with SFT、Boosting Reasoning Through Continued Pretraining、From SFT to Preference Optimization、Going On-Policy and Beyond Supervised Labels。</li>
+        <li>Hugging Face. <a href="https://huggingface.co/blog/smollm3">SmolLM3 发布博客</a>（模型合并）。</li>
+        <li>Rafailov et al. <a href="https://arxiv.org/abs/2305.18290">Direct Preference Optimization: Your Language Model is Secretly a Reward Model</a>（2023）。</li>
+        <li>D'Oosterlinck et al. <a href="https://arxiv.org/abs/2408.06266">Anchored Preference Optimization and Contrastive Revisions</a>（2024）；TRL <a href="https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py"><code>dpo_trainer.py</code></a> 中 <code>apo_zero</code> / <code>apo_down</code> 的实现。</li>
+        <li>Ethayarajh et al. <a href="https://arxiv.org/abs/2402.01306">KTO: Model Alignment as Prospect Theoretic Optimization</a>（2024）。</li>
+        <li>Hong, Lee, Thorne. <a href="https://arxiv.org/abs/2403.07691">ORPO: Monolithic Preference Optimization without Reference Model</a>（2024）。</li>
+        <li>Shao et al. <a href="https://arxiv.org/abs/2402.03300">DeepSeekMath</a>（2024）：GRPO 与 KL 估计。</li>
+        <li>Yu et al. <a href="https://arxiv.org/abs/2503.14476">DAPO: An Open-Source LLM Reinforcement Learning System at Scale</a>（2025）：超长惩罚、token 级损失、动态采样、clip-higher。</li>
+        <li>Liu et al. <a href="https://arxiv.org/abs/2503.20783">Understanding R1-Zero-Like Training: A Critical Perspective</a>（Dr. GRPO，2025）。</li>
+        <li>DeepSeek-AI. <a href="https://arxiv.org/abs/2501.12948">DeepSeek-R1</a>（2025）；Ouyang et al. <a href="https://arxiv.org/abs/2203.02155">InstructGPT</a>（2022）。</li>
+        <li>Xu et al. <a href="https://arxiv.org/abs/2504.21233">Phi-4-Mini-Reasoning</a>（2025）；Qwen Team. <a href="https://arxiv.org/abs/2505.09388">Qwen3 Technical Report</a>（2025）。</li>
+        <li>Agarwal et al. <a href="https://arxiv.org/abs/2306.13649">On-Policy Distillation of Language Models (GKD)</a>（2024）；Guo et al. <a href="https://arxiv.org/abs/2402.04792">Direct Language Model Alignment from Online AI Feedback</a>（2024）；Lanchantin et al. <a href="https://arxiv.org/abs/2506.21495">Bridging Offline and Online Reinforcement Learning for LLMs</a>（2025）。</li>
+        <li>Ding et al. <a href="https://arxiv.org/abs/2404.10830">Fewer Truncations Improve Language Modeling</a>（2024）：best-fit packing。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="smol"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const $ = (id) => document.getElementById(id);
+    const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+    const sig = (z) => 1 / (1 + Math.exp(-z));
+    const segInit = (id, cb) => { const btns = document.querySelectorAll('#' + id + ' button'); btns.forEach((b) => b.addEventListener('click', () => { btns.forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false')); cb(b.dataset.v); })); };
+    const segVal = (id) => document.querySelector('#' + id + ' button[aria-pressed=true]').dataset.v;
+
+    /* ---------- chat template + mask ---------- */
+    (() => {
+      function render() {
+        const mode = segVal('mk-mode'), think = segVal('mk-think') === 'think';
+        const drop = $('mk-drop').checked, bug = $('mk-bug').checked;
+        const T = []; // {t, kind: sys|user|asst, sp, think}
+        const push = (text, role, opts = {}) => {
+          if (opts.special) { T.push({ t: text, role, sp: true, think: !!opts.think }); return; }
+          const parts = text.split(/(\n)/);
+          parts.forEach((p) => { if (p === '\n') T.push({ t: '\\n', role, nl: true, think: !!opts.think }); else if (p) p.match(/[A-Za-z']+|[0-9]+|[^\sA-Za-z0-9]| /g).forEach((w) => { if (w === ' ') { if (T.length) T[T.length - 1].t += ' '; } else T.push({ t: w, role, think: !!opts.think }); }); });
+        };
+        const sysText = bug ? 'You are a helpful AI assistant named SmolLM, trained by Hugging Face.' : 'You are a pirate.';
+        push('<|im_start|>', 'sys', { special: true }); push('system\n## Metadata\nReasoning Mode: ' + (think ? '/think' : '/no_think') + '\n## Custom Instructions\n' + sysText + '\n', 'sys');
+        push('<|im_end|>', 'sys', { special: true }); push('\n', 'sys');
+        const turns = [
+          ['What is 7 times 8?', 'Seven eights: 7 x 8 = 56.', 'Arr, it be 56!'],
+          ['And plus 4?', '56 + 4 = 60.', 'Add 4 and ye get 60, matey!'],
+        ];
+        turns.forEach(([u, r, a], i) => {
+          push('<|im_start|>', 'user', { special: true }); push('user\n' + u, 'user'); push('<|im_end|>', 'user', { special: true }); push('\n', 'user');
+          push('<|im_start|>', 'asst', { special: true }); push('assistant\n', 'asst');
+          const last = i === turns.length - 1;
+          const keepReason = think && (last || !drop);
+          if (!(drop && !last && think)) {
+            push('<think>', 'asst', { special: true, think: true }); push('\n', 'asst', { think: true });
+            if (keepReason) push(r + '\n', 'asst', { think: true });
+            push('</think>', 'asst', { special: true, think: true }); push('\n', 'asst');
+          }
+          push(bug ? a.replace('Arr, it be ', 'It is ').replace(', matey', '').replace('ye', 'you') : a, 'asst');
+          push('<|im_end|>', 'asst', { special: true }); push('\n', 'asst');
+        });
+        const box = $('mk-toks'); box.replaceChildren();
+        let total = 0, lossN = 0, thinkN = 0;
+        T.forEach((x) => {
+          const s = document.createElement('span');
+          const inLoss = mode === 'all' || x.role === 'asst';
+          s.className = 'tok' + (x.sp ? ' sp' : '') + (inLoss ? ' loss' : '') + (x.think ? ' think' : '') + (x.nl ? ' nl' : '');
+          s.textContent = x.t;
+          box.appendChild(s);
+          if (x.nl) box.appendChild(Object.assign(document.createElement('span'), { className: 'br' }));
+          total++; if (inLoss) { lossN++; if (x.think) thinkN++; }
+        });
+        $('mk-o1').textContent = total; $('mk-o2').textContent = lossN; $('mk-o3').textContent = thinkN;
+        const notes = [];
+        if (mode === 'all') notes.push('全部 token 计损失：模型也在学补全 system 和 user 的文字。');
+        else notes.push('只有 assistant 部分（包括它的 <|im_start|>assistant 头和 <|im_end|>，与 playbook 中 {% generation %} 包住的范围一致）计入损失。');
+        if (!think) notes.push('/no_think：think 块是空的，但标签照样输出。');
+        if (drop && think) notes.push('丢弃历史推理：第一轮 assistant 的推理不在序列里，训练时模型看不到自己之前的思考过程——SmolLM3 认为训练时应保留。');
+        if (bug) notes.push('bug：custom_instructions 被设成 None，人设被替换成默认 system prompt，而回答仍然是数据里原来的风格（这里为了演示把海盗腔去掉了；真实数据里回答保留人设，模型就学会了「system 说的和回答无关」）。');
+        $('mk-note').textContent = notes.join(' ');
+      }
+      segInit('mk-mode', render); segInit('mk-think', render);
+      ['mk-drop', 'mk-bug'].forEach((id) => $(id).addEventListener('change', render));
+      render();
+    })();
+
+    /* ---------- BF16 ---------- */
+    (() => {
+      const f32 = new Float32Array(1), u32 = new Uint32Array(f32.buffer);
+      const bf16 = (x) => { f32[0] = x; let u = u32[0]; const lsb = (u >>> 16) & 1; u = (u + 0x7fff + lsb) >>> 0; u32[0] = u & 0xffff0000; return f32[0]; };
+      const fr = (x) => { f32[0] = x; return f32[0]; };
+      function upd() {
+        const w0 = +(Math.pow(10, +$('bf-w').value)).toPrecision(4);
+        const d = -Math.pow(10, +$('bf-d').value);
+        const n = +$('bf-n').value;
+        $('bf-w-v').textContent = w0.toPrecision(3);
+        $('bf-d-v').textContent = d.toExponential(1);
+        $('bf-n-v').textContent = n;
+        let m = fr(w0), b = bf16(w0);
+        for (let i = 0; i < n; i++) { m = fr(m + d); b = bf16(b + d); }
+        const e = Math.floor(Math.log2(Math.abs(bf16(w0))));
+        const spacing = Math.pow(2, e - 7);
+        $('bf-o1').textContent = m.toPrecision(6);
+        $('bf-o2').textContent = b.toPrecision(5);
+        $('bf-o3').textContent = spacing.toExponential(2);
+        const want = m - fr(w0), got = b - bf16(w0);
+        $('bf-o4').textContent = want !== 0 ? (Math.max(0, 1 - got / want) * 100).toFixed(0) + '%' : '–';
+      }
+      ['bf-w', 'bf-d', 'bf-n'].forEach((id) => $(id).addEventListener('input', upd));
+      upd();
+    })();
+
+    /* ---------- DPO / APO ---------- */
+    (() => {
+      const loss = (t, b, w, l) => {
+        const D = w - l;
+        if (t === 'dpo') { const L = Math.log1p(Math.exp(-b * D)); const g = sig(-b * D); return [L, -b * g, b * g]; }
+        if (t === 'apo0') { const sw = sig(b * w), sl = sig(b * l); return [1 - sw + sl, -b * sw * (1 - sw), b * sl * (1 - sl)]; }
+        const sw = sig(b * w), sd = sig(b * D); return [sw + 1 - sd, b * sw * (1 - sw) - b * sd * (1 - sd), b * sd * (1 - sd)];
+      };
+      function upd() {
+        const t = segVal('dp-type'), b = +$('dp-b').value, w = +$('dp-w').value, l = +$('dp-l').value;
+        $('dp-b-v').textContent = b.toFixed(2); $('dp-w-v').textContent = w.toFixed(1); $('dp-l-v').textContent = l.toFixed(1);
+        const [L, gw, gl] = loss(t, b, w, l);
+        $('dp-o1').textContent = L.toFixed(4); $('dp-o2').textContent = gw.toFixed(4); $('dp-o3').textContent = gl.toFixed(4);
+        $('dp-o4').textContent = sig(b * (w - l)).toFixed(3);
+        const dirW = gw < -1e-6 ? '推高 chosen' : gw > 1e-6 ? '压低 chosen' : 'chosen 不动';
+        const dirL = gl > 1e-6 ? '压低 rejected' : gl < -1e-6 ? '推高 rejected' : 'rejected 不动';
+        const extra = {
+          dpo: 'DPO 只看差值 Δρ = ρ_w − ρ_l，两个梯度大小相等、方向相反。把 ρ_w 和 ρ_l 同时拉到 −20：只要差值不变，损失就不变——两者的似然一起下降也照样「满意」。',
+          apo0: 'APO-zero 的两项各自以 0（参考模型）为锚：ρ_w 越低推得越用力（在 0 附近最大），ρ_l 同理。差值再大，只要 ρ_w 还在 0 附近，chosen 仍会被继续推高。',
+          apod: 'APO-down：ρ_w 自身项把 chosen 往下压，差值项要求 rejected 下降得更多。用于 chosen 并不比模型当前输出更好的情形。',
+        }[t];
+        $('dp-note').textContent = '梯度下降方向：' + dirW + '，' + dirL + '。' + extra;
+        // chart: loss vs rho_w (holding rho_l), for current type
+        const W = 680, H = 220, P = { l: 44, r: 12, t: 12, b: 28 };
+        const xs = []; for (let x = -30; x <= 30; x += 0.5) xs.push(x);
+        const ys = xs.map((x) => loss(t, b, x, l)[0]);
+        const ymax = Math.max(1, ...ys) * 1.05;
+        const X = (x) => P.l + (x + 30) / 60 * (W - P.l - P.r);
+        const Y = (y) => P.t + (1 - y / ymax) * (H - P.t - P.b);
+        const svg = document.createElementNS(NS, 'svg'); svg.setAttribute('viewBox', `0 0 ${W} ${H}`); svg.setAttribute('role', 'img'); svg.setAttribute('aria-label', '损失随 chosen 对数比变化');
+        for (let k = 0; k <= 4; k++) { const v = ymax * k / 4; el('line', { x1: P.l, x2: W - P.r, y1: Y(v), y2: Y(v), class: 'grid' }, svg); const tx = el('text', { x: P.l - 6, y: Y(v) + 4, 'text-anchor': 'end', class: 'axis' }, svg); tx.textContent = v.toFixed(2); }
+        [-30, -15, 0, 15, 30].forEach((x) => { const tx = el('text', { x: X(x), y: H - 10, 'text-anchor': 'middle', class: 'axis' }, svg); tx.textContent = x; });
+        el('path', { d: xs.map((x, i) => (i ? 'L' : 'M') + X(x).toFixed(1) + ' ' + Y(ys[i]).toFixed(1)).join(''), class: 'curve' }, svg);
+        el('circle', { cx: X(w), cy: Y(L), r: 5, class: 'dot' }, svg);
+        const lb = el('text', { x: W - P.r, y: P.t + 12, 'text-anchor': 'end', class: 'lbl' }, svg); lb.textContent = '横轴 ρ_w（固定当前 ρ_l），纵轴损失';
+        $('dp-chart').replaceChildren(svg);
+      }
+      segInit('dp-type', upd);
+      ['dp-b', 'dp-w', 'dp-l'].forEach((id) => $(id).addEventListener('input', upd));
+      upd();
+    })();
+
+    /* ---------- GRPO ---------- */
+    (() => {
+      const G = 8;
+      const S = [[1, 900], [0, 2600], [1, 1400], [0, 3300], [1, 2900], [0, 700], [1, 1800], [0, 2200]].map(([c, l]) => ({ c, l }));
+      let agg = 'seq';
+      const tab = $('gr-tab');
+      function build() {
+        tab.innerHTML = '<thead><tr><th>#</th><th>验证器</th><th>长度</th><th>长度罚</th><th>总奖励</th><th>优势 Â</th><th>每 token 权重</th><th>整条权重</th></tr></thead><tbody></tbody>';
+        const tb = tab.querySelector('tbody');
+        S.forEach((s, i) => {
+          const tr = document.createElement('tr');
+          tr.innerHTML = `<td>${i + 1}</td><td><button class="okbtn" aria-pressed="${s.c ? 'true' : 'false'}">${s.c ? '对' : '错'}</button></td><td><input type="number" min="1" step="100" value="${s.l}"></td><td></td><td></td><td></td><td></td><td></td>`;
+          const btn = tr.querySelector('button');
+          btn.addEventListener('click', () => { s.c = 1 - s.c; btn.textContent = s.c ? '对' : '错'; btn.setAttribute('aria-pressed', s.c ? 'true' : 'false'); calc(); });
+          tr.querySelector('input').addEventListener('input', (e) => { s.l = Math.max(1, +e.target.value || 1); calc(); });
+          tb.appendChild(tr);
+        });
+      }
+      function calc() {
+        const useStd = $('gr-std').checked, pen = $('gr-pen').checked;
+        const Lmax = +$('gr-lmax').value, Lc = Math.min(+$('gr-lc').value, Lmax);
+        const lp = S.map((s) => { if (!pen) return 0; const y = s.l; if (y <= Lmax - Lc) return 0; if (y <= Lmax) return ((Lmax - Lc) - y) / Lc; return -1; });
+        const R = S.map((s, i) => s.c + lp[i]);
+        const mean = R.reduce((a, b) => a + b, 0) / G;
+        const std = Math.sqrt(R.reduce((a, b) => a + (b - mean) ** 2, 0) / G);
+        const A = R.map((r) => useStd ? (std > 1e-9 ? (r - mean) / std : 0) : r - mean);
+        const sumL = S.reduce((a, s) => a + s.l, 0);
+        const perTok = A.map((a, i) => agg === 'seq' ? a / (G * S[i].l) : agg === 'tok' ? a / sumL : a / (G * Lmax));
+        const rows = tab.querySelectorAll('tbody tr');
+        const f = (x, d = 3) => (x > 0 ? '+' : '') + x.toFixed(d);
+        rows.forEach((tr, i) => {
+          const td = tr.children;
+          td[3].textContent = pen ? f(lp[i], 2) : '–';
+          td[4].textContent = R[i].toFixed(2);
+          td[5].textContent = f(A[i], 3); td[5].className = A[i] > 1e-9 ? 'pos' : A[i] < -1e-9 ? 'neg' : '';
+          td[6].textContent = (perTok[i] * 1e4).toFixed(3) + 'e-4';
+          td[7].textContent = f(perTok[i] * S[i].l, 3);
+        });
+        const nCorrect = S.reduce((a, s) => a + s.c, 0);
+        let note = `组内均值 ${mean.toFixed(3)}，标准差 ${std.toFixed(3)}。`;
+        if (std < 1e-9) note += '所有回答奖励相同，优势全为 0，这个 prompt 不产生任何梯度——DAPO 的动态采样会把它过滤掉。';
+        if (agg === 'seq') note += ' GRPO 按每条回答内平均：长回答的每个 token 权重更小。对错误回答，越长每个 token 受的惩罚越轻——这就是 Dr. GRPO 说的长度偏差。';
+        if (agg === 'tok') note += ' DAPO 对全组 token 平均：每个 token 权重只由优势决定，长回答整条的总权重更大。';
+        if (agg === 'const') note += ' Dr. GRPO 除以常数：与 token 级平均一样不随回答长度改变每个 token 的权重，且不依赖这一组的总长度。';
+        if (pen) note += ` 超长惩罚：长度 ≤ ${Lmax - Lc} 不罚，${Lmax - Lc}–${Lmax} 线性罚到 −1，超过 ${Lmax} 罚 −1。打开它后，同样答对的长回答优势变小甚至为负。`;
+        if (!useStd) note += ' 不除 std：优势就是奖励减均值，几乎全对或全错的组不会被放大。';
+        note += `（${nCorrect}/${G} 正确）`;
+        $('gr-note').textContent = note;
+      }
+      segInit('gr-agg', (v) => { agg = v; calc(); });
+      ['gr-std', 'gr-pen', 'gr-lmax', 'gr-lc'].forEach((id) => $(id).addEventListener('input', calc));
+      build(); calc();
+    })();
+  })();
+  </script>
+</body>
+</html>
