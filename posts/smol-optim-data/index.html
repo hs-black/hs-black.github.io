@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>分词器、优化器、超参与数据配比 · Zunzhe Zhang</title>
-  <meta name="description" content="读 Smol Training Playbook：BPE 与分词器评估、AdamW 与 Muon、学习率调度、batch size 与超参 scaling law、数据配比与多阶段训练。">
+  <meta name="description" content="预训练的另一半决定：BPE 与分词器评估、AdamW 与 Muon、学习率调度、batch size 与超参 scaling law、数据配比与多阶段训练。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
@@ -66,7 +66,7 @@
     <nav class="series" data-series="smol"></nav>
 
     <article class="prose">
-      <p>读 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">Smol Training Playbook</a> 的第三篇。<a href="/posts/smol-architecture/">上一篇</a>定下了网络结构，这一篇处理剩下的三件事：<strong>分词器</strong>（书里放在架构章末尾）、<strong>优化器与训练超参</strong>（「Optimizer and Training Hyperparameters」一节），以及<strong>数据配比</strong>（「The Art of Data Curation」一章）。书里有一句话贯穿这三部分：架构决定模型<em>怎么</em>学，数据决定它学<em>什么</em>；而超参决定这个学习过程能不能稳定、高效地走完。</p>
+      <p><a href="/posts/smol-architecture/">上一篇</a>定下了网络结构，这一篇处理开训前剩下的三件事：<strong>分词器</strong>、<strong>优化器与训练超参</strong>，以及<strong>数据配比</strong>。可以这样理解它们的分工：分词器决定模型看到的基本单元是什么；架构决定模型<em>怎么</em>学，数据决定它学<em>什么</em>；超参则决定这个学习过程能不能稳定、高效地走完。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -81,7 +81,7 @@
           <li><a href="#data">数据配比：为什么它最重要</a></li>
           <li><a href="#dataabl">怎么做数据消融</a></li>
           <li><a href="#smoldata">SmolLM3 的数据配比</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -123,14 +123,14 @@
       </div>
 
       <h3>怎么衡量分词器好坏</h3>
-      <p>不能看几个例子就下结论。书里用 <a href="https://arxiv.org/abs/2506.20920">FineWeb2</a> 的两个指标：</p>
+      <p>不能看几个例子就下结论。常用的是 <a href="https://arxiv.org/abs/2506.20920">FineWeb2</a> 里的两个指标：</p>
       <ul>
         <li><strong>Fertility（繁殖率）</strong>：平均每个词需要多少个 token。越低压缩越好，训练和推理越快。</li>
         <li><strong>被切开的词的比例（proportion of continued words, PCW）</strong>：被切成 2 个及以上 token 的词占多少。越低越好。</li>
       </ul>
       $$\text{fertility}=\frac{1}{|W|}\sum_{w\in W}\#\text{tok}(w),\qquad \text{PCW}=\frac{1}{|W|}\sum_{w\in W}\mathbb 1\big[\#\text{tok}(w)\ge2\big].$$
       <p>「词」需要用每种语言合适的分词工具切（spaCy、Stanza，DataTrove 里封装了各语言的 word tokenizer），这样跨语言比较才有意义。只比较单一语言时，也可以用字符数或字节数代替词数（characters-to-tokens、bytes-to-tokens），但它们跨语言有缺陷：UTF-8 里汉字占 3 字节、拉丁字母 1–2 字节；字符数又没考虑不同语言的词长差异（中文的词比德语复合词短得多）。</p>
-      <p>书里在 Wikipedia 上每种语言抽 100 篇文章，比较了四个分词器（部分结果）：</p>
+      <p>在 Wikipedia 上每种语言抽 100 篇文章，比较四个分词器，部分结果如下：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>分词器</th><th class="num">英语</th><th class="num">中文</th><th class="num">法语</th><th class="num">西班牙语</th><th class="num">阿拉伯语</th></tr></thead>
@@ -150,7 +150,7 @@
       <p>另外两个和分词器有关的提醒：换了分词器，loss 就不能直接比（<a href="/posts/smol-decisions/#eval">第一篇</a>讲过）；50k 的英文分词器干不了严肃的多语言，但如果你不覆盖那么多语言，也不需要 256k 的词表。</p>
 
       <h2 id="adamw">AdamW：为什么所有人都还在用它</h2>
-      <p>优化器决定每个参数每一步实际怎么更新，同时它也很吃显存和算力，会影响需要多少卡、训多快。书里总结的「现状表」只有两行：Kimi K2、GLM-4.5 用 Muon，其他所有人用 AdamW。为什么？写这一节的作者自嘲是「人懒」；更实际的原因是 AdamW 长期在各个规模上都好用，而换掉这么核心的组件很吓人，尤其在很长的训练里验证一个新优化器很贵。</p>
+      <p>优化器决定每个参数每一步实际怎么更新，同时它也很吃显存和算力，会影响需要多少卡、训多快。看看近年公开的大模型：除了 Kimi K2、GLM-4.5 用 Muon，几乎所有人都用 AdamW。为什么？一方面 AdamW 长期在各个规模上都好用；另一方面换掉这么核心的组件很吓人，在很长的训练里验证一个新优化器又很贵。</p>
       <p>公平比较优化器也比看上去难：规模会改变动力学，小消融难以模拟；每个优化器都需要自己的超参搜索（一维？二维？三维？），不能拿调好的 AdamW 超参直接套。还常见基线没调好、新优化器跟一个弱的 AdamW 比的情况，Marin 团队的 <a href="https://arxiv.org/abs/2509.02046">Fantastic Pretraining Optimizers</a> 显示光这一点就会严重夸大报告的收益。</p>
       <h3>Adam 的更新</h3>
       <p>Adam 是一阶方法（只用梯度），用历史梯度的动量为每个参数自适应调节步长。对参数 \(\theta\)、第 \(t\) 步梯度 \(g_t\)：</p>
@@ -164,14 +164,14 @@
       <h2 id="muon">Muon：正交化的更新与 Newton–Schulz 迭代</h2>
       <p>Muon 把每个参数<strong>矩阵</strong>当作一个整体来更新：</p>
       $$G_t=\nabla_\theta\mathcal L_t(\theta_{t-1}),\quad B_t=\mu B_{t-1}+G_t,\quad O_t=\mathrm{NewtonSchulz5}(B_t)\approx UV^\top\ \ (B_t=U\Sigma V^\top),\quad \theta_t=\theta_{t-1}-\eta O_t.$$
-      <p>就是带动量的梯度，然后把它「正交化」：保留奇异向量、把所有奇异值都换成 1。书里总结了三个关键点：</p>
+      <p>就是带动量的梯度，然后把它「正交化」：保留奇异向量、把所有奇异值都换成 1。它有三个关键点：</p>
       <ol>
         <li><strong>矩阵几何而非逐参数</strong>：AdamW 对每个参数单独做（对角）预条件；Muon 把权重矩阵当成一个对象，沿 \(UV^\top\) 更新，捕捉的是行、列子空间的结构。</li>
         <li><strong>正交化带来各向同性的步长</strong>：SVD 把 \(G=U\Sigma V^\top\) 分成大小（\(\Sigma\)）和方向（\(U,V\)）。换成 \(UV^\top\) 就丢掉了奇异值，让步长在活跃子空间里各向同性。乍看是丢了信息，但它减少了偏向少数主方向的倾向，让那些奇异值很小、本来会被压制的方向也得到探索。这种探索会不会给模型带来 loss 看不出的能力差异，还是开放问题。</li>
         <li><strong>经验上更能容忍大 batch</strong>：这可能是采用 Muon 的关键动机（下面讲 batch size 时会说为什么大 batch 重要）。</li>
       </ol>
       <h3>为什么是 \(UV^\top\)：谱范数下的最速下降</h3>
-      <p>书里说 Muon 的「二阶」藏在 Newton–Schulz 里，没有展开。我补一个常见的推导（来自 <a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein</a>）：线性化 loss，一步更新 \(\Delta W\) 带来的变化是 \(\langle G,\Delta W\rangle=\operatorname{tr}(G^\top\Delta W)\)。如果限制更新的<strong>谱范数</strong>（最大奇异值，衡量矩阵对任意输入向量的最大放大倍数）不超过 \(\eta\)：</p>
+      <p>为什么偏偏是 \(UV^\top\)？一个干净的解释（<a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein</a>）是把它看成某种范数下的最速下降。线性化 loss，一步更新 \(\Delta W\) 带来的变化是 \(\langle G,\Delta W\rangle=\operatorname{tr}(G^\top\Delta W)\)。如果限制更新的<strong>谱范数</strong>（最大奇异值，衡量矩阵对任意输入向量的最大放大倍数）不超过 \(\eta\)：</p>
       $$\min_{\|\Delta W\|_{\text{op}}\le\eta}\ \operatorname{tr}(G^\top\Delta W)=-\eta\sum_i\sigma_i(G),\qquad \text{取到最小值的是}\ \Delta W=-\eta\,UV^\top.$$
       <p>（由 von Neumann 迹不等式，\(\operatorname{tr}(G^\top\Delta W)\ge-\sum_i\sigma_i(G)\sigma_i(\Delta W)\ge-\eta\sum_i\sigma_i(G)\)，等号在 \(\Delta W\) 与 \(G\) 共享奇异向量、奇异值全为 \(\eta\) 时成立。）对比之下，在逐元素的 \(\ell_\infty\) 约束下最速下降方向是 \(-\eta\,\operatorname{sign}(G)\)，这正是不带动量平滑时 Adam 的极限形式。所以 Adam 和 Muon 的区别可以看成「用什么范数衡量一步走多远」。</p>
       <h3>Newton–Schulz：不做 SVD 的正交化</h3>
@@ -209,22 +209,22 @@
 
       <p>Muon 只用于隐藏层的二维权重；embedding、输出层以及向量和标量参数（norm 的增益、bias）仍用 AdamW（Keller Jordan 的建议，embedding 和输出头用 AdamW 效果更好）。扩到大模型还需要两个改动，来自 <a href="https://arxiv.org/abs/2502.16982">Moonlight（Muon is Scalable）</a>：加上权重衰减；以及按矩阵形状缩放更新——形状 \([A,B]\) 的满秩矩阵，正交化后更新的 RMS 理论上是 \(\sqrt{1/\max(A,B)}\)，于是乘 \(0.2\sqrt{\max(A,B)}\)，让各矩阵更新的 RMS 都接近 0.2，和 AdamW 典型的 0.2–0.4 对齐，这样学习率和权重衰减可以和 AdamW 部分共用：</p>
       $$W_t=W_{t-1}-\eta_t\big(0.2\,O_t\sqrt{\max(A,B)}+\lambda W_{t-1}\big).$$
-      <p>优化器的「动物园」还很大：Shampoo、SOAP、PSGD、CASPR、DION、Sophia、Lion，AdamW 自己也有 NAdamW、StableAdamW 等变体。书里没有展开，推荐看 Marin 的那篇系统比较，它的核心教训是比较时超参调优有多重要。</p>
+      <p>优化器的「动物园」还很大：Shampoo、SOAP、PSGD、CASPR、DION、Sophia、Lion，AdamW 自己也有 NAdamW、StableAdamW 等变体。想系统了解，推荐 Marin 的那篇系统比较，它的核心教训是比较时超参调优有多重要。</p>
 
       <h2 id="lr">学习率：预热、cosine、WSD、multi-step</h2>
       <p>学习率（LR）控制每步按梯度改多少。太低训练慢得痛苦，loss 曲线平平，可能困在差的局部；太高会越过好的解、不收敛，甚至发散。而且最优学习率不是常数：离好解远的早期大学习率好用，接近收敛时就会不稳定。所以要有调度：从 0 预热避免早期混乱，最后衰减让模型落进好的极小值。</p>
-      <p><strong>预热</strong>：多数现代 LLM 用固定的预热步数（比如 2000），与模型大小和训练长度无关（第二篇开头那张表里大多是 2k）。很短的训练常用总步数的 1–5%；书里说更长的训练里加长预热一般不影响效果。</p>
+      <p><strong>预热</strong>：多数现代 LLM 用固定的预热步数（比如 2000），与模型大小和训练长度无关（DeepSeek-V2、V3 都是 2000 步）。很短的训练常用总步数的 1–5%；对更长的训练，加长预热一般不影响最终效果。</p>
       <h3>cosine 的问题</h3>
       <p>改变学习率能帮助收敛早已是共识（<a href="https://arxiv.org/abs/1708.07120">Smith 2018</a>），很长时间里 cosine 衰减（<a href="https://arxiv.org/abs/1608.03983">SGDR</a>）是训 LLM 的默认：预热到峰值后按余弦曲线平滑降到最小值：</p>
       $$\eta(t)=\eta_{\min}+\tfrac12(\eta_{\max}-\eta_{\min})\Big(1+\cos\frac{\pi(t-W)}{T-W}\Big),\quad W\le t\le T.$$
-      <p>简单好用，缺点是<strong>不灵活</strong>：必须事先知道总步数 \(T\)。训到一半模型还没到平台、又拿到了更多算力想多训？或者做 scaling law、要在不同 token 数上训同一个模型？cosine 只能从头再来。书里的旁注：这种不灵活曾让早期 scaling law 研究跑偏——Kaplan 等人对不同 token 数的模型用了固定长度的 cosine，低估了数据量的作用；Chinchilla 让调度长度匹配每个模型实际的训练时长，纠正了这一点。</p>
+      <p>简单好用，缺点是<strong>不灵活</strong>：必须事先知道总步数 \(T\)。训到一半模型还没到平台、又拿到了更多算力想多训？或者做 scaling law、要在不同 token 数上训同一个模型？cosine 只能从头再来。这种不灵活还曾让早期 scaling law 研究跑偏——Kaplan 等人对不同 token 数的模型用了固定长度的 cosine，低估了数据量的作用；Chinchilla 让调度长度匹配每个模型实际的训练时长，纠正了这一点。</p>
       <h3>WSD 与 multi-step</h3>
       <p>很多团队改用不必在预热后立刻开始衰减的调度。<strong>Warmup–Stable–Decay（WSD）</strong>（<a href="https://arxiv.org/abs/2404.06395">MiniCPM</a>）：预热后保持恒定的高学习率，最后 10–20% 的 token 迅速衰减。<strong>Multi-step</strong>（<a href="https://arxiv.org/abs/2401.02954">DeepSeek LLM</a>）：恒定后分几次台阶式下降。DeepSeek LLM 的具体做法是 2000 步预热到峰值，训完 80% token 时降到峰值的 31.6%，90% 时再降到 10%。</p>
       <p>好处：可以中途延长训练而不必重来；可以提前衰减来看清进度；可以在一次主训练里做不同 token 数的 scaling law 实验（从稳定段的不同位置分叉出去衰减）。研究表明 WSD 和 multi-step 都能达到 cosine 的效果（<a href="https://arxiv.org/abs/2405.18392">Hägele et al.</a>、DeepSeek LLM）。（GLM-4.5 提到 WSD 在 SimpleQA、MMLU 上不如 cosine，但没给结果。）</p>
       <p>新的超参也随之出现：</p>
       <ul>
         <li><strong>WSD 的衰减多长</strong>：训练越长，匹配 cosine 所需的衰减比例越小；一般建议 10–20% 的 token。Hägele et al. 还比较了衰减曲线的形状，发现 \((1-\sqrt{\cdot})\) 形状比线性好：\(f(n)=1-\sqrt{(n-(N-N_{\text{decay}}))/N_{\text{decay}}}\)。</li>
-        <li><strong>multi-step 的台阶怎么放</strong>：DeepSeek LLM 的 80/10/10（稳定到 80%，80–90% 第一级，90–100% 第二级）能匹配 cosine，改成 70/15/15、60/20/20 还能略好。DeepSeek-V2 用了 60/30/10；DeepSeek-V3 更花：恒定段之后从 67% 到 97% 用 cosine 衰减，然后短暂恒定，最后一次陡降。V2、V3 的报告没给这些改动的消融，书里建议先用简单的 WSD 或 multi-step，再通过消融调参数。</li>
+        <li><strong>multi-step 的台阶怎么放</strong>：DeepSeek LLM 的 80/10/10（稳定到 80%，80–90% 第一级，90–100% 第二级）能匹配 cosine，改成 70/15/15、60/20/20 还能略好。DeepSeek-V2 用了 60/30/10；DeepSeek-V3 更花：恒定段之后从 67% 到 97% 用 cosine 衰减，然后短暂恒定，最后一次陡降。V2、V3 的报告没有给出这些改动的消融。实践上，先用简单的 WSD 或 multi-step，再通过消融调参数。</li>
       </ul>
 
       <div class="demo" id="lrs">
@@ -253,9 +253,9 @@
       </div>
 
       <h3>消融：WSD 能追上 cosine</h3>
-      <p>书里在 1B 模型上比较了 cosine 和两种 WSD（衰减 10%、20%）。最终表现相近。过程很有意思：稳定段里 cosine 的 loss 和评测（尤其 HellaSwag）都更好，因为它的学习率已经在降了；WSD 一进入衰减段，loss 和下游指标几乎线性地改善，最后追平。所以 10–20% 的衰减足以匹配 cosine，同时保留中途延长的灵活性；SmolLM3 用了 10% 衰减的 WSD。一个比较时的坑：<strong>拿稳定段的 WSD checkpoint 和 cosine 比，要先对 WSD checkpoint 做一次衰减</strong>，否则不公平。</p>
+      <p>在 1B 模型上比较 cosine 和两种 WSD（衰减 10%、20%）。最终表现相近。过程很有意思：稳定段里 cosine 的 loss 和评测（尤其 HellaSwag）都更好，因为它的学习率已经在降了；WSD 一进入衰减段，loss 和下游指标几乎线性地改善，最后追平。所以 10–20% 的衰减足以匹配 cosine，同时保留中途延长的灵活性；SmolLM3 用了 10% 衰减的 WSD。一个比较时的坑：<strong>拿稳定段的 WSD checkpoint 和 cosine 比，要先对 WSD checkpoint 做一次衰减</strong>，否则不公平。</p>
       <h3>学习率扫描</h3>
-      <p>最优学习率依赖训练时长：短消融里收敛最快的，未必是长训练的最优。先用简单扫描排除明显太高或太低的值。书里在 1B、45B token 上试了 1e-4、5e-4、5e-3、5e-2：5e-2 几乎立刻发散，loss 尖峰后再也回不来；1e-4 太保守，稳定但收敛慢得多；5e-4 和 5e-3 收敛更好、表现相近。SmolLM3 在 3B、100B token、AdamW + WSD 上比较了几个值：2e-4 比 1e-4 收敛快得多（loss 和下游都是），3e-4 只比 2e-4 好一点，却增加了长训练不稳定的风险，于是选了 2e-4。</p>
+      <p>最优学习率依赖训练时长：短消融里收敛最快的，未必是长训练的最优。先用简单扫描排除明显太高或太低的值。在 1B、45B token 上试 1e-4、5e-4、5e-3、5e-2：5e-2 几乎立刻发散，loss 尖峰后再也回不来；1e-4 太保守，稳定但收敛慢得多；5e-4 和 5e-3 收敛更好、表现相近。SmolLM3 在 3B、100B token、AdamW + WSD 上比较了几个值：2e-4 比 1e-4 收敛快得多（loss 和下游都是），3e-4 只比 2e-4 好一点，却增加了长训练不稳定的风险，于是选了 2e-4。</p>
 
       <h2 id="bs">Batch size 与临界 batch</h2>
       <p>Batch size 是每次更新前处理的样本（LLM 里通常按 token 计）数。硬件和训练栈能很好地横向扩展时，加大 batch 能提高吞吐（每秒处理的 token 数）。但超过某个点，大 batch 开始损害<strong>数据效率</strong>：达到同样的 loss 需要更多的 token。这个转折点叫<strong>临界 batch size</strong>（<a href="https://arxiv.org/abs/1812.06162">McCandlish et al.</a>）：</p>
@@ -268,7 +268,7 @@
       $$\tilde g_B=\frac1B\sum_{i=1}^B\tilde g^{(i)},\qquad \mathbb E[\tilde g_B]=g,\qquad \operatorname{Cov}(\tilde g_B)=\frac{\Sigma}{B}.$$
       <p>SGD 更新 \(\Delta w=-\eta\tilde g_B\) 的方差 \(\propto\eta^2\Sigma/B\)。batch 变成 \(k\) 倍时，要保持更新的噪声大致不变，学习率乘 \(\sqrt k\)：</p>
       $$B\to kB\quad\Rightarrow\quad \eta\to\sqrt k\,\eta.$$
-      <p>书里说这条<strong>平方根缩放</strong>对 AdamW、Muon 是个有用的经验法则，但具体怎么缩放依赖优化器，AdamW 里还和 \(\beta_1,\beta_2\) 有交互。（作为对照：纯 SGD 文献里更常见的是线性缩放规则，出发点是保持「每个样本对参数的平均推动」不变，而不是保持噪声不变。两者都只是近似。）</p>
+      <p>这条<strong>平方根缩放</strong>对 AdamW、Muon 是个有用的经验法则，但具体怎么缩放依赖优化器，AdamW 里还和 \(\beta_1,\beta_2\) 有交互。作为对照，SGD 文献里更常见的是线性缩放规则，出发点是保持「每个样本对参数的平均推动」不变，而不是保持噪声不变。两者都只是近似。</p>
       <h3>临界 batch 从哪来：梯度噪声尺度</h3>
       <p>McCandlish et al. 用一个简单的统计量预测临界 batch，叫<strong>梯度噪声尺度</strong>。在 Hessian 近似为单位阵倍数的简化下：</p>
       $$\mathcal B_{\text{simple}}=\frac{\operatorname{tr}(\Sigma)}{|G|^2},\qquad \frac{\mathbb E\big[|G_{\text{est}}-G|^2\big]}{|G|^2}=\frac{\mathcal B_{\text{simple}}}{B}.$$
@@ -287,7 +287,7 @@
       </ol>
       <p>他们得到的是</p>
       $$\eta_{\text{opt}}=0.3118\cdot C^{-0.125},\qquad B_{\text{opt}}=0.2920\cdot C^{0.3271}\ \ (\text{token}).$$
-      <p>直觉：训练越大越长，越需要稳的更新（更小的学习率）和更准的梯度估计（更大的 batch）。另一个重要发现：在固定的模型大小和预算下，<strong>表现在很宽的超参范围内都很稳定</strong>，最优点是一片宽的区域，所以只需要「足够接近」。但书里也提醒：scaling law 给的是起点，目标不是「每个梯度最优的样本数」，而是「在时间和卡数约束下能达到的最低 loss」。实践中常可以把 batch 开到比预测更大，换取明显更高的吞吐，只要不超过临界 batch。</p>
+      <p>直觉：训练越大越长，越需要稳的更新（更小的学习率）和更准的梯度估计（更大的 batch）。另一个重要发现：在固定的模型大小和预算下，<strong>表现在很宽的超参范围内都很稳定</strong>，最优点是一片宽的区域，所以只需要「足够接近」。但要记住：scaling law 给的是起点，目标不是「每个梯度最优的样本数」，而是「在时间和卡数约束下能达到的最低 loss」。实践中常可以把 batch 开到比预测更大，换取明显更高的吞吐，只要不超过临界 batch。</p>
 
       <div class="demo" id="bsd">
         <div class="demo-label">Batch size：步数与数据量的权衡 + 超参公式</div>
@@ -312,14 +312,14 @@
         <p class="note-small">上半：McCandlish 的模型 S = S<sub>min</sub>(1 + 𝓑/B)、E = E<sub>min</sub>(1 + B/𝓑)。下半：默认是 SmolLM3（3.08B、11T）。注意 DeepSeek 的 C 用的是「非 embedding FLOPs/token × token 数」，这里用 6ND 近似；公式是在他们的数据和设置上拟合的，迁移到别处只能当起点。代入 7B、2T 会得到约 4.2e-4 和 9.2M token，和 DeepSeek LLM 7B 实际用的 4.2e-4、9.4M 吻合；代入 SmolLM3 得到约 3.8e-4、12M，而 SmolLM3 实际用了 2e-4 和 2.36M。</p>
       </div>
 
-      <p><strong>μP</strong>：书里在初始化部分提到 μP（Maximal Update Parametrization）是另一条路（Cohere 的 Command A 用了它），在 MoE 部分把「怎么把 μP 用到 MoE」列为开放问题，但没有展开。简单说，μP 通过按宽度缩放初始化方差和每层学习率，让最优超参在模型变宽时基本不变，于是可以在小模型上调好直接迁移到大模型，和上面「拟合超参随 C 的幂律」是两种思路。</p>
+      <p><strong>μP</strong>：调超参还有另一条路。μP（Maximal Update Parametrization）通过按宽度缩放初始化方差和每层学习率，让最优超参在模型变宽时基本不变，于是可以在小模型上调好直接迁移到大模型，和上面「拟合超参随 C 的幂律」是两种思路。Cohere 的 Command A 用了 μP；怎么把它用到 MoE 上，目前还是开放问题。</p>
 
       <h2 id="smolhp">SmolLM3 的选择与守则</h2>
-      <p>优化器：在 1B、100B token 上比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但对学习率敏感、容易发散；AdEMAMix 的 loss 和 Muon 相近，敏感度更低；AdamW 最稳，但最终 loss 高于调好的两个。扩到 3B 后，Muon 和 AdEMAMix 发散更频繁——可能是消融结束后才发现的一个并行 bug 导致的（训练马拉松篇会讲），但没有确认。最终选了非常「香草」的设置：AdamW（\(\beta_1=0.9,\beta_2=0.95\)），权重衰减 0.1，梯度裁剪 1。</p>
-      <p>调度：WSD。SmolLM3 在 SmolLM2 上就用过，书里说这是他们最好的决定之一：易用，训练总长可以灵活调整，还能做中途的衰减实验。学习率扫描后定为 2e-4。全局 batch 试了 2M 到 4M token，对 loss 和下游影响很小，于是选了吞吐最好的 2.36M token。</p>
-      <p>这一节的守则（TL;DR：<strong>平衡探索与执行，完成胜过完美</strong>）：</p>
+      <p>优化器：在 1B、100B token 上比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但对学习率敏感、容易发散；AdEMAMix 的 loss 和 Muon 相近，敏感度更低；AdamW 最稳，但最终 loss 高于调好的两个。扩到 3B 后，Muon 和 AdEMAMix 发散更频繁。原因可能是后来才发现的一个并行 bug（训练马拉松篇会讲），但这一点没有再验证。最终选了非常「香草」的设置：AdamW（\(\beta_1=0.9,\beta_2=0.95\)），权重衰减 0.1，梯度裁剪 1。</p>
+      <p>调度：WSD。SmolLM2 就用过它，HF 团队认为这是他们做过的最好的决定之一：易用，训练总长可以灵活调整，还能做中途的衰减实验。学习率扫描后定为 2e-4。全局 batch 试了 2M 到 4M token，对 loss 和下游影响很小，于是选了吞吐最好的 2.36M token。</p>
+      <p>这部分的经验可以概括为：<strong>平衡探索与执行，完成胜过完美</strong>。</p>
       <ul>
-        <li><strong>合理分配时间</strong>。花几周打磨一个新方法的小改进，不如把同样的算力投到更好的数据或更彻底的结构消融上。书里说，虽然可能让结构爱好者失望，最大的提升通常来自数据。</li>
+        <li><strong>合理分配时间</strong>。花几周打磨一个新方法的小改进，不如把同样的算力投到更好的数据或更彻底的结构消融上。也许会让结构爱好者失望，但最大的提升通常来自数据。</li>
         <li><strong>拿不准时选灵活和稳定</strong>。两种方法效果相当，选更灵活、实现更成熟稳定的那个：能延长训练、能做中途实验的 WSD，比一个收敛也许略好但僵硬的调度更有价值。</li>
         <li><strong>知道什么时候停止优化、开始训练</strong>。总还有一个超参可以调、一个优化器可以试。给探索定截止日期并遵守它——真正训完的模型永远胜过从未开训的完美模型。</li>
       </ul>
@@ -331,7 +331,7 @@
       <p>每个来源里还常有一个「高质量」子集特别有用。为什么不只用高质量数据？因为对 SmolLM3 这样 11T token 的训练预算，极端过滤意味着把数据重复很多遍。<a href="https://arxiv.org/abs/2305.16264">Muennighoff et al.</a> 研究了数据受限下的 scaling：在固定算力下，<strong>重复最多 4 个 epoch 与使用全新数据相比 loss 几乎没有差别</strong>；再多重复，增加算力的价值逐渐衰减到零。所以理想情况是同时用好高质量和较低质量的数据。下面的计算器可以按配比算每个来源要过几遍（会把超过 4 个 epoch 的标出来）。</p>
       <p>模型在任何任务上的表现很大程度上取决于它见过多少相关数据，所以调配比是平衡各领域能力最直接的手段。这些权衡依赖于模型、难以预测，消融不可或缺。</p>
       <h3>多阶段训练（课程）</h3>
-      <p>配比不必全程不变。早期的 GPT-3 和早期 Llama 全程用一个静态配比；现在的趋势是多阶段（SmolLM2 就是），配比随训练变化。动机是模型最终的行为强烈受训练末尾数据的影响（<a href="https://arxiv.org/abs/2410.08527">Chen et al.</a>）。于是策略是：早期多用量大的来源，末尾混入量小但质量高的来源。什么时候换？没有通用规则，书里的原则是：</p>
+      <p>配比不必全程不变。早期的 GPT-3 和早期 Llama 全程用一个静态配比；现在的趋势是多阶段（SmolLM2 就是），配比随训练变化。动机是模型最终的行为强烈受训练末尾数据的影响（<a href="https://arxiv.org/abs/2410.08527">Chen et al.</a>）。于是策略是：早期多用量大的来源，末尾混入量小但质量高的来源。什么时候换？没有通用规则，但有两条原则：</p>
       <ol>
         <li><strong>由表现驱动</strong>：盯住关键基准，针对能力瓶颈调整配比。比如别的能力都在涨、数学平了，就是引入更高质量数学数据的信号。</li>
         <li><strong>把高质量数据留到后期</strong>：小而精的数学、代码数据在退火阶段（最后的学习率衰减阶段）引入，效果最大。</li>
@@ -362,25 +362,25 @@
             <text class="tf" x="300" y="226" text-anchor="middle">纵轴：学习率（WSD）。灰：主训练；橙：从主训练分出的退火分支</text>
           </g>
         </svg>
-        <figcaption>两种数据消融。按书中的示意图重画，横轴不按比例。</figcaption>
+        <figcaption>两种数据消融（横轴不按比例）。</figcaption>
       </figure>
 
       <p><strong>自动找配比的方法</strong>：<a href="https://arxiv.org/abs/2305.10429">DoReMi</a> 用一个小代理模型学习各领域的权重，以最小化验证 loss；<a href="https://arxiv.org/abs/2206.07137">RHO-LOSS</a> 按 holdout loss 挑单个训练样本，优先选「可学、值得学、还没学会」的；<a href="https://arxiv.org/abs/2407.01492">RegMix</a> 把配比当回归问题，用正则化回归在多个评测目标和数据域之间平衡。HF 在以前的项目里试过 DoReMi 和 RHO-LOSS，发现它们倾向于收敛到大致等于各数据集自然大小比例的分布——基本是在说「哪个多就多用哪个」，没有胜过仔细的手动消融。近期的 SOTA 模型仍靠系统消融和退火实验手动调配比，SmolLM3 也是。</p>
 
       <h2 id="smoldata">SmolLM3 的数据配比</h2>
-      <p>目标：英文和多语言都能处理，数学和代码要强。方法对低资源语言或金融、医疗等特定领域同样适用：找候选数据集、做消融、设计平衡所有目标领域的配比。书里不讲怎么造高质量数据集（见 FineWeb、FineWeb2、Stack-Edu 和 FineMath 的报告），只讲怎么把现有数据集组合起来。起点是 SmolLM2 在 1.7B 上已经验证过的英文网页配方，以及当时能拿到的最好的数学和代码数据。</p>
+      <p>目标：英文和多语言都能处理，数学和代码要强。方法对低资源语言或金融、医疗等特定领域同样适用：找候选数据集、做消融、设计平衡所有目标领域的配比。这里不讲怎么造高质量数据集（见 FineWeb、FineWeb2、Stack-Edu 和 FineMath 的报告），只讲怎么把现有数据集组合起来。起点是 SmolLM2 在 1.7B 上已经验证过的英文网页配方，以及当时能拿到的最好的数学和代码数据。</p>
       <ul>
         <li><strong>英文网页</strong>：FineWeb-Edu 和 DCLM 是当时最强的开放英文网页数据，合计 5.1T token。FineWeb-Edu 帮教育和 STEM 类基准，DCLM 帮常识推理。在 3B、100B token 上扫了 20/80、40/60、50/50、60/40、80/20，60/40 或 50/50 最平衡（和 SmolLM2 的发现一致），stage 1 用 50/50。另加了 pes2o、Wikipedia & Wikibooks、StackExchange，对表现没影响，为了多样性。</li>
         <li><strong>多语言网页</strong>：主攻法、西、德、意、葡五种语言，取自 FineWeb2-HQ，共 628B token；另有中文、阿拉伯语、俄语等 10 种语言以小比例加入，不是为了 SOTA，而是方便别人在这些语言上继续预训练（FineWeb2-HQ 不支持的语言用 FineWeb2）。关键问题是非英文占多少：在 3B 上消融发现 <strong>12% 多语言</strong>（约占网页部分的 14%）最平衡，多语言提升、英文不掉。只有 628B 非英文对 5.1T 英文，再高就得更多重复多语言数据。</li>
         <li><strong>代码</strong>：stage 1 来自 StarCoder2 / The Stack v2 语料：The Stack v2（16 种语言，按 StarCoder2Data 过滤）、GitHub pull request（真实的代码评审推理）、Jupyter 和 Kaggle notebook（可执行的分步工作流）、GitHub issue 和 StackExchange 讨论。<a href="https://arxiv.org/abs/2408.10914">Aryabumi et al.</a> 发现代码能提升代码之外的能力（自然语言推理、世界知识），建议 25% 代码。SmolLM3 从 25% 开始消融，英文基准（HellaSwag、ARC-C、MMLU）明显下降；降到 10% 后，相比 0% 代码英文基准没有提升，但因为代码生成本身很重要，还是保留了。教育过滤的 Stack-Edu 推迟到后期阶段加入（高质量数据留到后期）。</li>
-        <li><strong>数学</strong>：早期用较大、较通用的 FineMath3+ 和 InfiWebMath3+；后期上采样 FineMath4+、InfiWebMath4+，并引入 <a href="https://arxiv.org/abs/2504.02807">MegaMath</a> 和 OpenMathInstruct、OpenMathReasoning 等指令与推理数据。stage 1 只用 3% 数学（两者各半）：可用的只有 54B token，而 stage 1 估计 8T–9T token，再多就要超过 5 个 epoch。</li>
+        <li><strong>数学</strong>：早期用较大、较通用的 FineMath3+ 和 InfiWebMath3+；后期上采样 FineMath4+、InfiWebMath4+，并引入 <a href="https://arxiv.org/abs/2504.02807">MegaMath</a> 和 OpenMathInstruct、OpenMathReasoning 等指令与推理数据。stage 1 只用 3% 数学（两者各半）：可用的只有 54B token，而 stage 1 规划为 8T–9T token（最终训了 8T），再多就要超过 5 个 epoch。</li>
       </ul>
       <p>合起来，stage 1 的领域比例是英文网页 / 多语言 / 代码 / 数学 = 75 / 12 / 10 / 3。后续两个阶段的配比在训练马拉松篇里。</p>
 
       <div class="demo" id="mix">
         <div class="demo-label">数据配比计算器：每个来源过几遍</div>
         <div class="ctrls">
-          <label class="ctrl"><span>本阶段总 token（T）</span><input type="range" id="mix-T" min="0.1" max="20" step="0.1" value="8.5"><output id="mix-T-v"></output></label>
+          <label class="ctrl"><span>本阶段总 token（T）</span><input type="range" id="mix-T" min="0.1" max="20" step="0.1" value="8"><output id="mix-T-v"></output></label>
         </div>
         <div class="mix-wrap">
           <table class="mix">
@@ -392,15 +392,15 @@
           <div><span class="k">权重合计</span><span class="v" id="mix-sum"></span></div>
           <div><span class="k">最多重复的来源</span><span class="v" id="mix-max" style="font-size:15px"></span></div>
         </div>
-        <p class="note-small">默认是 SmolLM3 stage 1 的领域比例，总量取书中「8T–9T」的中点 8.5T；英文网页 5.1T、多语言 628B、数学 54B 来自书中，<b>代码的可用量书里没给，1000B 是我随手填的</b>。超过 4 个 epoch 的行标为橙色（Muennighoff et al. 的经验界）。可以改任意数字，或加一个来源。</p>
+        <p class="note-small">默认是 SmolLM3 stage 1 的领域比例和 8T 的总量；英文网页 5.1T、多语言 628B、数学 54B 是各来源的实际可用量，代码的可用量为示意值。超过 4 个 epoch 的行标为橙色（Muennighoff et al. 的经验界）。可以改任意数字，或加一个来源。</p>
         <button class="btn" id="mix-add">加一行</button>
       </div>
 
-      <p>默认数字下可以复核书里的说法：数学 3% × 8.5T ≈ 255B，对 54B 是约 4.7 个 epoch——再提高比例就超过 5 遍；英文网页约 1.25 遍，多语言约 1.6 遍。</p>
+      <p>按默认数字算：数学 3% × 8T = 240B，对 54B 约 4.4 个 epoch；如果 stage 1 训到 9T，就正好 5 遍，所以数学的比例不能再高了。英文网页约 1.2 遍，多语言约 1.5 遍。</p>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>：Designing the Model Architecture → The Tokenizer；Optimizer and Training Hyperparameters（Optimizers: AdamW and Beyond、Learning Rate、Batch Size、Scaling Laws for Hyperparameters、SmolLM3、Rules of Engagement）；The Art of Data Curation 全章。</li>
+        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>：本文的主要来源，对应 Designing the Model Architecture → The Tokenizer；Optimizer and Training Hyperparameters（Optimizers: AdamW and Beyond、Learning Rate、Batch Size、Scaling Laws for Hyperparameters、SmolLM3、Rules of Engagement）；The Art of Data Curation 全章。各组消融的完整曲线推荐直接去读原书。</li>
         <li>分词器：<a href="https://arxiv.org/abs/1508.07909">Sennrich et al.（BPE）</a>；<a href="https://arxiv.org/abs/2402.01035">Dagan et al.</a>；<a href="https://arxiv.org/abs/2506.20920">FineWeb2（fertility、PCW）</a>。</li>
         <li>优化器：<a href="https://arxiv.org/abs/1412.6980">Adam</a>；<a href="https://arxiv.org/abs/1711.05101">AdamW（Decoupled Weight Decay）</a>；<a href="https://kellerjordan.github.io/posts/muon/">Keller Jordan, Muon</a>（Newton–Schulz 系数、基线 (2, −1.5, 0.5)、[0.7, 1.3] 的目标区间、embedding/输出层用 AdamW）；<a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein, Deriving Muon</a>；<a href="https://arxiv.org/abs/2502.16982">Liu et al., Muon is Scalable for LLM Training</a>（更新 RMS 匹配 0.2√max(A,B)）；<a href="https://arxiv.org/abs/2509.02046">Wen et al., Fantastic Pretraining Optimizers</a>。</li>
         <li>学习率：<a href="https://arxiv.org/abs/1608.03983">SGDR</a>；<a href="https://arxiv.org/abs/2404.06395">MiniCPM（WSD）</a>；<a href="https://arxiv.org/abs/2405.18392">Hägele et al.（1−sqrt 冷却）</a>；<a href="https://arxiv.org/abs/2401.02954">DeepSeek LLM（multi-step 80/10/10、31.6%/10%、超参 scaling law 0.3118·C<sup>−0.125</sup> 与 0.2920·C<sup>0.3271</sup>、0.25% 近似最优）</a>。</li>
@@ -620,7 +620,7 @@
       const rows = [
         ['英文网页（FineWeb-Edu + DCLM 等）', 5100, 75],
         ['多语言网页（FineWeb2-HQ 等）', 628, 12],
-        ['代码（可用量为示意）', 1000, 10],
+        ['代码（The Stack v2 等）', 1000, 10],
         ['数学（FineMath3+ / InfiWebMath3+）', 54, 3],
       ];
       function mixRender() {
