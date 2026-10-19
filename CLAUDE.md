@@ -58,7 +58,7 @@ folder and are referenced relatively.
 5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
 6. Link related posts to each other in the text where a concept is
    explained elsewhere, then run `python3 scripts/post-links.py` to refresh
-   the cross-reference index.
+   the cross-reference index and the blog's content-versioned data URLs.
 7. Preview locally (below), then commit and push.
 
 The header nav (Home / Papers / Projects / Blog) is copied into every page;
