@@ -1,0 +1,933 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>JAX 分片编程与 Profiling · Zunzhe Zhang</title>
+  <meta name="description" content="用 JAX 的 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 和 profile，在时间线上分出计算、通信与空闲。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig { margin: 1.4em 0 0; }
+    .fig svg { width: 100%; height: auto; display: block; }
+    .fig svg text { font-family: var(--font-sans); fill: var(--text); }
+    .fig svg .soft { fill: var(--text-soft); }
+    .fig svg .faint { fill: var(--text-faint); }
+    .fig svg .mono { font-family: var(--font-mono); }
+    .box { fill: var(--surface); stroke: var(--border); }
+    .acc { fill: var(--accent); fill-opacity: 0.8; }
+    .acc2 { fill: var(--accent-2); fill-opacity: 0.8; }
+    .ln { stroke: var(--text-faint); fill: none; }
+
+    .prose pre { font-size: 13px; }
+    .lines { list-style: none; padding-left: 0 !important; font-size: 15px; }
+    .lines li { padding-left: 0; }
+    .prose :not(pre) > code { overflow-wrap: anywhere; }
+    .table-wrap { position: relative; }
+
+    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 10px 16px; margin-top: 12px; }
+    .grid2 label { display: grid; gap: 4px; font-size: 14px; color: var(--text-soft); }
+    .note { font-size: 13px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+    .codeline { margin-top: 12px; padding: 8px 12px; border-radius: 8px; background: var(--code-bg); font-family: var(--font-mono); font-size: 13px; overflow-x: auto; white-space: pre; }
+    .err { color: var(--accent-2); font-weight: 600; }
+
+    .ps-wrap { display: grid; grid-template-columns: 1fr; gap: 16px; margin-top: 14px; }
+    @media (min-width: 700px) { .ps-wrap { grid-template-columns: 1fr 1fr; } }
+    .ps-wrap h4 { margin: 0 0 6px; font-size: 13px; color: var(--text-faint); font-weight: 600; }
+    .arr { display: grid; gap: 1px; background: var(--border); border: 1px solid var(--border); width: 100%; max-width: 340px; }
+    .arr span { height: var(--ch, 14px); }
+    .devs { display: grid; gap: 6px; }
+    .devgrid { display: grid; gap: 4px; }
+    .dev { border-radius: 6px; padding: 4px 3px; color: #fff; font: 11px/1.3 var(--font-mono); text-align: center; min-width: 0; overflow: hidden; cursor: pointer; border: 2px solid transparent; }
+    .dev b { display: block; font-size: 10px; opacity: 0.85; }
+    .dev.on { border-color: var(--text); }
+    .zlab { font-size: 11px; color: var(--text-faint); font-family: var(--font-mono); }
+
+    .tl svg { width: 100%; height: auto; display: block; }
+    .tl text { font-family: var(--font-sans); fill: var(--text); }
+    .tl .tick { fill: var(--text-faint); font-size: 10px; font-family: var(--font-mono); }
+    .tl rect.op { cursor: pointer; }
+    .tl rect.op:hover { stroke: var(--text); stroke-width: 1; }
+    .row2 { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin-top: 12px; font-size: 14px; color: var(--text-soft); }
+    .row2 input[type="range"] { width: 140px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--text-soft); margin-top: 8px; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+    .opinfo { margin-top: 8px; font-size: 13px; color: var(--text-soft); min-height: 1.5em; font-family: var(--font-mono); }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>JAX 分片编程与 Profiling</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>这个系列前面都在纸上算：显存账本、roofline、集合通信的耗时、每种并行什么时候被通信卡住。这一篇落到两个动手的问题上：<strong>怎么把一个分片方案写成代码</strong>，以及<strong>跑起来以后怎么知道它是不是按预期在跑</strong>。前者我用 JAX 讲，因为 JAX 把「数组怎么分片」做成了显式的一等概念，写出来几乎就是前几篇的记号；后者讲 profiler，JAX/TPU 和 PyTorch/GPU 两边都讲，最后落到一件事：在一条时间线上把计算、通信、空闲分开。</p>
+      <p>材料主要来自 Scaling Book 的 <a href="https://jax-ml.github.io/scaling-book/jax-stuff/">Programming TPUs in JAX</a> 和 <a href="https://jax-ml.github.io/scaling-book/profiling/">How to Profile TPU Programs</a> 两章，以及 Ultra-Scale Playbook 里讲 profiler 的部分。文中的 JAX 代码我在 JAX 0.11.2 上用 8 个模拟 CPU 设备（<code>jax.config.update("jax_num_cpu_devices", 8)</code>）跑过，正确性没问题，但 CPU 上的时间没有参考意义。JAX 的分片 API 这两年变化很快，下面用的是新写法（<code>jax.make_mesh</code> 带 <code>axis_types</code>、<code>jax.set_mesh</code>、<code>jax.shard_map</code>、<code>jax.P</code>），老代码里常见的 <code>jax.experimental.shard_map</code>、<code>Mesh(mesh_utils.create_device_mesh(...))</code> 是同一套概念。</p>
+
+      <div class="toc">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#jit">从 jit 说起：追踪、HLO 和编译</a></li>
+          <li><a href="#mesh">设备网格</a></li>
+          <li><a href="#pspec">PartitionSpec 和 NamedSharding（演示）</a></li>
+          <li><a href="#auto">自动模式：分片传播和 with_sharding_constraint</a></li>
+          <li><a href="#explicit">显式模式：把分片写进类型</a></li>
+          <li><a href="#shmap">shard_map：每设备视角和显式集合通信</a></li>
+          <li><a href="#cmm">例子：集合矩阵乘法</a></li>
+          <li><a href="#xla">Profiling 之前：XLA 编译栈</a></li>
+          <li><a href="#jaxprof">JAX profiler：Trace Viewer、HLO op、Graph Viewer、显存</a></li>
+          <li><a href="#torchprof">PyTorch profiler</a></li>
+          <li><a href="#read">怎么读一条 trace：计算、通信、空闲（演示）</a></li>
+          <li><a href="#summary">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="jit">从 jit 说起：追踪、HLO 和编译</h2>
+      <p>JAX 的函数默认是一行一行在 Python 里执行的，每个 <code>jnp</code> 操作派发一个设备上的小计算。<code>jax.jit</code> 改变的是这件事：第一次调用时，JAX 用「抽象值」（只有形状和 dtype，没有具体数值）把函数<strong>追踪</strong>一遍，记下所有操作，得到一个中间表示 jaxpr；再降低（lower）成 StableHLO，交给 XLA 编译器做融合、布局、调度等优化，最后生成设备代码。之后同样形状和 dtype 的调用直接复用编译结果。</p>
+      <pre><code>import jax, jax.numpy as jnp
+
+def f(x, w):
+    return jnp.tanh(x @ w)
+
+x, w = jnp.ones((2, 3)), jnp.ones((3, 4))
+print(jax.make_jaxpr(f)(x, w))          # 1. 追踪得到的 jaxpr
+lowered = jax.jit(f).lower(x, w)
+print(lowered.as_text())                # 2. StableHLO（编译前）
+compiled = lowered.compile()
+print(compiled.as_text())               # 3. 优化后的 HLO（融合、布局都定了）</code></pre>
+      <p>第 1 步打印出来是 <code>dot_general</code> 接一个 <code>tanh</code>，形状都写在类型里（<code>f32[2,3]</code>、<code>f32[2,4]</code>）；第 2 步是一个 MLIR 模块，里面是 <code>stablehlo.dot_general</code> 和 <code>stablehlo.tanh</code>。读 profile 时我们看到的名字来自第 3 步的 HLO，所以这三层的对应关系要心里有数。</p>
+      <p>两个由此而来的约束：函数要是「纯」的（副作用只在追踪时发生一次），形状要是静态的（形状一变就重新编译）。这些约束换来的，是编译器能看到整个程序，所以它也能替你决定<strong>每个中间数组怎么分片、在哪里插入通信</strong>。这就是 JAX 多设备编程的出发点。</p>
+      <p>Scaling Book 把 JAX 的多设备编程分成三种模式：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>模式</th><th>视角</th><th>分片是否显式</th><th>集合通信是否显式</th><th>API</th></tr></thead>
+          <tbody>
+            <tr><td>自动（Auto）</td><td>全局</td><td>否（编译器推断）</td><td>否</td><td><code>jax.jit</code> + Auto 轴</td></tr>
+            <tr><td>显式（Explicit）</td><td>全局</td><td>是（分片是类型的一部分）</td><td>否</td><td><code>jax.jit</code> + Explicit 轴</td></tr>
+            <tr><td>手动（Manual）</td><td>每设备</td><td>是</td><td>是</td><td><code>jax.shard_map</code></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>三种模式共享同一套描述分片的词汇：mesh、PartitionSpec、NamedSharding。先把它们讲清楚。</p>
+
+      <h2 id="mesh">设备网格</h2>
+      <p>Mesh 是给设备起名字的方式：把 \(N\) 个设备排成一个多维数组，每一维有一个名字。</p>
+      <pre><code>import jax
+from jax.sharding import AxisType
+
+jax.config.update("jax_num_cpu_devices", 8)     # 没有 TPU/GPU 时，用 8 个假 CPU 设备练手
+
+mesh = jax.make_mesh(axis_sizes=(4, 2), axis_names=('X', 'Y'),
+                     axis_types=(AxisType.Auto, AxisType.Auto))
+jax.set_mesh(mesh)                               # 之后的分片默认用这个 mesh
+print(mesh.devices)                              # 4×2 的设备数组</code></pre>
+      <ul class="lines">
+        <li><code>axis_sizes=(4, 2)</code>：8 个设备排成 4 行 2 列，乘积必须等于设备数。</li>
+        <li><code>axis_names=('X', 'Y')</code>：之后只用名字引用轴，代码里不出现设备编号。</li>
+        <li><code>axis_types</code>：每个轴用哪种模式（Auto / Explicit；手动模式在 <code>shard_map</code> 里临时进入）。我用的版本里不写时默认是 Explicit，所以最好显式写出来。</li>
+        <li><code>jax.set_mesh</code>：设定当前 mesh，于是后面可以直接写 <code>jax.P('X', 'Y')</code> 而不必每次带上 mesh。</li>
+      </ul>
+      <p>在 TPU 上，<code>make_mesh</code> 会按物理拓扑排列设备，让 mesh 的相邻元素在 ICI 上也相邻；GPU 上同理会尽量让内层轴落在同一台机器里。上一篇讲的「哪个并行轴放内层」在 JAX 里就落实为：<strong>mesh 形状里最后一维变化最快</strong>，比如 <code>jax.make_mesh((dp, pp, tp), ('dp', 'pp', 'tp'))</code> 让 tp 轴在最内层。</p>
+
+      <h2 id="pspec">PartitionSpec 和 NamedSharding</h2>
+      <p><code>PartitionSpec</code>（简写 <code>P</code>）为数组的<strong>每一个维度</strong>写一项，说这一维沿哪些 mesh 轴切开：</p>
+      <ul>
+        <li><code>None</code>：这一维不切，每个设备都有完整的这一维。</li>
+        <li><code>'X'</code>：这一维切成 <code>X</code> 轴大小那么多份，<code>X</code> 轴上第 \(i\) 个设备拿第 \(i\) 份。</li>
+        <li><code>('X', 'Y')</code>：这一维切成 \(|X|\cdot|Y|\) 份，按「X 在外、Y 在内」的顺序编号，设备 \((i, j)\) 拿第 \(i\cdot|Y| + j\) 份。</li>
+        <li>没有出现在 spec 里的 mesh 轴：数组沿这个轴<strong>复制</strong>，这个轴上的设备持有相同的块。</li>
+        <li>一个 mesh 轴最多出现一次；被切的维度大小必须能被份数整除（否则 JAX 报错）。</li>
+      </ul>
+      <p>每个设备上的块形状因此很好算：第 \(k\) 维的大小除以它对应的所有 mesh 轴大小之积。前几篇用的记号 \(A[I_X, J]\) 正好对应 <code>P('X', None)</code>。<code>NamedSharding(mesh, spec)</code> 把两者绑在一起，就是一个完整的「这个数组放在哪些设备、每个设备放哪块」的描述。</p>
+      <pre><code>from jax.sharding import NamedSharding, PartitionSpec as P
+import jax.numpy as jnp
+
+x = jnp.arange(16 * 8, dtype=jnp.float32).reshape(16, 8)
+xs = jax.device_put(x, NamedSharding(mesh, P('X', 'Y')))   # 把数组按分片放到设备上
+
+print(xs.sharding.shard_shape(xs.shape))     # (4, 4)：每个设备上的块形状
+for s in xs.addressable_shards[:3]:
+    print(s.device, s.index, s.data.shape)   # 设备、它持有的切片、块形状
+# cpu:0 (slice(0, 4), slice(0, 4)) (4, 4)
+# cpu:1 (slice(0, 4), slice(4, 8)) (4, 4)
+# cpu:2 (slice(4, 8), slice(0, 4)) (4, 4)
+jax.debug.visualize_array_sharding(xs)       # 在终端里画出哪个设备持有哪块（需要 rich）</code></pre>
+      <p>下面的演示把这件事画出来。选一个数组形状、一个 mesh 和一个 spec，左边是数组被切成的块（颜色相同 = 同一块），右边是 mesh 上每个设备持有哪一块。</p>
+
+      <div class="demo" id="ps-demo">
+        <div class="demo-label">PartitionSpec 游乐场</div>
+        <div class="grid2">
+          <label>数组行数<select id="ps-r"><option>4</option><option>8</option><option selected>16</option><option>12</option><option>32</option></select></label>
+          <label>数组列数<select id="ps-c"><option>4</option><option selected>8</option><option>16</option><option>6</option></select></label>
+          <label>mesh 轴 x 大小<select id="ps-x"><option>1</option><option>2</option><option selected>4</option><option>8</option></select></label>
+          <label>mesh 轴 y 大小<select id="ps-y"><option>1</option><option selected>2</option><option>4</option></select></label>
+          <label>mesh 轴 z 大小<select id="ps-z"><option selected>1</option><option>2</option></select></label>
+          <label>spec 第 0 维<select id="ps-s0"></select></label>
+          <label>spec 第 1 维<select id="ps-s1"></select></label>
+        </div>
+        <div class="codeline" id="ps-code"></div>
+        <div class="ps-wrap">
+          <div><h4>数组（每格一个元素，同色 = 同一块）</h4><div class="arr" id="ps-arr"></div></div>
+          <div><h4>mesh 上的设备（点击一个设备看它的块）</h4><div class="devs" id="ps-devs"></div></div>
+        </div>
+        <div class="readout" id="ps-out"></div>
+        <p class="note">设备编号按 mesh 的行优先顺序（x 最外、z 最内），和 <code>jax.make_mesh</code> 在 CPU 上的结果一致；真实 TPU/GPU 上 <code>make_mesh</code> 可能按物理拓扑重排设备，但「哪个 mesh 坐标拿哪一块」的规则不变。</p>
+      </div>
+
+      <p>可以试几种典型的 spec：</p>
+      <ul>
+        <li><code>P('x', None)</code>：按行切 4 份，y 轴上的两台设备拿同一块（复制 2 份）。这就是数据并行里的激活。</li>
+        <li><code>P('x', 'y')</code>：8 份互不相同的块，没有复制，内存最省。</li>
+        <li><code>P(('x','y'), None)</code> 和 <code>P(('y','x'), None)</code>：都切成 8 份，但设备拿到的是不同的行段，这就是元组里「顺序」的意义。</li>
+        <li><code>P(None, None)</code>：全复制。行数选 12、x 选 8，会看到整除失败的报错。</li>
+      </ul>
+
+      <h3>分片矩阵乘法要什么通信</h3>
+      <p>本系列《集合通信与分片矩阵乘法》一篇推过，分片矩阵乘法 \(C = A\cdot B\) 按「收缩维有没有被切」分成几种情形。这里换成 PartitionSpec 的语言复述一遍，后面看 HLO 时会用到：</p>
+      <ol>
+        <li><strong>收缩维都没切</strong>：\(A[I_X, J]\cdot B[J, K_Y] \to C[I_X, K_Y]\)，各算各的，不需要通信。</li>
+        <li><strong>只有一边的收缩维被切</strong>：\(A[I, J_X]\cdot B[J, K]\)，先 all-gather 把 \(A\) 的收缩维拼完整，再按情形 1 算。</li>
+        <li><strong>两边收缩维沿同一轴切</strong>：\(A[I, J_X]\cdot B[J_X, K] \to C[I, K]\{U_X\}\)，每台设备得到部分和，要 all-reduce（结果复制）或 reduce-scatter（结果再切开）。</li>
+        <li><strong>两边非收缩维沿同一轴切</strong>：\(A[I_X, J]\cdot B[J, K_X]\)，结果不能同时沿 X 切两次，必须先 all-gather 其中一个。</li>
+      </ol>
+
+      <h2 id="auto">自动模式：分片传播和 with_sharding_constraint</h2>
+      <p>自动模式下，你只给输入（可能还有输出）指定分片，中间所有数组的分片由 XLA 的分片传播（现在是 Shardy，之前叫 GSPMD）推断，需要的通信也由它插入。Scaling Book 的例子：</p>
+      <pre><code>Auto = jax.sharding.AxisType.Auto
+mesh = jax.make_mesh(axis_sizes=(4, 2), axis_names=('X', 'Y'), axis_types=(Auto, Auto))
+jax.set_mesh(mesh)
+
+In = jnp.zeros((8, 2048), dtype=jnp.bfloat16, device=jax.NamedSharding(mesh, jax.P('X', 'Y')))
+W  = jnp.zeros((2048, 8192), dtype=jnp.bfloat16, device=jax.NamedSharding(mesh, jax.P('Y', None)))
+
+def matmul_square(In, W):
+    return jnp.einsum('bd,df->bf', jnp.square(In), W)
+
+jit_matmul = jax.jit(matmul_square, out_shardings=jax.P('X', None)).lower(In, W).compile()
+out = jit_matmul(In, W)</code></pre>
+      <ul class="lines">
+        <li><code>In</code> 是 \(\text{In}[B_X, D_Y]\)：batch 沿 X 切 4 份，\(d_\text{model}\) 沿 Y 切 2 份；<code>W</code> 是 \(W[D_Y, F]\)，收缩维沿 Y 切。这正是情形 3。</li>
+        <li><code>out_shardings=jax.P('X', None)</code>：要求输出沿 batch 切、沿 F 复制。于是编译器必须先算出部分和 \(\text{Out}[B_X, F]\{U_Y\}\)，再沿 Y 做 all-reduce。</li>
+        <li><code>.lower(...).compile()</code>：提前编译，可以用 <code>jit_matmul.as_text()</code> 看 HLO。</li>
+      </ul>
+      <p>书里给出的（大幅简化的）HLO 是一个 fusion 接一个 AllReduce，fusion 的输入形状是 <code>bf16[2,1024]</code> 和 <code>bf16[8192,1024]</code>，输出 <code>bf16[2,8192]</code>。注意这些都是<strong>每设备的局部形状</strong>：batch 8 被切 4 份是 2，\(d_\text{model}\) 2048 被切 2 份是 1024。我在 CPU 上编译一个同构的小例子，HLO 里同样出现了</p>
+      <pre><code>ROOT %all-reduce = f32[4,32]{1,0} all-reduce(%ynn_fusion), channel_id=1,
+     replica_groups=[4,2]&lt;=[8], use_global_device_ids=true, to_apply=%add.clone</code></pre>
+      <p><code>replica_groups=[4,2]&lt;=[8]</code> 是 iota 形式的分组写法：把 0 到 7 排成 4×2，每一行是一组，即 {0,1}、{2,3}、{4,5}、{6,7}，正好是沿 Y 轴的 4 个组。读 profile 时，<strong>从 replica_groups 反推这次通信沿哪个 mesh 轴</strong>是很常用的技巧，后面的例题会用到。</p>
+      <p>自动传播不总是对的。Scaling Book 的说法是：有时你看 profile 会发现一个巨大的 AllGather 占了 80% 的时间，而它本来不需要。这时可以用 <code>jax.lax.with_sharding_constraint</code> 在中间结果上「钉」一个分片，引导编译器：</p>
+      <pre><code>def mlp(x, W_in, W_out):
+    hidden = jnp.einsum('bd,df->bf', x, W_in)
+    hidden = jax.lax.with_sharding_constraint(hidden, jax.P('X', 'Y'))  # 强制隐层沿 (batch→X, F→Y) 切
+    return jnp.einsum('bf,fd->bd', hidden, W_out)</code></pre>
+      <p>书里说，在自动分区的世界里，这种控制中间结果分片的写法占了 JAX 并行编程的大约 60%。但它的问题也很明显：你可以给每个中间变量都加约束，还是不确定编译器最终会做什么。书里管这叫 compiler tickling（「挠编译器痒痒」），不是一个愉快的编程模型。</p>
+
+      <h2 id="explicit">显式模式：把分片写进类型</h2>
+      <p>显式模式把分片传播从编译器挪到 JAX 自己：每个 JAX 操作有一条分片规则，从输入分片算出输出分片，结果成为数组<strong>类型</strong>的一部分，追踪时就能看到。</p>
+      <pre><code>Explicit = jax.sharding.AxisType.Explicit
+mesh = jax.make_mesh((4, 2), ('X', 'Y'), axis_types=(Explicit, Explicit))
+jax.set_mesh(mesh)
+
+In = jnp.zeros((8, 2048), dtype=jnp.bfloat16, out_sharding=jax.P('X', 'Y'))
+W  = jnp.zeros((2048, 8192), dtype=jnp.bfloat16, out_sharding=jax.P('Y', None))
+
+@jax.jit
+def matmul_square(In, W):
+    print(jax.typeof(In))   # bfloat16[8@X,2048@Y]
+    print(jax.typeof(W))    # bfloat16[2048@Y,8192]
+    return jnp.einsum('bd,df->bf', jnp.square(In), W)
+
+matmul_square(In, W)        # 报错</code></pre>
+      <p>类型里的 <code>8@X</code> 读作「长度 8，沿 X 切」。逐元素操作的规则很简单（输出和输入同分片），但这里的 einsum 是情形 3：两边收缩维都沿 Y 切，输出可以是 <code>P('X', 'Y')</code>（做 reduce-scatter），也可以是 <code>P('X', None)</code>（做 all-reduce），没有唯一答案。显式模式不替你猜，直接在追踪时报错：</p>
+      <pre><code>Contracting dimensions are sharded and it is ambiguous how the output should be sharded.
+Please specify the output sharding via the `out_sharding` parameter.
+Got lhs_contracting_spec=('Y',) and rhs_contracting_spec=('Y',)</code></pre>
+      <p>补上 <code>out_sharding</code> 就行，输出类型变成 <code>bfloat16[8@X,8192@Y]</code>：</p>
+      <pre><code>@jax.jit
+def matmul_square(In, W):
+    return jnp.einsum('bd,df->bf', jnp.square(In), W, out_sharding=jax.P('X', 'Y'))</code></pre>
+      <p>上面两段报错和类型输出是我在本地跑出来的，和书中一致。显式和自动可以混用（<code>jax.sharding.auto_axes</code> / <code>explicit_axes</code>）。我的体会是：显式模式适合「我知道每一步该怎么切」的模型代码，错误在追踪时就暴露；自动模式适合快速把单卡代码铺开。</p>
+
+      <h2 id="shmap">shard_map：每设备视角和显式集合通信</h2>
+      <p><code>jit</code> 给的是全局视角：你写的是对整个数组的操作。<code>shard_map</code> 给的是<strong>每设备视角</strong>：函数体在每个设备上运行一次，看到的是本设备那一块，跨设备的事情全部由你用集合通信原语写出来。Scaling Book 的第一个例子：</p>
+      <pre><code>mesh = jax.make_mesh((2, 4), ('x', 'y'), (Explicit, Explicit))
+jax.set_mesh(mesh)
+x = jnp.arange(0, 512, dtype=jnp.int32, out_sharding=jax.P(('x', 'y')))
+
+@jax.shard_map(in_specs=jax.P(('x', 'y')), out_specs=jax.P())
+def slice_and_average(x):
+    assert x.shape == (512 // 8,)                         # 每个设备只看到 64 个元素
+    return jax.lax.pmean(x[:4], axis_name=('x', 'y'))     # 各取前 4 个，跨全部设备求平均
+
+out = slice_and_average(x)
+assert out.shape == (4,)</code></pre>
+      <ul class="lines">
+        <li><code>in_specs</code>：输入怎么切给每个设备，这里一维数组沿 (x, y) 切 8 份。</li>
+        <li><code>out_specs=jax.P()</code>：输出在所有设备上相同（复制），所以全局形状就是局部形状 (4,)。</li>
+        <li>结果等于 <code>mean(x[0:4], x[64:68], x[128:132], …)</code>。这种「每块各取前几个」的不规则切片，用全局视角写很别扭，编译器也容易插错通信。</li>
+      </ul>
+      <p>shard_map 里可用的集合通信，和它们在 ring 上的代价（\(n\) 个设备，数组每设备 \(V\) 字节，单向带宽 \(W\)，忽略延迟）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>原语</th><th>语义</th><th>对应集合通信</th><th>大致时间</th></tr></thead>
+          <tbody>
+            <tr><td><code>jax.lax.psum(x, ax)</code> / <code>pmean</code></td><td>沿轴求和 / 平均，结果每设备相同</td><td>all-reduce</td><td>\(2\frac{n-1}{n}\cdot V/W\)</td></tr>
+            <tr><td><code>jax.lax.all_gather(x, ax, axis=k, tiled=True)</code></td><td>把各设备的块沿第 k 维拼起来</td><td>all-gather</td><td>\(\frac{n-1}{n}\cdot nV/W\)</td></tr>
+            <tr><td><code>jax.lax.psum_scatter(x, ax, scatter_dimension=k, tiled=True)</code></td><td>求和后沿第 k 维切开，各拿一份</td><td>reduce-scatter</td><td>\(\frac{n-1}{n}\cdot V/W\)</td></tr>
+            <tr><td><code>jax.lax.ppermute(x, ax, perm)</code></td><td>按 (源, 目的) 对点对点发送</td><td>send/recv</td><td>一跳 \(V/W\)</td></tr>
+            <tr><td><code>jax.lax.all_to_all(x, ax, split_axis, concat_axis)</code></td><td>每个设备把数组切 n 份，第 j 份发给设备 j</td><td>all-to-all</td><td>约 \(\frac{n-1}{n}\cdot V/W\)（与拓扑有关）</td></tr>
+            <tr><td><code>jax.lax.axis_index(ax)</code> / <code>axis_size(ax)</code></td><td>本设备在轴上的下标 / 轴大小</td><td>无通信</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h3>手写三种并行</h3>
+      <p>有了这些原语，前几篇讲的并行都能直接写出来。下面三段我都和单设备结果对过数值。</p>
+      <p><strong>张量并行的 MLP</strong>：\(\text{In}[B_X, D]\cdot W_\text{in}[D, F_Y]\cdot W_\text{out}[F_Y, D]\)。第一个矩阵按列切、第二个按行切，中间不通信，最后一次 all-reduce：</p>
+      <pre><code>import functools
+
+@jax.jit
+@functools.partial(jax.shard_map,
+                   in_specs=(jax.P('X', None), jax.P(None, 'Y'), jax.P('Y', None)),
+                   out_specs=jax.P('X', None))
+def tp_mlp(x, w_in, w_out):
+    h = jax.nn.relu(x @ w_in)            # 局部 [B/X, F/Y]，不需要通信
+    partial = h @ w_out                  # 局部 [B/X, D]，但只是沿 F 的部分和
+    return jax.lax.psum(partial, 'Y')    # 沿 Y all-reduce，得到完整结果</code></pre>
+      <p>如果下一层接受沿 D 切开的输入（序列并行的思路），把最后一行换成 reduce-scatter，通信量减半：</p>
+      <pre><code>    return jax.lax.psum_scatter(h @ w_out, 'Y', scatter_dimension=1, tiled=True)  # 输出 P('X','Y')</code></pre>
+      <p><strong>FSDP 的一层</strong>：权重沿 \(D\) 按 X 切存放，用之前 all-gather：</p>
+      <pre><code>@jax.jit
+@functools.partial(jax.shard_map, in_specs=(jax.P('X', None), jax.P('X', None)),
+                   out_specs=jax.P('X', None))
+def fsdp_layer(x, w_shard):
+    w = jax.lax.all_gather(w_shard, 'X', axis=0, tiled=True)   # [D/X, F] → [D, F]
+    return x @ w</code></pre>
+      <p><strong>数据并行的一步 SGD</strong>：这里有个容易踩的坑。</p>
+      <pre><code>def loss(w, x, y):
+    return jnp.mean((x @ w - y) ** 2)
+
+@jax.jit
+@functools.partial(jax.shard_map, in_specs=(jax.P(), jax.P(('X', 'Y')), jax.P(('X', 'Y'))),
+                   out_specs=jax.P())
+def dp_step(w, x, y):
+    w_local = jax.lax.pcast(w, ('X', 'Y'), to='varying')   # 把复制的 w 标记为「每设备各自的副本」
+    g = jax.grad(loss)(w_local, x, y)                      # 只含本设备数据的梯度
+    g = jax.lax.pmean(g, ('X', 'Y'))                       # 显式 all-reduce 求平均
+    return w - 0.1 * g</code></pre>
+      <p>新版 shard_map 会跟踪每个值是「在轴上各不相同」（varying）还是「在轴上相同」（invariant）。<code>w</code> 按 <code>P()</code> 传入，是 invariant 的。如果直接对它求梯度，JAX 会在反向自动插入一次 psum（因为前向里隐含了一次从 invariant 到 varying 的广播，它的转置就是求和），得到的已经是<strong>所有设备梯度之和</strong>。我实测这个值正好是单设备平均梯度的 8 倍（8 个设备）；如果再 <code>pmean</code> 一次，就会把学习率放大 8 倍而不报错。先 <code>pcast</code> 成 varying 再求导，梯度就是纯本地的，通信完全由自己写出来，语义清楚。Scaling Book 的集合矩阵乘法例子里也用了 <code>pcast(..., to='varying')</code> 来初始化累加器，原因相同。</p>
+
+      <h2 id="cmm">例子：集合矩阵乘法</h2>
+      <p>来看一个 shard_map 真正赚到性能的例子。要算 \(A[B_X, D_Y]\cdot_D W[D, F_Y]\to \text{Out}[B_X, F_Y]\)：激活沿 \(D\) 切（比如上一层用了 reduce-scatter 的 TP），权重沿 \(F\) 切。朴素做法是情形 2：</p>
+      <ol>
+        <li>\(A[B_X, D] = \text{AllGather}_Y(A[B_X, D_Y])\)</li>
+        <li>\(\text{Out}[B_X, F_Y] = A[B_X, D]\cdot_D W[D, F_Y]\)</li>
+      </ol>
+      <p>问题在第 1 步：all-gather 结束前矩阵乘一点也做不了，通信完全暴露。<strong>集合矩阵乘法</strong>（collective matmul，Wang 等 2023）的思路是把 all-gather 拆成 \(|Y|-1\) 次环形的 <code>ppermute</code>：每一步先用手上现有的那块 \(A\)（\(D\) 方向的一段）乘上 \(W\) 里对应的那几行，同时把这块 \(A\) 传给邻居；下一步用收到的新块再乘、再传。\(|Y|\) 步之后，每个设备都用遍了 \(A\) 的全部 \(D\) 段，累加起来就是完整结果，而每一步的通信都和那一步的矩阵乘同时进行。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 640 300" role="img" aria-label="集合矩阵乘法：4 个设备沿环传递 A 的块，同时计算局部矩阵乘">
+          <g id="cmm-svg"></g>
+        </svg>
+        <figcaption>图 1　集合矩阵乘法，|Y| = 4。每一列是一个设备，每一行是一步。方块里的数字是该设备此刻手上 A 的哪一段（沿 D），它乘上 W 中同一段对应的行；箭头是同时进行的 ppermute（向左循环移位）。自绘示意。</figcaption>
+      </figure>
+
+      <p>书里的实现（我原样跑过，结果和普通 jit 矩阵乘逐元素相等）：</p>
+      <pre><code>def collective_matmul_allgather_lhs_contracting(lhs, rhs):
+    # lhs：本地 A 块 [B/X, D/Y]，会在环上流动；rhs：本地 W 块 [D, F/Y]，不动
+    axis_size = jax.lax.axis_size('Y')        # 例子里是 4
+    idx = jax.lax.axis_index('Y')             # 本设备在 Y 轴上的下标
+    chunk_size = lhs.shape[1]                 # D/Y
+
+    def f(i, carrys):
+        accum, lhs = carrys
+        # 第 i 步手上的 A 块，原本属于设备 (idx + i) % axis_size，取 W 中对应的 D 段
+        rhs_chunk = jax.lax.dynamic_slice_in_dim(rhs, (idx + i) % axis_size * chunk_size, chunk_size)
+        update = lhs @ rhs_chunk              # 局部矩阵乘，[B/X, F/Y]
+        lhs = jax.lax.ppermute(                # 同时把 A 块循环左移给邻居
+            lhs, axis_name='Y',
+            perm=[(j, (j - 1) % axis_size) for j in range(axis_size)])
+        return accum + update, lhs
+
+    accum = jnp.zeros((lhs.shape[0], rhs.shape[1]), dtype=lhs.dtype)
+    accum = jax.lax.pcast(accum, ('X', 'Y'), to='varying')     # 累加器是每设备各自的
+    accum, lhs = jax.lax.fori_loop(0, axis_size - 1, f, (accum, lhs), unroll=True)
+
+    # 最后一块：传完最后一次后再乘，循环里就少传一次
+    i = axis_size - 1
+    rhs_chunk = jax.lax.dynamic_slice_in_dim(rhs, (idx + i) % axis_size * chunk_size, chunk_size)
+    return accum + lhs @ rhs_chunk
+
+jit_sharded_f = jax.jit(jax.shard_map(
+    collective_matmul_allgather_lhs_contracting,
+    in_specs=(jax.P('X', 'Y'), jax.P(None, 'Y')), out_specs=jax.P('X', 'Y')))</code></pre>
+      <ul class="lines">
+        <li>为什么是 <code>(idx + i) % axis_size</code>：每步左移一次，第 \(i\) 步时设备 idx 手上的块原本来自设备 idx+i。</li>
+        <li><code>unroll=True</code>：把循环展开，XLA 才能把第 \(i\) 步的 <code>ppermute</code> 和同一步的矩阵乘排在一起并行执行。</li>
+        <li>循环只跑 \(|Y|-1\) 次，最后一块单独算，避免一次多余的传输。</li>
+      </ul>
+      <p>书中在 TPU 上的 profile：默认 jit 版本 311 µs，开头有一个阻塞的大 AllGather；集合矩阵乘法版本 244 µs，profile 里看不到 AllGather 了，全是有用的计算；作为参照，收缩维不切时的纯矩阵乘是 224 µs，已经很接近。同样的思路可以做 reduce-scatter 一侧（对应 MLP 的下投影，边累加边把部分结果往下传），书里把它和双向通信版本留作了练习。</p>
+
+      <h2 id="xla">Profiling 之前：XLA 编译栈</h2>
+      <p>读 profile 前先要知道 profile 里的名字从哪来。Scaling Book 的 Profiling 一章从软件栈讲起：</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 640 200" role="img" aria-label="JAX 到 TPU 的编译栈">
+          <g id="stack-svg"></g>
+        </svg>
+        <figcaption>图 2　从 JAX 代码到设备上执行的各层。profile 里的 op 名来自 HLO 这一层。自绘示意。</figcaption>
+      </figure>
+
+      <ul>
+        <li><strong>JAX</strong>：NumPy 风格的程序。<code>jax.jit</code> 追踪它，产生 <strong>StableHLO</strong>，一种与平台无关的机器学习计算 IR。</li>
+        <li><strong>HLO</strong>：XLA 编译器把 StableHLO 降低成 HLO，跑很多遍优化（融合、布局、分片、调度）。profile 里看到的就是这一层的 op，比如 <code>fusion.3</code>、<code>all-reduce.1</code>。</li>
+        <li><strong>LLO</strong>（TPU）：low-level optimizer IR，直接给 TPU 编程：安排各级存储之间的拷贝、把数据推进脉动阵列、调度 DMA。再编译成机器码装进 TPU 的指令存储执行。GPU 后端则是生成 kernel 或调用 cuBLAS/cuDNN 这类库。</li>
+        <li><strong>Pallas</strong>：当编译器在底层做得不好时的逃生舱口，手写 kernel。</li>
+      </ul>
+      <p>平时我们在 JAX 层改代码，但要读懂为什么慢，常常要懂一点 HLO 的语义。</p>
+
+      <h2 id="jaxprof">JAX profiler：Trace Viewer、HLO op、Graph Viewer、显存</h2>
+      <p>采集一段 trace：</p>
+      <pre><code>import jax
+with jax.profiler.trace("/tmp/tensorboard"):        # 这个 with 块里的执行都会被记录
+    key = jax.random.key(0)
+    x = jax.random.normal(key, (1024, 1024))
+    y = x @ x
+    y.block_until_ready()                           # JAX 是异步派发的，不等它就可能没录到
+
+# 然后：pip install -U xprof，tensorboard --logdir=/tmp/tensorboard</code></pre>
+      <p>两个细节：JAX 默认<strong>异步派发</strong>，Python 函数返回时设备可能还在算，所以计时和 profile 都要 <code>block_until_ready()</code>；另外训练循环里通常跳过前几步（编译和预热），只录稳态的几步，可以用 <code>jax.profiler.start_trace</code> / <code>stop_trace</code> 精确控制范围。给代码加上 <code>jax.named_scope("attention")</code> 之类的标签，trace 里就能看到对应的名字。</p>
+      <p>打开以后主要有三个工具：Trace Viewer（时间线）、Graph Viewer（HLO 图）、Memory Profile / Memory Viewer（显存）。</p>
+
+      <h3>Trace Viewer</h3>
+      <p>Trace Viewer 按时间顺序画出每个 TPU 核上发生的事。几个要点：</p>
+      <ul>
+        <li>最上面一行 <strong>XLA Ops</strong> 是设备上真实执行的操作，名字是 HLO 名。其它行是根据 <code>jax.named_scope</code>、<code>jax.named_call</code> 和 Python 调用栈近似出来的。</li>
+        <li>通常只需要看 TPU:0，因为所有核执行同样的程序（SPMD）。</li>
+        <li>Transformer 会呈现出重复的块，每一块就是一层；对照代码能分出哪段是注意力、哪段是 MLP。</li>
+        <li>点击一个 XLA op 可以看到它来自哪行代码，以及跳到 Graph Viewer 的链接。</li>
+        <li>导航用 WASD：A/D 左右平移，W/S 放大缩小。</li>
+      </ul>
+
+      <h3>怎么读一个 XLA op</h3>
+      <p>书里的例子：</p>
+      <pre><code>%fusion.3 = bf16[32,32,4096]{2,1,0:T(8,128)(2,1)S(1)} fusion(bf16[32,32,8192]{2,1,0:T(8,128)(2,1)S(1)} %fusion.32), kind=kCustom, calls=%all-reduce-scatter.3</code></pre>
+      <ul>
+        <li><strong>名字</strong> <code>fusion.3</code>：一个 dot 或 fusion 最多包含一次矩阵乘，加上一些相关的逐元素（VPU）操作。</li>
+        <li><strong>形状</strong> <code>bf16[32,32,4096]</code>：输出的 dtype 和形状，bf16 每元素 2 字节。</li>
+        <li><strong>布局</strong> <code>{2,1,0:T(8,128)(2,1)}</code>：维度在物理内存里的顺序（从最次要到最主要）和分块（tiling）方式。</li>
+        <li><strong>存储位置</strong> <code>S(1)</code>：在 VMEM；<code>S(0)</code>（常省略）是 HBM，<code>S(2)</code>、<code>S(3)</code> 是其它存储空间。</li>
+        <li><strong>参数</strong>：输入 <code>%fusion.32</code>，形状 <code>bf16[32,32,8192]</code>。顺着参数往上找，就能知道谁喂给了谁。</li>
+        <li><code>calls=%all-reduce-scatter.3</code>：这个 fusion 实际上是一次 reduce-scatter（最后一维 8192 → 4096，说明沿它切了 2 份）。</li>
+      </ul>
+      <p>布局里的 tiling 稍微展开一下。<code>f32[3,5]{1,0:T(2,2)}</code>：<code>1,0</code> 从右往左读，表示维度 0 最主要、维度 1 最次要，即物理上还是 [3, 5] 的行优先；<code>T(2,2)</code> 表示按 2×2 的小块存放，块内行优先。因为要凑整块，数组被填充成 [4, 6]，内存是原来的 24/15 = 1.6 倍。大数组上常见的 <code>T(8,128)(2,1)</code> 是两级分块：外层 (8, 128)，内层 (2, 1)，后者是给 bf16 用的，保证每次读取是 4 字节的倍数。分块会影响数据进出 VMEM 的效率，XLA 有时会在程序中间插入「重新分块 / 重新布局」的 copy，开销不一定小。</p>
+
+      <h3>Graph Viewer</h3>
+      <p>复杂的 fusion 在 Graph Viewer 里画成图，鼠标悬停往往能看到定义它的代码行。书里的建议是多盯着 HLO 图看，练习把 HLO op 对应回自己的代码。</p>
+
+      <h3>一个（近似）真实的例子</h3>
+      <p>书里给了一个假 Transformer 的 profile，在 8 核 TPU v2 上，4 路数据并行、2 路模型并行。放大 FFW 块，上投影是一个 fusion，输入 <code>bf16[8, 1024, 8192]</code> 和 <code>bf16[8192, 16384]</code>，输出 <code>bf16[8, 1024, 16384]</code>。这是局部形状，还原成全局就是</p>
+      $$X\colon \text{bf16}[32, 1024, 8192]\ \cdot\ W_\text{in}\colon \text{bf16}[8192, 32768] \to \text{bf16}[32, 1024, 32768].$$
+      <p>它该花多久？每个数据并行分片的 batch 是 \(8\times1024 = 8192\) 个 token，稳稳是计算受限。8 个 v2 核，每核 \(2.3\times10^{13}\) FLOP/s：</p>
+      $$\frac{2\cdot 32\cdot 1024\cdot 8192\cdot 32768}{2.3\times10^{13}\times 8}\approx 95.6\ \text{ms},$$
+      <p>profile 里实测 96 ms，几乎就是满算力。第二个矩阵乘末尾藏着一个小 fusion，点开是 <code>calls=%all-reduce-scatter.1</code>，即一次 reduce-scatter。估算：v2 4×2 上只需一跳，双向带宽 \(1.2\times10^{11}\) 字节/秒；数组沿 batch 切 4 份后每份 \(2\cdot8\cdot1024\cdot8192\) 字节 = 128 MB，约 1.1 ms；实测 1.13 ms。<strong>先用 roofline 算出「应该多久」，再和 profile 里的「实际多久」比</strong>，这是读 profile 最核心的动作：两者接近就说明这一块已经没什么可挖，差得远的地方才是该看的。</p>
+
+      <h3>显存</h3>
+      <p>Memory Profile 画出程序显存随时间的变化，用来查 OOM。书里的例子里能看到约 7.5 GB 分配给了参数，还有约 8.5 GB 空闲，说明还能放下更多东西。</p>
+
+      <h3>书里的两道题</h3>
+      <p><strong>题 1</strong>：只看 profile，猜出程序在算什么。profile 里有一个 reduce、两个大 fusion 和一个 all-reduce。第一个大 fusion 是</p>
+      <pre><code>%fusion.1 = bf16[4096]{0:T(1024)(128)(2,1)} fusion(bf16[4096,8192]{1,0:T(8,128)(2,1)} %param.1, bf16[8192]{0:T(1024)(128)(2,1)} %reduce.6), kind=kLoop, calls=%fused_computation.1</code></pre>
+      <p>即每个分片上 <code>bf16[8192] * bf16[4096, 8192] -> bf16[4096]</code>。末尾 all-reduce 的 <code>replica_groups={{0,16,32,48,64,80,96,112}, ...}</code> 每组 8 个设备，说明是 8 路模型并行，于是真实形状是 <code>bf16[8, 8192] * bf16[32768, 8192] -> bf16[8, 32768]</code>。答案是两次矩阵乘：<code>einsum('wf,bf->bw', w2, einsum('fw,bw->bf', w1, x))</code>。</p>
+      <p><strong>题 2</strong>：一个用 GSPMD 自动分区的朴素 Transformer，用 <code>with_sharding_constraint</code> 修正分片。书里记录最初每层约 184 ms，优化后 67 ms；后来 XLA 改进了，朴素版本已经降到约 90 ms，优化版本只快约 10 ms（80 ms）。这个注脚本身就说明：自动分区的质量随编译器版本变化，profile 要在自己的版本上重新看。</p>
+
+      <h2 id="torchprof">PyTorch profiler</h2>
+      <p>GPU 上用 PyTorch 时，对应的工具是 <code>torch.profiler</code>。Playbook 给的用法，我加了注释和几个常用参数：</p>
+      <pre><code>import torch
+from torch.profiler import profile, schedule, ProfilerActivity, record_function, tensorboard_trace_handler
+
+with profile(
+    activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA],   # 同时记录 CPU 侧和 GPU 侧
+    schedule=schedule(wait=1, warmup=1, active=3, repeat=1),     # 跳过 1 步、预热 1 步、记录 3 步
+    on_trace_ready=tensorboard_trace_handler("./log/profile"),   # 每段记录完写出 trace 文件
+    record_shapes=True,                                          # 记录每个算子的输入形状
+    profile_memory=True,                                         # 记录显存分配（trace 会更大）
+    with_stack=True,                                             # 记录 Python 调用栈
+) as prof:
+    for step in range(steps):
+        with record_function("train_step"):                      # 自定义标签，会出现在 trace 里
+            train_step()
+        prof.step()                                              # 告诉 profiler 一步结束了
+
+print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
+</code></pre>
+      <ul class="lines">
+        <li><code>schedule</code>：profiler 本身有开销，头几步还有编译、缓存分配器热身等干扰，所以只录中间稳态的几步。</li>
+        <li><code>prof.step()</code>：必须每步调一次，schedule 靠它计数。</li>
+        <li><code>key_averages().table(...)</code>：按算子聚合的表，按 GPU 总时间排序，快速看最贵的是什么（新版本里这一列也叫 device time）。</li>
+        <li>生成的 trace 可以在 TensorBoard 里看，也可以导出 JSON 后用 <code>chrome://tracing</code> 或 Perfetto 打开。</li>
+      </ul>
+      <p>trace 的结构：上面是 CPU 线程，能看到 Python 层的 <code>aten::</code> 算子一层层往下调，最后是 <code>cudaLaunchKernel</code>；下面是 GPU 上的若干 CUDA 流，计算 kernel 在一条流上，NCCL 通信 kernel 通常在另一条（名字形如 <code>ncclDevKernel_AllReduce_…</code>，旧版本是 <code>ncclKernel_…</code>）。CPU 是异步发 kernel 的，所以 CPU 上的启动和 GPU 上的执行之间有时间差；trace 里会用箭头把一次启动和对应的 kernel 连起来。Playbook 列出的、trace 能帮你发现的问题：</p>
+      <ul>
+        <li>本可以重叠却串行执行的计算和通信；</li>
+        <li>GPU 在等数据传输时的空闲；</li>
+        <li>CUDA 同步，以及 CPU 和 GPU 之间的数据搬运；</li>
+        <li>GPU 上的 kernel 启动开销。</li>
+      </ul>
+      <p>另外几个配套工具：</p>
+      <ul>
+        <li><strong>计时要用 CUDA event</strong>。CUDA 操作是异步的，用 <code>time.time()</code> 测到的只是 Python 发起 kernel 的开销。正确做法是 <code>torch.cuda.Event(enable_timing=True)</code> 在前后各 <code>record()</code> 一次，<code>torch.cuda.synchronize()</code> 之后用 <code>start.elapsed_time(end)</code> 读毫秒数，测之前先跑几次预热。</li>
+        <li><strong>单个 kernel 的细节用 Nsight Compute</strong>：<code>ncu --set full -o output python layer_norm.py</code>，打开 <code>output.ncu-rep</code> 能看到显存吞吐、合并访存、占用率等，并附带改进建议。</li>
+        <li><strong>显存</strong>：除了 <code>profile_memory=True</code>，PyTorch 还有显存快照：<code>torch.cuda.memory._record_memory_history()</code> 开始记录，<code>torch.cuda.memory._dump_snapshot("snap.pickle")</code> 导出，拖进 pytorch.org/memory_viz 查看每块显存是哪行代码分配的。Playbook 用这类图说明了一步训练里显存怎么随前向上升、随反向下降。</li>
+      </ul>
+
+      <h2 id="read">怎么读一条 trace：计算、通信、空闲</h2>
+      <p>不管是 TPU 还是 GPU，读分布式训练的 trace 我会按同一个顺序来：</p>
+      <ol>
+        <li><strong>找到一步的边界</strong>，量出步时 \(T_\text{step}\)。看稳态的步，排除第一步。</li>
+        <li><strong>分三类时间</strong>。在计算流上，\(T_\text{step}\) 可以拆成三部分：
+          $$T_\text{step} = T_\text{compute} + T_\text{exposed comm} + T_\text{idle}.$$
+          \(T_\text{compute}\) 是计算 kernel 在跑的时间；\(T_\text{exposed comm}\) 是通信在跑、计算却没在跑的时间（计算在等通信）；\(T_\text{idle}\) 是两者都没在跑的时间（等 CPU、等同步、等数据）。和计算同时进行的通信不计入步时，这部分叫「被藏住的通信」。</li>
+        <li><strong>和 roofline 比</strong>。按模型 FLOPs 算出理想计算时间，\(\text{MFU} = \text{模型 FLOPs} / (T_\text{step}\cdot \text{peak})\)。如果 \(T_\text{compute}\) 本身就远大于理想值，问题在 kernel（看 key_averages 表、ncu）；如果 \(T_\text{exposed comm}\) 大，问题在重叠或并行方案；如果 \(T_\text{idle}\) 大，问题在 CPU 侧。</li>
+        <li><strong>对着具体模式找原因</strong>：
+          <ul>
+            <li>每层开头一个大 all-gather，后面的计算等着它：FSDP 预取没生效，或者自动分区插了不该有的通信（JAX 下用 <code>with_sharding_constraint</code> 或改成 shard_map）。</li>
+            <li>反向全部结束后才开始一串 all-reduce：DDP 的分桶 hook 没起作用，或者梯度累积时每个 micro-batch 都在同步（应该用 <code>no_sync</code>）。</li>
+            <li>两个矩阵乘之间夹着 all-reduce / all-gather：TP 的通信在关键路径上，这是预期之内的；想消掉就要集合矩阵乘法这类重叠。</li>
+            <li>计算 kernel 之间有很多小空隙，CPU 那一行却很忙：启动受限，kernel 太碎，考虑融合或 CUDA Graph。</li>
+            <li>中间某处 GPU 全停，CPU 上有一次同步：比如 <code>loss.item()</code>、打印、把张量拷回 CPU。</li>
+            <li>某个通信 kernel 特别长：未必是带宽不够，集合通信要等所有 rank 到齐，长的那段可能是在等一个慢的 rank。要对比不同 rank 的 trace 才能分清。</li>
+            <li>重叠了，但计算 kernel 在重叠时变慢：通信 kernel 也占 SM，和计算抢资源。Playbook 专门提到了这种隐藏的争用。</li>
+          </ul>
+        </li>
+      </ol>
+      <p>下面的演示是一条<strong>虚构的</strong> trace（数字是我编的，单位只是示意的「毫秒」），用 4 层的小模型演示三种重叠：DDP 的梯度 all-reduce 与反向重叠、FSDP 的参数 all-gather 预取、TP 的集合矩阵乘法。可以开关重叠，调节「通信占 SM 导致的计算变慢」，或者在前向结束后插一次 CPU 同步，看步时和三类时间怎么变。</p>
+
+      <div class="demo" id="tl-demo">
+        <div class="demo-label">示意 trace 查看器（虚构数据，仅示意）</div>
+        <div class="row2">
+          <div class="seg" id="tl-scn">
+            <button data-s="ddp" aria-pressed="true">DDP 梯度同步</button>
+            <button data-s="fsdp" aria-pressed="false">FSDP 预取</button>
+            <button data-s="tp" aria-pressed="false">TP 集合矩阵乘</button>
+          </div>
+        </div>
+        <div class="row2">
+          <label><input type="checkbox" id="tl-ov" checked> 开启重叠</label>
+          <label><input type="checkbox" id="tl-sync"> 前向后插入一次 CPU 同步（如 <code>loss.item()</code>）</label>
+          <label>重叠时计算变慢 <input type="range" id="tl-ct" min="0" max="40" step="5" value="0"> <span id="tl-ct-o" class="kv">0%</span></label>
+        </div>
+        <div class="tl" id="tl-svg"></div>
+        <div class="legend" id="tl-leg"></div>
+        <div class="opinfo" id="tl-info">点击时间线上的块查看详情。</div>
+        <div class="readout" id="tl-out"></div>
+      </div>
+
+      <p>几件可以在演示里看出来的事：</p>
+      <ul>
+        <li>DDP：不重叠时，all-reduce 全部堆在反向之后，计算流在那段时间完全空着等；重叠后，每层反向一结束就开始同步这一层的梯度，只有最后算完反向的第 1 层的 all-reduce 暴露在外，这就是「最后一个桶」的代价。</li>
+        <li>FSDP：不预取时，每层前都要等一次 all-gather；预取后，只剩前向开头和反向开头各一次 all-gather 暴露。反向里 all-gather 和 reduce-scatter 共用一条通信流，所以「先发下一层的 all-gather、再发这一层的 reduce-scatter」这个顺序很重要，顺序反了预取就会被 reduce-scatter 堵住；最后一层的 reduce-scatter 总是暴露的。</li>
+        <li>TP：朴素做法每层两段通信都在关键路径上；集合矩阵乘法把它们拆成小块藏到矩阵乘后面，只剩一点首尾。</li>
+        <li>把「计算变慢」拉到 20% 以上，重叠的收益会被吃掉一部分。这就是为什么 DeepSeek-V3 要把通信限制在少量 SM 上。</li>
+        <li>CPU 同步会在计算流上留下一段空闲：GPU 跑完前向后，CPU 才开始发反向的 kernel。</li>
+      </ul>
+
+      <h2 id="summary">小结</h2>
+      <ul>
+        <li><code>jax.jit</code> 追踪函数得到 jaxpr → StableHLO → HLO，编译器看到整个程序，因此能替你推断分片、插入通信。</li>
+        <li>Mesh 给设备命名；PartitionSpec 为数组每一维写「沿哪些 mesh 轴切」，没提到的轴就是复制；每设备块形状 = 维度大小 / 对应轴大小之积。</li>
+        <li>三种模式：自动（编译器推断，用 <code>with_sharding_constraint</code> 纠偏）、显式（分片进类型，歧义时报错要求 <code>out_sharding</code>）、手动 shard_map（每设备视角，<code>psum</code> / <code>all_gather</code> / <code>psum_scatter</code> / <code>ppermute</code> / <code>all_to_all</code> 自己写）。</li>
+        <li>shard_map 里注意 varying / invariant：对复制的输入求梯度会自动带上 psum。</li>
+        <li>集合矩阵乘法把 all-gather 拆成 ppermute 环，和分块矩阵乘重叠；书中例子从 311 µs 降到 244 µs，接近无通信的 224 µs。</li>
+        <li>读 profile：认 HLO op（名字、形状、布局、存储空间、replica_groups），先用 roofline 估算再对照实测；在时间线上把步时拆成计算、暴露的通信、空闲三部分，按模式找原因。</li>
+      </ul>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>，Google DeepMind，2025：<a href="https://jax-ml.github.io/scaling-book/jax-stuff/">Part 10: Programming TPUs in JAX</a>（三种模式、Auto / Explicit / shard_map、集合矩阵乘法、习题）和 <a href="https://jax-ml.github.io/scaling-book/profiling/">Part 9: How to Profile TPU Programs</a>（软件栈、Trace Viewer、HLO op 的读法、Graph Viewer、示例 profile、显存、习题）。</li>
+        <li>Nouamane Tazi 等，<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook</a>，Hugging Face，2025：「Profiling GPU compute and communication」一节、附录 A1（Distributed Training Profiling）、数据并行一节里的重叠与分桶，以及 5D 一节末尾关于计算与通信争用的讨论。</li>
+        <li>JAX 文档：<a href="https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html">Explicit sharding</a>、<a href="https://docs.jax.dev/en/latest/notebooks/shard_map.html">shard_map</a>、<a href="https://docs.jax.dev/en/latest/profiling.html">Profiling</a>。</li>
+        <li>PyTorch 文档：<a href="https://pytorch.org/docs/stable/profiler.html">torch.profiler</a>、<a href="https://pytorch.org/docs/stable/torch_cuda_memory.html">Understanding CUDA Memory Usage</a>。</li>
+        <li>Shibo Wang 等，<a href="https://dl.acm.org/doi/10.1145/3567955.3567959">Overlap Communication with Dependent Computation via Decomposition in Large Deep Learning Models</a>，ASPLOS 2023（集合矩阵乘法）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const setPressed = (seg, btn) => seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+
+    // ---------- Figure: collective matmul ----------
+    (() => {
+      const g = document.getElementById('cmm-svg');
+      const n = 4, x0 = 120, dx = 125, y0 = 40, dy = 62;
+      let s = '';
+      for (let d = 0; d < n; d++) s += '<text x="' + (x0 + d * dx + 30) + '" y="22" text-anchor="middle" font-size="13" font-weight="600">设备 Y=' + d + '</text>';
+      for (let i = 0; i < n; i++) {
+        s += '<text x="10" y="' + (y0 + i * dy + 26) + '" font-size="13" class="soft">第 ' + i + ' 步</text>';
+        for (let d = 0; d < n; d++) {
+          const blk = (d + i) % n;
+          const x = x0 + d * dx, y = y0 + i * dy;
+          s += '<rect x="' + x + '" y="' + y + '" width="60" height="38" rx="6" class="' + (blk === d ? 'acc2' : 'acc') + '"/>' +
+               '<text x="' + (x + 30) + '" y="' + (y + 24) + '" text-anchor="middle" font-size="13" style="fill:#fff">A' + blk + '·W' + blk + '</text>';
+          if (i < n - 1) {
+            const tx = d === 0 ? x0 + (n - 1) * dx + 60 : x0 + (d - 1) * dx + 60;
+            if (d > 0) s += '<path d="M' + x + ' ' + (y + 44) + ' L' + (tx + 4) + ' ' + (y + dy - 4) + '" stroke="var(--text-faint)" fill="none" marker-end="url(#arr)"/>';
+          }
+        }
+        if (i < n - 1) s += '<path d="M' + x0 + ' ' + (y0 + i * dy + 44) + ' C ' + (x0 - 40) + ' ' + (y0 + i * dy + 56) + ', ' + (x0 + (n - 1) * dx + 110) + ' ' + (y0 + i * dy + 40) + ', ' + (x0 + (n - 1) * dx + 64) + ' ' + (y0 + i * dy + dy - 4) + '" stroke="var(--text-faint)" stroke-dasharray="3 3" fill="none" marker-end="url(#arr)"/>';
+      }
+      s = '<defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10z" fill="var(--text-faint)"/></marker></defs>' + s;
+      s += '<rect x="120" y="288" width="12" height="12" class="acc2"/><text x="138" y="298" font-size="12" class="soft">本设备原有的块</text>' +
+           '<rect x="260" y="288" width="12" height="12" class="acc"/><text x="278" y="298" font-size="12" class="soft">从邻居收到的块</text>';
+      g.innerHTML = s;
+      g.parentNode.setAttribute('viewBox', '0 0 640 305');
+    })();
+
+    // ---------- Figure: compile stack ----------
+    (() => {
+      const g = document.getElementById('stack-svg');
+      const items = [
+        ['JAX', ['Python / jnp', '程序']], ['StableHLO', ['jit 追踪', '的输出']], ['HLO', ['XLA 优化：', '融合、布局、分片']], ['LLO / kernel', ['TPU 低层 IR；', 'GPU kernel']], ['机器码', ['在设备上', '执行']],
+      ];
+      let s = '<defs><marker id="arr2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto"><path d="M0 0 L10 5 L0 10z" fill="var(--text-faint)"/></marker></defs>';
+      items.forEach(([t, d], i) => {
+        const x = 8 + i * 127;
+        s += '<rect x="' + x + '" y="30" width="112" height="56" rx="10" class="box"' + (t === 'HLO' ? ' style="stroke:var(--accent);stroke-width:2"' : '') + '/>' +
+             '<text x="' + (x + 56) + '" y="62" text-anchor="middle" font-size="14" font-weight="600">' + t + '</text>' +
+             d.map((ln, k) => '<text x="' + (x + 56) + '" y="' + (108 + 16 * k) + '" text-anchor="middle" font-size="11" class="soft">' + ln + '</text>').join('');
+        if (i < items.length - 1) s += '<path d="M' + (x + 113) + ' 58 H' + (x + 126) + '" stroke="var(--text-faint)" marker-end="url(#arr2)"/>';
+      });
+      s += '<text x="320" y="160" text-anchor="middle" font-size="12" style="fill:var(--accent)">profile 里的 op 名（fusion.3、all-reduce.1 …）来自 HLO 这一层</text>' +
+           '<text x="320" y="182" text-anchor="middle" font-size="11" class="faint">jax.jit(f).lower(...).as_text() 看 StableHLO；.compile().as_text() 看优化后的 HLO</text>';
+      g.innerHTML = s;
+    })();
+
+    // ---------- Demo: PartitionSpec playground ----------
+    const PS = {
+      r: document.getElementById('ps-r'), c: document.getElementById('ps-c'),
+      x: document.getElementById('ps-x'), y: document.getElementById('ps-y'), z: document.getElementById('ps-z'),
+      s0: document.getElementById('ps-s0'), s1: document.getElementById('ps-s1'),
+    };
+    const SPECS = ['None', 'x', 'y', 'z', 'x,y', 'y,x', 'x,z', 'y,z', 'x,y,z'];
+    const specLabel = (v) => v === 'None' ? 'None' : v.includes(',') ? "('" + v.split(',').join("','") + "')" : "'" + v + "'";
+    [PS.s0, PS.s1].forEach((sel, i) => { sel.innerHTML = SPECS.map((v) => '<option value="' + v + '"' + ((i === 0 && v === 'x') || (i === 1 && v === 'y') ? ' selected' : '') + '>' + specLabel(v) + '</option>').join(''); });
+    let psPick = -1;
+
+    function hue(i, n) { return 'hsl(' + (Math.round((i * 360) / Math.max(n, 1)) + 210) % 360 + ' 55% 50%)'; }
+
+    function ps() {
+      const R = +PS.r.value, C = +PS.c.value;
+      const size = { x: +PS.x.value, y: +PS.y.value, z: +PS.z.value };
+      const axes = ['x', 'y', 'z'].filter((a) => size[a] > 1 || a !== 'z');
+      const meshAxes = ['x', 'y', 'z'];
+      const specs = [PS.s0.value, PS.s1.value].map((v) => (v === 'None' ? [] : v.split(',')));
+      const used = specs.flat();
+      const meshDesc = 'jax.make_mesh((' + size.x + ', ' + size.y + (size.z > 1 ? ', ' + size.z : '') + "), ('x', 'y'" + (size.z > 1 ? ", 'z'" : '') + '))';
+      const pstr = 'P(' + [PS.s0.value, PS.s1.value].map(specLabel).join(', ') + ')';
+      let err = '';
+      if (new Set(used).size !== used.length) err = '同一个 mesh 轴在 spec 里出现了两次：一个 mesh 轴最多映射到数组的一个维度。';
+      if (!err && used.includes('z') && size.z === 1) err = "mesh 里没有大小大于 1 的 'z' 轴（把 z 设成 2 再试）。";
+      const nSh = specs.map((a) => a.reduce((p, ax) => p * size[ax], 1));
+      const dims = [R, C];
+      if (!err) for (let k = 0; k < 2; k++) if (dims[k] % nSh[k]) err = '第 ' + k + ' 维大小 ' + dims[k] + ' 不能被 ' + nSh[k] + ' 整除（JAX 会报错：does not evenly divide the dimension size）。';
+      const typeStr = 'f32[' + dims.map((d, k) => d + (specs[k].length ? '@' + (specs[k].length > 1 ? '(' + specs[k].join(',') + ')' : specs[k][0]) : '')).join(',') + ']';
+      document.getElementById('ps-code').innerHTML =
+        'mesh = ' + meshDesc + '\nxs = jax.device_put(x, NamedSharding(mesh, ' + pstr + '))' +
+        (err ? '\n<span class="err"># ' + err + '</span>' : '\n# jax.typeof(xs) 在显式模式下：' + typeStr + '\n# 每设备块形状：(' + dims.map((d, k) => d / nSh[k]).join(', ') + ')');
+      const arrBox = document.getElementById('ps-arr');
+      const devBox = document.getElementById('ps-devs');
+      if (err) { arrBox.innerHTML = ''; devBox.innerHTML = ''; document.getElementById('ps-out').innerHTML = ''; return; }
+
+      // devices: row-major over (x, y, z)
+      const devs = [];
+      for (let i = 0; i < size.x; i++) for (let j = 0; j < size.y; j++) for (let k = 0; k < size.z; k++) devs.push({ x: i, y: j, z: k, id: devs.length });
+      const shardIdx = (dv, k) => specs[k].reduce((acc, ax) => acc * size[ax] + dv[ax], 0);
+      const blocks = nSh[0] * nSh[1];
+      devs.forEach((dv) => { dv.b0 = shardIdx(dv, 0); dv.b1 = shardIdx(dv, 1); dv.blk = dv.b0 * nSh[1] + dv.b1; });
+      const bh = R / nSh[0], bw = C / nSh[1];
+      const pick = psPick >= 0 && psPick < devs.length ? devs[psPick] : null;
+
+      // array view
+      arrBox.style.gridTemplateColumns = 'repeat(' + C + ', 1fr)';
+      arrBox.style.setProperty('--ch', Math.max(8, Math.min(26, Math.round(300 / R))) + 'px');
+      let a = '';
+      for (let i = 0; i < R; i++) for (let j = 0; j < C; j++) {
+        const blk = Math.floor(i / bh) * nSh[1] + Math.floor(j / bw);
+        const dim = pick && pick.blk !== blk;
+        a += '<span style="background:' + hue(blk, blocks) + (dim ? ';opacity:0.18' : '') + '"></span>';
+      }
+      arrBox.innerHTML = a;
+
+      // device view: one grid per z
+      let d = '';
+      for (let k = 0; k < size.z; k++) {
+        if (size.z > 1) d += '<div class="zlab">z = ' + k + '</div>';
+        d += '<div class="devgrid" style="grid-template-columns:repeat(' + size.y + ', 1fr)">';
+        devs.filter((dv) => dv.z === k).forEach((dv) => {
+          const r0 = dv.b0 * bh, c0 = dv.b1 * bw;
+          d += '<button class="dev' + (pick && pick.id === dv.id ? ' on' : '') + '" data-id="' + dv.id + '" style="background:' + hue(dv.blk, blocks) + (pick && pick.blk !== dv.blk ? ';opacity:0.35' : '') + '"><b>dev ' + dv.id + ' (x' + dv.x + ',y' + dv.y + (size.z > 1 ? ',z' + dv.z : '') + ')</b>[' + r0 + ':' + (r0 + bh) + ', ' + c0 + ':' + (c0 + bw) + ']</button>';
+        });
+        d += '</div>';
+      }
+      devBox.innerHTML = d;
+      const N = devs.length;
+      document.getElementById('ps-out').innerHTML =
+        '<div><span class="k">设备数</span><span class="v">' + N + '</span></div>' +
+        '<div><span class="k">每设备块形状</span><span class="v">(' + bh + ', ' + bw + ')</span></div>' +
+        '<div><span class="k">不同的块数</span><span class="v">' + blocks + '</span></div>' +
+        '<div><span class="k">每块复制份数</span><span class="v">' + N / blocks + '</span></div>' +
+        '<div><span class="k">总内存 / 原数组</span><span class="v">' + (N / blocks) + '×</span></div>';
+    }
+    document.getElementById('ps-devs').addEventListener('click', (e) => {
+      const b = e.target.closest('.dev'); if (!b) return;
+      const id = +b.dataset.id; psPick = psPick === id ? -1 : id; ps();
+    });
+    Object.values(PS).forEach((el) => el.addEventListener('change', () => { psPick = -1; ps(); }));
+    ps();
+
+    // ---------- Demo: mock trace viewer ----------
+    const TL = { ov: document.getElementById('tl-ov'), sync: document.getElementById('tl-sync'), ct: document.getElementById('tl-ct') };
+    let scn = 'ddp';
+    let lastRes = null;
+
+    // op: {name, lane: 'cmp'|'com', dur, deps: [names], kind}
+    function buildOps(s, ov) {
+      const ops = [];
+      const add = (name, lane, dur, deps, kind) => ops.push({ name, lane, dur, deps, kind });
+      const L = 4;
+      if (s === 'ddp') {
+        for (let i = 1; i <= L; i++) add('F' + i, 'cmp', 3, [], 'fwd');
+        add('SYNC', 'cpu', 0, [], 'sync');
+        for (let i = L; i >= 1; i--) {
+          add('B' + i, 'cmp', 6, [], 'bwd');
+          if (ov) add('AR' + i, 'com', 4, ['B' + i], 'comm');
+        }
+        if (!ov) for (let i = L; i >= 1; i--) add('AR' + i, 'com', 4, ['B1'], 'comm');
+        add('OPT', 'cmp', 2, ['AR1', 'AR2', 'AR3', 'AR4'], 'opt');
+      } else if (s === 'fsdp') {
+        if (ov) {
+          // prefetch: the gather for layer i+2 is issued as soon as layer i starts computing
+          add('AG1', 'com', 2.5, [], 'comm'); add('AG2', 'com', 2.5, [], 'comm');
+          for (let i = 1; i <= L; i++) {
+            add('F' + i, 'cmp', 3, ['AG' + i], 'fwd');
+            if (i + 2 <= L) add('AG' + (i + 2), 'com', 2.5, ['F' + i], 'comm');
+          }
+        } else {
+          // no prefetch: the gather of layer i only starts after layer i-1 has finished
+          for (let i = 1; i <= L; i++) {
+            add('AG' + i, 'com', 2.5, i > 1 ? ['F' + (i - 1)] : [], 'comm');
+            add('F' + i, 'cmp', 3, ['AG' + i], 'fwd');
+          }
+        }
+        add('SYNC', 'cpu', 0, [], 'sync');
+        if (ov) {
+          // backward prefetch: gather layer i-1 is issued before the reduce-scatter of layer i
+          add("AG'" + L, 'com', 2.5, ['F' + L], 'comm');
+          for (let i = L; i >= 1; i--) {
+            if (i > 1) add("AG'" + (i - 1), 'com', 2.5, i < L ? ['B' + (i + 1)] : ['F' + L], 'comm');
+            add('B' + i, 'cmp', 6, ["AG'" + i], 'bwd');
+            add('RS' + i, 'com', 2.5, ['B' + i], 'comm');
+          }
+        } else {
+          for (let i = L; i >= 1; i--) {
+            add("AG'" + i, 'com', 2.5, i < L ? ['B' + (i + 1), 'RS' + (i + 1)] : ['F' + L], 'comm');
+            add('B' + i, 'cmp', 6, ["AG'" + i], 'bwd');
+            add('RS' + i, 'com', 2.5, ['B' + i], 'comm');
+          }
+        }
+        add('OPT', 'cmp', 1, ['RS1', 'RS2', 'RS3', 'RS4'], 'opt');
+      } else {
+        // TP: per layer AG -> MM_in -> MM_out -> RS (forward only, for clarity), then backward lumped
+        let prev = [];
+        for (let i = 1; i <= L; i++) {
+          if (!ov) {
+            add('AG' + i, 'com', 2.4, prev, 'comm');
+            add('MMin' + i, 'cmp', 6, ['AG' + i], 'fwd');
+            add('MMout' + i, 'cmp', 6, ['MMin' + i], 'fwd');
+            add('RS' + i, 'com', 2.4, ['MMout' + i], 'comm');
+            prev = ['RS' + i];
+          } else {
+            // collective matmul: 4 chunks; permute k overlaps chunk k
+            for (let k = 0; k < 4; k++) {
+              if (k < 3) add('pp' + i + '.' + k, 'com', 0.8, k === 0 ? prev : ['pp' + i + '.' + (k - 1)], 'comm');
+              add('MMin' + i + '.' + k, 'cmp', 1.5, k === 0 ? prev : ['MMin' + i + '.' + (k - 1), 'pp' + i + '.' + (k - 1)], 'fwd');
+            }
+            for (let k = 0; k < 4; k++) {
+              add('MMout' + i + '.' + k, 'cmp', 1.5, k === 0 ? ['MMin' + i + '.3'] : ['MMout' + i + '.' + (k - 1)], 'fwd');
+              add('rs' + i + '.' + k, 'com', 0.8, k === 0 ? ['MMout' + i + '.0'] : ['MMout' + i + '.' + k, 'rs' + i + '.' + (k - 1)], 'comm');
+            }
+            prev = ['rs' + i + '.3'];
+          }
+        }
+        add('SYNC', 'cpu', 0, [], 'sync');
+        add('BWD', 'cmp', 30, prev, 'bwd');
+        add('OPT', 'cmp', 2, ['BWD'], 'opt');
+      }
+      return ops;
+    }
+
+    function simulate(ops, opt) {
+      // returns placed ops with start/end; CPU launches each op in program order
+      const LAUNCH = 0.25, PYGAP = 4;
+      let slow = ops.map(() => 0);
+      let placed;
+      for (let iter = 0; iter < 4; iter++) {
+        const end = {};
+        const lane = { cmp: 0, com: 0 };
+        let cpu = 0;
+        placed = [];
+        const cpuBlocks = [];
+        ops.forEach((o, i) => {
+          if (o.kind === 'sync') {
+            if (!opt.sync) return;
+            const gpuDone = Math.max(lane.cmp, lane.com);
+            const t0 = cpu;
+            cpu = Math.max(cpu, gpuDone);
+            cpuBlocks.push({ name: 'cudaStreamSynchronize（等待 GPU）', lane: 'cpu', start: t0, end: cpu, kind: 'wait' });
+            cpuBlocks.push({ name: 'Python：loss.item() / 日志', lane: 'cpu', start: cpu, end: cpu + PYGAP, kind: 'py' });
+            cpu += PYGAP;
+            return;
+          }
+          const launchStart = cpu;
+          cpu += LAUNCH;
+          cpuBlocks.push({ name: 'launch ' + o.name, lane: 'cpu', start: launchStart, end: cpu, kind: 'launch' });
+          const dep = Math.max(0, ...o.deps.map((d) => end[d] || 0));
+          const st = Math.max(cpu, lane[o.lane], dep);
+          const en = st + o.dur * (o.lane === 'cmp' ? 1 + slow[i] : 1);
+          lane[o.lane] = en;
+          end[o.name] = en;
+          placed.push({ ...o, start: st, end: en, idx: i });
+        });
+        // contention: compute ops slowed by the fraction of time they overlap comm
+        const comm = placed.filter((p) => p.lane === 'com');
+        const nslow = ops.map(() => 0);
+        placed.forEach((p) => {
+          if (p.lane !== 'cmp') return;
+          let ov = 0;
+          comm.forEach((c) => { ov += Math.max(0, Math.min(p.end, c.end) - Math.max(p.start, c.start)); });
+          const frac = ov / (p.end - p.start);
+          nslow[p.idx] = opt.ct * frac;
+        });
+        slow = nslow;
+        placed = placed.concat(cpuBlocks);
+      }
+      return placed;
+    }
+
+    function analyze(placed) {
+      const T = Math.max(...placed.filter((p) => p.lane !== 'cpu').map((p) => p.end));
+      // sweep over time in small steps
+      const dt = 0.01;
+      let comp = 0, exp = 0, idle = 0, commTot = 0;
+      const cmp = placed.filter((p) => p.lane === 'cmp'), com = placed.filter((p) => p.lane === 'com');
+      for (let t = dt / 2; t < T; t += dt) {
+        const a = cmp.some((p) => p.start <= t && t < p.end);
+        const b = com.some((p) => p.start <= t && t < p.end);
+        if (a) comp += dt; else if (b) exp += dt; else idle += dt;
+        if (b) commTot += dt;
+      }
+      return { T, comp, exp, idle, commTot };
+    }
+
+    const KCOL = { fwd: 'var(--accent)', bwd: 'color-mix(in srgb, var(--accent) 55%, var(--surface))', opt: 'var(--text-faint)', comm: 'var(--accent-2)', launch: 'var(--text-faint)', wait: 'color-mix(in srgb, var(--text-faint) 40%, transparent)', py: 'hsl(45 85% 50%)' };
+    const KLAB = { fwd: '前向计算', bwd: '反向计算', opt: '优化器', comm: '通信 kernel', launch: 'CPU 发 kernel', wait: 'CPU 等待同步', py: 'Python 开销' };
+
+    function drawTL() {
+      document.getElementById('tl-ct-o').textContent = TL.ct.value + '%';
+      const opt = { sync: TL.sync.checked, ct: +TL.ct.value / 100 };
+      const placed = simulate(buildOps(scn, TL.ov.checked), opt);
+      const base = analyze(simulate(buildOps(scn, false), { sync: false, ct: 0 }));
+      const A = analyze(placed);
+      lastRes = placed;
+      const W = Math.max(340, Math.min(900, document.getElementById('tl-svg').clientWidth || 760)), left = 58, right = 8, laneH = 34, top = 18;
+      const tmax = Math.max(A.T, base.T) * 1.02;
+      const sx = (t) => left + (t / tmax) * (W - left - right);
+      const lanes = [['cpu', 'CPU'], ['cmp', '计算流'], ['com', '通信流']];
+      let s = '';
+      lanes.forEach(([k, lab], i) => {
+        const y = top + i * (laneH + 8);
+        s += '<rect x="' + left + '" y="' + y + '" width="' + (W - left - right) + '" height="' + laneH + '" fill="var(--bg-soft)"/>' +
+             '<text x="' + (left - 8) + '" y="' + (y + laneH / 2 + 4) + '" text-anchor="end" font-size="12">' + lab + '</text>';
+      });
+      // shade exposed comm and idle on compute lane
+      const yc = top + (laneH + 8);
+      const cmp = placed.filter((p) => p.lane === 'cmp'), com = placed.filter((p) => p.lane === 'com');
+      const dt = tmax / 400;
+      let runK = null, runS = 0;
+      const flush = (t) => {
+        if (runK) s += '<rect x="' + sx(runS) + '" y="' + yc + '" width="' + Math.max(0.5, sx(t) - sx(runS)) + '" height="' + laneH + '" fill="' + (runK === 'exp' ? 'color-mix(in srgb, var(--accent-2) 22%, transparent)' : 'url(#hatch)') + '"><title>' + (runK === 'exp' ? '暴露的通信：计算在等通信' : '空闲：计算和通信都没在跑') + '</title></rect>';
+      };
+      for (let t = 0; t < A.T; t += dt) {
+        const tm = t + dt / 2;
+        const a = cmp.some((p) => p.start <= tm && tm < p.end);
+        const b = com.some((p) => p.start <= tm && tm < p.end);
+        const k = a ? null : b ? 'exp' : 'idle';
+        if (k !== runK) { flush(t); runK = k; runS = t; }
+      }
+      flush(A.T);
+      placed.forEach((p, i) => {
+        const li = p.lane === 'cpu' ? 0 : p.lane === 'cmp' ? 1 : 2;
+        const y = top + li * (laneH + 8) + (p.lane === 'cpu' && p.kind === 'launch' ? 10 : 3);
+        const h = p.lane === 'cpu' && p.kind === 'launch' ? laneH - 20 : laneH - 6;
+        const w = Math.max(0.8, sx(p.end) - sx(p.start));
+        s += '<rect class="op" data-i="' + i + '" x="' + sx(p.start) + '" y="' + y + '" width="' + w + '" height="' + h + '" rx="2" fill="' + KCOL[p.kind] + '" stroke="var(--surface)" stroke-width="0.5"><title>' + p.name + '</title></rect>';
+        if (w > 26 && p.lane !== 'cpu') s += '<text x="' + (sx(p.start) + w / 2) + '" y="' + (y + h / 2 + 4) + '" text-anchor="middle" font-size="10" style="fill:#fff;pointer-events:none">' + p.name.replace(/\.\d$/, '') + '</text>';
+      });
+      // axis
+      const ya = top + 3 * (laneH + 8) + 2;
+      const step = (tmax > 60 ? 10 : 5) * (W < 500 ? 2 : 1);
+      for (let t = 0; t <= tmax; t += step) s += '<text class="tick" x="' + sx(t) + '" y="' + (ya + 10) + '" text-anchor="middle">' + t + '</text>';
+      s += '<line x1="' + sx(A.T) + '" x2="' + sx(A.T) + '" y1="' + (top - 6) + '" y2="' + (ya - 4) + '" stroke="var(--text)" stroke-dasharray="3 3"/>' +
+           '<text x="' + sx(A.T) + '" y="' + (top - 8) + '" text-anchor="middle" font-size="10" class="tick">步结束 ' + A.T.toFixed(1) + '</text>';
+      const H = ya + 16;
+      document.getElementById('tl-svg').innerHTML = '<svg viewBox="0 0 ' + W + ' ' + H + '"><defs><pattern id="hatch" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="6" height="6" fill="transparent"/><line x1="0" y1="0" x2="0" y2="6" stroke="var(--text-faint)" stroke-width="2"/></pattern></defs>' + s + '</svg>';
+      document.getElementById('tl-leg').innerHTML = Object.keys(KLAB).map((k) => '<span><i style="background:' + KCOL[k] + '"></i>' + KLAB[k] + '</span>').join('') +
+        '<span><i style="background:color-mix(in srgb, var(--accent-2) 22%, transparent)"></i>计算流上：暴露的通信</span><span><i style="background:repeating-linear-gradient(45deg,var(--text-faint) 0 2px,transparent 2px 5px)"></i>计算流上：空闲</span>';
+      const pct = (v) => (100 * v / A.T).toFixed(0) + '%';
+      document.getElementById('tl-out').innerHTML =
+        '<div><span class="k">步时</span><span class="v">' + A.T.toFixed(1) + '</span></div>' +
+        '<div><span class="k">计算</span><span class="v">' + A.comp.toFixed(1) + '（' + pct(A.comp) + '）</span></div>' +
+        '<div><span class="k">暴露的通信</span><span class="v">' + A.exp.toFixed(1) + '（' + pct(A.exp) + '）</span></div>' +
+        '<div><span class="k">空闲</span><span class="v">' + A.idle.toFixed(1) + '（' + pct(A.idle) + '）</span></div>' +
+        '<div><span class="k">被藏住的通信</span><span class="v">' + Math.max(0, A.commTot - A.exp).toFixed(1) + ' / ' + A.commTot.toFixed(1) + '</span></div>' +
+        '<div><span class="k">相对「不重叠、无争用」</span><span class="v">' + (base.T / A.T).toFixed(2) + '×</span></div>';
+    }
+    document.getElementById('tl-svg').addEventListener('click', (e) => {
+      const r = e.target.closest('rect.op'); if (!r || !lastRes) return;
+      const p = lastRes[+r.dataset.i];
+      document.getElementById('tl-info').textContent = p.name + ' · ' + (KLAB[p.kind] || p.kind) + ' · 开始 ' + p.start.toFixed(2) + ' · 结束 ' + p.end.toFixed(2) + ' · 时长 ' + (p.end - p.start).toFixed(2);
+    });
+    document.getElementById('tl-scn').addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      scn = b.dataset.s; setPressed(e.currentTarget, b); document.getElementById('tl-info').textContent = '点击时间线上的块查看详情。'; drawTL();
+    });
+    TL.ov.addEventListener('change', drawTL); TL.sync.addEventListener('change', drawTL); TL.ct.addEventListener('input', drawTL);
+    drawTL();
+    let rz = 0;
+    window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(drawTL, 150); });
+  })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,996 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>5D 并行：组合与选型 · Zunzhe Zhang</title>
+  <meta name="description" content="DP、TP、CP、PP、EP 各切什么、通信放在网络哪一层、怎么在设备网格上组合，以及一套选配置的流程和一个配置规划器。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .fig { margin: 1.4em 0 0; }
+    .table-wrap { position: relative; }
+    .table-wrap table.wide { min-width: 680px; }
+    .fig svg { width: 100%; height: auto; display: block; }
+    .fig svg text { font-family: var(--font-sans); fill: var(--text); }
+    .fig svg .soft { fill: var(--text-soft); }
+    .fig svg .faint { fill: var(--text-faint); }
+    .fig svg .mono { font-family: var(--font-mono); }
+    .d0 { fill: var(--accent); fill-opacity: 0.75; }
+    .d1 { fill: var(--accent-2); fill-opacity: 0.75; }
+    .dn { fill: var(--bg-soft); stroke: var(--border); }
+    .ln { stroke: var(--text-faint); fill: none; }
+    .box { fill: var(--surface); stroke: var(--border); }
+
+    .demo select, .demo input[type="number"] { max-width: 100%; }
+    .grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 10px 18px; margin-top: 12px; }
+    .grid2 label { display: grid; gap: 4px; font-size: 14px; color: var(--text-soft); }
+    .grid2 label .row { display: flex; gap: 8px; align-items: center; }
+    .grid2 input[type="range"] { flex: 1; min-width: 0; }
+    .grid2 output { font-family: var(--font-mono); font-size: 13px; min-width: 5.5em; text-align: right; color: var(--text); }
+    .note { font-size: 13px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+    .verdict { margin-top: 12px; padding: 10px 14px; border-radius: 10px; background: var(--bg-soft); font-size: 15px; line-height: 1.6; }
+    .verdict b { color: var(--accent); }
+
+    table.cfg { width: 100%; border-collapse: collapse; font-size: 13px; font-variant-numeric: tabular-nums; }
+    table.cfg th, table.cfg td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: right; white-space: nowrap; }
+    table.cfg th { color: var(--text-faint); font-weight: 600; }
+    table.cfg td:last-child, table.cfg th:last-child { text-align: left; }
+    table.cfg tbody tr { cursor: pointer; }
+    table.cfg tbody tr:hover { background: var(--bg-soft); }
+    table.cfg tbody tr.sel { background: var(--accent-soft); }
+    .cfg-wrap { overflow-x: auto; margin-top: 12px; }
+    .cfg-wrap table { min-width: 560px; }
+
+    .stack { display: flex; height: 22px; border-radius: 6px; overflow: hidden; background: var(--bg-soft); margin-top: 6px; }
+    .stack span { height: 100%; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 12px; font-size: 12px; color: var(--text-soft); margin-top: 6px; }
+    .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
+    .detail h4 { margin: 14px 0 0; font-size: 14px; color: var(--text-soft); font-weight: 600; }
+
+    .mesh { display: grid; gap: 6px; margin-top: 12px; }
+    .node { display: grid; grid-template-columns: 3.4em 1fr; gap: 6px; align-items: center; }
+    .node > small { font-size: 11px; color: var(--text-faint); font-family: var(--font-mono); }
+    .gpus { display: grid; gap: 3px; padding: 4px; border: 1px dashed var(--border); border-radius: 8px; }
+    .gpu {
+      aspect-ratio: 1; border-radius: 5px; border: 2px solid transparent;
+      font: 600 10px/1 var(--font-mono); color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      cursor: pointer; padding: 0; min-width: 0;
+    }
+    .gpu.dim { opacity: 0.28; }
+    .gpu.me { border-color: var(--text); }
+    .chk { list-style: none; padding: 0; margin: 10px 0 0; font-size: 14px; }
+    .chk li { margin-top: 3px; }
+    .ok { color: var(--accent); font-weight: 600; }
+    .bad { color: var(--accent-2); font-weight: 600; }
+    .kv { font-family: var(--font-mono); font-size: 13px; }
+    .flow { counter-reset: s; list-style: none; padding-left: 0 !important; }
+    .flow > li { position: relative; padding: 10px 14px 10px 44px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); }
+    .flow > li + li { margin-top: 10px; }
+    .flow > li::before { counter-increment: s; content: counter(s); position: absolute; left: 12px; top: 10px; width: 22px; height: 22px; border-radius: 50%; background: var(--accent); color: #fff; font: 600 13px/22px var(--font-sans); text-align: center; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>5D 并行：组合与选型</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>前面几篇把每一种并行单独拆开讲过了：数据并行和 ZeRO、张量并行和序列并行、上下文并行、流水线并行、专家并行。真正训练一个大模型时，没有人只用其中一种。Llama 3 405B 用了四种，DeepSeek-V3 用了三种，而且偏偏没用张量并行。这一篇回答两个问题：这五个轴（加上 ZeRO 的三个等级）放在一起时<strong>各自负责什么、互相怎么摆</strong>；给定模型、序列长度、batch 和一堆 GPU，<strong>怎么挑出一个好配置</strong>。</p>
+      <p>主要材料是 Hugging Face 的 <a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#5d_parallelism_in_a_nutshell">Ultra-Scale Playbook</a> 里「5D Parallelism in a Nutshell」和「Finding the Best Training Configuration」两节，以及 Google DeepMind 的 <a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>（下文简称 Scaling Book）第 5、6 章。前者从 GPU 集群和工程经验出发，后者从 TPU 和 roofline 算术出发，两边对照着看正好。</p>
+
+      <div class="toc">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#axes">五个轴，一张图</a></li>
+          <li><a href="#notation">记号和一层的账本</a></li>
+          <li><a href="#each">逐个轴：切什么、通信什么、多贵</a></li>
+          <li><a href="#combine">谁和谁能组合</a></li>
+          <li><a href="#network">每个轴该放在网络的哪一层</a></li>
+          <li><a href="#mesh">设备网格：rank 怎么编号（演示）</a></li>
+          <li><a href="#thresholds">什么时候被通信卡住：每设备 batch 的门槛（演示）</a></li>
+          <li><a href="#gpu">同一套算术放到 GPU 上</a></li>
+          <li><a href="#procedure">选配置的三步流程</a></li>
+          <li><a href="#planner">配置规划器（演示）</a></li>
+          <li><a href="#real">真实系统怎么组合</a></li>
+          <li><a href="#summary">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="axes">五个轴，一张图</h2>
+      <p>训练时，一步要处理的东西可以看成一个多维的「工作量」：一批序列（batch 维），每条序列有很多 token（序列维），每个 token 要穿过很多层（层维），每层里有矩阵乘法（隐藏维），MoE 模型的 FFN 还被拆成很多专家（专家维）。所谓「5D 并行」，就是挑这些维度来切，把一份工作量分到多张卡上：</p>
+      <ul>
+        <li><strong>数据并行 DP</strong>：沿 batch 切。每张卡拿不同的样本，模型完整复制。</li>
+        <li><strong>张量并行 TP</strong>（通常带序列并行 SP）：沿隐藏维切权重矩阵，一层的矩阵乘法由几张卡合作完成。</li>
+        <li><strong>上下文并行 CP</strong>：沿序列维切。一条很长的序列分成几段，每张卡负责一段。</li>
+        <li><strong>流水线并行 PP</strong>：沿层维切。前几层放一张卡，后几层放另一张卡。</li>
+        <li><strong>专家并行 EP</strong>：沿专家维切。不同专家的 FFN 放在不同的卡上，token 被路由过去。</li>
+      </ul>
+      <p>再加上和 DP 绑在一起的 <strong>ZeRO</strong>：ZeRO-1 在 DP 副本之间切优化器状态，ZeRO-2 再切梯度，ZeRO-3（也就是 FSDP）连参数也切。ZeRO 不是新的「工作量」维度，它切的是 DP 本来要冗余保存的那些状态。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 440 540" role="img" aria-label="五种并行各自切分的维度示意">
+          <!-- panel 1: DP -->
+          <g transform="translate(10,10)">
+            <text x="60" y="14" text-anchor="middle" font-size="14" font-weight="600">DP：切 batch</text>
+            <text x="60" y="32" text-anchor="middle" font-size="11" class="faint">激活 [batch × seq]</text>
+            <rect x="15" y="40" width="90" height="40" class="d0"/>
+            <rect x="15" y="80" width="90" height="40" class="d1"/>
+            <text x="60" y="64" text-anchor="middle" font-size="11" fill="#fff" style="fill:#fff">卡 0</text>
+            <text x="60" y="104" text-anchor="middle" font-size="11" style="fill:#fff">卡 1</text>
+            <text x="60" y="146" text-anchor="middle" font-size="11" class="faint">权重</text>
+            <rect x="15" y="154" width="42" height="42" class="d0"/>
+            <rect x="63" y="154" width="42" height="42" class="d1"/>
+            <text x="60" y="216" text-anchor="middle" font-size="11" class="soft">两张卡各一份完整权重</text>
+            <text x="60" y="236" text-anchor="middle" font-size="11" class="soft">ZeRO 再切掉冗余状态</text>
+          </g>
+          <!-- panel 2: TP -->
+          <g transform="translate(155,10)">
+            <text x="60" y="14" text-anchor="middle" font-size="14" font-weight="600">TP：切隐藏维</text>
+            <text x="60" y="32" text-anchor="middle" font-size="11" class="faint">激活 [batch × seq]</text>
+            <rect x="15" y="40" width="90" height="80" class="dn"/>
+            <text x="60" y="84" text-anchor="middle" font-size="11" class="soft">两卡都要完整输入</text>
+            <text x="60" y="146" text-anchor="middle" font-size="11" class="faint">权重 [D × F]</text>
+            <rect x="15" y="154" width="45" height="42" class="d0"/>
+            <rect x="60" y="154" width="45" height="42" class="d1"/>
+            <text x="60" y="216" text-anchor="middle" font-size="11" class="soft">每卡一半列 / 行</text>
+            <text x="60" y="236" text-anchor="middle" font-size="11" class="soft">每层都要通信</text>
+          </g>
+          <!-- panel 3: CP -->
+          <g transform="translate(300,10)">
+            <text x="60" y="14" text-anchor="middle" font-size="14" font-weight="600">CP：切序列</text>
+            <text x="60" y="32" text-anchor="middle" font-size="11" class="faint">激活 [batch × seq]</text>
+            <rect x="15" y="40" width="45" height="80" class="d0"/>
+            <rect x="60" y="40" width="45" height="80" class="d1"/>
+            <text x="37" y="84" text-anchor="middle" font-size="11" style="fill:#fff">前半</text>
+            <text x="82" y="84" text-anchor="middle" font-size="11" style="fill:#fff">后半</text>
+            <text x="60" y="146" text-anchor="middle" font-size="11" class="faint">权重</text>
+            <rect x="15" y="154" width="42" height="42" class="d0"/>
+            <rect x="63" y="154" width="42" height="42" class="d1"/>
+            <text x="60" y="216" text-anchor="middle" font-size="11" class="soft">权重复制</text>
+            <text x="60" y="236" text-anchor="middle" font-size="11" class="soft">注意力要交换 K/V</text>
+          </g>
+          <!-- panel 4: PP -->
+          <g transform="translate(70,265)">
+            <text x="60" y="14" text-anchor="middle" font-size="14" font-weight="600">PP：切层</text>
+            <text x="60" y="32" text-anchor="middle" font-size="11" class="faint">层 1 … L</text>
+            <rect x="30" y="40" width="60" height="16" class="d0"/>
+            <rect x="30" y="60" width="60" height="16" class="d0"/>
+            <rect x="30" y="80" width="60" height="16" class="d0"/>
+            <rect x="30" y="104" width="60" height="16" class="d1"/>
+            <rect x="30" y="124" width="60" height="16" class="d1"/>
+            <rect x="30" y="144" width="60" height="16" class="d1"/>
+            <path d="M100 96 v12" class="ln" stroke-width="1.5"/>
+            <path d="M96 104 l4 5 l4 -5" class="ln" stroke-width="1.5"/>
+            <text x="60" y="186" text-anchor="middle" font-size="11" class="soft">卡 0 前几层</text>
+            <text x="60" y="202" text-anchor="middle" font-size="11" class="soft">卡 1 后几层</text>
+            <text x="60" y="236" text-anchor="middle" font-size="11" class="soft">只在边界传激活</text>
+          </g>
+          <!-- panel 5: EP -->
+          <g transform="translate(220,265)">
+            <text x="70" y="14" text-anchor="middle" font-size="14" font-weight="600">EP：切专家</text>
+            <text x="70" y="32" text-anchor="middle" font-size="11" class="faint">一层 MoE 的 4 个专家</text>
+            <rect x="12" y="48" width="26" height="40" class="d0"/>
+            <rect x="44" y="48" width="26" height="40" class="d0"/>
+            <rect x="76" y="48" width="26" height="40" class="d1"/>
+            <rect x="108" y="48" width="26" height="40" class="d1"/>
+            <text x="25" y="72" text-anchor="middle" font-size="10" style="fill:#fff">E0</text>
+            <text x="57" y="72" text-anchor="middle" font-size="10" style="fill:#fff">E1</text>
+            <text x="89" y="72" text-anchor="middle" font-size="10" style="fill:#fff">E2</text>
+            <text x="121" y="72" text-anchor="middle" font-size="10" style="fill:#fff">E3</text>
+            <circle cx="30" cy="130" r="6" class="d0"/><circle cx="50" cy="130" r="6" class="d0"/>
+            <circle cx="90" cy="130" r="6" class="d1"/><circle cx="110" cy="130" r="6" class="d1"/>
+            <path d="M30 124 L89 90 M110 124 L25 90 M50 124 L57 90 M90 124 L121 90" class="ln" stroke-dasharray="3 3"/>
+            <text x="70" y="158" text-anchor="middle" font-size="11" class="faint">token</text>
+            <text x="70" y="216" text-anchor="middle" font-size="11" class="soft">token 跨卡去找专家</text>
+            <text x="70" y="236" text-anchor="middle" font-size="11" class="soft">all-to-all</text>
+          </g>
+          <g transform="translate(14,515)">
+            <rect x="0" y="0" width="14" height="14" class="d0"/><text x="20" y="12" font-size="12" class="soft">卡 0 上的部分</text>
+            <rect x="120" y="0" width="14" height="14" class="d1"/><text x="140" y="12" font-size="12" class="soft">卡 1 上的部分</text>
+            <rect x="240" y="0" width="14" height="14" class="dn"/><text x="260" y="12" font-size="12" class="soft">两卡都有完整一份</text>
+          </g>
+        </svg>
+        <figcaption>图 1　五种并行各自沿哪一维切，以两张卡为例。自绘示意。</figcaption>
+      </figure>
+
+      <p>切的维度不同，带来三件不同的事：<strong>省下哪部分显存</strong>、<strong>引入哪种通信</strong>、<strong>这次通信能不能藏在计算后面</strong>。选型就是在这三件事之间做交换。下面先把记号定下来，再一个轴一个轴地算。</p>
+
+      <h2 id="notation">记号和一层的账本</h2>
+      <p>沿用 Playbook 的记号：隐藏维 \(h\)，层数 \(L\)，序列长度 \(s\)，micro-batch 大小（每张卡一次前向处理的序列数）\(b\)，注意力头数 \(a\)，词表 \(V\)，模型参数量 \(\Psi\)。并行度写作 \(t\)（TP）、\(c\)（CP）、\(p\)（PP）、\(d\)（DP）、\(e\)（EP），总卡数</p>
+      $$N = t \cdot c \cdot p \cdot d.$$
+      <p>EP 一般不单独占一个因子，而是借用 DP（或 DP×CP）那一维的卡：在 MoE 层里，这些卡不再各自持有全部专家，而是分摊专家（后面细说）。</p>
+      <p>一步训练的全局 batch（global batch size，GBS）按 token 计是</p>
+      $$\text{GBS} = d \cdot b \cdot m \cdot s,$$
+      <p>其中 \(m\) 是梯度累积步数，对流水线来说也就是一步里的 micro-batch 个数。这个等式在后面会反复出现：<strong>GBS 通常由收敛性（scaling law、临界 batch size）事先定好，不能随便改</strong>，所以加大 \(d\) 就得减小 \(b\) 或 \(m\)；当 \(b \cdot m\) 已经是 1，DP 就不能再加了。</p>
+      <p>显存方面，混合精度 + Adam 下每个参数大约要 16 字节：bf16 参数 2、bf16 梯度 2、fp32 主权重 4、Adam 两个矩 8（如果梯度也用 fp32 累加，还要再加 4）。激活值方面，Playbook 给出（不做重算、用 FlashAttention 时去掉注意力分数那一项）每层约</p>
+      $$m_\text{act} \approx 34\, s\, b\, h \ \text{字节}.$$
+      <p>算力方面，一个 token 前向 + 反向约 \(6\Psi\) FLOPs，加上注意力的 \(12 L h s^2\)（每条序列）。这些在本系列第一篇《训练的账本》里推过，这里直接用。</p>
+
+      <h2 id="each">逐个轴：切什么、通信什么、多贵</h2>
+
+      <h3>数据并行与 ZeRO</h3>
+      <p>DP 把 batch 分到 \(d\) 张卡，每张卡跑完整的前向和反向，得到的是「自己那份数据」上的梯度。为了让所有副本做同样的更新，反向结束时要把梯度做一次 <strong>all-reduce</strong> 求平均。用 ring 算法时，每张卡发送和接收的数据量约为 \(2\cdot\frac{d-1}{d}\) 倍梯度大小。</p>
+      <p>DP 的通信有两个好性质。第一，前向没有通信；第二，梯度的 all-reduce <strong>不在关键路径上</strong>：最后一层的梯度一算出来就可以开始同步，同时继续算前面层的反向（PyTorch DDP 用 hook + 分桶实现）。只要反向的计算时间比通信长，通信就被完全藏住了。坏处是它不省参数和优化器的显存：每张卡仍然是 \(16\Psi\) 字节。按 Scaling Book 的估算，96 GB HBM 的 TPU v5p 上，纯 DP + Adam 能放下的模型上限约是 \(96\text{GB}/10 \approx 9\text{B}\)（它算的是 bf16 参数 + fp32 优化器 10 字节/参数，还没算激活）。</p>
+      <p>ZeRO 去掉这份冗余。ZeRO-1 只切优化器状态：梯度 all-reduce 换成 reduce-scatter，每张卡只更新自己那 \(1/d\) 的参数，再 all-gather 回完整参数。reduce-scatter + all-gather 的总通信量和一次 all-reduce 相同，所以 ZeRO-1、ZeRO-2 几乎是白送的。ZeRO-3 / FSDP 连参数也只存 \(1/d\)，每层用之前临时 all-gather，前向一次、反向一次，再加上梯度的 reduce-scatter，通信量约为 DP 的 1.5 倍。但这些 all-gather 可以<strong>预取</strong>：算第 \(i\) 层时拉第 \(i+1\) 层的参数。所以 FSDP 的计算/通信比和纯 DP 一样，只是多了一份对「每层计算够不够长」的要求。</p>
+
+      <h3>张量并行（+ 序列并行）</h3>
+      <p>TP 把一层里的大矩阵按列或按行切开。Megatron 的做法是 MLP 的第一个矩阵按列切、第二个按行切，这样两个矩阵之间不需要通信，只在块的进出各通信一次；注意力按头切，道理一样。不带 SP 时，前向每个块末尾是一次 all-reduce；带 SP 时，LayerNorm、dropout 这些逐 token 的操作沿序列维切开，all-reduce 被拆成进块前的 all-gather 和出块后的 reduce-scatter。每次通信的数据是一份激活 \(s\cdot b\cdot h\)，一层前向 4 次（注意力 2 次、MLP 2 次），反向再 4 次。</p>
+      <p>关键在于：这些通信<strong>在关键路径上</strong>。下一个矩阵乘法要用这次通信的结果，算不了别的。所以 TP 对带宽和延迟都很敏感，几乎总是被限制在一台机器的 NVLink 范围之内（\(t \le 8\)）。它的好处是同时切了参数、梯度、优化器状态和激活（带 SP 时），而且不需要更大的 batch。</p>
+
+      <h3>上下文并行</h3>
+      <p>CP 沿序列维切 token。MLP、LayerNorm 这些逐 token 的计算完全不需要通信，只有注意力需要别的段的 K、V。常见实现是 <strong>Ring Attention</strong>：\(c\) 张卡排成环，每一步把自己手上的 K/V 块传给下一张卡，同时用收到的块算一部分注意力，\(c-1\) 步后每段 Q 都见过了全部 K/V。为了因果掩码下负载均衡，序列切成 \(2c\) 块，第 \(i\) 张卡拿第 \(i\) 块和第 \(2c-1-i\) 块（zig-zag）。CP 省的是激活显存，这在 128k 这种长度下是决定性的；代价是注意力里多出的通信，好在它能和注意力计算重叠。另外别忘了，CP 组内每张卡的权重是一样的，各自只看到一部分 token 的梯度，所以梯度同步（以及 ZeRO 的切分）要在 DP×CP 这一整组卡上做，在这一点上 CP 和 DP 是一回事。</p>
+      <p>另一种实现是先 all-gather 全部 K/V 再算，Llama 3 就是这么做的。论文给的理由：这样更容易支持文档掩码之类的各种掩码；而且用了 GQA 以后 K/V 比 Q 小得多，all-gather 的时间（\(O(S)\)）比注意力计算（\(O(S^2)\)）小一个量级，暴露出来也不要紧。</p>
+
+      <h3>流水线并行</h3>
+      <p>PP 把 \(L\) 层分成 \(p\) 段，每张卡只存自己那段的参数。通信只是相邻两段之间的点对点传输（前向传激活，反向传激活的梯度），量很小：每个 micro-batch 每个边界只有一份 \(s\cdot b\cdot h\)。所以 PP 能跨慢网络。问题在 <strong>bubble</strong>：流水线填满之前和排空之后，有些段在闲着。1F1B 调度下 bubble 占比是</p>
+      $$\frac{t_\text{bubble}}{t_\text{ideal}} = \frac{p-1}{m},$$
+      <p>要把它压小就得让 \(m\)（一步里的 micro-batch 数）远大于 \(p\)，也就是需要足够大的 GBS。Interleaved、Zero Bubble、DualPipe 这些调度都在和这个比值较劲。还有一个容易被忽略的代价：1F1B 下第一段要同时存 \(p\) 个 micro-batch 的激活，所以 PP 省参数，却不按比例省激活。</p>
+
+      <h3>专家并行</h3>
+      <p>MoE 层里每个 token 只走 top-k 个专家。EP 把专家分到不同卡上，每张卡只存 \(E/e\) 个专家。前向时，路由算出每个 token 去哪些专家，用一次 <strong>all-to-all</strong> 把 token 发到专家所在的卡（dispatch），算完再用一次 all-to-all 发回来（combine）；反向对称地再来两次。和 TP 不同，专家内部的矩阵乘不需要切，所以 EP 很「轻」。</p>
+      <p>EP 只影响 MoE 层，注意力等其它部分仍然需要别的方式分工，否则这些卡会在非 MoE 部分做重复计算。所以 EP 几乎总是和 DP 叠在一起：同一组卡，在注意力层里是 DP（各算各的样本），在 MoE 层里是 EP（各管各的专家）。这也是为什么有些实现把 EP 看作 DP 的一种特殊形式。</p>
+
+      <h3>一张总表</h3>
+      <div class="table-wrap">
+        <table class="wide">
+          <thead><tr><th>轴</th><th>切的维度</th><th>主要省的显存</th><th>通信</th><th>是否在关键路径</th><th>主要短板</th></tr></thead>
+          <tbody>
+            <tr><td>DP</td><td>batch</td><td>激活（单卡 batch 变小）</td><td>梯度 all-reduce，每步一次</td><td>否，可与反向重叠</td><td>受 GBS 上限约束</td></tr>
+            <tr><td>ZeRO-1/2</td><td>DP 副本间的优化器状态 / 梯度</td><td>优化器、梯度</td><td>reduce-scatter + all-gather，总量同 all-reduce</td><td>否</td><td>不省参数</td></tr>
+            <tr><td>ZeRO-3</td><td>再加参数</td><td>参数、梯度、优化器</td><td>每层 all-gather 参数（前向、反向）+ reduce-scatter</td><td>可预取</td><td>每层计算要够长才藏得住</td></tr>
+            <tr><td>TP + SP</td><td>隐藏维 / 序列维</td><td>参数、梯度、优化器、激活</td><td>每层前向 4 次、反向 4 次 all-gather / reduce-scatter</td><td>是</td><td>要高带宽，限于节点内</td></tr>
+            <tr><td>CP</td><td>序列维</td><td>激活</td><td>注意力里交换 K/V</td><td>可与注意力重叠</td><td>只在长序列时划算</td></tr>
+            <tr><td>PP</td><td>层</td><td>参数（激活不按比例省）</td><td>相邻段点对点</td><td>边界处是</td><td>bubble、调度复杂</td></tr>
+            <tr><td>EP</td><td>专家</td><td>专家参数</td><td>每个 MoE 层 4 次 all-to-all</td><td>是（除非专门做重叠）</td><td>只适用 MoE</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>这张表大体对应 Playbook「Summarizing it all」里的总结，我按自己的理解补了通信和关键路径两列。</p>
+
+      <h2 id="combine">谁和谁能组合</h2>
+      <p><strong>PP 和 ZeRO-3 是同一个问题的两种解法。</strong>它们都把模型参数沿深度方向分摊，每张卡都以「整层」为单位计算（TP、EP 则是在层内部切）。区别在于搬什么：ZeRO-3 搬权重，每张卡存每层的一小片，用的时候拉齐；PP 搬激活，每张卡存几层完整的参数，把激活往下传。由此推出它们各自偏好的条件：ZeRO-3 喜欢大的 \(b\cdot s\)，这样每层计算够长、能藏住参数的 all-gather；PP 喜欢大的 \(m\)，这样 bubble 小。</p>
+      <p>两者能同时用，但很少这么做：PP 下每个 micro-batch 都要过一遍每层，ZeRO-3 如果每个 micro-batch 都重新 all-gather 参数，通信量会乘上 \(m\)。要组合的话，得让 ZeRO-3 在一轮 micro-batch 期间把参数留在显存里，那又把 ZeRO-3 省下的显存吐回去一部分。相反，<strong>ZeRO-1、ZeRO-2 和 PP 天然互补</strong>：它们只动优化器状态和梯度，这些每步只同步一次，和 micro-batch 个数无关。DeepSeek-V3 用的就是 PP + ZeRO-1。</p>
+      <p><strong>TP（+SP）和 PP、ZeRO-3 都能组合。</strong>它依赖的是矩阵乘法的可分配性，和外面怎么切层、怎么切副本无关。但 TP 不适合单独扛大规模：一是它的通信在关键路径上，规模一大通信就压过计算；二是它要求对模型结构了解得很细（哪里按隐藏维切、哪里按序列维切），不像 ZeRO 和 PP 那样与模型无关。</p>
+      <p><strong>CP 和 EP 都是在切激活，和 TP 互补。</strong>CP 主要影响注意力，EP 只影响 MoE 层，彼此不冲突。Playbook 还给了每种并行「作用在模型哪部分」的对照：</p>
+      <ul>
+        <li>TP + SP 作用于整个模型（每个线性层、每个 LayerNorm）；需要针对模型写切分规则。</li>
+        <li>CP 主要作用于注意力，其它层在切开的序列上各算各的；除注意力外与模型无关。</li>
+        <li>EP 只作用于 MoE 层；除 MoE 外与模型无关。</li>
+        <li>PP 和 ZeRO 不针对某个子模块，只是 PP 要求各段负载均衡，第一段和最后一段因为有 embedding 和输出头常常要特殊处理。</li>
+      </ul>
+
+      <h2 id="network">每个轴该放在网络的哪一层</h2>
+      <p>GPU 集群的网络是分层的。以 H100 为例：一台服务器 8 张卡，通过 NVLink/NVSwitch 互联，每张卡对外的 NVLink 带宽是 900 GB/s（双向合计，单向约 450 GB/s）；服务器之间走 InfiniBand 或 RoCE，每张卡配一块 400 Gb/s 的网卡，单向约 50 GB/s。节点内外差了将近一个数量级，延迟差得更多。DeepSeek-V3 论文里给的自家 H800 集群数字是 NVLink 160 GB/s、IB 50 GB/s，约 3.2 倍。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 480 420" role="img" aria-label="节点内 NVLink 与节点间 InfiniBand 的层级，以及各并行轴放置的位置">
+          <g transform="translate(10,10)">
+            <rect x="0" y="0" width="290" height="140" rx="12" class="box"/>
+            <text x="12" y="22" font-size="13" font-weight="600">节点 0（8 × GPU）</text>
+            <rect x="14" y="100" width="262" height="24" rx="6" fill="var(--accent-soft)"/>
+            <text x="145" y="116" text-anchor="middle" font-size="12" style="fill:var(--accent)">NVSwitch · 每卡单向 ~450 GB/s</text>
+            <g id="gpus0"></g>
+          </g>
+          <g transform="translate(10,260)">
+            <rect x="0" y="0" width="290" height="140" rx="12" class="box"/>
+            <text x="12" y="22" font-size="13" font-weight="600">节点 1（8 × GPU）</text>
+            <rect x="14" y="100" width="262" height="24" rx="6" fill="var(--accent-soft)"/>
+            <text x="145" y="116" text-anchor="middle" font-size="12" style="fill:var(--accent)">NVSwitch</text>
+            <g id="gpus1"></g>
+          </g>
+          <path d="M155 150 V260" stroke="var(--accent-2)" stroke-width="3" stroke-dasharray="6 4"/>
+          <text x="165" y="200" font-size="12" style="fill:var(--accent-2)">IB / RoCE</text>
+          <text x="165" y="218" font-size="12" style="fill:var(--accent-2)">每卡 ~50 GB/s</text>
+          <g transform="translate(315,20)">
+            <rect x="0" y="0" width="155" height="120" rx="10" fill="var(--accent-soft)"/>
+            <text x="12" y="24" font-size="13" font-weight="600" style="fill:var(--accent)">节点内</text>
+            <text x="12" y="46" font-size="12">TP（+SP）</text>
+            <text x="12" y="64" font-size="12">常常还有 CP、EP</text>
+            <text x="12" y="88" font-size="11" class="soft">关键路径上的通信</text>
+            <text x="12" y="104" font-size="11" class="soft">要带宽也要低延迟</text>
+          </g>
+          <g transform="translate(315,160)">
+            <rect x="0" y="0" width="155" height="120" rx="10" fill="color-mix(in srgb, var(--accent-2) 14%, transparent)"/>
+            <text x="12" y="24" font-size="13" font-weight="600" style="fill:var(--accent-2)">节点间</text>
+            <text x="12" y="46" font-size="12">PP、DP / ZeRO</text>
+            <text x="12" y="64" font-size="12">（FSDP）</text>
+            <text x="12" y="88" font-size="11" class="soft">量小（PP）或能和</text>
+            <text x="12" y="104" font-size="11" class="soft">计算重叠（DP、预取）</text>
+          </g>
+        </svg>
+        <figcaption>图 2　网络层级和每个并行轴的典型位置。带宽为 H100 + 400 Gb/s 网卡的标称值，自绘示意。</figcaption>
+      </figure>
+
+      <p>放置原则一句话：<strong>越在关键路径上、通信越频繁的轴，越要放在内层（带宽高、延迟低的那一层）</strong>。具体来说：</p>
+      <ul>
+        <li>TP 每层通信 8 次、无法与计算重叠，必须在 NVLink 里。Playbook 的建议是 TP 组「应该保持在节点内」。</li>
+        <li>CP 的 K/V 交换能和注意力重叠，但量随序列线性增长，通常也放在节点内或紧挨着 TP。</li>
+        <li>EP 的 all-to-all 量不小，最好在节点内；跨节点时要靠路由约束和通信重叠（下文 DeepSeek-V3 的做法）。</li>
+        <li>PP 只在边界传激活，量小，可以跨节点。</li>
+        <li>DP / FSDP 在最外层：它的通信可以异步预取参数、异步规约梯度，最能容忍延迟。</li>
+      </ul>
+      <p>Llama 3 的论文把这个原则写得很直白：并行维度按 [TP, CP, PP, DP] 的顺序从内到外排列，「最内层的并行需要最高的带宽和最低的延迟，因此通常限制在同一台服务器内；最外层可能跨越多跳网络，应能容忍更高的延迟」。DP（他们用的是 FSDP）在最外层，因为它能异步预取权重、异步规约梯度。</p>
+
+      <h2 id="mesh">设备网格：rank 怎么编号</h2>
+      <p>把 \(N\) 张卡看成一个 4 维数组，形状是 \([d, p, c, t]\)（外到内），每张卡的全局编号 rank 就是它在这个数组里的展平下标。按 [TP, CP, PP, DP] 由内到外的顺序：</p>
+      $$\text{rank} = i_t + t\,\big(i_c + c\,(i_p + p\, i_d)\big).$$
+      <p>同一个 TP 组就是其它三个下标相同、只有 \(i_t\) 不同的那 \(t\) 张卡，它们的 rank 连续（步长 1）；同一个 CP 组的 rank 步长是 \(t\)；PP 组步长 \(tc\)；DP 组步长 \(tcp\)。如果每台机器 8 张卡、rank 按机器连续分配，那么「步长 × 组大小 \(\le 8\)」的组就整个落在一台机器里。这就是「内层」在实现上的含义：<strong>内层轴 = 编号里变化最快的轴</strong>。</p>
+      <p>Llama 3 论文里的例子：16 张卡，TP=CP=PP=DP=2。GPU0 的坐标是 [TP0, CP0, PP0, DP0]，GPU1 是 [TP1, CP0, PP0, DP0]，所以 GPU0 和 GPU1 在同一个 TP 组；GPU0 和 GPU2 同一个 CP 组；GPU0 和 GPU4 同一个 PP 组；GPU0 和 GPU8 同一个 DP 组。代入上面的公式正好对得上。</p>
+      <p>在 PyTorch 里，这个网格就是 <code>DeviceMesh</code>：</p>
+      <pre><code>from torch.distributed.device_mesh import init_device_mesh
+
+# 外层在前、内层在后：最后一维 tp 变化最快，rank 连续
+mesh = init_device_mesh("cuda", (dp, pp, cp, tp),
+                        mesh_dim_names=("dp", "pp", "cp", "tp"))
+tp_group = mesh["tp"].get_group()   # 本卡所在的 TP 进程组
+dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre>
+      <p>JAX 的 <code>jax.make_mesh((dp, pp, cp, tp), ('dp', 'pp', 'cp', 'tp'))</code> 是同一个概念，下一篇会细讲。</p>
+      <p>EP 一般从 DP 维里「借」：把 DP 下标 \(i_d\) 再拆成 \((i_{ed}, i_e)\)，同一 \(i_{ed}\) 的 \(e\) 张卡组成一个 EP 组，分摊所有专家；不同 EP 组之间对专家参数做数据并行（expert-DP，大小 \(d/e\)）。下面的演示可以随便换顺序，看看每种组落在哪里。</p>
+
+      <div class="demo" id="mesh-demo">
+        <div class="demo-label">设备网格可视化</div>
+        <div class="grid2">
+          <label>TP<span class="row"><select id="mz-tp"></select></span></label>
+          <label>CP<span class="row"><select id="mz-cp"></select></span></label>
+          <label>PP<span class="row"><select id="mz-pp"></select></span></label>
+          <label>DP<span class="row"><select id="mz-dp"></select></span></label>
+          <label>EP（取自 DP）<span class="row"><select id="mz-ep"></select></span></label>
+          <label>每节点 GPU 数<span class="row"><select id="mz-g"><option>4</option><option selected>8</option></select></span></label>
+          <label>顺序（内 → 外）<span class="row"><select id="mz-order"></select></span></label>
+        </div>
+        <div style="margin-top:12px; display:flex; flex-wrap:wrap; gap:8px; align-items:center;">
+          <span style="font-size:14px; color:var(--text-soft)">按组着色：</span>
+          <div class="seg" id="mz-color">
+            <button data-k="tp" aria-pressed="true">TP 组</button>
+            <button data-k="cp" aria-pressed="false">CP 组</button>
+            <button data-k="pp" aria-pressed="false">PP 组</button>
+            <button data-k="dp" aria-pressed="false">DP 组</button>
+            <button data-k="ep" aria-pressed="false">EP 组</button>
+          </div>
+        </div>
+        <div class="mesh" id="mz-mesh"></div>
+        <div class="readout" id="mz-info"></div>
+        <ul class="chk" id="mz-chk"></ul>
+        <p class="note">点击任意一张卡，只高亮与它同组的卡，并显示它的坐标。颜色只用来区分不同的组，没有别的含义。最多显示 256 张卡。</p>
+      </div>
+
+      <p>换几种顺序试试：默认的 [TP, CP, PP, DP] 下，TP 组整组在一台机器内；把 DP 挪到最内层，TP 组就被拆到好几台机器上，原本走 NVLink 的每层通信全都要走网卡。这正是「顺序」这个超参数存在的原因。</p>
+
+      <h2 id="thresholds">什么时候被通信卡住：每设备 batch 的门槛</h2>
+      <p>「放得下」只是第一关。卡多了以后，每张卡分到的计算变少，而通信量往往不变甚至变多，迟早会出现通信时间超过计算时间、卡在空等的情况。Scaling Book 第 5 章把这件事算成了几个很好记的门槛。它把 Transformer 简化成一摞 MLP 块（每块两个矩阵 \(W_\text{in}\in\mathbb{R}^{D\times F}\)、\(W_\text{out}\in\mathbb{R}^{F\times D}\)），\(B\) 是全局 batch 的 token 数，\(C\) 是每芯片算力，\(W\) 是互联带宽（双向），\(X\)、\(Y\) 分别是 FSDP 和 TP 的并行度。</p>
+
+      <h3>DP / FSDP：每设备 batch 要大于 \(C/W\)</h3>
+      <p>纯 DP 的反向里每层有两个矩阵要 all-reduce，每个 \(2DF\) 字节（bf16），all-reduce 的时间约为 \(2\times\)字节数\(/W\)：</p>
+      $$T_\text{comms} = \frac{2\cdot 2\cdot 2\, DF}{W}, \qquad T_\text{math} = \frac{2\cdot 2\cdot 2\, B D F}{X\, C}.$$
+      <p>后者是反向的 4 个矩阵乘，每个 \(2(B/X)DF\) FLOPs。两者相除，计算比通信长的条件是</p>
+      $$\frac{B}{X} > \frac{C}{W}.$$
+      <p>右边叫这张网络的「算术强度」。TPU v5p 上 \(C = 4.59\times10^{14}\)，单轴 ICI 双向带宽 \(W = 1.8\times 10^{11}\) 字节/秒，比值约 2550：<strong>每张卡至少要分到 2550 个 token</strong>，DP 才是计算受限的。注意这个结论和模型大小无关，因为通信量和计算量都正比于 \(DF\)。FSDP 把 all-reduce 换成 all-gather + reduce-scatter，比值不变，所以「DP 能跑」就意味着「FSDP 也能跑」，而且白白省下大量显存。DP 用了几个网格轴（\(M_X\)），带宽就乘几，门槛变成 \(2550/M_X\)；3 维 torus 全给 DP，门槛约 850。</p>
+
+      <h3>TP：并行度上限约 \(F/2550\)</h3>
+      <p>TP 搬的是激活：前向在 \(W_\text{in}\) 前 all-gather、\(W_\text{out}\) 后 reduce-scatter，每次 \(2BD\) 字节。</p>
+      $$T_\text{comms} = \frac{2\cdot 2\, BD}{W}, \qquad T_\text{math} = \frac{4\, BDF}{Y\, C} \;\Rightarrow\; Y \lt \frac{F\, W}{C} \approx \frac{F}{2550}.$$
+      <p>这个门槛和 batch 无关，只和 FFN 宽度有关。LLaMA 3-70B 的 \(F = 28672\)，8 路 TP 舒服，16 路就通信受限了；大多数模型落在 8 到 16 路之间。</p>
+
+      <h3>FSDP + TP 混合：门槛降到 \(\alpha^2/(2F)\)</h3>
+      <p>一句口诀：<strong>FSDP 搬权重，TP 搬激活</strong>。混在一起时，FSDP 的 all-gather 对象是已经被 TP 切过的 \([D_X, F_Y]\)，随 \(Y\) 变小；TP 的 all-gather 对象是已经被 FSDP 切过的 \([B_X, D_Y]\)，随 \(X\) 变小。设 \(N = XY\)，\(\alpha = C/W\)：</p>
+      $$T_\text{FSDP} = \frac{4DF}{Y\,W\,M_X},\quad T_\text{TP} = \frac{4BD}{X\,W\,M_Y},\quad T_\text{math}=\frac{4BDF}{N C}.$$
+      <p>假设两种通信能互相重叠，总通信时间是两者的最大值。一个随 \(X\) 增、一个随 \(X\) 减，最大值在两者相等时最小：</p>
+      $$X_\text{opt} = \sqrt{\frac{B}{F}\cdot\frac{M_X}{M_Y}\cdot N}.$$
+      <p>代回去，计算受限的条件变成</p>
+      $$\frac{B}{N} \gt \frac{\alpha^2}{M_X M_Y F}.$$
+      <p>3 维 torus 上 \(M_X M_Y = 2\)，\(F\approx 32768\) 时门槛约 100，比纯 FSDP 的 850 低了约 8 倍。直觉是：计算时间随 \(B\) 线性增长，而最优混合下的通信时间只随 \(\sqrt{B}\) 增长。</p>
+
+      <h3>跨 pod：每个 pod 的 batch 要大于约 7 万</h3>
+      <p>一个 TPU v5p pod 最多 8960 片，再往外要走数据中心网络（DCN），每片只有约 6.25 GB/s。通常的做法是 pod 内用 FSDP + TP，pod 之间只做纯 DP。DCN 的总带宽随 pod 内芯片数线性增长（每台主机都有网卡），推出来的条件是<strong>每个 pod</strong>的 batch 大于 \(C/W_\text{dcn} \approx 4.59\times10^{14}/6.25\times10^9 \approx 73{,}440\) 个 token。这是很容易满足的。</p>
+
+      <div class="demo" id="thr-demo">
+        <div class="demo-label">每设备 batch 门槛计算器（Scaling Book 第 5、6 章的公式）</div>
+        <div style="margin-top:10px" class="seg" id="thr-preset">
+          <button data-p="0" aria-pressed="true">LLaMA 3-70B · v5p 整 pod · 4M token</button>
+          <button data-p="1" aria-pressed="false">LLaMA-2 13B · v5p 4096 片 · 3M token</button>
+          <button data-p="2" aria-pressed="false">LLaMA 3-70B · 2M token</button>
+        </div>
+        <div class="grid2">
+          <label>每芯片算力 C（TFLOP/s）<span class="row"><input type="range" id="thr-c" min="100" max="2500" step="1"><output id="thr-c-o"></output></span></label>
+          <label>单轴互联带宽 W（GB/s，双向）<span class="row"><input type="range" id="thr-w" min="20" max="1000" step="1"><output id="thr-w-o"></output></span></label>
+          <label>FFN 宽度 F<span class="row"><input type="range" id="thr-f" min="4096" max="65536" step="256"><output id="thr-f-o"></output></span></label>
+          <label>全局 batch B（token，log）<span class="row"><input type="range" id="thr-b" min="17" max="25" step="0.01"><output id="thr-b-o"></output></span></label>
+          <label>芯片数 N（log）<span class="row"><input type="range" id="thr-n" min="4" max="15" step="0.01"><output id="thr-n-o"></output></span></label>
+          <label>网格轴数（FSDP 轴 / TP 轴）<span class="row"><select id="thr-m"><option value="2,1" selected>3 维：2 / 1</option><option value="1,1">2 维：1 / 1</option><option value="1,2">3 维：1 / 2</option></select></span></label>
+        </div>
+        <div class="readout" id="thr-out"></div>
+        <div class="verdict" id="thr-verdict"></div>
+        <p class="note">纯 FSDP 的门槛按「所有轴都给 FSDP」计算（\(M = M_X + M_Y\)）；混合门槛和 \(X_\text{opt}\) 用上面的公式。这是只看 MLP 矩阵乘、假设通信和计算完美重叠的 roofline 估计，真实系统会差一些。</p>
+      </div>
+
+      <h3>书里的例子：在一个 v5p pod 上训练 LLaMA 3-70B</h3>
+      <p>Scaling Book 第 6 章把上面的公式套到 LLaMA 3-70B 上（\(L=80, D=8192, F=28672\)，约 70B 参数），设定是 4M token 的 batch（1024 条 4096 长的序列），一整个 8960 片的 v5p pod。我把它的推理顺一遍：</p>
+      <ol>
+        <li><strong>总算力和时间。</strong>每 token 约 \(6\times 70\text{B} = 4.2\times10^{11}\) FLOPs，15T token 共约 \(6.3\times10^{24}\) FLOPs。8960 片、40% MFU 下约 \(3.8\times10^6\) 秒，约 44 天。</li>
+        <li><strong>显存不是约束。</strong>bf16 参数 140 GB，fp32 优化器 560 GB，每层存 2 个检查点的激活约 10.5 TB，合计约 11.2 TB。按每片 96 GB，最少 117 片就放得下，但那样要训近 10 年。用整个 pod 是为了算力，不是为了显存；摊到 8960 片上每片只用约 1.3 GB。</li>
+        <li><strong>纯 FSDP 行不行？</strong>只沿 batch 切最多 1024 路（1024 条序列）。允许同时沿序列切以后，每片 \(4\cdot1024\cdot1024/8960 \approx 468\) token，低于 3 轴 FSDP 的门槛 850，通信受限。</li>
+        <li><strong>FSDP + TP。</strong>门槛 \(2550^2/(2F) \approx 113\)，468 在它之上。\(X_\text{opt} = \sqrt{2\cdot 4.19\times10^6 \cdot 8960 / 28672} \approx 1618\)，取整到约 2048 路 FSDP、4 路 TP。书里的结论是：1024 路数据并行 × 2 路序列并行 × 4 路张量并行，就能保持计算受限。</li>
+      </ol>
+      <p>上面计算器的第一个预设就是这个例子。第三个预设对应书中「跨 pod」的讨论：batch 降到 2M 时，FSDP + TP 的门槛约 108，允许约 1.8 万片，超过一个 pod，所以要跨 DCN；两个 pod 时每 pod 的 batch 是 1M，远超 73k，每片约 111 个 token，「有点紧，但理论上可行」。</p>
+
+      <h2 id="gpu">同一套算术放到 GPU 上</h2>
+      <p>Playbook 的附录 A3 对 GPU 做了同样的事，用的是「通信时间 / 计算时间」这个比值，小于 1 就能重叠。我把字节数显式写出来（bf16，2 字节），推一遍，结论和 TPU 版是同一个形状。记 \(\text{peak}\) 为单卡算力，\(\text{bw}\) 为单向带宽，\(\alpha = \text{peak}/\text{bw}\)。</p>
+      <ul>
+        <li><strong>ZeRO-3 预取。</strong>每层 all-gather 参数 \(2P_\text{layer}\cdot\frac{d-1}{d}\) 字节，同层前向计算 \(2\,T\,P_\text{layer}\) FLOPs（\(T = s\cdot b\) 是这张卡一个 micro-batch 的 token 数），比值约 \(\frac{\alpha}{T}\)。要藏住，每张卡每个 micro-batch 的 token 数要大于 \(\alpha\)。</li>
+        <li><strong>DP 梯度同步。</strong>开了梯度累积时，all-reduce 只能和<em>最后一个</em> micro-batch 的反向重叠（前面的 micro-batch 用 <code>no_sync</code> 跳过同步）。所以条件同样是每个 micro-batch 的 token 数大于 \(\alpha\) 量级；藏不住的部分每步只出现一次，会被 \(m\) 个 micro-batch 摊薄。</li>
+        <li><strong>TP。</strong>Playbook 推出的比值是 \(\frac{t-1}{2h}\cdot\alpha\)，与 \(s\)、\(b\) 都无关，只看隐藏维和 TP 度数。</li>
+        <li><strong>PP。</strong>比值是 \(\frac{\alpha}{32\, h\, L_\text{next}}\)（\(L_\text{next}\) 是下一段的层数），几乎总是远小于 1。</li>
+      </ul>
+      <p>代入 H100（bf16 稠密约 989 TFLOP/s）：节点内 NVLink 单向 450 GB/s，\(\alpha \approx 2200\)；节点间 50 GB/s，\(\alpha \approx 19800\)。于是 \(h = 8192\)、\(t = 8\) 的 TP，节点内比值约 \(7/16384\times2200\approx 0.94\)，勉强能藏；挪到节点间约 8.5，通信是计算的 8 倍多。这就是「TP 不出节点」的定量版本。ZeRO-3 跨节点时要求每卡每个 micro-batch 约 2 万 token，4096 长的序列需要 \(b\ge 5\)，否则会有一部分 all-gather 暴露出来。</p>
+      <p>还要提醒一句：这些比值都假设「通信和计算重叠时互不影响」。Playbook 在 5D 一节的结尾专门指出这不完全成立：NCCL 的通信 kernel 也要占用 SM，和计算 kernel 抢资源，重叠时计算会变慢。DeepSeek-V3 专门把通信限制在 20 个 SM 上，也是为了这个。</p>
+
+      <h2 id="procedure">选配置的三步流程</h2>
+      <p>Playbook 给的流程分三步。它不是算法，而是一个起点，最后总要在自己的集群上跑实验确认。</p>
+      <ol class="flow">
+        <li>
+          <strong>先放得下一份模型。</strong>卡多的情况：
+          <ul>
+            <li>10B 以下：单一手段就够，比如 8 卡内的 TP，或者 ZeRO-3 / DP + 全量重算。</li>
+            <li>10B 到 100B、需要 8 卡以上：TP=8 + PP，或 TP=8 + ZeRO-3，或者只用 ZeRO-3。</li>
+            <li>512 卡以上：纯 DP / ZeRO-3 的通信开始拖后腿，最好把 DP 和 TP 或 PP 组合。</li>
+            <li>1024 卡以上：一个推荐起点是 TP=8 + ZeRO-2 DP + PP。</li>
+            <li>超长序列：跨节点加 CP。MoE：跨节点加 EP。</li>
+          </ul>
+          卡少的情况：开全量激活重算，用计算换显存；用梯度累积拼出大 batch。
+        </li>
+        <li>
+          <strong>凑到目标 GBS。</strong>第一步之后，\(d\cdot b\cdot m\cdot s\) 可能偏大或偏小。要变大：加 DP 或梯度累积；长序列时加 CP。要变小：把 DP 换成别的并行；长序列时减 CP。
+        </li>
+        <li>
+          <strong>优化吞吐。</strong>在显存和通信都不是瓶颈的前提下：把 TP 加到接近节点大小（用快的节点内带宽），从而减少其它并行；在保持 GBS 的前提下用 ZeRO-3 加 DP；DP 通信成为瓶颈时换成 PP；逐个轴往上调试；调 micro-batch 大小，在 GBS、模型大小、计算和通信之间找平衡。
+        </li>
+      </ol>
+      <p>Playbook 的作者们在 1 到 64 个 8×H100 节点上跑了几千个配置（序列 4096，GBS 1M token），把每个模型大小、节点数下最好的配置画成热力图。他们读出的几条规律：</p>
+      <ul>
+        <li>节点越多，效率（MFU）越低，小模型尤其明显。小模型的「计算 / 模型大小」比低，本来可以加大 batch 来补，但 GBS 被固定在 1M。</li>
+        <li>大模型在节点少时要么放不下，要么贴着显存上限跑、效率很差（例子是 80B 模型跑在 4 个节点上）。</li>
+        <li>结果非常依赖实现质量。一开始他们的 TP 比 PP 快；优化了 PP 代码后 PP 反超；他们预期改进 TP 的通信重叠以后 TP 会再领先。</li>
+      </ul>
+      <p>工程上的教训也值得记下来：PyTorch 进程有时清理不干净；Slurm 强杀作业会导致节点故障；几分钟的基准测试拖成几小时；有的作业直接卡死。他们花了大量时间在缩短集群重启和空闲时间、读 NCCL 调试日志、理解 CUDA 显存分配器的行为、改进多节点 PP 的性能上。理论上的配置空间很好写，把它在真实集群上扫一遍是另一回事。</p>
+
+      <h2 id="planner">配置规划器</h2>
+      <p>下面这个规划器把上面的显存和通信公式写成代码：枚举所有合法的 (TP, CP, PP, DP, EP, micro-batch) 组合，估算每卡显存和一步的时间，按时间排序。它<strong>是一个简化模型</strong>，用来感受各个旋钮的方向，不是用来替代实测的。主要假设写在下面的折叠框里。</p>
+
+      <div class="demo" id="plan-demo">
+        <div class="demo-label">5D 配置规划器（简化模型）</div>
+        <div class="grid2">
+          <label>模型<span class="row"><select id="pl-model">
+            <option value="l8">Llama 3 8B</option>
+            <option value="l70" selected>Llama 3 70B</option>
+            <option value="l405">Llama 3 405B</option>
+            <option value="mx">Mixtral 8x7B（MoE，8 专家 top-2）</option>
+          </select></span></label>
+          <label>序列长度 s<span class="row"><select id="pl-seq">
+            <option>2048</option><option selected>4096</option><option>8192</option><option>16384</option><option>32768</option><option>131072</option>
+          </select></span></label>
+          <label>全局 batch（token）<span class="row"><select id="pl-gbs">
+            <option value="1048576">1M</option><option value="2097152">2M</option><option value="4194304" selected>4M</option><option value="8388608">8M</option><option value="16777216">16M</option>
+          </select></span></label>
+          <label>GPU 数<span class="row"><select id="pl-n">
+            <option>8</option><option>16</option><option>32</option><option>64</option><option>128</option><option>256</option><option selected>512</option><option>1024</option><option>2048</option><option>4096</option><option>8192</option><option>16384</option>
+          </select></span></label>
+          <label>GPU 类型<span class="row"><select id="pl-gpu">
+            <option value="a100">A100 80GB · 312 TF</option>
+            <option value="h100" selected>H100 80GB · 989 TF</option>
+            <option value="h200">H200 141GB · 989 TF</option>
+          </select></span></label>
+          <label>ZeRO 等级<span class="row"><select id="pl-zero"><option value="0">0（纯 DP）</option><option value="1" selected>1</option><option value="2">2</option><option value="3">3（FSDP）</option></select></span></label>
+          <label>节点内有效带宽（GB/s，单向）<span class="row"><input type="range" id="pl-bwi" min="50" max="900" step="10"><output id="pl-bwi-o"></output></span></label>
+          <label>节点间有效带宽（GB/s，单向）<span class="row"><input type="range" id="pl-bwo" min="5" max="100" step="1"><output id="pl-bwo-o"></output></span></label>
+          <label>激活重算<span class="row"><select id="pl-rc"><option value="0">不重算</option><option value="1" selected>全量重算</option></select></span></label>
+        </div>
+        <div class="readout" id="pl-sum"></div>
+        <div class="cfg-wrap">
+          <table class="cfg">
+            <thead><tr><th>TP</th><th>CP</th><th>PP</th><th>DP</th><th>EP</th><th>mbs</th><th>m</th><th>显存/卡</th><th>步时</th><th>MFU</th><th>瓶颈</th></tr></thead>
+            <tbody id="pl-body"></tbody>
+          </table>
+        </div>
+        <div class="detail" id="pl-detail"></div>
+        <p class="note">所有数字都是本模型的估算，不是实测；不同框架、不同集群可能差很多。点一行看时间和显存拆分。</p>
+      </div>
+
+      <details>
+        <summary>规划器用了哪些公式和假设</summary>
+        <ul>
+          <li><strong>枚举。</strong>TP ∈ {1,2,4,8,16}（要整除头数），CP ∈ {1,…,32}（序列要能切成 2·CP 块，且每张卡至少分到 1024 个 token；段太短时真实实现的效率很差，这个简化模型刻画不了，干脆排除），PP ∈ {1,…,32}（每段层数取上整，按最重的一段算），EP 整除专家数且整除 DP，micro-batch ∈ {1,2,4,8}，DP = N/(TP·CP·PP)，梯度累积 m = 序列数/(DP·mbs) 必须是正整数。</li>
+          <li><strong>拓扑。</strong>按 [TP, CP, PP, DP] 由内到外编号，EP 取 DP 里变化最快的那几位；一个组如果「步长 × 大小 ≤ 8」就走节点内带宽，否则走节点间带宽。</li>
+          <li><strong>显存。</strong>参数按 TP、PP 切（专家参数再按 EP 切），每卡加一份 V·h/TP 的词表（首段或末段）。每参数 bf16 参数 2 + bf16 梯度 2 + fp32 主权重和 Adam 12 字节，ZeRO-1/2/3 依次把后者、梯度、参数除以 DP·CP（权重在 CP 组内也是复制的，所以梯度同步和 ZeRO 切分都在 DP×CP 上做；专家参数除以 DP·CP/EP）；ZeRO-3 再加两层参数的 gather 缓冲。激活每层 34·(s/CP)·b·h/TP 字节（假设有 SP 和 FlashAttention）；全量重算时每层只存 2·(s/CP)·b·h/TP 的输入，外加一层的完整激活。PP 用 1F1B，第一段同时存 min(PP, m) 个 micro-batch。另加 6·(s/CP)·b·V/TP 的 logits。可用显存按 90% 计。</li>
+          <li><strong>计算。</strong>每个 micro-batch 6·Ψ<sub>active</sub>·s·b + 12·L·h·s²·b FLOPs，按 TP·CP 和本段层数比例分摊；全量重算乘 4/3；矩阵乘效率固定取峰值的 60%。</li>
+          <li><strong>通信。</strong>TP：每层 8 次（重算时 12 次）all-gather / reduce-scatter，完全暴露。CP：K/V 环形传递约 3·(CP−1) 份本地 K/V，能和注意力计算重叠的部分不计。EP：每个 MoE 层 4 次（重算 6 次）all-to-all，完全暴露。PP：每个 micro-batch 两次点对点。DP（在 DP×CP 组上）：ZeRO-0/1/2 每步一次梯度 all-reduce（或等量的 reduce-scatter + all-gather），可与最后一个 micro-batch 的反向重叠；ZeRO-3 每个 micro-batch 三遍参数量，可与该 micro-batch 计算重叠。</li>
+          <li><strong>步时。</strong>(m + PP − 1) × 每段每个 micro-batch 的时间 + 暴露的 DP 通信。MFU 只算模型 FLOPs（不含重算）。</li>
+          <li><strong>没建模的：</strong>通信与计算抢 SM、网络拥塞和延迟、负载不均（MoE 路由、PP 首末段）、interleaved / zero-bubble 调度、kernel 启动开销、显存碎片、MoE 激活的特殊形状等。</li>
+        </ul>
+      </details>
+
+      <p>几个可以动手看的现象（数字都来自这个简化模型）：</p>
+      <ul>
+        <li>默认设置（70B、4096 序列、4M token、512 张 H100、全量重算）下，排在前面的配置几乎都是计算受限，MFU 估计在 40% 左右，用的是 2 到 4 路 TP、几路 CP 和较深的 PP，DP 反而不大。PP 在这里很便宜，因为 4M token 拆成了上百个 micro-batch，bubble 只占百分之几。</li>
+        <li>把 GBS 降到 1M：micro-batch 数一下子变少，深 PP 的 bubble 变大，前几名变成 TP=8、不用 PP 的配置，瓶颈变成 TP 通信，MFU 跟着掉。这就是「GBS 固定、卡多以后越来越难」的样子。</li>
+        <li>关掉重算：放得下的配置变少，但最快配置的 MFU 明显上升，因为少了约 1/3 的重复前向。显存和算力之间的交换在这里一目了然。</li>
+        <li>序列拉到 131072：CP 成了必需品（不切序列，一条序列的激活就放不下），而全局只有 128 条序列，micro-batch 不够多，PP bubble 变成主要损耗。</li>
+        <li>Mixtral 8x7B、512 卡时 EP 组能留在节点内，all-to-all 不是问题；加到 4096 卡，TP 和 EP 抢节点内的 8 个位置，EP 组被挤到节点外，前几名的瓶颈就变成了 all-to-all。</li>
+        <li>这个模型在 4096 长度下也经常选 CP。原因是它把 CP 的 K/V 传递当作能被注意力计算完全藏住，CP 在这里就相当于「沿序列做数据并行」，正好绕开了 GBS 对 DP 的限制，这和 Scaling Book 把序列切分看成另一种数据并行是一致的。真实实现里段越短效率越差，所以别把这当成推荐。</li>
+      </ul>
+
+      <h2 id="real">真实系统怎么组合</h2>
+      <h3>Llama 3 405B：4D 并行</h3>
+      <p>Llama 3 405B 在最多 16K 张 H100（80 GB HBM3，每台服务器 8 卡 NVLink，服务器间 400 Gb/s 的 RoCE）上训练，用的是 TP + CP + PP + DP（FSDP）四种。论文表 4 给了三个阶段的配置：</p>
+      <div class="table-wrap">
+        <table class="wide">
+          <thead><tr><th class="num">GPU</th><th class="num">TP</th><th class="num">CP</th><th class="num">PP</th><th class="num">DP</th><th class="num">序列长度</th><th class="num">每 DP 组 batch</th><th class="num">每步 token</th><th class="num">TFLOP/s/GPU</th><th class="num">BF16 MFU</th></tr></thead>
+          <tbody>
+            <tr><td class="num">8,192</td><td class="num">8</td><td class="num">1</td><td class="num">16</td><td class="num">64</td><td class="num">8,192</td><td class="num">32</td><td class="num">16M</td><td class="num">430</td><td class="num">43%</td></tr>
+            <tr><td class="num">16,384</td><td class="num">8</td><td class="num">1</td><td class="num">16</td><td class="num">128</td><td class="num">8,192</td><td class="num">16</td><td class="num">16M</td><td class="num">400</td><td class="num">41%</td></tr>
+            <tr><td class="num">16,384</td><td class="num">8</td><td class="num">16</td><td class="num">16</td><td class="num">8</td><td class="num">131,072</td><td class="num">16</td><td class="num">16M</td><td class="num">380</td><td class="num">38%</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>几点可以对上前面的理论：</p>
+      <ul>
+        <li>TP = 8 正好一台服务器，顺序 [TP, CP, PP, DP] 由内到外。</li>
+        <li>从 8K 卡到 16K 卡，GBS 保持 16M token 不变，DP 翻倍，每个 DP 组的 batch 从 32 降到 16。论文把 MFU 从 43% 掉到 41% 归因于此：每组 batch 变小，PP 的 bubble 占比和 DP 通信占比都上升。这正是「GBS 固定、加卡变难」的实例。</li>
+        <li>长上下文阶段把序列拉到 128K，用 CP=16 切序列，DP 相应降到 8。乘一下：8 × 16 × 16 × 8 = 16384。</li>
+        <li>他们的 FSDP 切优化器状态和梯度，但前向之后不重新切分参数，以免反向时再 all-gather 一次（介于 ZeRO-2 和 ZeRO-3 之间）。</li>
+        <li>CP 用的是先 all-gather K/V 的实现（见上文），序列切成 2×CP 块做负载均衡。</li>
+        <li>他们专门做了显存估算器和性能预测工具来探索配置空间，这也是本文规划器想做的事的真实版本。</li>
+      </ul>
+
+      <h3>DeepSeek-V3：PP + EP + ZeRO-1，没有 TP</h3>
+      <p>DeepSeek-V3 是 671B 总参数、每 token 激活 37B 的 MoE，每个 MoE 层有 1 个共享专家和 256 个路由专家，每个 token 激活 8 个路由专家。训练集群是 2048 张 H800，每节点 8 卡 NVLink/NVSwitch，节点间 IB。论文写的并行方案是 <strong>16 路 PP、跨 8 个节点的 64 路 EP、以及 ZeRO-1 DP</strong>，并且明确说通过仔细的显存优化，<strong>不用代价高昂的 TP</strong> 也能训练。</p>
+      <p>按论文给的数字推一下（这是我的推算，论文没有逐项写出）：2048 / 16 = 128，即每个流水段 128 张卡；这 128 张卡在注意力部分是 128 路数据并行，在 MoE 层里分成两个 64 卡（8 节点）的 EP 组，每组分摊 256 个专家，每卡 4 个；两组之间对专家参数再做 2 路数据并行。</p>
+      <p>不用 TP 能成立，是因为他们在别的地方把账补了回来：</p>
+      <ul>
+        <li><strong>DualPipe</strong>：把一对前向和反向 chunk 内部的计算和通信重叠起来，并从流水线两端同时喂 micro-batch，减少 bubble。代价是存两份参数，但因为 EP 很大，每卡参数本来就少，这份冗余不贵。</li>
+        <li><strong>受网络拓扑约束的路由</strong>：每个 token 最多发往 4 个节点。token 先走 IB 发到目标节点上「同一卡位」的 GPU，再走 NVLink 转发给持有专家的卡，IB 和 NVLink 的传输重叠。论文说这样每个 token 平均可以在每个节点选 3.2 个专家而不增加 NVLink 开销。</li>
+        <li><strong>只用 20 个 SM 做通信</strong>：分成 10 个通信通道，用 warp specialization 分别负责 IB 发送、IB 到 NVLink 转发、NVLink 接收，减少对计算 SM 的挤占。</li>
+        <li><strong>省显存</strong>：反向时重算所有 RMSNorm 和 MLA 的上投影；参数的 EMA 放在 CPU 内存里异步更新；MTP 模块和主模型共享 embedding 和输出头，且 DualPipe 让最浅层和最深层落在同一个 PP rank 上，物理上共享这份参数和梯度。</li>
+      </ul>
+      <p>Playbook 也提到过这个组合：ZeRO-1 和 PP 互补，DeepSeek-V3 正是 PP + ZeRO-1。对比两家：Llama 3 是稠密模型，TP 在节点内吃满 NVLink；DeepSeek-V3 是细粒度 MoE，节点内带宽留给了 EP 的 all-to-all 转发，于是放弃 TP，用 PP 切深度，用 ZeRO-1 切优化器。<strong>同一套原则，模型结构不同，答案就不同。</strong></p>
+
+      <h2 id="summary">小结</h2>
+      <ul>
+        <li>五个轴各切一个维度：DP 切 batch、TP 切隐藏维、CP 切序列、PP 切层、EP 切专家；ZeRO 在 DP 副本之间切冗余状态。</li>
+        <li>判断一个轴的代价看三件事：省哪部分显存、加哪种通信、通信是否在关键路径上。TP 和 EP 的通信在关键路径上，CP、FSDP 的可以重叠，PP 的很小但有 bubble，DP 的每步一次且能藏在反向后面。</li>
+        <li>通信越频繁、越在关键路径上的轴越往内层放：[TP, CP, PP, DP] 由内到外。内层 = rank 编号里变化最快的维度。</li>
+        <li>DP / FSDP 要求每卡 token 数大于网络的算术强度 \(C/W\)；TP 的度数上限约为 \(F/\alpha\)；两者混合把门槛降到 \(\alpha^2/(2F)\) 量级，最优 FSDP 度数是 \(\sqrt{(B/F)(M_X/M_Y)N}\)。</li>
+        <li>GBS 是硬约束。卡越多，每卡分到的越少，越难藏住通信、bubble 越大。</li>
+        <li>选型流程：先放得下一份模型，再凑够 GBS，最后在不碰到显存和通信瓶颈的前提下调吞吐；最终都要实测。</li>
+      </ul>
+      <p>下一篇转到工具：用 JAX 写分片程序（mesh、PartitionSpec、shard_map），以及怎么读 profile，在时间线上分出计算、通信和空闲。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Nouamane Tazi 等，<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook: Training LLMs on GPU Clusters</a>，Hugging Face，2025。本文主要用到：<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#5d_parallelism_in_a_nutshell">5D Parallelism in a Nutshell</a>、<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#finding_the_best_training_configuration">Finding the Best Training Configuration</a>、附录 A2（Typical Scales）和 A3（Math for Compute/Communication Overlap），以及前文的显存公式。</li>
+        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>，Google DeepMind，2025：<a href="https://jax-ml.github.io/scaling-book/training/">Part 5: How to Parallelize a Transformer for Training</a>（DP / FSDP / TP / 混合的门槛、跨 pod、Takeaways）和 <a href="https://jax-ml.github.io/scaling-book/applied-training/">Part 6: Training LLaMA 3 on TPUs</a>（LLaMA 3-70B 的例子）。</li>
+        <li>Llama Team, AI @ Meta，<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>，2024：§3.3（训练基础设施、4D 并行、表 4、网络感知的并行顺序、CP 实现）。</li>
+        <li>DeepSeek-AI，<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>，2024：§3.2（DualPipe、跨节点 all-to-all、显存优化）和 §4.2 的 MoE 超参。</li>
+        <li>Shoeybi 等，<a href="https://arxiv.org/abs/1909.08053">Megatron-LM</a>；Korthikanti 等，<a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（序列并行和激活公式的来源）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    // ---------- SVG: draw 8 GPUs in each node of figure 2 ----------
+    ['gpus0', 'gpus1'].forEach((id) => {
+      const g = document.getElementById(id);
+      let s = '';
+      for (let i = 0; i < 8; i++) {
+        const x = 16 + i * 33;
+        s += '<rect x="' + x + '" y="36" width="27" height="40" rx="5" class="d0"/>' +
+             '<text x="' + (x + 13.5) + '" y="61" text-anchor="middle" font-size="11" style="fill:#fff">' + i + '</text>' +
+             '<path d="M' + (x + 13.5) + ' 76 V100" class="ln"/>';
+      }
+      g.innerHTML = s;
+    });
+
+    const fmt = (v, d = 1) => (Math.abs(v) >= 100 ? v.toFixed(0) : v.toFixed(d));
+    const fmtTok = (v) => v >= 1e6 ? (v / 1e6).toFixed(2) + 'M' : v >= 1e3 ? (v / 1e3).toFixed(1) + 'k' : v.toFixed(0);
+    const setPressed = (seg, btn) => seg.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', String(b === btn)));
+
+    // ---------- Demo: mesh visualizer ----------
+    const MZ = {
+      tp: document.getElementById('mz-tp'), cp: document.getElementById('mz-cp'),
+      pp: document.getElementById('mz-pp'), dp: document.getElementById('mz-dp'),
+      ep: document.getElementById('mz-ep'), g: document.getElementById('mz-g'),
+      order: document.getElementById('mz-order'),
+    };
+    const opts = (sel, vals, def) => { sel.innerHTML = vals.map((v) => '<option' + (v === def ? ' selected' : '') + '>' + v + '</option>').join(''); };
+    opts(MZ.tp, [1, 2, 4, 8], 4); opts(MZ.cp, [1, 2, 4], 1); opts(MZ.pp, [1, 2, 4, 8], 2); opts(MZ.dp, [1, 2, 4, 8, 16, 32], 4);
+    const ORDERS = [['tp', 'cp', 'pp', 'dp'], ['tp', 'pp', 'cp', 'dp'], ['cp', 'tp', 'pp', 'dp'], ['tp', 'dp', 'cp', 'pp'], ['dp', 'tp', 'cp', 'pp'], ['pp', 'cp', 'tp', 'dp']];
+    MZ.order.innerHTML = ORDERS.map((o, i) => '<option value="' + i + '">[' + o.map((x) => x.toUpperCase()).join(', ') + ']' + (i === 0 ? '（Llama 3）' : '') + '</option>').join('');
+    let colorKey = 'tp';
+    let picked = -1;
+
+    function syncEp() {
+      const dp = +MZ.dp.value;
+      const cur = +MZ.ep.value || 1;
+      const vals = [1, 2, 4, 8, 16, 32].filter((v) => v <= dp && dp % v === 0);
+      opts(MZ.ep, vals, vals.includes(cur) ? cur : 1);
+    }
+
+    function meshCoords() {
+      const S = { tp: +MZ.tp.value, cp: +MZ.cp.value, pp: +MZ.pp.value, dp: +MZ.dp.value };
+      const ep = +MZ.ep.value;
+      const order = ORDERS[+MZ.order.value];
+      const N = S.tp * S.cp * S.pp * S.dp;
+      const stride = {};
+      let st = 1;
+      order.forEach((k) => { stride[k] = st; st *= S[k]; });
+      const gpus = [];
+      for (let r = 0; r < N; r++) {
+        const c = {};
+        order.forEach((k) => { c[k] = Math.floor(r / stride[k]) % S[k]; });
+        c.ep = c.dp % ep; c.edp = Math.floor(c.dp / ep);
+        gpus.push(c);
+      }
+      // group id for each axis = tuple of all OTHER coordinates
+      const gid = (c, k) => {
+        if (k === 'ep') return [c.tp, c.cp, c.pp, c.edp].join(',');
+        return order.filter((x) => x !== k).map((x) => c[x]).join(',');
+      };
+      return { S, ep, order, N, stride, gpus, gid };
+    }
+
+    function hueFor(i, n) { return 'hsl(' + Math.round((i * 360) / Math.max(n, 1) + 200) % 360 + ' 58% 50%)'; }
+
+    function renderMesh() {
+      const M = meshCoords();
+      const G = +MZ.g.value;
+      const box = document.getElementById('mz-mesh');
+      if (M.N > 256) { box.innerHTML = '<p class="note">共 ' + M.N + ' 张卡，超过 256 张，请减小并行度。</p>'; return; }
+      const ids = {};
+      M.gpus.forEach((c) => { const k = M.gid(c, colorKey); if (!(k in ids)) ids[k] = Object.keys(ids).length; });
+      const nG = Object.keys(ids).length;
+      const pick = picked >= 0 && picked < M.N ? M.gpus[picked] : null;
+      let html = '';
+      const nodes = Math.ceil(M.N / G);
+      for (let n = 0; n < nodes; n++) {
+        html += '<div class="node"><small>节点' + n + '</small><div class="gpus" style="grid-template-columns:repeat(' + G + ',1fr)">';
+        for (let j = 0; j < G; j++) {
+          const r = n * G + j;
+          if (r >= M.N) { html += '<span></span>'; continue; }
+          const c = M.gpus[r];
+          const k = M.gid(c, colorKey);
+          let cls = 'gpu';
+          if (pick) { if (M.gid(pick, colorKey) !== k) cls += ' dim'; if (r === picked) cls += ' me'; }
+          const lab = colorKey === 'ep' ? c.ep : c[colorKey];
+          html += '<button class="' + cls + '" data-r="' + r + '" style="background:' + hueFor(ids[k], nG) + '" title="rank ' + r + ' · TP' + c.tp + ' CP' + c.cp + ' PP' + c.pp + ' DP' + c.dp + '">' + r + '</button>';
+        }
+        html += '</div></div>';
+      }
+      box.innerHTML = html;
+
+      // group locality check
+      const nodeOf = (r) => Math.floor(r / G);
+      const axes = ['tp', 'cp', 'pp', 'dp', 'ep'];
+      const names = { tp: 'TP', cp: 'CP', pp: 'PP', dp: 'DP', ep: 'EP' };
+      const sizes = { tp: M.S.tp, cp: M.S.cp, pp: M.S.pp, dp: M.S.dp, ep: M.ep };
+      let chk = '';
+      axes.forEach((k) => {
+        if (sizes[k] === 1) return;
+        const groups = {};
+        M.gpus.forEach((c, r) => { const g = M.gid(c, k); (groups[g] = groups[g] || new Set()).add(nodeOf(r)); });
+        const spans = Object.values(groups).map((s) => s.size);
+        const maxSpan = Math.max(...spans);
+        chk += '<li>' + names[k] + ' 组（大小 ' + sizes[k] + '，共 ' + spans.length + ' 组）：' +
+          (maxSpan === 1 ? '<span class="ok">全部在节点内</span>，走 NVLink'
+                         : '<span class="bad">跨节点</span>，每组最多跨 ' + maxSpan + ' 个节点，走网卡') + '</li>';
+      });
+      document.getElementById('mz-chk').innerHTML = chk || '<li>所有并行度都是 1。</li>';
+
+      const info = document.getElementById('mz-info');
+      let s = '<div><span class="k">总卡数</span><span class="v">' + M.N + '</span></div>' +
+              '<div><span class="k">节点数</span><span class="v">' + nodes + '</span></div>' +
+              '<div><span class="k">当前着色的组数</span><span class="v">' + nG + '</span></div>';
+      if (pick) {
+        s += '<div><span class="k">rank ' + picked + ' 的坐标</span><span class="v kv">TP' + pick.tp + ' CP' + pick.cp + ' PP' + pick.pp + ' DP' + pick.dp + (M.ep > 1 ? ' EP' + pick.ep : '') + '</span></div>';
+      }
+      info.innerHTML = s;
+    }
+
+    document.getElementById('mz-mesh').addEventListener('click', (e) => {
+      const b = e.target.closest('.gpu');
+      if (!b) return;
+      const r = +b.dataset.r;
+      picked = picked === r ? -1 : r;
+      renderMesh();
+    });
+    document.getElementById('mz-color').addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      colorKey = b.dataset.k; setPressed(e.currentTarget, b); renderMesh();
+    });
+    Object.values(MZ).forEach((el) => el.addEventListener('change', () => { if (el === MZ.dp) syncEp(); picked = -1; renderMesh(); }));
+    syncEp(); renderMesh();
+    window.__meshSet = (tp, cp, pp, dp, ep) => {
+      const set = (sel, v) => { if (![...sel.options].some((o) => +o.value === v)) sel.insertAdjacentHTML('beforeend', '<option>' + v + '</option>'); sel.value = String(v); };
+      set(MZ.tp, tp); set(MZ.cp, cp); set(MZ.pp, pp); set(MZ.dp, dp); syncEp(); set(MZ.ep, ep);
+      MZ.order.value = '0'; picked = -1; renderMesh();
+    };
+
+    // ---------- Demo: thresholds ----------
+    const T = {
+      c: document.getElementById('thr-c'), w: document.getElementById('thr-w'), f: document.getElementById('thr-f'),
+      b: document.getElementById('thr-b'), n: document.getElementById('thr-n'), m: document.getElementById('thr-m'),
+    };
+    const PRESETS = [
+      { c: 459, w: 180, f: 28672, b: 4194304, n: 8960 },
+      { c: 459, w: 180, f: 13824, b: 3e6, n: 4096 },
+      { c: 459, w: 180, f: 28672, b: 2097152, n: 8960 },
+    ];
+    let exact = null; // exact B and N from a preset, until a log slider is moved
+    function applyPreset(i) {
+      const p = PRESETS[i];
+      exact = { b: p.b, n: p.n };
+      T.c.value = p.c; T.w.value = p.w; T.f.value = p.f; T.b.value = Math.log2(p.b); T.n.value = Math.log2(p.n); T.m.value = '2,1';
+      thr();
+    }
+    function thr() {
+      const C = +T.c.value * 1e12, W = +T.w.value * 1e9, F = +T.f.value;
+      const B = exact ? exact.b : Math.round(2 ** +T.b.value), N = exact ? exact.n : Math.round(2 ** +T.n.value);
+      const [MX, MY] = T.m.value.split(',').map(Number);
+      document.getElementById('thr-c-o').textContent = T.c.value;
+      document.getElementById('thr-w-o').textContent = T.w.value;
+      document.getElementById('thr-f-o').textContent = F;
+      document.getElementById('thr-b-o').textContent = fmtTok(B);
+      document.getElementById('thr-n-o').textContent = N;
+      const a = C / W;
+      const bpn = B / N;
+      const fsdpTh = a / (MX + MY);
+      const tpMax = (MY * F) / a;
+      const mixTh = (a * a) / (MX * MY * F);
+      const xopt = Math.sqrt((B / F) * (MX / MY) * N);
+      const xr = 2 ** Math.round(Math.log2(Math.min(Math.max(xopt, 1), N)));
+      const yr = Math.max(1, Math.round(N / xr));
+      document.getElementById('thr-out').innerHTML =
+        '<div><span class="k">α = C/W</span><span class="v">' + fmt(a) + '</span></div>' +
+        '<div><span class="k">每芯片 batch B/N</span><span class="v">' + fmt(bpn) + '</span></div>' +
+        '<div><span class="k">纯 FSDP 门槛 α/M</span><span class="v">' + fmt(fsdpTh) + '</span></div>' +
+        '<div><span class="k">TP 上限 M<sub>Y</sub>·F/α</span><span class="v">' + fmt(tpMax) + '</span></div>' +
+        '<div><span class="k">FSDP+TP 门槛</span><span class="v">' + fmt(mixTh) + '</span></div>' +
+        '<div><span class="k">X<sub>opt</sub></span><span class="v">' + fmt(xopt) + '</span></div>';
+      let v;
+      if (bpn > fsdpTh) v = '每芯片 batch ' + fmt(bpn) + ' 高于纯 FSDP 门槛 ' + fmt(fsdpTh) + '：<b>纯 FSDP（所有轴都给数据并行）就能计算受限</b>，最简单。';
+      else if (bpn > mixTh) v = '低于纯 FSDP 门槛，但高于混合门槛 ' + fmt(mixTh) + '：<b>用 FSDP + TP</b>。最优 FSDP 度数约 ' + fmt(xopt) + '，取 2 的幂约为 FSDP ' + xr + ' × TP ' + yr + '。' + (yr > tpMax ? '（注意这个 TP 度数已超过单独 TP 的上限 ' + fmt(tpMax) + '，混合时只要总通信低于计算即可。）' : '');
+      else v = '每芯片 batch 低于混合门槛 ' + fmt(mixTh) + '：<b>即使 FSDP + TP 也是通信受限</b>。办法：加大全局 batch、减少芯片数，或者接受较低的 MFU / 引入流水线并行。';
+      document.getElementById('thr-verdict').innerHTML = v;
+    }
+    Object.values(T).forEach((el) => el.addEventListener('input', () => {
+      if (exact && (el === T.b || el === T.n)) exact = null;
+      thr();
+    }));
+    document.getElementById('thr-preset').addEventListener('click', (e) => {
+      const b = e.target.closest('button'); if (!b) return;
+      setPressed(e.currentTarget, b); applyPreset(+b.dataset.p);
+    });
+    applyPreset(0);
+
+    // ---------- Demo: planner ----------
+    const MODELS = {
+      l8: { h: 4096, L: 32, ffn: 14336, heads: 32, kv: 8, hd: 128, V: 128256 },
+      l70: { h: 8192, L: 80, ffn: 28672, heads: 64, kv: 8, hd: 128, V: 128256 },
+      l405: { h: 16384, L: 126, ffn: 53248, heads: 128, kv: 8, hd: 128, V: 128256 },
+      mx: { h: 4096, L: 32, ffn: 14336, heads: 32, kv: 8, hd: 128, V: 32000, E: 8, k: 2 },
+    };
+    const GPUS = { a100: { mem: 80, tf: 312, nv: 300 }, h100: { mem: 80, tf: 989, nv: 450 }, h200: { mem: 141, tf: 989, nv: 450 } };
+    const ETA = 0.6, G = 8;
+
+    function modelCounts(m) {
+      const E = m.E || 1, k = m.k || 1;
+      const attn = 2 * m.h * m.heads * m.hd + 2 * m.h * m.kv * m.hd;
+      const mlp = 3 * m.h * m.ffn;
+      const layerNon = attn + (E > 1 ? m.h * E : mlp);
+      const layerExp = E > 1 ? E * mlp : 0;
+      const embed = 2 * m.V * m.h;
+      return {
+        layerNon, layerExp, embed, E, k,
+        total: m.L * (layerNon + layerExp) + embed,
+        active: m.L * (layerNon + (E > 1 ? k * mlp : 0)) + embed,
+      };
+    }
+
+    function evaluate(cfg, env) {
+      const { m: md, c } = env;
+      const { tp, cp, pp, dp, ep, mbs } = cfg;
+      const s = env.s, h = md.h;
+      const nseq = env.gbs / s;
+      const m = nseq / (dp * mbs);
+      if (!Number.isInteger(m) || m < 1) return null;
+      const Ls = Math.ceil(md.L / pp);
+      // params on this GPU (before ZeRO)
+      const ne = (Ls * c.layerNon) / tp + (md.V * h) / tp;
+      const ex = (Ls * c.layerExp) / (tp * ep);
+      // weights are replicated across DP and CP, so ZeRO and gradient sync run over DP×CP
+      const zd = dp * cp, edp = (dp / ep) * cp;
+      const z = env.zero;
+      const P = 2 * (z >= 3 ? ne / zd + ex / edp : ne + ex);
+      const Gr = 2 * (z >= 2 ? ne / zd + ex / edp : ne + ex);
+      const O = 12 * (z >= 1 ? ne / zd + ex / edp : ne + ex);
+      const buf = z >= 3 ? 2 * 2 * (c.layerNon / tp + c.layerExp / (tp * ep)) : 0;
+      const tok = (s / cp) * mbs;
+      const actLayer = (34 * tok * h) / tp;
+      const inflight = pp > 1 ? Math.min(pp, m) : 1;
+      const act = (env.rc ? Ls * inflight * ((2 * tok * h) / tp) + actLayer : Ls * inflight * actLayer) + (6 * tok * md.V) / tp;
+      const mem = P + Gr + O + buf + act;
+      const fits = mem <= 0.9 * env.mem;
+
+      const peak = env.peak * ETA;
+      const bwOf = (span) => (span <= G ? env.bwi : env.bwo);
+      const Fmb = 6 * c.active * s * mbs + 12 * md.L * h * s * s * mbs;
+      const rc = env.rc ? 4 / 3 : 1;
+      const tComp = (Fmb * rc * (Ls / md.L)) / (tp * cp) / peak;
+      const nTP = env.rc ? 12 : 8;
+      const tTP = tp > 1 ? (nTP * Ls * tok * h * 2 * (tp - 1)) / tp / bwOf(tp) : 0;
+      const kvDim = Math.max(1, md.kv / tp) * md.hd;
+      const tCPc = cp > 1 ? (3 * Ls * (cp - 1) * 2 * tok * kvDim * 2) / bwOf(tp * cp) : 0;
+      const tAttn = (12 * Ls * h * s * s * mbs) / (tp * cp) / peak;
+      const tCP = Math.max(0, tCPc - tAttn);
+      const nA = env.rc ? 6 : 4;
+      const tEP = c.E > 1 && ep > 1 ? (nA * Ls * (tok / tp) * c.k * h * 2 * (ep - 1)) / ep / bwOf(tp * cp * pp * ep) : 0;
+      const tPP = pp > 1 ? (2 * ((tok * h) / tp) * 2) / bwOf(tp * cp * pp) : 0;
+      let z3 = 0, tDPexp = 0;
+      const dpBw = bwOf(tp * cp * pp * dp), edpBw = dpBw;
+      if (z >= 3) {
+        const t3 = (zd > 1 ? (3 * 2 * ne * (zd - 1)) / zd / dpBw : 0) + (edp > 1 ? (3 * 2 * ex * (edp - 1)) / edp / edpBw : 0);
+        z3 = Math.max(0, t3 - tComp);
+      } else {
+        const tdp = (zd > 1 ? (2 * 2 * ne * (zd - 1)) / zd / dpBw : 0) + (edp > 1 ? (2 * 2 * ex * (edp - 1)) / edp / edpBw : 0);
+        tDPexp = Math.max(0, tdp - (2 / 3) * tComp);
+      }
+      const Tst = tComp + tTP + tCP + tEP + tPP + z3;
+      const Tstep = (m + pp - 1) * Tst + tDPexp;
+      const modelFlops = 6 * c.active * env.gbs + 12 * md.L * h * s * s * nseq;
+      const mfu = modelFlops / (env.N * env.peak * Tstep);
+      const parts = {
+        compute: m * tComp, bubble: (pp - 1) * Tst, tp: m * tTP, cp: m * tCP, ep: m * tEP, pp: m * tPP, dp: tDPexp + m * z3,
+      };
+      let bott = '计算';
+      const names = { bubble: 'PP bubble', tp: 'TP 通信', cp: 'CP 通信', ep: 'EP all-to-all', pp: 'PP 点对点', dp: 'DP/ZeRO 通信' };
+      let best = 0;
+      Object.keys(names).forEach((k) => { if (parts[k] > best) { best = parts[k]; bott = names[k]; } });
+      if (best < 0.15 * Tstep) bott = '计算';
+      return { cfg, m, mem, fits, memParts: { P, Gr, O: O + buf, act }, Tstep, mfu, parts, bott };
+    }
+
+    const PL = {
+      model: document.getElementById('pl-model'), seq: document.getElementById('pl-seq'), gbs: document.getElementById('pl-gbs'),
+      n: document.getElementById('pl-n'), gpu: document.getElementById('pl-gpu'), zero: document.getElementById('pl-zero'),
+      bwi: document.getElementById('pl-bwi'), bwo: document.getElementById('pl-bwo'), rc: document.getElementById('pl-rc'),
+    };
+    let rows = [];
+    let selected = 0;
+
+    function plan() {
+      const md = MODELS[PL.model.value];
+      const c = modelCounts(md);
+      const gpu = GPUS[PL.gpu.value];
+      document.getElementById('pl-bwi-o').textContent = PL.bwi.value;
+      document.getElementById('pl-bwo-o').textContent = PL.bwo.value;
+      const env = {
+        m: md, c, s: +PL.seq.value, gbs: +PL.gbs.value, N: +PL.n.value, mem: gpu.mem * 1e9, peak: gpu.tf * 1e12,
+        bwi: +PL.bwi.value * 1e9, bwo: +PL.bwo.value * 1e9, zero: +PL.zero.value, rc: PL.rc.value === '1',
+      };
+      const all = [];
+      let valid = 0;
+      for (const tp of [1, 2, 4, 8, 16]) {
+        if (md.heads % tp) continue;
+        for (const cp of [1, 2, 4, 8, 16, 32]) {
+          if (cp > 1 && (env.s % (2 * cp) || env.s / cp < 1024)) continue;
+          for (const pp of [1, 2, 4, 8, 16, 32]) {
+            if (pp > md.L) continue;
+            const rest = env.N / (tp * cp * pp);
+            if (!Number.isInteger(rest) || rest < 1) continue;
+            const dp = rest;
+            const eps = c.E > 1 ? [1, 2, 4, 8].filter((e) => c.E % e === 0 && dp % e === 0) : [1];
+            for (const ep of eps) {
+              for (const mbs of [1, 2, 4, 8]) {
+                const r = evaluate({ tp, cp, pp, dp, ep, mbs }, env);
+                if (!r) continue;
+                valid++;
+                all.push(r);
+              }
+            }
+          }
+        }
+      }
+      const fit = all.filter((r) => r.fits).sort((a, b) => a.Tstep - b.Tstep);
+      rows = fit.slice(0, 12);
+      selected = 0;
+      const best = rows[0];
+      const tokS = best ? env.gbs / best.Tstep / env.N : 0;
+      document.getElementById('pl-sum').innerHTML =
+        '<div><span class="k">模型参数（总 / 激活）</span><span class="v">' + (c.total / 1e9).toFixed(1) + 'B / ' + (c.active / 1e9).toFixed(1) + 'B</span></div>' +
+        '<div><span class="k">合法配置 / 放得下</span><span class="v">' + valid + ' / ' + fit.length + '</span></div>' +
+        '<div><span class="k">最快配置步时</span><span class="v">' + (best ? best.Tstep.toFixed(2) + ' s' : '—') + '</span></div>' +
+        '<div><span class="k">估计 MFU / 每卡 token/s</span><span class="v">' + (best ? (best.mfu * 100).toFixed(0) + '% / ' + fmt(tokS, 0) : '—') + '</span></div>';
+      const body = document.getElementById('pl-body');
+      if (!rows.length) {
+        body.innerHTML = '<tr><td colspan="11" style="text-align:left">没有放得下的配置。试试开全量重算、换 ZeRO-3、加卡，或者换大显存的 GPU。</td></tr>';
+        document.getElementById('pl-detail').innerHTML = '';
+        return;
+      }
+      body.innerHTML = rows.map((r, i) => {
+        const g = r.cfg;
+        return '<tr data-i="' + i + '"' + (i === 0 ? ' class="sel"' : '') + '><td>' + g.tp + '</td><td>' + g.cp + '</td><td>' + g.pp + '</td><td>' + g.dp + '</td><td>' + g.ep + '</td><td>' + g.mbs + '</td><td>' + r.m +
+          '</td><td>' + (r.mem / 1e9).toFixed(1) + ' GB</td><td>' + r.Tstep.toFixed(2) + ' s</td><td>' + (r.mfu * 100).toFixed(0) + '%</td><td>' + r.bott + '</td></tr>';
+      }).join('');
+      detail(env);
+    }
+
+    const COLORS = {
+      compute: 'var(--accent)', bubble: 'var(--text-faint)', tp: 'var(--accent-2)', cp: 'hsl(160 55% 42%)',
+      ep: 'hsl(330 60% 52%)', pp: 'hsl(45 85% 50%)', dp: 'hsl(200 70% 48%)',
+    };
+    const LABELS = { compute: '计算', bubble: 'PP bubble', tp: 'TP', cp: 'CP（暴露部分）', ep: 'EP', pp: 'PP 点对点', dp: 'DP/ZeRO（暴露部分）' };
+    const MCOL = { P: 'var(--accent)', Gr: 'hsl(200 70% 48%)', O: 'var(--accent-2)', act: 'hsl(160 55% 42%)' };
+    const MLAB = { P: '参数', Gr: '梯度', O: '优化器状态 / 缓冲', act: '激活 + logits' };
+
+    function detail(env) {
+      const r = rows[selected];
+      if (!r) return;
+      const tot = r.Tstep;
+      const bar = Object.keys(LABELS).filter((k) => r.parts[k] > 0).map((k) => '<span style="width:' + (100 * r.parts[k] / tot) + '%;background:' + COLORS[k] + '" title="' + LABELS[k] + '"></span>').join('');
+      const leg = Object.keys(LABELS).filter((k) => r.parts[k] > 0).map((k) => '<span><i style="background:' + COLORS[k] + '"></i>' + LABELS[k] + ' ' + r.parts[k].toFixed(2) + ' s</span>').join('');
+      const cap = PL.gpu.value === 'h200' ? 141e9 : 80e9;
+      const mbar = Object.keys(MLAB).map((k) => '<span style="width:' + (100 * r.memParts[k] / cap) + '%;background:' + MCOL[k] + '"></span>').join('');
+      const mleg = Object.keys(MLAB).map((k) => '<span><i style="background:' + MCOL[k] + '"></i>' + MLAB[k] + ' ' + (r.memParts[k] / 1e9).toFixed(1) + ' GB</span>').join('');
+      const g = r.cfg;
+      const canMesh = g.tp * g.cp * g.pp * Math.min(g.dp, 64) <= 256;
+      document.getElementById('pl-detail').innerHTML =
+        '<h4>第 ' + (selected + 1) + ' 名：TP ' + g.tp + ' · CP ' + g.cp + ' · PP ' + g.pp + ' · DP ' + g.dp + (g.ep > 1 ? ' · EP ' + g.ep : '') + ' · mbs ' + g.mbs + ' · m ' + r.m + '</h4>' +
+        '<h4>一步时间拆分（' + tot.toFixed(2) + ' s）</h4><div class="stack">' + bar + '</div><div class="legend">' + leg + '</div>' +
+        '<h4>每卡显存（满条 = ' + cap / 1e9 + ' GB）</h4><div class="stack">' + mbar + '</div><div class="legend">' + mleg + '</div>' +
+        (canMesh ? '<p style="margin-top:10px"><button class="btn" id="pl-tomesh">在上面的网格演示里看这个布局</button></p>' : '');
+      const btn = document.getElementById('pl-tomesh');
+      if (btn) btn.addEventListener('click', () => {
+        let dp = g.dp;
+        while (g.tp * g.cp * g.pp * dp > 256) dp /= 2;
+        window.__meshSet(g.tp, g.cp, g.pp, dp, Math.min(g.ep, dp));
+        document.getElementById('mesh-demo').scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    }
+
+    document.getElementById('pl-body').addEventListener('click', (e) => {
+      const tr = e.target.closest('tr[data-i]'); if (!tr) return;
+      selected = +tr.dataset.i;
+      document.querySelectorAll('#pl-body tr').forEach((x) => x.classList.toggle('sel', x === tr));
+      detail();
+    });
+    PL.gpu.addEventListener('change', () => { PL.bwi.value = Math.round(GPUS[PL.gpu.value].nv * 0.9 / 10) * 10; });
+    PL.bwi.value = 400; PL.bwo.value = 40;
+    Object.values(PL).forEach((el) => el.addEventListener(el.type === 'range' ? 'input' : 'change', plan));
+    plan();
+  })();
+  </script>
+</body>
+</html>
