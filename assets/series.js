@@ -45,6 +45,7 @@
         ['qwen3-next', 'Qwen3-Next：混合线性注意力与超稀疏 MoE'],
         ['kimi-k2', 'Kimi K2：MuonClip 与万亿参数 Agent 模型'],
         ['kimi-linear', 'Kimi Linear：Kimi Delta Attention'],
+        ['kimi-k3', 'Kimi K3：KDA、注意力残差与 Stable LatentMoE'],
       ],
     },
   };

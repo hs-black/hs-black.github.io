@@ -1,0 +1,619 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kimi Linear：Kimi Delta Attention · Zunzhe Zhang</title>
+  <meta name="description" content="从线性注意力、DeltaNet、Gated DeltaNet 推到 KDA：通道级门控、分块并行算法、3:1 混合与 NoPE，以及效率实验。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .chart { width: 100%; height: auto; display: block; margin-top: 8px; }
+    .chart .axis { stroke: var(--border); stroke-width: 1; fill: none; }
+    .chart .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; fill: none; }
+    .chart text { fill: var(--text-faint); font-size: 12px; font-family: var(--font-mono); }
+    .chart .lbl { fill: var(--text-soft); font-family: var(--font-sans); font-size: 13px; }
+    .s-acc { stroke: var(--accent); fill: none; stroke-width: 2; }
+    .s-acc2 { stroke: var(--accent-2); fill: none; stroke-width: 2; }
+    .s-soft { stroke: var(--text-faint); fill: none; stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .f-acc { fill: var(--accent); }
+    .f-acc2 { fill: var(--accent-2); }
+    .f-soft { fill: var(--text-faint); }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-soft); margin-top: 6px; }
+    .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+    .note { font-size: 13px; color: var(--text-faint); margin-top: 8px; line-height: 1.6; }
+    .diagram { width: 100%; height: auto; display: block; }
+    .diagram .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.2; }
+    .diagram .boxa { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+    .diagram .boxb { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.2; }
+    .diagram text { fill: var(--text); font-size: 13px; }
+    .diagram .t-soft { fill: var(--text-soft); font-size: 12px; }
+    .diagram .arrow { stroke: var(--text-soft); stroke-width: 1.4; fill: none; }
+    .diagram .arrowhead { fill: var(--text-soft); }
+    figure { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    .mini-title { font-size: 13px; color: var(--text-soft); margin: 4px 0 0; }
+    .heat { width: 100%; height: auto; display: block; }
+    .btnrow { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+    .btnrow .stepinfo { font-family: var(--font-mono); font-size: 13px; color: var(--text-soft); }
+    @media (max-width: 560px) {
+      .twocol { grid-template-columns: 1fr; }
+      figure .diagram { min-width: 540px; }
+      .chart text, .chart .lbl { font-size: 17px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>Kimi Linear：Kimi Delta Attention</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="reports"></nav>
+
+    <article class="prose">
+      <p>Kimi Linear（arXiv 2510.26692，<em>Kimi Linear: An Expressive, Efficient Attention Architecture</em>）是 Moonshot AI 在 2025 年 10 月发布的一篇架构报告。它的核心是一个新的线性注意力模块 <strong>KDA（Kimi Delta Attention）</strong>：在 Gated DeltaNet 的基础上，把“每个头一个标量”的遗忘门换成“每个通道一个”的细粒度门，并为这个结构设计了专门的分块并行算法。用 3 层 KDA 配 1 层 MLA 的混合结构，在同样的训练配方（1.4T token）下，报告声称第一次在短上下文、长上下文和 RL 三种设定下都公平地胜过了全注意力，同时 KV cache 最多减少 75%，1M 上下文下解码吞吐最多提高 6 倍。</p>
+      <p>这篇从线性注意力最基本的形式开始，依次讲门控、delta 规则、Gated DeltaNet，然后推导 KDA 的分块算法，最后是混合架构、NoPE 和实验。两个交互演示：通道级与标量门控对状态矩阵的影响，以及 KV cache 与解码吞吐的计算器。这套架构后来成了 Kimi K3 的骨架，见<a href="/posts/kimi-k3/">K3 那篇</a>。</p>
+
+      <nav class="toc" aria-label="目录">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#why">为什么要换掉 softmax 注意力</a></li>
+          <li><a href="#la">线性注意力：三种等价形式</a></li>
+          <li><a href="#gate">加上遗忘：衰减与门控</a></li>
+          <li><a href="#delta">DeltaNet：把状态当成在线回归</a></li>
+          <li><a href="#gdn">Gated DeltaNet，以及“门控即位置编码”</a></li>
+          <li><a href="#kda">KDA：通道级的遗忘门</a></li>
+          <li><a href="#chunk">KDA 的分块并行算法</a></li>
+          <li><a href="#dplr">为什么比一般 DPLR 快</a></li>
+          <li><a href="#arch">Kimi Linear 的架构：3:1 混合与 NoPE</a></li>
+          <li><a href="#exp">实验</a></li>
+          <li><a href="#eff">效率：KV cache、预填充与解码</a></li>
+          <li><a href="#take">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="why">1. 为什么要换掉 softmax 注意力</h2>
+      <p>标准的 softmax 注意力在第 \(t\) 个位置计算</p>
+      $$o_t = \sum_{j\le t}\frac{\exp(q_t^\top k_j)}{\sum_{l\le t}\exp(q_t^\top k_l)}\,v_j .$$
+      <p>它有两个随长度增长的代价：</p>
+      <ul>
+        <li><strong>预填充（prefill）时间是二次的</strong>：长度 \(T\) 的序列，每个头的打分矩阵是 \(T\times T\)，FLOPs 约 \(2T^2 d\)。</li>
+        <li><strong>解码时要保留全部历史的 K/V</strong>（KV cache），它随长度线性增长；每生成一个 token 都要把整个 cache 从显存读一遍，解码是带宽受限的。</li>
+      </ul>
+      <p>Agent 和 RL 的趋势让这两点更痛：一条轨迹里有大量工具调用和观察结果，上下文动辄几十万 token；RL 的 rollout 是长时间的解码。报告的动机就是：要有一个质量不输全注意力、但长序列下又快又省显存的注意力。</p>
+
+      <h2 id="la">2. 线性注意力：三种等价形式</h2>
+      <h3>2.1 去掉 softmax</h3>
+      <p>线性注意力（Katharopoulos 等，2020）把 \(\exp(q^\top k)\) 换成普通内积（或一个特征映射后的内积），并暂时忽略归一化：</p>
+      $$o_t = \sum_{j\le t}(q_t^\top k_j)\,v_j = \Big(\sum_{j\le t} v_j k_j^\top\Big) q_t .$$
+      <p>括号里的东西与 \(q_t\) 无关，可以递推维护。按 Kimi Linear 的记号（列向量，状态 \(S\in\mathbb R^{d_k\times d_v}\)）：</p>
+      $$S_t = S_{t-1} + k_t v_t^\top,\qquad o_t = S_t^\top q_t .$$
+      <p>这就是<strong>递推形式</strong>：每步 \(O(d_kd_v)\)，状态大小固定，与长度无关。解码时不再需要 KV cache，只需要一个 \(d_k\times d_v\) 的矩阵。</p>
+      <h3>2.2 并行形式与分块形式</h3>
+      <p>训练时我们一次拿到整条序列，递推是串行的，不适合 GPU。等价的<strong>并行形式</strong>是</p>
+      $$O = \big(QK^\top \odot M\big)V,$$
+      <p>\(M\) 是下三角因果掩码。这又回到了 \(T\times T\) 的矩阵，二次复杂度。实践中用的是两者之间的<strong>分块形式</strong>（chunkwise）：把序列切成长度 \(C\)（常取 64）的块，块内用并行形式（矩阵乘，适合 Tensor Core），块间用递推传递状态：</p>
+      $$O_{[t]} = Q_{[t]}S_{[t]} + \big(Q_{[t]}K_{[t]}^\top\odot M\big)V_{[t]},\qquad S_{[t+1]} = S_{[t]} + K_{[t]}^\top V_{[t]} .$$
+      <p>第一项是“之前所有块的贡献”（inter-chunk），第二项是“块内的贡献”（intra-chunk）。总计算量约 \(O(TCd + Td^2)\)，对 \(T\) 线性。后面 KDA 的算法就是这个框架加上衰减和 delta 规则之后的推广。</p>
+      <h3>2.3 在线学习的视角</h3>
+      <p>报告用一个统一视角来看各种线性注意力：状态 \(S\) 是一个“快权重”（fast weight），是一个把 key 映射到 value 的联想记忆；每来一个 token，就对某个损失做一步梯度下降。普通线性注意力对应的损失是</p>
+      $$\mathcal L_t(S) = -\langle S^\top k_t,\ v_t\rangle,\qquad \nabla_S\mathcal L_t = -k_tv_t^\top \ \Rightarrow\ S_t = S_{t-1} + k_tv_t^\top .$$
+      <p>这是一个无界的相关性目标：只会不断强化最近的 key–value 对，没有任何“该忘掉什么”的准则，状态无限累积，长序列下不同记忆相互干扰。状态只有 \(d_k\times d_v\) 这么大（KDA 里是 128×128），能精确存下的“正交 key”最多 \(d_k\) 个，这是线性注意力的根本容量限制。</p>
+
+      <h2 id="gate">3. 加上遗忘：衰减与门控</h2>
+      <p>最直接的改进是在递推里乘一个衰减：\(S_t = A_t S_{t-1} + k_tv_t^\top\)。不同方法的差别只在 \(A_t\) 的形式（报告表 7）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>方法</th><th>状态更新</th><th>衰减粒度</th></tr></thead>
+          <tbody>
+            <tr><td>线性注意力</td><td>\(S_t = S_{t-1} + k_tv_t^\top\)</td><td>无</td></tr>
+            <tr><td>RetNet</td><td>\(S_t = \alpha S_{t-1} + \beta_t k_tv_t^\top\)</td><td>常数标量</td></tr>
+            <tr><td>Mamba2</td><td>\(S_t = \alpha_t S_{t-1} + \beta_t k_tv_t^\top\)</td><td>数据相关标量（每头）</td></tr>
+            <tr><td>GLA</td><td>\(S_t = \operatorname{Diag}(\alpha_t) S_{t-1} + k_tv_t^\top\)</td><td>数据相关、逐通道</td></tr>
+            <tr><td>DeltaNet</td><td>\(S_t = (I-\beta_tk_tk_t^\top)S_{t-1} + \beta_tk_tv_t^\top\)</td><td>无（但有 delta 修正）</td></tr>
+            <tr><td>Gated DeltaNet</td><td>\(S_t = \alpha_t(I-\beta_tk_tk_t^\top)S_{t-1} + \beta_tk_tv_t^\top\)</td><td>数据相关标量</td></tr>
+            <tr><td>KDA</td><td>\(S_t = (I-\beta_tk_tk_t^\top)\operatorname{Diag}(\alpha_t)S_{t-1} + \beta_tk_tv_t^\top\)</td><td>数据相关、逐通道</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>在在线学习视角里，衰减对应在损失上加一个 Frobenius 范数正则（例如 \(\tfrac12\|\sqrt{1-\alpha_t}\,S\|_F^2\)），也就是快权重上的权重衰减。<strong>逐通道</strong>的 \(\operatorname{Diag}(\alpha_t)\) 意味着状态的每一行（对应 key 的一个维度）有自己的遗忘速度。GLA 最早系统地用了这种对角门，并给出了能分块并行的实现。</p>
+
+      <h2 id="delta">4. DeltaNet：把状态当成在线回归</h2>
+      <h3>4.1 从重构损失推出 delta 规则</h3>
+      <p>DeltaNet 把损失换成重构误差：希望用 key 读出来的东西 \(S^\top k_t\) 等于 \(v_t\)：</p>
+      $$\mathcal L_t(S) = \tfrac12\big\|S^\top k_t - v_t\big\|^2,\qquad \nabla_S \mathcal L_t = k_t\big(S^\top k_t - v_t\big)^\top .$$
+      <p>以学习率 \(\beta_t\) 走一步梯度下降：</p>
+      $$S_t = S_{t-1} - \beta_t k_t\big(S_{t-1}^\top k_t - v_t\big)^\top = \big(I-\beta_tk_tk_t^\top\big)S_{t-1} + \beta_t k_tv_t^\top .$$
+      <p>这就是经典的 delta 规则。直观上：先读出这个 key 当前对应的旧值 \(S^\top k_t\)，把它擦掉一部分，再写入新值。如果同一个 key 第二次出现、对应的值变了，普通线性注意力会把两个值叠加，delta 规则则会用新值替换旧值。</p>
+      <h3>4.2 为什么要对 key 做 L2 归一化</h3>
+      <p>转移矩阵 \(I-\beta kk^\top\) 是一个（广义）Householder 变换。若 \(\|k\|=1\)，它的特征值是：在与 \(k\) 正交的 \(d_k-1\) 维子空间上为 1，沿 \(k\) 方向为 \(1-\beta\)。只要 \(\beta\in[0,1]\)，所有特征值都在 \([0,1]\) 里，反复相乘不会发散。如果 \(\|k\|\) 不受控，\(1-\beta\|k\|^2\) 可能小于 \(-1\)，状态就会爆炸。所以 KDA 对 \(q,k\) 都做 L2Norm，\(\beta\) 用 sigmoid 输出，报告称这是为了“特征值稳定”。</p>
+      <h3>4.3 能并行吗</h3>
+      <p>delta 规则让转移矩阵依赖于数据，看起来比线性注意力难并行得多。关键是秩 1 更新的乘积有紧凑表示：若干个 \(I-\beta_ik_ik_i^\top\) 的乘积可以写成 \(I - \sum_i k_i w_i^\top\) 的形式（经典的 WY 表示），而 \(w_i\) 可以通过解一个下三角线性方程组一次性求出。这使得 DeltaNet 也能按块并行（Yang 等，2024）。第 7 节会对 KDA 完整推导这一点。</p>
+
+      <h2 id="gdn">5. Gated DeltaNet，以及“门控即位置编码”</h2>
+      <p>DeltaNet 只会“覆盖”，不会主动“遗忘”：与当前 key 正交的旧记忆永远保留。Gated DeltaNet（GDN）加一个标量遗忘门 \(\alpha_t\in[0,1]\)：</p>
+      $$S_t = \alpha_t\big(I-\beta_tk_tk_t^\top\big)S_{t-1} + \beta_tk_tv_t^\top .$$
+      <p>在优化视角下，这是先对快权重做权重衰减 \(\tilde S = \alpha_t S_{t-1}\)，再在 \(\tilde S\) 上做一步重构损失的 SGD。Qwen3-Next 等模型用的就是 GDN。</p>
+      <h3>5.1 门控与 RoPE 的类比</h3>
+      <p>报告 §6.1 给了一个很有用的统一写法。把注意力分数写成</p>
+      $$s_{t,i} = q_t^\top\Big(\prod_{j=i+1}^{t} R_j\Big)k_i .$$
+      <p>RoPE 里 \(R_j\) 是块对角的二维旋转，旋转矩阵的乘积只依赖于相对位置 \(t-i\)，所以可以把绝对位置分别作用到 \(q\) 和 \(k\) 上，再在内积里变成相对位置。把 GDN 的递推展开：</p>
+      $$o_t = \sum_{i\le t}\Big(q_t^\top\prod_{j=i+1}^{t}\alpha_j\big(I-\beta_jk_jk_j^\top\big)\,k_i\Big)\,v_i ,$$
+      <p>形式完全一样，只是“位置变换”\(\alpha_j(I-\beta_jk_jk_j^\top)\) 是<strong>数据相关、可学习</strong>的，而且不必是正交矩阵。所以 GDN 可以看作一种乘性的、可学习的位置编码，放松了 RoPE 的正交性约束。</p>
+      <p>这个类比也解释了为什么需要通道级门控。RoPE 的一个关键优点是<strong>每对维度有不同的旋转频率</strong>，相当于在特征维上做非均匀傅里叶变换：有的维度编码近距离，有的编码远距离。GDN 每个头只有一个标量衰减，所有维度以同样速度遗忘，缺少这种逐维度的多样性。KDA 就是来补这一点的。</p>
+
+      <h2 id="kda">6. KDA：通道级的遗忘门</h2>
+      <h3>6.1 定义</h3>
+      <p>KDA 把 GDN 的标量 \(\alpha_t\) 换成对角矩阵 \(\operatorname{Diag}(\alpha_t)\)，\(\alpha_t\in[0,1]^{d_k}\)：</p>
+      $$S_t = \big(I-\beta_tk_tk_t^\top\big)\operatorname{Diag}(\alpha_t)\,S_{t-1} + \beta_tk_tv_t^\top \in\mathbb R^{d_k\times d_v},\qquad o_t = S_t^\top q_t .$$
+      <p>注意顺序：先逐通道衰减，再做 delta 修正。状态的第 \(c\) 行对应 key 的第 \(c\) 个维度，它有自己的保留率 \(\alpha_{t,c}\)。于是模型可以学会把需要长期保存的信息写进“慢”通道（\(\alpha\approx1\)），把短期信息写进“快”通道（\(\alpha\) 小），快通道很快被清空，不会干扰慢通道里的长期记忆。</p>
+      <h3>6.2 参数化（每个头）</h3>
+      $$\begin{aligned}
+      q_t, k_t &amp;= \operatorname{L2Norm}\big(\operatorname{Swish}(\operatorname{ShortConv}(W_{q/k}x_t))\big)\in\mathbb R^{d_k},\\
+      v_t &amp;= \operatorname{Swish}\big(\operatorname{ShortConv}(W_vx_t)\big)\in\mathbb R^{d_v},\\
+      \alpha_t &amp;= f\big(W_\alpha^{\uparrow}W_\alpha^{\downarrow}x_t\big)\in[0,1]^{d_k},\qquad \beta_t = \operatorname{Sigmoid}(W_\beta x_t)\in[0,1].
+      \end{aligned}$$
+      <ul>
+        <li>\(d_k=d_v=128\)，所有实验都是这个值。</li>
+        <li>ShortConv：核大小很小（config 里是 4）的逐通道因果卷积，捕捉局部依赖。消融里去掉它会变差（第 10 节）。</li>
+        <li>逐通道衰减 \(\alpha_t\) 用低秩投影（秩等于头维度）加一个衰减函数 \(f\)，和 GDN、Mamba 的做法类似（取对数后为负的 softplus 形式，Kimi K3 报告写明是 \(g=-e^{A}\operatorname{Softplus}(z)\)，\(\alpha=e^g\)）。</li>
+      </ul>
+      <p>输出端：先做逐头 RMSNorm，再乘一个数据相关的输出门，最后过输出投影：</p>
+      $$o_t = W_o\Big(\operatorname{Sigmoid}\big(W_g^{\uparrow}W_g^{\downarrow}x_t\big)\odot\operatorname{RMSNorm}\big(\operatorname{KDA}(q_t,k_t,v_t,\alpha_t,\beta_t)\big)\Big).$$
+      <p>输出门也是低秩的（为了参数公平比较），效果与全秩相当，并能缓解 attention sink。门的激活用 sigmoid 而不是 GDN 原文的 swish，消融显示 swish 门明显更差。</p>
+
+      <h3>6.3 演示：标量门与通道门</h3>
+      <p>下面在一个 16×16 的小状态上真实地跑 KDA 递推。序列里每隔 10 个 token 有一个“事实”token，它的 key 落在前 8 个通道（“慢通道”）；其余是“噪声”token，key 落在后 8 个通道。通道门模式下慢通道保留率为 \(\alpha_{\text{slow}}\)、快通道为 \(\alpha_{\text{fast}}\)；标量门模式下所有通道用同一个 \(\alpha\)，取两者的几何平均（总的遗忘量相同，只是分配方式不同）。最后用每个事实的 key 去查询状态，看读出的值和原值的余弦相似度。</p>
+      <p>这里人为地把事实和噪声分到不同通道，是为了模拟训练好的模型会做的事（把需要长期保存的信息写进慢通道）。真实模型里这种分工是学出来的。可以切换“delta 规则”和“纯加法（无 delta）”看两者的差别。</p>
+
+      <div class="demo" id="gate-demo">
+        <div class="demo-label">交互演示 · 标量门（GDN）与通道门（KDA）</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>慢通道 α<sub>slow</sub></span><input type="range" id="gd-slow" min="0.9" max="1" step="0.002" value="0.99"><output id="gd-slow-o"></output></label>
+          <label class="ctrl"><span>快通道 α<sub>fast</sub></span><input type="range" id="gd-fast" min="0.3" max="0.98" step="0.01" value="0.7"><output id="gd-fast-o"></output></label>
+          <label class="ctrl"><span>写入强度 β</span><input type="range" id="gd-beta" min="0.1" max="1" step="0.05" value="0.9"><output id="gd-beta-o"></output></label>
+        </div>
+        <div class="seg" role="group" aria-label="更新规则">
+          <button type="button" data-rule="delta" aria-pressed="true">delta 规则</button>
+          <button type="button" data-rule="add" aria-pressed="false">纯加法（无 delta）</button>
+        </div>
+        <div class="btnrow"><button class="btn primary" id="gd-play" type="button">▶ 逐步播放</button><button class="btn" id="gd-end" type="button">跳到结尾</button><span class="stepinfo" id="gd-step"></span></div>
+        <div class="twocol">
+          <div><p class="mini-title">标量门：S（行 = key 通道，上 8 行为慢通道）</p><svg class="heat" id="gd-heat-s" viewBox="0 0 220 220" role="img" aria-label="标量门状态"></svg></div>
+          <div><p class="mini-title">通道门：S（同上）</p><svg class="heat" id="gd-heat-c" viewBox="0 0 220 220" role="img" aria-label="通道门状态"></svg></div>
+        </div>
+        <p class="mini-title">序列结束时，用每个事实的 key 查询：读出值与原值的余弦相似度（横轴 = 事实距离结尾的步数）</p>
+        <svg class="chart" id="gd-recall" viewBox="0 0 600 220" role="img" aria-label="召回质量"></svg>
+        <div class="legend"><span><i style="background:var(--accent-2)"></i>标量门</span><span><i style="background:var(--accent)"></i>通道门</span></div>
+        <div class="readout">
+          <div><span class="k">最近 6 个事实平均召回（标量）</span><span class="v" id="gd-r1">–</span></div>
+          <div><span class="k">最近 6 个事实平均召回（通道）</span><span class="v" id="gd-r2">–</span></div>
+          <div><span class="k">标量门的 α</span><span class="v" id="gd-r3">–</span></div>
+        </div>
+        <p class="note">维度 d<sub>k</sub>=d<sub>v</sub>=16，序列长 160，key 为随机单位向量，value 为随机高斯向量（固定种子）。热图颜色：紫色为正、橙色为负，深浅为绝对值。数值仅用于示意机制。</p>
+      </div>
+      <p>可以观察到：标量门要在“记得久”和“清噪声”之间二选一——\(\alpha\) 大则噪声堆积干扰事实，\(\alpha\) 小则事实很快被遗忘；通道门可以两者兼得。关掉 delta 规则后，同一通道子空间里多个事实相互叠加，召回明显变差，这就是 DeltaNet 相对普通线性注意力的优势。</p>
+
+      <h2 id="chunk">7. KDA 的分块并行算法</h2>
+      <p>这一节把报告 §3.1 和附录 B 的推导按我自己的记号完整走一遍。记一个块内的位置 \(r=1,\dots,C\)，块的初始状态为 \(S^0\)。定义</p>
+      $$A_r = \big(I-\beta_rk_rk_r^\top\big)D_r,\quad D_r=\operatorname{Diag}(\alpha_r),\qquad \gamma^r = \prod_{j=1}^{r}\alpha_j\ (\text{逐元素}),\qquad \Gamma^{i\to r} = \operatorname{Diag}\!\big(\gamma^r/\gamma^i\big)=D_r\cdots D_{i+1}.$$
+      <p>（\(\Gamma^{r\to r}=I\)；报告里 \(\gamma^{i\to j}\) 的下标约定略有不同，但矩阵形式里出现的都是比值 \(\gamma^r/\gamma^i\)。）</p>
+      <h3>7.1 展开递推</h3>
+      <p>块内第 \(r\) 步的状态可以拆成“初始状态被变换后的部分”和“块内写入累积的部分”：</p>
+      $$S^r = \underbrace{A_r\cdots A_1}_{P^r}\,S^0 + \underbrace{\sum_{i=1}^{r}A_r\cdots A_{i+1}\,\beta_ik_iv_i^\top}_{H^r}.$$
+      <p>直接算 \(P^r\) 要做 \(r\) 次 \(d_k\times d_k\) 的矩阵乘，太贵。目标是把它们写成适合矩阵乘的紧凑形式。</p>
+      <h3>7.2 WY 表示（命题 1）</h3>
+      <p><strong>断言</strong>：存在向量 \(w_1,\dots,w_r\in\mathbb R^{d_k}\)，使得</p>
+      $$P^r = \Gamma^{0\to r} - \sum_{i=1}^{r}\Gamma^{i\to r}k_iw_i^\top,\qquad w_r = \beta_r\Big(\Gamma^{0\to r}k_r - \sum_{i\lt r} w_i\,\big(k_i^\top\Gamma^{i\to r}k_r\big)\Big).$$
+      <p><strong>归纳</strong>：设对 \(r-1\) 成立。注意 \(D_r\Gamma^{i\to r-1} = \Gamma^{i\to r}\)，所以</p>
+      $$\begin{aligned}
+      P^r &amp;= (I-\beta_rk_rk_r^\top)\,D_rP^{r-1} = (I-\beta_rk_rk_r^\top)\Big(\Gamma^{0\to r}-\sum_{i\lt r}\Gamma^{i\to r}k_iw_i^\top\Big)\\
+      &amp;= \Gamma^{0\to r}-\sum_{i\lt r}\Gamma^{i\to r}k_iw_i^\top - k_r\,\underbrace{\beta_r\Big(k_r^\top\Gamma^{0\to r} - \sum_{i\lt r}\big(k_r^\top\Gamma^{i\to r}k_i\big)w_i^\top\Big)}_{w_r^\top}.
+      \end{aligned}$$
+      <p>因为 \(\Gamma^{r\to r}=I\)，最后一项正是 \(\Gamma^{r\to r}k_rw_r^\top\)，断言对 \(r\) 成立。完全同理（命题 2），</p>
+      $$H^r = \sum_{i=1}^{r}\Gamma^{i\to r}k_iu_i^\top,\qquad u_r = \beta_r\Big(v_r - \sum_{i\lt r}u_i\,\big(k_i^\top\Gamma^{i\to r}k_r\big)\Big).$$
+      <h3>7.3 UT 变换：把递推变成一次三角求逆</h3>
+      <p>上面 \(w_r, u_r\) 的递推是串行的，但它们其实是一个下三角线性方程组。记块内矩阵 \(K,V\in\mathbb R^{C\times d}\)，\(\Gamma\in\mathbb R^{C\times d_k}\) 的第 \(r\) 行是 \(\gamma^r\)。系数 \(k_r^\top\Gamma^{i\to r}k_i = \sum_c k_{r,c}k_{i,c}\,\gamma^r_c/\gamma^i_c\) 正好是矩阵 \((\Gamma\odot K)(K/\Gamma)^\top\) 的第 \((r,i)\) 元。把 \(u\) 的递推移项：</p>
+      $$\Big(I + \operatorname{StrictTril}\big(\operatorname{Diag}(\beta)(\Gamma\odot K)(K/\Gamma)^\top\big)\Big)U = \operatorname{Diag}(\beta)V .$$
+      <p>于是</p>
+      $$\mathcal M = \Big(I + \operatorname{StrictTril}\big(\operatorname{Diag}(\beta)(\Gamma\odot K)(K/\Gamma)^\top\big)\Big)^{-1}\operatorname{Diag}(\beta),\qquad W = \mathcal M(\Gamma\odot K),\quad U = \mathcal M V .$$
+      <p>\(C\times C\) 下三角矩阵（\(C=64\)）的逆用前代法逐行求，代价小；其余全是矩阵乘。报告称这一步（UT 变换）的目的是减少非矩阵乘的 FLOPs，提高硬件利用率。</p>
+      <h3>7.4 块间状态更新与输出</h3>
+      <p>代回 \(S^C = P^CS^0 + H^C\)：</p>
+      $$S_{[t+1]} = \operatorname{Diag}(\gamma^C)\,S_{[t]} + \big(\Gamma^{\cdot\to C}\odot K\big)^\top\big(U - WS_{[t]}\big).$$
+      <p>块内第 \(r\) 个输出 \(o_r^\top = q_r^\top S^r\) 同样展开后，堆叠成矩阵：</p>
+      $$O_{[t]} = \underbrace{(\Gamma\odot Q)\,S_{[t]}}_{\text{块间}} + \underbrace{\operatorname{Tril}\big((\Gamma\odot Q)(K/\Gamma)^\top\big)}_{\text{块内}}\ \underbrace{\big(U - WS_{[t]}\big)}_{\text{“伪 value”}} .$$
+      <p>这个结构和第 2.2 节普通线性注意力的分块形式几乎一样：块间项用初始状态读，块内项是一个下三角的 \(C\times C\) 注意力矩阵乘以 value。区别是 value 被换成了“伪 value” \(U-WS\)——delta 规则的效果全部被吸收进了 \(U\) 和 \(W\)。注意 Tril 包含对角线：每个输出读的是当前 token 写入之后的状态。</p>
+      <h3>7.5 伪代码</h3>
+      <p>按报告附录 C 的 PyTorch 风格伪代码简化（\(g\) 是对数衰减 \(\log\alpha\)，块内做 cumsum 得到 \(\log\gamma\)）：</p>
+      <pre><code>def chunk_kda(q, k, v, g, beta, C=64):          # q,k: [T,dk]  v: [T,dv]  g: [T,dk] (log α)
+    S = zeros(dk, dv); out = []
+    for blk in split(range(T), C):
+        Q, K, V, b = q[blk]*dk**-0.5, k[blk], v[blk], beta[blk]
+        G = g[blk].cumsum(0)                      # log γ^r，逐通道
+        # A[r,i] = β_r Σ_c k_rc k_ic exp(G_rc − G_ic)，严格下三角
+        A = strict_tril(b[:,None] * ((K*exp(G)) @ (K*exp(-G)).T))
+        M = inv(I + A) * b[None,:]                # 前代法求逆，再右乘 Diag(β)
+        W, U = M @ (exp(G)*K), M @ V
+        Vt = U - W @ S                            # 伪 value
+        Aqk = tril((Q*exp(G)) @ (K*exp(-G)).T)    # 含对角
+        out.append((Q*exp(G)) @ S + Aqk @ Vt)
+        decay = exp(G[-1:] - G)                   # γ^C/γ^r
+        S = exp(G[-1])[:,None] * S + (K*decay).T @ Vt
+    return cat(out)</code></pre>
+      <p>这里有一个数值问题：\(K/\Gamma\) 里的 \(1/\gamma\) 是累积衰减的倒数，块内越往后越大，在半精度下会溢出。报告的处理（继承自 GLA）是在对数域算相对衰减，并把块再切成 16 个 token 的二级小块（secondary chunking）：非对角的小块可以直接用 Tensor Core 做稠密矩阵乘，对角的小块要逐位置对计算。附录 C 的伪代码里输出阶段那个逐列的循环就是这个“为数值稳定的二级分块”。（K3 后来用有下界的衰减，让对角小块也能走 Tensor Core。）</p>
+      <h3>7.6 FLOPs</h3>
+      <p>报告 §6.3 给出每个头、长度 \(T\)、头维 \(d_h\)、块长 \(C=64\) 时的理论 FLOPs：</p>
+      $$\mathrm{FLOPs}_{\text{KDA}} = 6Td_h^2 + 3TCd_h + TC^2,\qquad \mathrm{FLOPs}_{\text{Attn}} = 2T^2d_h .$$
+      <p>令两者相等，\(d_h=128\) 时交点约在 \(T\approx 3d_h+1.5C+C^2/(2d_h)\approx 500\)。也就是说几百 token 以上 KDA 每头的计算就更省，到 1M 时差三个数量级。推理时预填充用分块 kernel，解码切换到递推 kernel（每步只读写 128×128 的状态）。</p>
+
+      <h2 id="dplr">8. 为什么比一般 DPLR 快</h2>
+      <p>更一般的“对角加低秩”（DPLR，Diagonal-Plus-Low-Rank）转移矩阵写作</p>
+      $$S_t = \big(D - a_tb_t^\top\big)S_{t-1} + k_tv_t^\top .$$
+      <p>S4 用的是静态 DPLR，RWKV-7 用的是数据相关的 DPLR。KDA 也是 DPLR 的一种，展开就是</p>
+      $$S_t = \big(\operatorname{Diag}(\alpha_t) - \beta_tk_tk_t^\top\operatorname{Diag}(\alpha_t)\big)S_{t-1} + \beta_tk_tv_t^\top,\qquad D=\operatorname{Diag}(\alpha_t),\ a_t = \beta_tk_t,\ b_t = k_t\odot\alpha_t .$$
+      <p>表达能力上二者都有细粒度衰减，但 KDA 把 \(a\)、\(b\) 都绑定到 \(k\) 上，并且共享 \(\alpha_t\)，从而可以把 \(\operatorname{Diag}(\alpha_t)\) 提出来，写成“先 GLA 式逐通道衰减、再 DeltaNet 式 Householder 更新”。计算上的好处（报告 §6.2 对照了两份伪代码）：</p>
+      <ul>
+        <li>一般 DPLR 在块内需要四个 \(C\times C\) 的交互矩阵（\(A_{qk}, A_{qb}, A_{ab}, A_{ak}\)），每个都涉及 \(1/\Gamma\)，都需要二级分块来保证数值稳定；KDA 因为 \(a=b=k\)（差一个标量和衰减），只需要 \(A_{qk}\) 和 \(A_{kk}\) 两个，二级分块从四次降到两次。</li>
+        <li>块间与输出计算里，KDA 又省掉了大约三次矩阵乘。</li>
+      </ul>
+      <p>报告的 kernel 测试（batch 1、16 头）显示，在长度直到 64K 的范围内 KDA 的速度接近 DPLR 的 2 倍。</p>
+
+      <h2 id="arch">9. Kimi Linear 的架构：3:1 混合与 NoPE</h2>
+      <h3>9.1 为什么还要混合全注意力</h3>
+      <p>纯线性注意力的状态是固定大小的，精确检索和逐字复制这类任务在理论上就很难（需要从压缩的记忆里取回整段历史）。所以 Kimi Linear 把 KDA 和少量全注意力层（MLA）混合。混合方式选的是<strong>按层交替</strong>，而不是在一层里混合不同的头，理由是基础设施简单、训练稳定。经验上 3 层 KDA 接 1 层 MLA 的均匀 3:1 比例在质量与吞吐之间最好。</p>
+      <figure>
+        <svg class="diagram" viewBox="0 0 640 170" role="img" aria-label="Kimi Linear 的 3:1 层布局">
+          <g id="kl-layers"></g>
+        </svg>
+        <figcaption>Kimi-Linear-48B-A3B 的 27 层布局（按 Hugging Face config 的 <code>full_attn_layers</code> 与 <code>kda_layers</code> 画出，层号从 1 开始）：第 4、8、…、24 层和最后的第 27 层是 MLA，其余 20 层是 KDA。每层后面都是 MoE（第 1 层是 dense FFN）。</figcaption>
+      </figure>
+      <h3>9.2 MLA 层用 NoPE</h3>
+      <p>Kimi Linear 的所有 MLA 层都<strong>不加位置编码</strong>（NoPE），位置信息和近因偏置完全交给 KDA 层。理由来自第 5.1 节：KDA 本身就是一种可学习的、逐通道多频率的乘性位置编码，作用类似甚至强于短卷积或滑动窗口注意力这类辅助组件。NoPE 对 MLA 还有两个实际好处：</p>
+      <ul>
+        <li>推理时 MLA 可以转成高效的纯 MQA（所有头共享一个 key/value 的隐向量，不需要单独的 RoPE 分支）；</li>
+        <li>长上下文训练更简单，不需要调 RoPE 的频率底数，也不需要 YaRN 一类方法。</li>
+      </ul>
+      <p>消融（第 10 节表 5）显示，用 RoPE 的版本在短上下文上差不多，但长上下文明显更差。报告的解释是：带 RoPE 时全局注意力层承担了强而显式的相对位置信号，而 KDA 只提供较弱的隐式位置偏置，位置偏置在深度上分布失衡，过分强调短程顺序，在中途扩展到长上下文时适应性差；NoPE 让位置偏置在各层分布更均衡，外推更稳。</p>
+      <h3>9.3 模型配置</h3>
+      <p>主干沿用 Moonlight 的结构，区别是 MoE 稀疏度提高到 32：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项目</th><th>值</th><th>来源</th></tr></thead>
+          <tbody>
+            <tr><td>总参数 / 激活参数</td><td>48B / 3B</td><td>报告 §5.4</td></tr>
+            <tr><td>层数</td><td>27（20 KDA + 7 MLA）</td><td>config</td></tr>
+            <tr><td>隐藏维度</td><td>2304</td><td>config</td></tr>
+            <tr><td>KDA 头数 × 头维</td><td>32 × 128（\(d_k=d_v=128\)）</td><td>config / 报告 §4</td></tr>
+            <tr><td>ShortConv 核大小</td><td>4</td><td>config</td></tr>
+            <tr><td>MLA 头数、kv_lora_rank</td><td>32、512（<code>mla_use_nope: true</code>）</td><td>config</td></tr>
+            <tr><td>专家</td><td>256 个，每 token 激活 8 个（报告：含 1 个共享专家），专家中间维 1024</td><td>报告 §5.4 / config</td></tr>
+            <tr><td>第一层</td><td>dense FFN（为了训练稳定）</td><td>报告 §5.4</td></tr>
+            <tr><td>最大上下文</td><td>1,048,576</td><td>config</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <h2 id="exp">10. 实验</h2>
+      <h3>10.1 合成任务</h3>
+      <p>2 层、2 头、头维 128 的小模型，最多训练 20000 步，学习率在 {5e-5, 1e-4, 5e-4, 1e-3} 里网格搜索。三个任务：</p>
+      <ul>
+        <li><strong>Palindrome</strong>：把一串随机 token 倒序输出。需要从固定大小的状态里精确取回全部历史，对线性注意力很难。</li>
+        <li><strong>MQAR</strong>（多查询联想召回）：上下文里有若干 key–value 对，最后给出多个 key，要回答对应的 value。已知它和语言建模能力高度相关。</li>
+        <li><strong>Stack</strong>：64 个独立的栈，序列里是 PUSH/POP 操作，POP 时要预测对应栈最近压入的元素，考察状态追踪。</li>
+      </ul>
+      <p>结果：长度从 256 增加到 2048，三个任务上 KDA 的准确率都最高；在 Palindrome 和 MQAR 上 KDA 比 GDN 收敛快得多。只有乘性衰减、没有 delta 规则的 Mamba2 在这个设定下三个任务都失败。</p>
+      <h3>10.2 消融</h3>
+      <p>以缩放律实验中最小的配置（16 头 16 层）为基准，同 FLOPs、同超参：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>变体</th><th class="num">训练 PPL</th><th class="num">验证 PPL</th></tr></thead>
+          <tbody>
+            <tr><td><strong>3:1（KDA:MLA，最终选择）</strong></td><td class="num">9.23</td><td class="num">5.65</td></tr>
+            <tr><td>0:1（纯 MLA）</td><td class="num">9.45</td><td class="num">5.77</td></tr>
+            <tr><td>1:1</td><td class="num">9.29</td><td class="num">5.66</td></tr>
+            <tr><td>7:1</td><td class="num">9.23</td><td class="num">5.70</td></tr>
+            <tr><td>15:1</td><td class="num">9.34</td><td class="num">5.82</td></tr>
+            <tr><td>去掉输出门</td><td class="num">9.25</td><td class="num">5.67</td></tr>
+            <tr><td>swish 输出门</td><td class="num">9.43</td><td class="num">5.81</td></tr>
+            <tr><td>去掉卷积层</td><td class="num">9.29</td><td class="num">5.70</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>验证集的分布与预训练语料差别很大，强调分布偏移下的泛化，所以训练与验证 PPL 的数值差距大。几点：7:1 训练 PPL 与 3:1 相同但验证更差；1:1 验证接近但推理开销更大；纯全注意力反而最差。</p>
+      <h3>10.3 缩放律</h3>
+      <p>按 Moonlight 结构训练一组 MoE（激活 653M 到 1.7B，8/64 专家，Muon），MLA 基线按 Chinchilla 方法逐个网格搜索超参，Kimi Linear 保持 3:1、其余完全照搬 MLA 的配置。拟合结果：MLA \(2.3092\times C^{-0.0536}\)，Kimi Linear \(2.2879\times C^{-0.0527}\)，在算力最优训练下 Kimi Linear 约有 1.16 倍的计算效率。报告说 KDA 的超参没有专门调，仔细调可能更好。</p>
+      <h3>10.4 主实验设置</h3>
+      <p>三个模型——Kimi Linear、全 MLA 基线、混合 GDN 基线（GDN-H）——架构、参数量和训练配置完全相同（另有一个用 RoPE 的 Kimi Linear 作为 NoPE 的消融）。都用 4096 上下文、MuonClip、WSD，从 K2 的预训练语料里采样 1.4T token；学习率 1.1e-3，全局 batch 3200 万 token，退火和长上下文激活沿用 K2。SFT 在 K2 的 SFT 数据上加了推理数据，分多阶段；RL 用数学、代码、STEM 提示，沿用 K1.5 的算法并加上截断重要性采样（缓解训练与推理引擎精度不一致带来的策略偏差）、动态调整 KL 惩罚和 mini-batch 数，防止熵坍缩；同时像 K2 一样加 PTX 损失。</p>
+      <h3>10.5 结果（1.4T token，同配方）</h3>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>基准</th><th class="num">MLA</th><th class="num">GDN-H</th><th class="num">Kimi Linear</th></tr></thead>
+          <tbody>
+            <tr><td colspan="4"><em>预训练（基座）</em></td></tr>
+            <tr><td>MMLU</td><td class="num">71.6</td><td class="num">72.2</td><td class="num">73.8</td></tr>
+            <tr><td>MMLU-Pro</td><td class="num">47.2</td><td class="num">47.9</td><td class="num">51.0</td></tr>
+            <tr><td>BBH</td><td class="num">71.6</td><td class="num">70.6</td><td class="num">72.9</td></tr>
+            <tr><td>GSM8K</td><td class="num">83.7</td><td class="num">81.7</td><td class="num">83.9</td></tr>
+            <tr><td>EvalPlus</td><td class="num">59.5</td><td class="num">63.1</td><td class="num">60.2</td></tr>
+            <tr><td colspan="4"><em>SFT 后</em></td></tr>
+            <tr><td>MMLU-Pro</td><td class="num">65.7</td><td class="num">64.8</td><td class="num">67.4</td></tr>
+            <tr><td>GPQA-Diamond (Avg@8)</td><td class="num">57.1</td><td class="num">58.6</td><td class="num">62.1</td></tr>
+            <tr><td>AIME 2025 (Avg@64)</td><td class="num">20.6</td><td class="num">21.1</td><td class="num">21.3</td></tr>
+            <tr><td>LiveCodeBench v6</td><td class="num">25.1</td><td class="num">25.4</td><td class="num">26.0</td></tr>
+            <tr><td>MATH500</td><td class="num">80.8</td><td class="num">83.0</td><td class="num">81.2</td></tr>
+            <tr><td colspan="4"><em>长上下文（128K）</em></td></tr>
+            <tr><td>RULER</td><td class="num">81.3</td><td class="num">80.5</td><td class="num">84.3</td></tr>
+            <tr><td>MRCR</td><td class="num">22.6</td><td class="num">23.9</td><td class="num">29.6</td></tr>
+            <tr><td>RepoQA</td><td class="num">63.0</td><td class="num">63.0</td><td class="num">68.5</td></tr>
+            <tr><td>LongBench v2</td><td class="num">36.1</td><td class="num">32.6</td><td class="num">35.0</td></tr>
+            <tr><td>7 项长上下文平均</td><td class="num">52.2</td><td class="num">51.2</td><td class="num">54.5</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>Kimi Linear (RoPE) 的长上下文平均是 51.8，比 NoPE 版低 2.7。报告总结的层次关系：预训练和 SFT 阶段 Kimi Linear &gt; GDN-H &gt; MLA；长上下文上 Kimi Linear 仍第一，但 GDN-H 掉到 MLA 后面；数学 RL 中 Kimi Linear 的训练准确率增长明显快于 MLA，差距逐渐拉大，MATH500 和 AIME 2025 测试曲线也是如此。也有例外：EvalPlus 和 MATH500 上 GDN-H 更高，LongBench v2、Frames 上 MLA 更高。</p>
+      <h3>10.6 5.7T 的发布版本</h3>
+      <p>发布的检查点按同样流程训练到 5.7T token（与 Moonlight 相同），支持 1M 上下文。和 Moonlight（同样 3B 激活，但 16B 总参）比，基座 MMLU-Pro 54.8 vs 42.4、MATH 58.5 vs 45.3；指令版 RULER@128K 95.4、RULER@1M 94.8，AIME 2025 58.6，LiveCodeBench v6 45.7（Moonlight-Instruct 11.9）。注意这个比较里总参数和稀疏度也变了（报告说“3 倍稀疏度”），不是纯粹的注意力对照。</p>
+
+      <h2 id="eff">11. 效率：KV cache、预填充与解码</h2>
+      <p>报告的效率数据（三个模型都是 48B 配置、相同层数与头数）：</p>
+      <ul>
+        <li><strong>KV cache</strong>：只有 1/4 的层（MLA）需要随长度增长的 cache，最多减少 75%。</li>
+        <li><strong>预填充</strong>：4K–16K 与 MLA 相当；128K 起明显更快；512K 时 2.3 倍，1M 时 2.9 倍。细粒度衰减相对 GDN-H 几乎没有额外延迟。</li>
+        <li><strong>解码</strong>：1M 上下文时，由于省下的显存可以支持更大的 batch，每输出 token 时间（TPOT）为 1.84 ms，MLA 为 11.48 ms，约 6.3 倍。batch 为 1 时加速比小得多（§6.3 文字给的是 1M 时约 2.3 倍；图 7(b) 上标注的是 2.2× 和 1.8×，文字与图略有出入）。</li>
+      </ul>
+      <p>下面的计算器按 Kimi-Linear-48B 的 config 估算每条序列的缓存大小，并用一个简单的带宽模型估算解码。模型：每个解码步要从显存读一遍被激活的权重和所有序列的缓存，时间 ≈ 字节数 / HBM 带宽；在给定的缓存显存预算内 batch 取最大。</p>
+
+      <div class="demo" id="kv-demo">
+        <div class="demo-label">交互演示 · KV cache 与解码吞吐（全 MLA vs 3:1 混合）</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>上下文长度</span><input type="range" id="kv-L" min="12" max="20" step="0.25" value="20"><output id="kv-L-o"></output></label>
+          <label class="ctrl"><span>缓存显存预算</span><input type="range" id="kv-mem" min="10" max="400" step="10" value="120"><output id="kv-mem-o"></output></label>
+          <label class="ctrl"><span>HBM 带宽 (TB/s)</span><input type="range" id="kv-bw" min="1" max="8" step="0.05" value="3.35"><output id="kv-bw-o"></output></label>
+        </div>
+        <div class="seg" role="group" aria-label="KDA 状态精度">
+          <button type="button" data-dt="4" aria-pressed="true">KDA 状态 FP32</button>
+          <button type="button" data-dt="2" aria-pressed="false">KDA 状态 BF16</button>
+        </div>
+        <div class="readout">
+          <div><span class="k">每序列缓存：全 MLA</span><span class="v" id="kv-r1">–</span></div>
+          <div><span class="k">每序列缓存：混合</span><span class="v" id="kv-r2">–</span></div>
+          <div><span class="k">缓存节省</span><span class="v" id="kv-r3">–</span></div>
+          <div><span class="k">最大 batch：MLA / 混合</span><span class="v" id="kv-r4">–</span></div>
+          <div><span class="k">平均每 token 时间：MLA / 混合</span><span class="v" id="kv-r5">–</span></div>
+          <div><span class="k">吞吐提升</span><span class="v" id="kv-r6">–</span></div>
+          <div><span class="k">预填充单头 FLOPs 比 Attn/KDA</span><span class="v" id="kv-r7">–</span></div>
+        </div>
+        <svg class="chart" id="kv-chart" viewBox="0 0 600 240" role="img" aria-label="每序列缓存随上下文长度"></svg>
+        <div class="legend"><span><i style="background:var(--text-faint)"></i>全 MLA（27 层）</span><span><i style="background:var(--accent)"></i>混合（7 MLA + 20 KDA）</span><span><i style="background:var(--accent-2)"></i>当前长度</span></div>
+        <p class="note">MLA 每 token 每层缓存按 config 的 kv_lora_rank + qk_rope_head_dim = 512 + 64 个 BF16 数计；KDA 每层每序列是 32 个 128×128 状态加短卷积缓存。权重读取量按“非专家参数约 1.2B + 每层被 batch 中任一 token 选中的专家”估计（BF16）。这是一个粗略的带宽模型，忽略了计算、通信和 kernel 效率，只用于看趋势；报告实测的 1M 解码加速约 6.3 倍。</p>
+      </div>
+      <p>把预算调到 1M、120 GB 附近，可以看到为什么报告强调“更大的 batch”：全 MLA 每条 1M 序列的缓存约 33 GB，混合模型约 8.5 GB，同样的显存能多放约 4 倍的序列；而权重的读取是被 batch 摊薄的，所以吞吐的提升可以超过缓存本身的压缩比。batch 固定为 1 时，解码时间的大头是读缓存，提升受限于 MLA 层占比。</p>
+
+      <h2 id="take">12. 小结</h2>
+      <ul>
+        <li>KDA = Gated DeltaNet 的 delta 规则 + GLA 的逐通道衰减。delta 规则解决“覆盖”，逐通道门解决“按维度决定记多久”，后者也让 KDA 成为一种可学习的多频率位置编码，从而全注意力层可以用 NoPE。</li>
+        <li>算法上关键是把 \(a,b\) 都绑定到 \(k\)：WY 表示 + UT 变换让 delta 规则可分块并行，只需要两个块内交互矩阵，比一般 DPLR 快约一倍。</li>
+        <li>架构上 3:1 按层混合，在同配方 1.4T token 下短、长上下文和 RL 都胜过全 MLA；长序列下省 75% 的 KV cache，大 batch 解码在 1M 时快约 6 倍。</li>
+      </ul>
+      <p>这些设计在 Kimi K3 里几乎原样保留，K3 又在 KDA 上改了衰减的参数化（加下界，消掉对角小块的逐位置计算）和输出门（改成全秩），见<a href="/posts/kimi-k3/">K3 那篇</a>。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Kimi Team. <em>Kimi Linear: An Expressive, Efficient Attention Architecture</em>. arXiv:2510.26692：<a href="https://arxiv.org/html/2510.26692#S2">§2 预备知识</a>、<a href="https://arxiv.org/html/2510.26692#S3">§3 KDA</a>、<a href="https://arxiv.org/html/2510.26692#S4">§4 架构</a>、<a href="https://arxiv.org/html/2510.26692#S5">§5 实验</a>、<a href="https://arxiv.org/html/2510.26692#S6">§6 讨论</a>、<a href="https://arxiv.org/html/2510.26692#A2">附录 B</a>、<a href="https://arxiv.org/html/2510.26692#A3">附录 C</a>、<a href="https://arxiv.org/html/2510.26692#A4">附录 D</a>。</li>
+        <li>Kimi-Linear-48B-A3B-Instruct 的 <a href="https://huggingface.co/moonshotai/Kimi-Linear-48B-A3B-Instruct/blob/main/config.json">config.json</a>。</li>
+        <li>KDA kernel：<a href="https://github.com/fla-org/flash-linear-attention/tree/main/fla/ops/kda">fla-org/flash-linear-attention</a>；代码与模型：<a href="https://github.com/MoonshotAI/Kimi-Linear">MoonshotAI/Kimi-Linear</a>。</li>
+        <li>A. Katharopoulos et al. <em>Transformers are RNNs</em>（线性注意力）；S. Yang et al. <em>Gated Linear Attention</em>、<em>Parallelizing Linear Transformers with the Delta Rule</em>、<em>Gated Delta Networks</em>（本文对应的背景工作，按报告的引用）。</li>
+        <li>Kimi Team. <em>Kimi K3: Open Frontier Intelligence</em>. <a href="https://arxiv.org/abs/2607.24653">arXiv:2607.24653</a> §2.1.1（Kimi Linear 的衰减函数形式）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="reports"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+    const fmt = (x, d = 2) => Number(x).toFixed(d);
+    const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+    function gauss(r) { let u = 0; while (u === 0) u = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * r()); }
+
+    // ---------- layer layout figure ----------
+    (function layout() {
+      const g = document.getElementById('kl-layers');
+      const mla = new Set([4, 8, 12, 16, 20, 24, 27]);
+      const w = 21, gap = 2.2, x0 = 12;
+      for (let i = 1; i <= 27; i++) {
+        const x = x0 + (i - 1) * (w + gap);
+        el('rect', { x, y: 40, width: w, height: 60, rx: 4, class: mla.has(i) ? 'boxb' : 'boxa' }, g);
+        const t = el('text', { x: x + w / 2, y: 120, 'text-anchor': 'middle', class: 't-soft' }, g); t.textContent = i;
+        const t2 = el('text', { x: x + w / 2, y: 75, 'text-anchor': 'middle' }, g); t2.textContent = mla.has(i) ? 'M' : 'K';
+      }
+      el('text', { x: 12, y: 24 }, g).textContent = 'K = KDA（20 层）　M = MLA，NoPE（7 层）';
+      el('text', { x: 12, y: 150, class: 't-soft' }, g).textContent = '每 3 层 KDA 后接 1 层 MLA；最后一层也是 MLA';
+    })();
+
+    // ---------- gate demo ----------
+    (function gateDemo() {
+      const slow = document.getElementById('gd-slow'), fast = document.getElementById('gd-fast'), beta = document.getElementById('gd-beta');
+      const hs = document.getElementById('gd-heat-s'), hc = document.getElementById('gd-heat-c'), rec = document.getElementById('gd-recall');
+      const D = 16, N = 160, EVERY = 10;
+      let rule = 'delta', step = N, timer = null;
+      document.querySelectorAll('#gate-demo .seg button').forEach((b) => b.addEventListener('click', () => { rule = b.dataset.rule; document.querySelectorAll('#gate-demo .seg button').forEach((x) => x.setAttribute('aria-pressed', x === b)); prepare(); render(step); }));
+      // fixed sequence
+      const r = rng(2024);
+      const seq = [];
+      const unit = (v) => { const n = Math.hypot(...v); return v.map((x) => x / n); };
+      for (let t = 0; t < N; t++) {
+        const fact = t % EVERY === EVERY - 1;
+        const k = new Array(D).fill(0);
+        for (let c = 0; c < 8; c++) k[fact ? c : c + 8] = gauss(r);
+        // small leakage
+        for (let c = 0; c < D; c++) k[c] += 0.08 * gauss(r);
+        seq.push({ fact, k: unit(k), v: Array.from({ length: D }, () => gauss(r)) });
+      }
+      let statesS = [], statesC = [];
+      function runMode(alphaVec, b) {
+        let S = Array.from({ length: D }, () => new Array(D).fill(0));
+        const hist = [S.map((row) => row.slice())];
+        for (let t = 0; t < N; t++) {
+          const { k, v } = seq[t];
+          for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) S[i][j] *= alphaVec[i];
+          if (rule === 'delta') {
+            const read = new Array(D).fill(0);
+            for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) read[j] += S[i][j] * k[i];
+            for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) S[i][j] += b * k[i] * (v[j] - read[j]);
+          } else {
+            for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) S[i][j] += b * k[i] * v[j];
+          }
+          hist.push(S.map((row) => row.slice()));
+        }
+        return hist;
+      }
+      function recall(S) {
+        const out = [];
+        for (let t = 0; t < N; t++) {
+          if (!seq[t].fact) continue;
+          const { k, v } = seq[t];
+          const read = new Array(D).fill(0);
+          for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) read[j] += S[i][j] * k[i];
+          const dot = read.reduce((s, x, j) => s + x * v[j], 0);
+          const cos = dot / (Math.hypot(...read) * Math.hypot(...v) + 1e-9);
+          out.push({ age: N - 1 - t, cos });
+        }
+        return out;
+      }
+      let aScalar = 0;
+      function prepare() {
+        const as = +slow.value, af = +fast.value, b = +beta.value;
+        document.getElementById('gd-slow-o').textContent = fmt(as, 3);
+        document.getElementById('gd-fast-o').textContent = fmt(af, 2);
+        document.getElementById('gd-beta-o').textContent = fmt(b, 2);
+        aScalar = Math.sqrt(as * af);
+        const vecC = Array.from({ length: D }, (_, i) => (i < 8 ? as : af));
+        const vecS = new Array(D).fill(aScalar);
+        statesS = runMode(vecS, b); statesC = runMode(vecC, b);
+        const rs = recall(statesS[N]), rc = recall(statesC[N]);
+        const avg = (a) => a.slice(-6).reduce((s, x) => s + x.cos, 0) / 6;
+        document.getElementById('gd-r1').textContent = fmt(avg(rs), 3);
+        document.getElementById('gd-r2').textContent = fmt(avg(rc), 3);
+        document.getElementById('gd-r3').textContent = fmt(aScalar, 3);
+        // recall chart
+        rec.innerHTML = '';
+        const P = { x0: 44, y0: 196, w: 540, h: 176 };
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0 + P.w, y2: P.y0, class: 'axis' }, rec);
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0, y2: P.y0 - P.h, class: 'axis' }, rec);
+        const X = (age) => P.x0 + P.w - age / (N - 1) * P.w, Y = (c) => P.y0 - (Math.max(-0.2, Math.min(1, c)) + 0.2) / 1.2 * P.h;
+        [-0.2, 0, 0.5, 1].forEach((c) => { el('line', { x1: P.x0, y1: Y(c), x2: P.x0 + P.w, y2: Y(c), class: 'grid' }, rec); el('text', { x: 4, y: Y(c) + 4 }, rec).textContent = c; });
+        [0, 50, 100, 150].forEach((a) => { el('text', { x: X(a), y: P.y0 + 16, 'text-anchor': 'middle' }, rec).textContent = a; });
+        el('text', { x: P.x0 + 6, y: 16, class: 'lbl' }, rec).textContent = '← 越早的事实　　　　　　越近的事实 →';
+        const line = (arr, cls) => { el('path', { d: arr.slice().sort((p, q) => q.age - p.age).map((p, i) => (i ? 'L' : 'M') + X(p.age).toFixed(1) + ',' + Y(p.cos).toFixed(1)).join(''), class: cls }, rec); arr.forEach((p) => el('circle', { cx: X(p.age), cy: Y(p.cos), r: 3, class: cls === 's-acc' ? 'f-acc' : 'f-acc2' }, rec)); };
+        line(rs, 's-acc2'); line(rc, 's-acc');
+      }
+      function heat(svg, S) {
+        svg.innerHTML = '';
+        const cell = 200 / D, ox = 10, oy = 10;
+        let mx = 1e-6; S.forEach((row) => row.forEach((x) => { mx = Math.max(mx, Math.abs(x)); }));
+        mx = Math.max(mx, 1.0);
+        for (let i = 0; i < D; i++) for (let j = 0; j < D; j++) {
+          const v = S[i][j]; const a = Math.min(1, Math.abs(v) / mx);
+          el('rect', { x: ox + j * cell, y: oy + i * cell, width: cell - 0.6, height: cell - 0.6, class: v >= 0 ? 'f-acc' : 'f-acc2', 'fill-opacity': (0.06 + 0.94 * a).toFixed(3) }, svg);
+        }
+        el('line', { x1: ox, y1: oy + 8 * cell, x2: ox + 200, y2: oy + 8 * cell, class: 'axis', 'stroke-width': 2 }, svg);
+      }
+      function render(t) {
+        step = t;
+        heat(hs, statesS[t]); heat(hc, statesC[t]);
+        const tok = t > 0 ? (seq[t - 1].fact ? '事实' : '噪声') : '—';
+        document.getElementById('gd-step').textContent = '第 ' + t + ' / ' + N + ' 步　上一个 token：' + tok;
+      }
+      function stop() { if (timer) { clearInterval(timer); timer = null; } document.getElementById('gd-play').textContent = '▶ 逐步播放'; }
+      document.getElementById('gd-play').addEventListener('click', () => {
+        if (timer) { stop(); return; }
+        if (reduce) { render(N); return; }
+        let t = step >= N ? 0 : step;
+        document.getElementById('gd-play').textContent = '❚❚ 暂停';
+        timer = setInterval(() => { render(t); t++; if (t > N) stop(); }, 60);
+      });
+      document.getElementById('gd-end').addEventListener('click', () => { stop(); render(N); });
+      [slow, fast, beta].forEach((x) => x.addEventListener('input', () => { prepare(); render(step); }));
+      prepare(); render(N);
+    })();
+
+    // ---------- KV / throughput calculator ----------
+    (function kvDemo() {
+      const Ls = document.getElementById('kv-L'), mem = document.getElementById('kv-mem'), bw = document.getElementById('kv-bw');
+      const chart = document.getElementById('kv-chart');
+      let dt = 4;
+      document.querySelectorAll('#kv-demo .seg button').forEach((b) => b.addEventListener('click', () => { dt = +b.dataset.dt; document.querySelectorAll('#kv-demo .seg button').forEach((x) => x.setAttribute('aria-pressed', x === b)); calc(); }));
+      const LAYERS = 27, MLA_H = 7, KDA_L = 20, HEADS = 32, HD = 128;
+      const mlaTok = (512 + 64) * 2; // bytes per token per MLA layer
+      const convBytes = 3 * (3 * HEADS * HD) * 2; // q,k,v short conv (kernel 4 -> 3 past), bf16
+      const kdaSeq = () => KDA_L * (HEADS * HD * HD * dt + convBytes);
+      const nonExpert = 1.2e9, expertParams = 3 * 2304 * 1024, moeLayers = 26, E = 256, K = 8;
+      const weightBytes = (B) => { const touched = E * (1 - Math.pow(1 - K / E, B)) + 1; return (nonExpert + moeLayers * touched * expertParams) * 2; };
+      const gb = (x) => x >= 1e9 ? (x / 1e9).toFixed(2) + ' GB' : (x / 1e6).toFixed(1) + ' MB';
+      function decode(perSeq, budget, bwv) {
+        const B = Math.max(1, Math.floor(budget / perSeq));
+        const t = (weightBytes(B) + B * perSeq) / bwv; // seconds per step
+        return { B, perTok: t / B };
+      }
+      function calc() {
+        const L = Math.round(Math.pow(2, +Ls.value)), budget = +mem.value * 1e9, bwv = +bw.value * 1e12;
+        document.getElementById('kv-L-o').textContent = L >= 1048576 * 0.99 ? '1M' : L >= 1024 ? Math.round(L / 1024) + 'K' : L;
+        document.getElementById('kv-mem-o').textContent = mem.value + ' GB';
+        document.getElementById('kv-bw-o').textContent = fmt(+bw.value, 2);
+        const full = LAYERS * mlaTok * L, hyb = MLA_H * mlaTok * L + kdaSeq();
+        document.getElementById('kv-r1').textContent = gb(full);
+        document.getElementById('kv-r2').textContent = gb(hyb);
+        document.getElementById('kv-r3').textContent = ((1 - hyb / full) * 100).toFixed(1) + '%';
+        const a = decode(full, budget, bwv), b = decode(hyb, budget, bwv);
+        document.getElementById('kv-r4').textContent = a.B + ' / ' + b.B;
+        document.getElementById('kv-r5').textContent = (a.perTok * 1e3).toFixed(2) + ' / ' + (b.perTok * 1e3).toFixed(2) + ' ms';
+        document.getElementById('kv-r6').textContent = (a.perTok / b.perTok).toFixed(2) + '×';
+        const C = 64, d = HD;
+        const kf = 6 * L * d * d + 3 * L * C * d + L * C * C, af = 2 * L * L * d;
+        document.getElementById('kv-r7').textContent = (af / kf).toFixed(af / kf < 10 ? 2 : 0) + '×';
+        // chart: per-seq cache vs L (log-log)
+        chart.innerHTML = '';
+        const P = { x0: 52, y0: 206, w: 530, h: 186 };
+        const lx = (l) => P.x0 + (Math.log2(l) - 12) / 8 * P.w;
+        const ymin = 1e7, ymax = 1e11;
+        const ly = (v) => P.y0 - (Math.log10(v) - 7) / 4 * P.h;
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0 + P.w, y2: P.y0, class: 'axis' }, chart);
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0, y2: P.y0 - P.h, class: 'axis' }, chart);
+        [1e7, 1e8, 1e9, 1e10, 1e11].forEach((v) => { el('line', { x1: P.x0, y1: ly(v), x2: P.x0 + P.w, y2: ly(v), class: 'grid' }, chart); el('text', { x: 2, y: ly(v) + 4 }, chart).textContent = v >= 1e9 ? (v / 1e9) + 'GB' : (v / 1e6) + 'MB'; });
+        [[4096, '4K'], [32768, '32K'], [262144, '256K'], [1048576, '1M']].forEach(([l, s]) => { el('text', { x: lx(l), y: P.y0 + 16, 'text-anchor': 'middle' }, chart).textContent = s; });
+        const path = (f) => { let d = ''; for (let i = 0; i <= 80; i++) { const l = Math.pow(2, 12 + i / 10); const v = Math.min(ymax, Math.max(ymin, f(l))); d += (i ? 'L' : 'M') + lx(l).toFixed(1) + ',' + ly(v).toFixed(1); } return d; };
+        el('path', { d: path((l) => LAYERS * mlaTok * l), class: 's-soft' }, chart);
+        el('path', { d: path((l) => MLA_H * mlaTok * l + kdaSeq()), class: 's-acc' }, chart);
+        el('line', { x1: lx(L), y1: P.y0, x2: lx(L), y2: P.y0 - P.h, class: 's-acc2', 'stroke-dasharray': '3 3' }, chart);
+        el('text', { x: P.x0 + 8, y: 16, class: 'lbl' }, chart).textContent = '每条序列的缓存（对数坐标）';
+      }
+      [Ls, mem, bw].forEach((x) => x.addEventListener('input', calc));
+      calc();
+    })();
+  })();
+  </script>
+</body>
+</html>

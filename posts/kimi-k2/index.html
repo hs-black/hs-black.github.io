@@ -1,0 +1,797 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Kimi K2：MuonClip 与万亿参数 Agent 模型 · Zunzhe Zhang</title>
+  <meta name="description" content="逐节精读 Kimi K2 技术报告：Muon 与 QK-Clip、数据改写、超稀疏 MoE、训练基础设施、Agent 数据合成与 RL。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .chart { width: 100%; height: auto; display: block; margin-top: 8px; }
+    .chart .axis { stroke: var(--border); stroke-width: 1; fill: none; }
+    .chart .grid { stroke: var(--border); stroke-width: 1; stroke-dasharray: 2 4; fill: none; }
+    .chart text { fill: var(--text-faint); font-size: 12px; font-family: var(--font-mono); }
+    .chart .lbl { fill: var(--text-soft); font-family: var(--font-sans); font-size: 13px; }
+    .s-acc { stroke: var(--accent); fill: none; stroke-width: 2; }
+    .s-acc2 { stroke: var(--accent-2); fill: none; stroke-width: 2; }
+    .s-soft { stroke: var(--text-faint); fill: none; stroke-width: 1.5; stroke-dasharray: 5 4; }
+    .s-thin { stroke-width: 1.2; opacity: 0.55; }
+    .f-acc { fill: var(--accent); }
+    .f-acc2 { fill: var(--accent-2); }
+    .f-soft { fill: var(--text-faint); }
+    .f-accsoft { fill: var(--accent-soft); }
+    .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-soft); margin-top: 6px; }
+    .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
+    .note { font-size: 13px; color: var(--text-faint); margin-top: 8px; line-height: 1.6; }
+    .diagram { width: 100%; height: auto; display: block; }
+    .diagram .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.2; }
+    .diagram .boxa { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.2; }
+    .diagram .boxb { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.2; }
+    .diagram text { fill: var(--text); font-size: 13px; }
+    .diagram .t-soft { fill: var(--text-soft); font-size: 12px; }
+    .diagram .arrow { stroke: var(--text-soft); stroke-width: 1.4; fill: none; marker-end: url(#ah); }
+    .diagram .arrowhead { fill: var(--text-soft); }
+    .twocol { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+    @media (max-width: 560px) { .twocol { grid-template-columns: 1fr; } }
+    .mini-title { font-size: 13px; color: var(--text-soft); margin: 4px 0 0; }
+    .kv { font-family: var(--font-mono); font-size: 14px; }
+    figure { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+    @media (max-width: 560px) {
+      figure .diagram { min-width: 540px; }
+      .chart text { font-size: 17px; }
+      .chart .lbl { font-size: 17px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>Kimi K2：MuonClip 与万亿参数 Agent 模型</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="reports"></nav>
+
+    <article class="prose">
+      <p>Kimi K2 是 Moonshot AI 在 2025 年 7 月发布的开源 MoE 模型：总参数 1.04T，激活 32.6B，用 15.5T token 预训练，<strong>全程没有一次 loss spike</strong>。技术报告（arXiv 2507.20534，<em>Kimi K2: Open Agentic Intelligence</em>）里真正新的东西有三块：</p>
+      <ul>
+        <li><strong>MuonClip</strong>：在 Muon 优化器上加一个叫 QK-Clip 的权重裁剪，解决 Muon 在大规模训练中注意力 logit 爆炸的问题；</li>
+        <li><strong>提高 token 效率的数据改写</strong>：高质量 token 不够用时，用改写而不是多轮重复来“放大”数据；</li>
+        <li><strong>Agent 能力的后训练</strong>：大规模合成工具调用轨迹，加上可验证奖励与“自我批评 rubric 奖励”结合的 RL。</li>
+      </ul>
+      <p>这篇按报告的顺序，把每个技术从基础讲到细节。Muon 部分我会把它的前身 Moonlight（arXiv 2502.16982，<em>Muon is Scalable for LLM Training</em>）一起讲，因为 K2 直接沿用了那篇里的两个修改。文中三个交互演示：Muon 与 Adam 的更新谱对比、QK-Clip 模拟器、MoE 稀疏度计算器。</p>
+
+      <nav class="toc" aria-label="目录">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#overview">全貌：K2 有哪些数字</a></li>
+          <li><a href="#muon">从 Adam 到 Muon：正交化动量</a></li>
+          <li><a href="#moonlight">Moonlight 的两处修改：权重衰减与更新 RMS 对齐</a></li>
+          <li><a href="#explode">注意力 logit 爆炸</a></li>
+          <li><a href="#qkclip">QK-Clip 的推导与 MuonClip</a></li>
+          <li><a href="#data">Token 效率与数据改写</a></li>
+          <li><a href="#arch">架构：MLA、384 专家与稀疏度缩放律</a></li>
+          <li><a href="#infra">训练基础设施与训练配方</a></li>
+          <li><a href="#sft">SFT 与大规模 Agent 数据合成</a></li>
+          <li><a href="#rl">强化学习：可验证奖励、自我批评与三个技巧</a></li>
+          <li><a href="#rlinfra">RL 基础设施</a></li>
+          <li><a href="#eval">评测结果</a></li>
+          <li><a href="#take">小结</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </nav>
+
+      <h2 id="overview">1. 全貌：K2 有哪些数字</h2>
+      <p>先把报告里的硬数字放在一起，后文再逐个解释它们从何而来。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>项目</th><th class="num">DeepSeek-V3</th><th class="num">Kimi K2</th></tr></thead>
+          <tbody>
+            <tr><td>层数</td><td class="num">61</td><td class="num">61</td></tr>
+            <tr><td>总参数</td><td class="num">671B</td><td class="num">1.04T</td></tr>
+            <tr><td>激活参数</td><td class="num">37B</td><td class="num">32.6B</td></tr>
+            <tr><td>专家总数（routed）</td><td class="num">256</td><td class="num">384</td></tr>
+            <tr><td>每 token 激活专家</td><td class="num">8</td><td class="num">8</td></tr>
+            <tr><td>共享专家</td><td class="num">1</td><td class="num">1</td></tr>
+            <tr><td>注意力头数</td><td class="num">128</td><td class="num">64</td></tr>
+            <tr><td>Dense 层数</td><td class="num">3</td><td class="num">1</td></tr>
+            <tr><td>专家分组（expert grouping）</td><td class="num">有</td><td class="num">无</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>这是报告表 2 的内容。另外几个常用数字：隐藏维度 7168，每个专家的 FFN 中间维度 2048，注意力用 MLA；预训练 15.5T token、上下文 4K，之后退火并做长上下文激活，用 YaRN 扩到 128K；优化器 MuonClip，QK-Clip 阈值 \(\tau=100\)。</p>
+      <p>从公开的 Hugging Face <code>config.json</code> 还能读到 MLA 的具体尺寸：<code>q_lora_rank=1536</code>、<code>kv_lora_rank=512</code>、<code>qk_nope_head_dim=128</code>、<code>qk_rope_head_dim=64</code>、<code>v_head_dim=128</code>，路由打分函数是 sigmoid（<code>scoring_func: sigmoid</code>，<code>topk_method: noaux_tc</code>，即 DeepSeek-V3 式的无辅助损失负载均衡）。后面的计算都用这些值。</p>
+
+      <h2 id="muon">2. 从 Adam 到 Muon：正交化动量</h2>
+      <h3>2.1 先回忆 SGD 动量和 Adam</h3>
+      <p>训练就是反复做 \(W \leftarrow W - \eta\,\Delta\)。不同优化器的区别只在“更新方向 \(\Delta\) 怎么从梯度 \(G\) 算出来”：</p>
+      <ul>
+        <li><strong>SGD + 动量</strong>：\(M_t = \mu M_{t-1} + G_t\)，\(\Delta = M_t\)。更新的大小和梯度成正比，梯度大的方向走得快。</li>
+        <li><strong>Adam</strong>：维护一阶矩 \(m\) 与二阶矩 \(v\)，\(\Delta = \hat m / (\sqrt{\hat v}+\epsilon)\)。逐元素除以“梯度的典型大小”，相当于把每个元素的步长归一到 \(\pm 1\) 附近。在 \(\beta_1=\beta_2\to 0\) 的极端下，Adam 退化为 \(\operatorname{sign}(G)\)，即 signSGD。</li>
+      </ul>
+      <p>这两者都把参数当成一堆<strong>独立的标量</strong>。但神经网络里绝大多数参数是矩阵 \(W\in\mathbb R^{n\times m}\)，它的作用是一个线性算子 \(x\mapsto Wx\)。对矩阵来说，更自然的问题是：这一步更新会把输出 \(Wx\) 改变多少？</p>
+
+      <h3>2.2 谱范数下的最速下降</h3>
+      <p>Muon 背后的观点（Bernstein &amp; Newhouse 的“在范数约束下做最速下降”）是：对矩阵参数，应该约束更新的<strong>谱范数</strong>（最大奇异值）\(\|\Delta\|_2\)，因为它正好是“对任意单位输入，输出最多变化多少”。于是问题是</p>
+      $$\Delta^\star = \arg\max_{\|\Delta\|_2 \le 1} \langle G, \Delta\rangle .$$
+      <p>设 \(G = U\Sigma V^\top\) 是奇异值分解。\(\langle G,\Delta\rangle = \operatorname{tr}(\Sigma\, U^\top \Delta V)\)，而 \(U^\top\Delta V\) 的对角元绝对值都不超过它的谱范数 1，所以最大值 \(\sum_i \sigma_i\) 在 \(U^\top \Delta V = I\) 时取到：</p>
+      $$\Delta^\star = U V^\top =: \operatorname{msign}(G).$$
+      <p>这就是“正交化”：把梯度的所有奇异值都换成 1，只保留它的奇异向量（方向）。报告附录里把它写作 \(\operatorname{msign}\)（matrix sign），类比标量的 sign：Adam 在逐元素意义下取符号，Muon 在矩阵意义下取符号。等价的写法是 \(\operatorname{msign}(G) = (GG^\top)^{-1/2}G\)。</p>
+      <p>Muon 的完整更新是：</p>
+      $$M_t = \mu M_{t-1} + G_t,\qquad O_t = \operatorname{msign}(M_t),\qquad W_t = W_{t-1} - \eta\, O_t .$$
+      <p>动量先在原始梯度上累积，再整体正交化。动量系数 \(\mu=0.95\)（Moonlight 与原始 Muon 都用这个值，Moonlight 报告调它没有稳定收益）。</p>
+
+      <h3>2.3 Newton–Schulz 迭代：不做 SVD 也能正交化</h3>
+      <p>每步对每个矩阵做 SVD 太贵，而且不适合 GPU。Muon 用一个只含矩阵乘法的迭代逼近 \(UV^\top\)。先归一化 \(X_0 = M/\|M\|_F\)，保证所有奇异值都在 \((0,1]\)；然后迭代</p>
+      $$X_{k} = a X_{k-1} + b\,(X_{k-1}X_{k-1}^\top) X_{k-1} + c\,(X_{k-1}X_{k-1}^\top)^2 X_{k-1}.$$
+      <p>关键观察：如果 \(X = U\Sigma V^\top\)，那么 \((XX^\top)X = U\Sigma^3V^\top\)，\((XX^\top)^2X = U\Sigma^5 V^\top\)。所以这个迭代<strong>不改变奇异向量</strong>，只对每个奇异值独立地施加奇多项式</p>
+      $$\sigma \mapsto f(\sigma) = a\sigma + b\sigma^3 + c\sigma^5 .$$
+      <p>只要 \(f\) 把 \((0,1]\) 里的值都推向 1 附近，迭代几次后 \(X_k \approx U V^\top\)。原始 Muon（Moonlight 沿用）的系数是 \(a=3.4445,\ b=-4.7750,\ c=2.0315\)。这里的设计取舍是：\(f'(0)=a\approx 3.44\) 很大，小奇异值每步被放大三倍多，几步就能拉上来；代价是 \(f\) 并不精确收敛到 1，而是让奇异值在 1 附近振荡。我用这组系数算了一下：初始奇异值只要不小于 0.01，迭代 5 步后都落在大约 \([0.68,\ 1.20]\) 里。对优化来说这已经够了——Moonlight 报告迭代 10 步比 5 步正交化得更准，但训练效果没有更好，所以用 5 步。</p>
+      <p>开销：对 \(n\times m\)（\(n\le m\)）的矩阵，一步迭代大约是 \(XX^\top\)（\(2n^2m\)）、平方（\(2n^3\)）和两次乘回 \(X\)（\(4n^2 m\)）。5 步加起来比前向反向小得多；Moonlight 报告优化器带来的端到端延迟一般只占前向反向的 1%–3%。</p>
+      <pre><code>def newton_schulz5(G, steps=5, eps=1e-7):
+    a, b, c = 3.4445, -4.7750, 2.0315
+    X = G.bfloat16() / (G.norm() + eps)
+    transposed = X.size(0) &gt; X.size(1)
+    if transposed: X = X.T          # 让 X X^T 是较小的那个方阵
+    for _ in range(steps):
+        A = X @ X.T
+        B = b * A + c * A @ A
+        X = a * X + B @ X
+    return X.T if transposed else X</code></pre>
+
+      <h3>2.4 为什么正交化有帮助</h3>
+      <p>直观解释：梯度矩阵往往是“低秩、病态”的——少数几个奇异方向占了绝大部分能量。SGD 和 Adam 的更新会主要沿这几个方向走，其它方向几乎不动。正交化之后所有奇异方向的步长相同，那些弱但有用的方向也能被学到。原文的说法是让更新矩阵“各向同性”，避免权重只沿少数主导方向学习。</p>
+      <p>Moonlight 给了两类证据：</p>
+      <ul>
+        <li><strong>缩放律</strong>：在 399M–1.5B 的一组 dense 模型上，对 AdamW 做了网格搜索的强基线；Muon 直接复用 AdamW 的最优超参。拟合出的曲线是 Muon \(2.506\times C^{-0.052}\)、AdamW \(2.608\times C^{-0.054}\)，在算力最优训练下 Muon 只需约 52% 的 FLOPs 就能达到 AdamW 的 loss（“约 2 倍计算效率”）。</li>
+        <li><strong>奇异值熵</strong>：对 Moonlight（Muon 训练）和 Moonlight-A（AdamW 训练）的权重矩阵算 SVD 熵 \(H(\sigma) = -\frac{1}{\log n}\sum_i p_i\log p_i,\ p_i = \sigma_i^2/\sum_j\sigma_j^2\)，Muon 训练出来的矩阵在所有检查点、所有矩阵组上熵都更高，超过 90% 的矩阵如此；在 MoE 的路由矩阵上差距最明显。</li>
+      </ul>
+      <p>下面的演示在两种尺度上对比“原始梯度、Adam 式符号更新、Newton–Schulz 正交化”。上半部分是 2×2 矩阵作用在单位圆上的像：病态的梯度把圆压成细长椭圆，正交化后接近一个圆（奇异值都接近 1）。下半部分是一个 32×16 的随机矩阵，奇异值按幂律衰减，柱状图显示三种更新的奇异值（各自除以最大值）。所有数都是页面上真算出来的：SVD 用 Jacobi 方法求 \(G^\top G\) 的特征值。</p>
+
+      <div class="demo" id="muon-demo">
+        <div class="demo-label">交互演示 · Muon 与 Adam 的更新谱</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>条件数 κ（2×2）</span><input type="range" id="md-kappa" min="0" max="3" step="0.05" value="1.3"><output id="md-kappa-o"></output></label>
+          <label class="ctrl"><span>Newton–Schulz 步数</span><input type="range" id="md-steps" min="0" max="8" step="1" value="5"><output id="md-steps-o"></output></label>
+          <label class="ctrl"><span>谱衰减指数（32×16）</span><input type="range" id="md-decay" min="0" max="3" step="0.1" value="1.5"><output id="md-decay-o"></output></label>
+        </div>
+        <div class="twocol">
+          <div>
+            <p class="mini-title">单位圆在三种更新下的像（2×2）</p>
+            <svg class="chart" id="md-ellipse" viewBox="0 0 300 220" role="img" aria-label="单位圆的像"></svg>
+            <div class="legend"><span><i style="background:var(--text-faint)"></i>梯度 G/‖G‖<sub>F</sub></span><span><i style="background:var(--accent-2)"></i>sign(G)（Adam 极限）</span><span><i style="background:var(--accent)"></i>NS 正交化</span></div>
+          </div>
+          <div>
+            <p class="mini-title">迭代多项式 f 作用 k 次后的映射 σ → f<sup>k</sup>(σ)</p>
+            <svg class="chart" id="md-poly" viewBox="0 0 300 220" role="img" aria-label="Newton-Schulz 多项式"></svg>
+          </div>
+        </div>
+        <p class="mini-title">32×16 矩阵的奇异值（各自归一化到最大值为 1，降序）</p>
+        <svg class="chart" id="md-bars" viewBox="0 0 600 220" role="img" aria-label="奇异值柱状图"></svg>
+        <div class="legend"><span><i style="background:var(--text-faint)"></i>原始梯度</span><span><i style="background:var(--accent-2)"></i>sign(G)</span><span><i style="background:var(--accent)"></i>NS 正交化</span></div>
+        <div class="readout">
+          <div><span class="k">2×2：NS 后的两个奇异值</span><span class="v" id="md-r1">–</span></div>
+          <div><span class="k">SVD 熵：G / sign / NS</span><span class="v" id="md-r2">–</span></div>
+          <div><span class="k">NS 后最小/最大奇异值</span><span class="v" id="md-r3">–</span></div>
+        </div>
+        <p class="note">矩阵是随机生成的示意数据（固定随机种子），不是真实模型的梯度。sign(G) 的谱虽然也比 G 平，但它不保持 G 的奇异向量，且仍有明显的衰减；NS 只改奇异值、不改奇异向量。2×2 情形里 sign(G) 常常退化成一条线段：对接近秩 1 的矩阵 \(G\approx\sigma uv^\top\)，\(\operatorname{sign}(G_{ij})=\operatorname{sign}(u_i)\operatorname{sign}(v_j)\) 仍是秩 1，逐元素取符号救不回弱方向。</p>
+      </div>
+
+      <h2 id="moonlight">3. Moonlight 的两处修改：权重衰减与更新 RMS 对齐</h2>
+      <p>原始 Muon 在小规模语言模型上很强，但扩到大模型、多 token 时收益会消失。Moonlight 找到两个原因并修掉，K2 的算法 1 原样继承了这两处。</p>
+      <h3>3.1 加回权重衰减</h3>
+      <p>原始 Muon 没有权重衰减。Moonlight 观察到训练久了权重和层输出的 RMS 一直增长，超出 bf16 的高精度区间。他们加入 AdamW 式的解耦权重衰减：</p>
+      $$W_t = W_{t-1} - \eta_t\,(O_t + \lambda W_{t-1}).$$
+      <p>在一个 800M 模型、100B token（约 5 倍算力最优 token 数）的过训练实验里，原始 Muon 早期收敛更快，但后期被带权重衰减的 Muon 反超，后者也优于 AdamW。为什么 Muon 特别需要它，可以从更新的“形状”理解：Muon 每步的更新是满秩、每个方向步长相同的，不像 Adam 那样大多数方向几乎不动，所以权重范数更容易持续增长；权重衰减提供一个平衡点。后面会看到，这个“奇异值容易增长”的性质也正是 logit 爆炸的根源。</p>
+
+      <h3>3.2 更新 RMS 随矩阵形状变化</h3>
+      <p>Adam 的更新逐元素大约是 \(\pm1\) 量级，所以它的更新 RMS（均方根）不依赖矩阵形状，实际在 0.2–0.4 左右。Muon 不是这样。<strong>引理</strong>：形状为 \([A,B]\) 的满秩矩阵，Muon 更新 \(O = UV^\top\) 的 RMS 是 \(\sqrt{1/\max(A,B)}\)。</p>
+      <p>证明很短。设 \(n=\max(A,B)\ge m=\min(A,B)\)，满秩时 \(O = \sum_{k=1}^{m} u_k v_k^\top\)，\(\{u_k\}\)、\(\{v_k\}\) 各自正交归一。则</p>
+      $$\|O\|_F^2 = \operatorname{tr}(O^\top O) = \operatorname{tr}\Big(\sum_k v_k v_k^\top\Big) = m,\qquad \operatorname{RMS}(O) = \sqrt{\frac{\|O\|_F^2}{nm}} = \sqrt{\frac{1}{n}} .$$
+      <p>这带来两个问题：大矩阵（比如 dense MLP，\(\max(A,B)\) 很大）的更新太小，学不动；小矩阵（比如把 MLA/GQA 的每个 KV 头当成独立参数）更新太大，训练不稳。修法是把每个矩阵的更新乘上 \(\sqrt{\max(A,B)}\) 抵消形状影响，再乘 0.2 对齐 AdamW 的典型更新 RMS：</p>
+      $$W_t = W_{t-1} - \eta_t\big(0.2\cdot O_t\cdot\sqrt{\max(A,B)} + \lambda W_{t-1}\big).$$
+      <p>这样做的另一个好处是 Muon 可以<strong>直接复用为 AdamW 调好的学习率和权重衰减</strong>——这对实践很重要，因为非矩阵参数（embedding、LM head、RMSNorm 的 gamma）仍然用 AdamW，两套优化器共享一组超参。Moonlight 的附录做了扫描：把 Muon 更新 RMS 设成 0.05/0.1/0.2/0.4/0.8，2k 步时 0.2 与 0.4 最好且相近（训练 loss 3.198 / 3.199），AdamW 基线是 3.512。</p>
+      <p>Moonlight 还比较了三种控制更新 RMS 的方法：统一乘 \(0.2\sqrt{H}\)（基线）、把更新直接归一到 RMS=0.2（Update Norm）、按形状乘 \(0.2\sqrt{\max(A,B)}\)（Adjusted LR）。后两者都比基线好且彼此接近，Adjusted LR 计算更便宜，于是被采用。K2 算法 1 第 5 行写的正是 \(O_t = \text{Newton-Schulz}(M_t)\cdot\sqrt{\max(n,m)}\cdot 0.2\)。</p>
+
+      <h3>3.3 分布式 Muon 与 SFT 阶段</h3>
+      <p>AdamW 的更新逐元素计算，所以 ZeRO-1 可以把优化器状态任意切片。Muon 需要<strong>完整的矩阵</strong>才能做 Newton–Schulz。Moonlight 的 Distributed Muon 在 ZeRO-1 基础上多两步：在数据并行组内把本地分片的（带动量的）梯度 gather 成完整矩阵，算完整更新，只保留自己那一片去更新参数。内存上 Muon 只有一个动量缓冲，是 AdamW 的一半；通信量是 Distributed AdamW 的 \((1, 1.25]\) 倍（多出来的 gather 用 bf16）。</p>
+      <p>Moonlight 还做了预训练与 SFT 优化器的交叉实验：Muon 预训练 + Muon SFT 最好；如果预训练用 AdamW，SFT 换成 Muon 没有明显优势。K2 据此在 SFT 和 RL 阶段也用 Muon，并建议用户微调 K2 时用 Muon。</p>
+
+      <h2 id="explode">4. 注意力 logit 爆炸</h2>
+      <h3>4.1 现象</h3>
+      <p>对一个注意力头 \(h\)，\(Q^h = XW_q^h,\ K^h = XW_k^h\)，softmax 的输入是 \(\frac{1}{\sqrt d}Q^hK^{h\top}\)。报告定义每个头在一个 batch 里的<strong>最大 logit</strong>：</p>
+      $$S^h_{\max} = \frac{1}{\sqrt d}\max_{X\in B}\ \max_{i,j}\ Q^h_i K^{h\top}_j .$$
+      <p>K2 团队在一个中等规模（激活 9B、总参 53B 的 MoE）用原始 Muon 训练时，看到最大 logit 很快超过 1000。logit 到这个量级，softmax 几乎变成 one-hot，梯度要么消失要么剧烈，通常会伴随 loss spike，偶尔发散。他们在实验里发现这个问题在 Muon 下比 AdamW 下更频繁。Moonlight 当时其实已经观察到了苗头：训练早期部分层的最大 logit 超过 100，只是 logit 超过 100 的比例只有约 \(10^{-4}\)，且后来自己降下去了，所以没出事。到 K2 的规模就不再安全。</p>
+
+      <h3>4.2 为什么由权重的谱范数决定</h3>
+      <p>报告附录 E 给了一个简单的上界：</p>
+      $$|q_i\cdot k_j| \le \|q_i\|\,\|k_j\| \le \|x_i\|\,\|x_j\|\,\|W_q\|_2\,\|W_k\|_2 .$$
+      <p>注意力层的输入经过 RMSNorm，\(\|x\|\) 是有界的，所以 logit 能无限增长只能是 \(W_q\) 或 \(W_k\) 的谱范数在增长。更准确地说，logit 是双线性型 \(x_i^\top W_q W_k^\top x_j\)，乘积 \(W_qW_k^\top\) 把两个谱范数乘在一起，任何一个奇异值的增长都被“平方地”放大。</p>
+
+      <h3>4.3 为什么 Muon 更容易出事（报告的假设）</h3>
+      <p>报告附录 E 给的是假设而非证明：Muon 的更新所有奇异值相等、有效秩满；Adam 的更新谱偏斜、有效秩低。把权重写成 \(W_{t-1} = \sum_i\sigma_i u_iv_i^\top\)，更新写成 \(\Delta W_t = \sum_j\bar\sigma\,\bar u_j\bar v_j^\top\)。权重和更新的有效秩都更高时，某个更新方向 \(\bar u_j\bar v_j^\top\) 与权重已有的奇异方向 \(u_iv_i^\top\) 对齐的概率更大，一旦对齐，对应奇异值就被逐步<strong>加性地</strong>推高。再经过上面的“平方放大”，就变成 logit 爆炸。Moonlight 的 SVD 熵结果（Muon 训练的权重有效秩更高）被引用为支持证据。</p>
+
+      <h3>4.4 已有办法为什么不够</h3>
+      <ul>
+        <li><strong>Logit soft-cap</strong>（Gemma 2）：把 logit 换成 \(c\tanh(s/c)\)。它只截断 softmax 的输入，但 \(q\cdot k\) 本身仍然可以继续增长，只是被“藏”在 tanh 后面；在饱和区梯度也趋于零。根本问题（权重谱范数增长）没解决。</li>
+        <li><strong>QK-Norm</strong>：对每个头的 \(q\)、\(k\) 做归一化再点乘，logit 天然有界。但它<strong>不适用于 MLA</strong>。原因要看 MLA 的推理方式：MLA 只缓存每个 token 的压缩向量 \(c^{KV}_t\in\mathbb R^{512}\)，推理时把 key 的上投影 \(W^{UK}\) 吸收进 query 一侧，直接用 \(q^\top W^{UK} c_t\) 计算分数，每个头的完整 key \(k = W^{UK}c\) 从来不被显式算出来（报告原话：key 矩阵在推理时没有被完整实例化）。QK-Norm 要对 \(k\) 做非线性的归一化，就破坏了这个吸收，等于放弃 MLA 省 KV cache 的意义。</li>
+      </ul>
+
+      <h2 id="qkclip">5. QK-Clip 的推导与 MuonClip</h2>
+      <h3>5.1 核心想法：事后缩放权重</h3>
+      <p>QK-Clip 不改前向、不改反向，而是在优化器更新<strong>之后</strong>，看这一步前向里观察到的 \(S^h_{\max}\)，如果超过阈值 \(\tau\)，就把这个头的 \(W_q\)、\(W_k\) 按比例缩小。最大 logit 只是一个“该压多狠”的信号。</p>
+      <p>推导只用到 logit 关于 \(W_q\)、\(W_k\) 是双线性的。若</p>
+      $$W_q \leftarrow \gamma^{\alpha}W_q,\qquad W_k\leftarrow \gamma^{1-\alpha}W_k,$$
+      <p>那么对同样的输入，</p>
+      $$q_i\cdot k_j \ \to\ \gamma^{\alpha}\gamma^{1-\alpha}\,q_i\cdot k_j = \gamma\, q_i\cdot k_j .$$
+      <p>取 \(\gamma = \min(1, \tau/S_{\max})\)，缩放后（在同一批数据上）最大 logit 恰好变成 \(\min(S_{\max},\tau)\)。\(\alpha\) 控制 query 与 key 各承担多少，通常取 0.5，两边各乘 \(\sqrt\gamma\)。下一步的数据不同、权重又更新了一步，所以这不是严格的硬上界，而是持续把权重拉回“在当前数据上 logit 不超过 \(\tau\)”的区域。</p>
+
+      <h3>5.2 为什么要按头裁剪</h3>
+      <p>朴素做法是全局用一个 \(\gamma=\min(1,\tau/\max_h S^h_{\max})\) 缩放所有头。但实际上只有少数头会爆炸，全局缩放会把正常的头也压下去，相当于凭空给它们加了强正则。所以 K2 对每个头单独算 \(\gamma_h = \min(1,\tau/S^h_{\max})\)，只动超标的头。演示里可以切换两种方式，看正常头被“误伤”多少。</p>
+
+      <h3>5.3 MLA 里怎么裁</h3>
+      <p>MLA 的每个头，query 和 key 都由两部分拼成：不带位置编码的“内容”部分（C）和带 RoPE 的部分（R）：</p>
+      $$q^h = [\,q^{C,h};\ q^{R,h}\,],\qquad k^h = [\,k^{C,h};\ k^{R}\,],\qquad q^h\cdot k^h = q^{C,h}\cdot k^{C,h} + q^{R,h}\cdot k^{R}.$$
+      <p>要注意 \(k^R\) 是<strong>所有头共享</strong>的（它由输入直接投影得到，再加 RoPE，只有一份 64 维）。如果缩放它，会同时影响所有头，违背“只动超标的头”。所以 K2 的方案是：</p>
+      <ul>
+        <li>\(q^{C}\) 和 \(k^{C}\)（头专属）：各乘 \(\sqrt{\gamma_h}\) → 第一项乘 \(\gamma_h\)；</li>
+        <li>\(q^{R}\)（头专属）：乘 \(\gamma_h\) → 第二项乘 \(\gamma_h\)（因为 \(k^R\) 不动）；</li>
+        <li>\(k^{R}\)（共享）：不动。</li>
+      </ul>
+      <p>两项都乘了 \(\gamma_h\)，所以整个 logit 恰好缩放 \(\gamma_h\)，与 5.1 的推导一致。落实到参数上，就是缩放 query 上投影里该头对应的 \(W_{qc}^h\)、\(W_{qr}^h\)，以及 key 上投影（\(W^{UK}\)）里该头对应的 \(W_{kc}^h\)。这些都是头专属的权重切片，缩放互不影响。</p>
+
+      <h3>5.4 MuonClip 算法</h3>
+      <p>把 Muon、权重衰减、RMS 对齐和 QK-Clip 合在一起，就是 K2 报告的算法 1：</p>
+      <pre><code>for each step t:
+    # 1. Muon（含 Moonlight 的两处修改）
+    for each matrix W (n×m):
+        M_t = μ·M_{t-1} + G_t
+        O_t = NewtonSchulz(M_t) · sqrt(max(n, m)) · 0.2      # 对齐 AdamW 的更新 RMS
+        W_t = W_{t-1} − η·(O_t + λ·W_{t-1})                  # 解耦权重衰减
+    # 2. QK-Clip（逐头）
+    for each attention head h in every attention layer:
+        S = S_max^h            # 前向时顺手记录，不需要额外计算
+        if S &gt; τ:
+            γ = τ / S
+            W_qc^h ← W_qc^h · sqrt(γ)
+            W_kc^h ← W_kc^h · sqrt(γ)
+            W_qr^h ← W_qr^h · γ</code></pre>
+      <p>实现上唯一的额外开销是前向时为每个头记录一个 max（在 FlashAttention 类 kernel 里可以顺带算出），以及偶尔对少量权重切片做一次标量乘法。</p>
+
+      <figure>
+        <svg class="diagram" viewBox="0 0 640 210" role="img" aria-label="MLA 中 QK-Clip 的作用位置">
+          <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+          <rect class="box" x="10" y="80" width="80" height="44" rx="8"/><text x="50" y="107" text-anchor="middle">x</text>
+          <rect class="box" x="130" y="20" width="110" height="40" rx="8"/><text x="185" y="45" text-anchor="middle">c^Q（1536）</text>
+          <rect class="box" x="130" y="140" width="110" height="40" rx="8"/><text x="185" y="165" text-anchor="middle">c^KV（512）</text>
+          <rect class="boxa" x="290" y="6" width="150" height="34" rx="8"/><text x="365" y="28" text-anchor="middle">q^C,h　×√γ_h</text>
+          <rect class="boxa" x="290" y="48" width="150" height="34" rx="8"/><text x="365" y="70" text-anchor="middle">q^R,h　×γ_h</text>
+          <rect class="boxa" x="290" y="126" width="150" height="34" rx="8"/><text x="365" y="148" text-anchor="middle">k^C,h　×√γ_h</text>
+          <rect class="box" x="290" y="168" width="150" height="34" rx="8"/><text x="365" y="190" text-anchor="middle">k^R（共享）不动</text>
+          <rect class="boxb" x="490" y="80" width="140" height="44" rx="8"/><text x="560" y="100" text-anchor="middle">logit · γ_h</text><text class="t-soft" x="560" y="116" text-anchor="middle">= qC·kC + qR·kR</text>
+          <path class="arrow" d="M90,95 L128,45"/><path class="arrow" d="M90,110 L128,160"/><path class="arrow" d="M90,118 C200,210 230,190 288,186"/>
+          <path class="arrow" d="M240,36 L288,24"/><path class="arrow" d="M240,44 L288,64"/><path class="arrow" d="M240,160 L288,144"/>
+          <path class="arrow" d="M440,24 L488,92"/><path class="arrow" d="M440,66 L488,98"/><path class="arrow" d="M440,142 L488,108"/><path class="arrow" d="M440,184 L488,116"/>
+        </svg>
+        <figcaption>QK-Clip 在 MLA 中的作用位置：头专属的三个分量被缩放，共享的 RoPE key 不动，整个 logit 恰好乘 γ<sub>h</sub>。维度取自 K2 的 config。</figcaption>
+      </figure>
+
+      <h3>5.5 实验证据</h3>
+      <ul>
+        <li><strong>中等规模、无裁剪</strong>：9B 激活 / 53B 总参的 MoE 用原始 Muon，最大 logit 很快超过 1000。</li>
+        <li><strong>小规模消融</strong>：0.5B 激活 / 3B 总参的 MoE，一个用原始 Muon，一个用 MuonClip 且阈值故意设得很低（\(\tau=30\)）。loss 曲线几乎重合，下游评测也没有统计显著的下降。</li>
+        <li><strong>K2 本身</strong>（\(\tau=100\)）：最大 logit 一开始很快涨到 100 被卡住，大约训练 30% 的步数之后才自行回落到正常区间，全程没有调整 \(\tau\)。前 70000 步里有 12.7% 的注意力头至少触发过一次 QK-Clip；70000 步以后，所有头的 \(S_{\max}\) 都已降到 100 以下，QK-Clip 不再生效。也就是说它只在早期“临时介入”，训练稳定后自动退出。</li>
+        <li><strong>结果</strong>：15.5T token 的逐步训练 loss 曲线（报告图 3，未平滑、未降采样）没有任何 spike。</li>
+      </ul>
+      <p>下面的模拟器是一个<strong>玩具动力学</strong>（不是 K2 的真实数据），用来体会这些现象。每个头的 \(W_q\)、\(W_k\) 谱范数按“对齐带来的乘性增长 − 权重衰减”演化，增长率随训练衰减（模拟“权重和更新方向对齐”在早期最强）；少数头增长率特别大。logit \(S^h = \kappa_h\sigma_q\sigma_k\)。打开 QK-Clip 时，每步更新后按 5.1 的规则缩放。</p>
+
+      <div class="demo" id="qk-demo">
+        <div class="demo-label">交互演示 · QK-Clip 模拟器（玩具模型）</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>阈值 τ</span><input type="range" id="qk-tau" min="10" max="400" step="5" value="100"><output id="qk-tau-o"></output></label>
+          <label class="ctrl"><span>爆炸头个数（共 32 头）</span><input type="range" id="qk-nexp" min="0" max="12" step="1" value="4"><output id="qk-nexp-o"></output></label>
+          <label class="ctrl"><span>权重衰减强度</span><input type="range" id="qk-wd" min="0.2" max="3" step="0.1" value="1"><output id="qk-wd-o"></output></label>
+        </div>
+        <div class="seg" role="group" aria-label="裁剪方式">
+          <button type="button" data-mode="head" aria-pressed="true">逐头 QK-Clip</button>
+          <button type="button" data-mode="global" aria-pressed="false">全局统一缩放</button>
+        </div>
+        <svg class="chart" id="qk-chart" viewBox="0 0 600 260" role="img" aria-label="最大 logit 随训练步数变化"></svg>
+        <div class="legend"><span><i style="background:var(--text-faint)"></i>无裁剪：所有头中的最大 logit</span><span><i style="background:var(--accent)"></i>QK-Clip：最大 logit</span><span><i style="background:var(--accent-2)"></i>阈值 τ</span></div>
+        <div class="readout">
+          <div><span class="k">无裁剪的峰值 S<sub>max</sub></span><span class="v" id="qk-r1">–</span></div>
+          <div><span class="k">触发过裁剪的头占比</span><span class="v" id="qk-r2">–</span></div>
+          <div><span class="k">最后一次触发在</span><span class="v" id="qk-r3">–</span></div>
+          <div><span class="k">正常头 logit 被额外压缩</span><span class="v" id="qk-r4">–</span></div>
+        </div>
+        <p class="note">玩具模型：logit 的对数增长率 = 2·(r<sub>h</sub>·e<sup>−t/T</sup> − λ)，r<sub>h</sub> 对少数“爆炸头”取大值。数值只用于示意。“正常头被额外压缩”= 未爆炸头在裁剪方案下的平均 logit 相对无裁剪时下降的比例；逐头方案下它应为 0，全局方案下明显大于 0。</p>
+      </div>
+
+      <h2 id="data">6. Token 效率与数据改写</h2>
+      <h3>6.1 token 效率是新的瓶颈</h3>
+      <p>报告的立场是：高质量的人类数据越来越有限，<strong>token 效率</strong>（每个 token 带来的性能提升）成了缩放中的关键系数。提升它有两条路：优化器（Muon 每个 token 学得更多）和数据（让每个 token 携带更多有效信号，报告叫 token utility）。最朴素的“多学几遍”（多 epoch 重复）会过拟合、泛化变差。</p>
+      <h3>6.2 知识类数据的改写</h3>
+      <p>知识密集的文本有个两难：只过一遍学不全，重复多遍收益递减还容易过拟合。K2 的改写框架有三个部件：</p>
+      <ul>
+        <li><strong>多风格、多视角的提示</strong>：受 WRAP（Rephrasing the Web）启发，用一组精心设计的提示让 LLM 以不同风格、不同视角忠实地改写原文，增加语言多样性但不改事实。</li>
+        <li><strong>分块自回归改写</strong>：长文档直接整篇改写会丢信息（LLM 有隐性的输出长度上限）。做法是把文档切成段，每段在保留前文上下文的条件下依次改写，再拼回完整的一篇。</li>
+        <li><strong>忠实度校验</strong>：比较每段改写与原文的语义一致性，作为训练前的第一道质量控制。</li>
+      </ul>
+      <figure>
+        <svg class="diagram" viewBox="0 0 640 150" role="img" aria-label="分块自回归改写流程">
+          <defs><marker id="ah2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+          <rect class="box" x="10" y="10" width="110" height="34" rx="6"/><text x="65" y="32" text-anchor="middle">块 1</text>
+          <rect class="box" x="10" y="56" width="110" height="34" rx="6"/><text x="65" y="78" text-anchor="middle">块 2</text>
+          <rect class="box" x="10" y="102" width="110" height="34" rx="6"/><text x="65" y="124" text-anchor="middle">块 3</text>
+          <rect class="boxa" x="200" y="10" width="150" height="34" rx="6"/><text x="275" y="32" text-anchor="middle">改写(块1)</text>
+          <rect class="boxa" x="200" y="56" width="150" height="34" rx="6"/><text x="275" y="78" text-anchor="middle">改写(块2 | 前文)</text>
+          <rect class="boxa" x="200" y="102" width="150" height="34" rx="6"/><text x="275" y="124" text-anchor="middle">改写(块3 | 前文)</text>
+          <rect class="boxb" x="430" y="40" width="200" height="66" rx="8"/><text x="530" y="68" text-anchor="middle">拼接 → 完整改写文</text><text class="t-soft" x="530" y="88" text-anchor="middle">+ 忠实度校验</text>
+          <path class="arrow" style="marker-end:url(#ah2)" d="M120,27 L198,27"/><path class="arrow" style="marker-end:url(#ah2)" d="M120,73 L198,73"/><path class="arrow" style="marker-end:url(#ah2)" d="M120,119 L198,119"/>
+          <path class="arrow" style="marker-end:url(#ah2)" d="M275,44 L275,54"/><path class="arrow" style="marker-end:url(#ah2)" d="M275,90 L275,100"/>
+          <path class="arrow" style="marker-end:url(#ah2)" d="M350,27 L428,60"/><path class="arrow" style="marker-end:url(#ah2)" d="M350,73 L428,73"/><path class="arrow" style="marker-end:url(#ah2)" d="M350,119 L428,86"/>
+        </svg>
+        <figcaption>分块自回归改写：每块在前文的条件下改写，最后拼回（按报告图 4 的描述重画）。</figcaption>
+      </figure>
+      <p>报告用 SimpleQA 准确率比较了三种方案（一个 K2 早期检查点）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>改写次数</th><th class="num">epoch 数</th><th class="num">SimpleQA 准确率</th></tr></thead>
+          <tbody>
+            <tr><td>0（原始 wiki 文本）</td><td class="num">10</td><td class="num">23.76</td></tr>
+            <tr><td>1</td><td class="num">10</td><td class="num">27.39</td></tr>
+            <tr><td>10</td><td class="num">1</td><td class="num">28.94</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>同样是“看十遍”，十个不同的改写版本各看一遍最好。实际大规模使用时，每个语料最多改写两次。</p>
+      <h3>6.3 数学数据</h3>
+      <p>数学文档按 SwallowMath 的方法改写成“学习笔记”风格；另外把其他语言的高质量数学材料翻译成英文来增加多样性。报告也坦白：合成数据作为持续缩放的手段仍在研究中，难点是推广到更多领域时保证事实正确、减少幻觉和毒性、以及规模化。</p>
+      <h3>6.4 总体语料</h3>
+      <p>15.5T token，四个领域：网页、代码、数学、知识。大部分处理流程沿用 Kimi K1.5，每个领域都做了正确性、质量验证和针对性的数据实验。</p>
+
+      <h2 id="arch">7. 架构：MLA、384 专家与稀疏度缩放律</h2>
+      <h3>7.1 MLA 回顾（按 K2 的尺寸）</h3>
+      <p>MLA（Multi-head Latent Attention，DeepSeek-V2 引入）把每个 token 的 K/V 压缩到一个低维隐向量。按 K2 的 config：</p>
+      <ul>
+        <li>Query：\(x\in\mathbb R^{7168}\to c^Q\in\mathbb R^{1536}\)（下投影），再上投影成 64 个头，每头 \(q^C\in\mathbb R^{128}\)、\(q^R\in\mathbb R^{64}\)（后者加 RoPE）。</li>
+        <li>Key/Value：\(x\to c^{KV}\in\mathbb R^{512}\)，另外直接投影出一个共享的 \(k^R\in\mathbb R^{64}\)（加 RoPE）；\(c^{KV}\) 上投影成每头 \(k^C\in\mathbb R^{128}\)、\(v\in\mathbb R^{128}\)。</li>
+        <li>推理时 KV cache 每 token 每层只存 \(c^{KV}\)（512）和 \(k^R\)（64），共 576 个数。61 层、BF16 下每 token 约 \(576\times 61\times 2\approx 70\) KB。作为对比，同样 64 头、每头 key 192 维 + value 128 维的标准 MHA 要存 \(64\times 320=20480\) 个数，是 MLA 的 35 倍多。</li>
+      </ul>
+      <p>按这些尺寸算，每层注意力参数约 1.01 亿，61 层合计约 6.2B。</p>
+
+      <h3>7.2 MoE 配置</h3>
+      <p>除第一层是 dense FFN（中间维 18432）外，其余 60 层都是 MoE：384 个路由专家 + 1 个共享专家，每 token 选 8 个路由专家，专家 FFN 中间维 2048（SwiGLU，每个专家 \(3\times 7168\times 2048\approx 44\)M 参数）。和 DeepSeek-V3 不同，K2 没有专家分组（V3 先选组再在组内选专家，用于限制跨节点通信）。</p>
+
+      <h3>7.3 稀疏度缩放律</h3>
+      <p>报告把<strong>稀疏度</strong>定义为“总专家数 / 激活专家数”。他们在 Muon 下做了小规模的受控实验：固定激活专家数 8、共享专家 1（即固定激活参数和 FLOPs），只改变总专家数。结论是稀疏度越高，训练和验证 loss 都越低。在算力最优的缩放律下，要达到验证 loss 1.5，稀疏度 48 相比稀疏度 8、16、32 分别节省 1.69×、1.39×、1.15× 的 FLOPs。</p>
+      <p>收益在递减（从 32 到 48 只省 15%），而更高的稀疏度意味着更多专家参数要存、要通信，基础设施更复杂。K2 取了 48：384/8。</p>
+
+      <h3>7.4 注意力头数：64 而不是 128</h3>
+      <p>DeepSeek-V3 把头数设成层数的两倍左右（128），目的是更好地利用显存带宽。但上下文变长后，注意力的计算随头数线性增长：报告给的例子是在 128K 序列长度下、总专家数固定 384 时，头数从 64 加到 128 会让推理 FLOPs 增加 83%。而受控实验（头数 = 层数 vs 头数 = 2× 层数，同 token 数）显示加倍头数只让验证 loss 降低 0.5%–1.2%。在 Agent 场景长上下文很关键，这点收益不值得，于是 K2 用 64 头。</p>
+      <p>下面的计算器按 config 的公式估算参数量。注意：它算出的总参是 1.026T，比报告的 1.04T 少约 17B。差额恰好约等于一层 MTP（多 token 预测）模块：Kimi K3 报告的表 1 记录了 K2 有 1 层 MTP，而公开的 <code>config.json</code> 里 <code>num_nextn_predict_layers=0</code>（发布权重不含 MTP）。加上这层后约 1.043T，与 K2 报告表 4 写的“1043B”吻合。</p>
+
+      <div class="demo" id="moe-demo">
+        <div class="demo-label">交互演示 · MoE 稀疏度计算器</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>路由专家数 E</span><input type="range" id="moe-E" min="8" max="768" step="8" value="384"><output id="moe-E-o"></output></label>
+          <label class="ctrl"><span>每 token 激活 k</span><input type="range" id="moe-k" min="1" max="16" step="1" value="8"><output id="moe-k-o"></output></label>
+          <label class="ctrl"><span>注意力头数 H</span><input type="range" id="moe-H" min="16" max="128" step="16" value="64"><output id="moe-H-o"></output></label>
+          <label class="ctrl"><span>上下文长度</span><input type="range" id="moe-L" min="0" max="7" step="1" value="5"><output id="moe-L-o"></output></label>
+        </div>
+        <div class="seg" role="group" aria-label="预设">
+          <button type="button" data-preset="k2" aria-pressed="true">K2（61 层，d=7168，专家维 2048，1 层 dense）</button>
+          <button type="button" data-preset="v3" aria-pressed="false">DeepSeek-V3 式（3 层 dense，256 专家，128 头）</button>
+        </div>
+        <div class="readout">
+          <div><span class="k">总参数（不含 MTP）</span><span class="v" id="moe-tot">–</span></div>
+          <div><span class="k">激活参数</span><span class="v" id="moe-act">–</span></div>
+          <div><span class="k">稀疏度 E/k</span><span class="v" id="moe-sp">–</span></div>
+          <div><span class="k">BF16 权重</span><span class="v" id="moe-mem">–</span></div>
+          <div><span class="k">每 token 参数 FLOPs ≈ 2N<sub>act</sub></span><span class="v" id="moe-pf">–</span></div>
+          <div><span class="k">每 token 注意力 FLOPs（该长度）</span><span class="v" id="moe-af">–</span></div>
+        </div>
+        <svg class="chart" id="moe-chart" viewBox="0 0 600 196" role="img" aria-label="报告的稀疏度 FLOPs 节省"></svg>
+        <p class="note">参数公式：MLA 每层 = d·1536 + 1536·H·192 + d·576 + 512·H·256 + H·128·d；每个专家 3·d·2048；路由器 E·d；embedding 与 LM head 各 163840·d。注意力 FLOPs 按“非吸收”实现粗算：每层 2·H·L·(192+128)，L 是当前位置之前的上下文长度。柱状图是报告给出的数字（达到验证 loss 1.5 时，稀疏度 48 相对其它稀疏度节省的 FLOPs 倍数），不随滑块变化。</p>
+      </div>
+      <p>用计算器可以看出头数的代价：在 K2 预设下把上下文拉到 128K，注意力 FLOPs 已经与 \(2N_{\text{act}}\) 同量级，此时把 H 从 64 调到 128，总推理 FLOPs 增加接近一倍。我这个粗算的口径（每 token 以完整 128K 前文计、不做 MLA 吸收）与报告不一定相同，报告没有给出 83% 的计算细节，所以只当作量级上的核对。</p>
+
+      <h2 id="infra">8. 训练基础设施与训练配方</h2>
+      <h3>8.1 集群</h3>
+      <p>NVIDIA H800 集群，每节点 8 卡、2 TB 内存，节点内 NVLink/NVSwitch，节点间 8×400 Gbps RoCE。</p>
+      <h3>8.2 并行策略：能在任意 32 的倍数个节点上训练</h3>
+      <p>训练资源是动态变化的，所以他们没有为某个固定规模优化，而是设计了一个能在“任意 32 的倍数个节点”上跑的方案：</p>
+      <ul>
+        <li><strong>16 路流水线并行（PP）</strong>，带虚拟 stage（interleaved）；</li>
+        <li><strong>16 路专家并行（EP）</strong>；</li>
+        <li><strong>ZeRO-1 数据并行</strong>，切分优化器状态。</li>
+      </ul>
+      <p>PP×EP = 256 卡 = 32 节点，构成一个模型并行组。BF16 参数加 FP32 梯度累积缓冲约 6 TB（核对：\(1.04\text{T}\times(2+4)\ \text{bytes}\approx 6.2\) TB），分布在 256 卡上。优化器状态的放法取决于规模：节点多时由 ZeRO-1 摊得很薄；只有 32 节点时把一部分卸载到 CPU。这样每卡用于各种状态的显存约 30 GB，其余给激活。同一套并行配置可以用于小规模和大规模实验，报告强调这对“研究效率”很重要。</p>
+      <h3>8.3 EP 通信与 interleaved 1F1B 的重叠</h3>
+      <p>MoE 的 all-to-all（把 token 发给专家、再收回）很慢，需要和计算重叠。K2 的做法是在标准 interleaved 1F1B 调度上<strong>增加 warm-up 的 micro-batch 数</strong>，让一个 micro-batch 的 EP 通信与另一个的计算重叠。他们没有用 DeepSeek-V3 的 DualPipe：DualPipe 要存两份参数和梯度，显存翻倍，只能靠更大的 PP（更多气泡）或 EP（开销更高）来补，对万亿模型代价太大。</p>
+      <p>interleaved 1F1B 的问题是 stage 更多，PP 通信更多。缓解办法是把每个 micro-batch 反向里的<strong>权重梯度计算</strong>拆出来（类似 zero-bubble 的 B/W 拆分），和对应的 PP 通信并行执行。这样除 warm-up 阶段外，所有 PP 通信都能被重叠。</p>
+      <h3>8.4 更小的 EP</h3>
+      <p>K2 只有 64 个注意力头，注意力计算时间比 V3 短，留给 EP 通信重叠的时间也短。所以要尽量缩短 EP 操作：选最小可行的 EP=16。小 EP 组的另一个好处是专家负载均衡的约束更宽松，不需要额外调就能接近最优速度。</p>
+      <h3>8.5 激活显存的三板斧</h3>
+      <p>扣掉参数、梯度缓冲和优化器状态后，剩下的显存放不下完整的 MoE 激活，尤其是 1F1B warm-up 阶段积累激活最多的前几个 stage。三种手段：</p>
+      <ul>
+        <li><strong>选择性重计算</strong>：对计算便宜但占显存大的部分重算——LayerNorm、SwiGLU、MLA 的上投影；另外 MoE 的 down-projection 也重算。后者是可选的，但能在训练早期专家不均衡时防止显存溢出崩溃。</li>
+        <li><strong>对不敏感的激活用 FP8 存储</strong>：MoE up-projection 和 SwiGLU 的输入压成 FP8-E4M3，1×128 的 tile、每 tile 一个 FP32 scale。小规模实验没有可测的 loss 上升。注意他们<strong>没有</strong>用 FP8 做计算——初步研究中观察到性能下降的风险。</li>
+        <li><strong>激活卸载到 CPU</strong>：剩余所有激活都卸载到 CPU 内存，由 copy engine 流式卸载和加载，与计算和通信 kernel 重叠。1F1B 阶段卸载上一个 micro-batch 的前向激活，同时预取下一个的反向激活。PCIe 流量可能干扰 EP 通信，但测试显示 EP 通信仍完全被重叠。</li>
+      </ul>
+      <h3>8.6 训练配方</h3>
+      <ul>
+        <li>上下文 4096，MuonClip，WSD 学习率调度，共 15.5T token；</li>
+        <li>前 10T：500 步 warm-up 后恒定学习率 2e-4；后 5.5T：从 2e-4 余弦衰减到 2e-5；</li>
+        <li>权重衰减 0.1，全局 batch 6700 万 token，全程不变；</li>
+        <li>预训练末尾：退火 + 长上下文激活，学习率 2e-5 → 7e-6，先以 4K 长度训 400B token，再以 32K 长度训 60B token；最后用 YaRN 把上下文扩到 128K。</li>
+      </ul>
+
+      <h2 id="sft">9. SFT 与大规模 Agent 数据合成</h2>
+      <h3>9.1 SFT 的总原则</h3>
+      <p>SFT 用 Muon。指令数据的两条原则是最大化提示多样性和保证回答质量。不同任务领域有各自的数据流水线，混合使用人工标注、提示工程和验证；候选回答由 K1.5 和内部的领域专家模型生成，再由 LLM 或人工评审打分过滤。</p>
+      <h3>9.2 工具调用数据的合成流水线</h3>
+      <p>真实环境能提供真实的交互信号，但成本、复杂度、隐私和可达性都限制了规模。K2 借鉴 ACEBench 的合成框架，建了一条模拟真实工具使用场景的流水线，生成数万条多样、高质量的训练样本。分三个阶段：</p>
+      <figure>
+        <svg class="diagram" viewBox="0 0 640 200" role="img" aria-label="Agent 数据合成流水线">
+          <defs><marker id="ah3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
+          <rect class="box" x="8" y="20" width="140" height="70" rx="8"/><text x="78" y="45" text-anchor="middle">工具库</text><text class="t-soft" x="78" y="64" text-anchor="middle">3000+ 真实 MCP</text><text class="t-soft" x="78" y="80" text-anchor="middle">20000+ 合成工具</text>
+          <rect class="box" x="170" y="20" width="140" height="70" rx="8"/><text x="240" y="45" text-anchor="middle">Agent</text><text class="t-soft" x="240" y="64" text-anchor="middle">系统提示 + 工具组合</text><text class="t-soft" x="240" y="80" text-anchor="middle">数千个</text>
+          <rect class="box" x="332" y="20" width="140" height="70" rx="8"/><text x="402" y="45" text-anchor="middle">任务 + rubric</text><text class="t-soft" x="402" y="64" text-anchor="middle">成功标准、预期工具</text><text class="t-soft" x="402" y="80" text-anchor="middle">使用模式、检查点</text>
+          <rect class="boxa" x="494" y="20" width="138" height="70" rx="8"/><text x="563" y="45" text-anchor="middle">多轮轨迹</text><text class="t-soft" x="563" y="64" text-anchor="middle">用户模拟器</text><text class="t-soft" x="563" y="80" text-anchor="middle">工具模拟器（有状态）</text>
+          <rect class="boxb" x="332" y="122" width="300" height="60" rx="8"/><text x="482" y="147" text-anchor="middle">LLM 评审按 rubric 过滤 → 只留成功轨迹</text><text class="t-soft" x="482" y="167" text-anchor="middle">编码/SWE 场景改用真实沙箱 + 单测</text>
+          <rect class="box" x="8" y="122" width="290" height="60" rx="8"/><text x="153" y="147" text-anchor="middle">SFT 数据（相当于大规模拒绝采样）</text>
+          <path class="arrow" style="marker-end:url(#ah3)" d="M148,55 L168,55"/><path class="arrow" style="marker-end:url(#ah3)" d="M310,55 L330,55"/><path class="arrow" style="marker-end:url(#ah3)" d="M472,55 L492,55"/>
+          <path class="arrow" style="marker-end:url(#ah3)" d="M563,90 L563,120"/><path class="arrow" style="marker-end:url(#ah3)" d="M332,152 L300,152"/>
+        </svg>
+        <figcaption>工具调用数据合成流水线（按报告第 3.1.1 节重画）。</figcaption>
+      </figure>
+      <ul>
+        <li><strong>领域演化与工具生成</strong>：两路来源。一是直接从 GitHub 抓取 3000 多个真实 MCP（Model Context Protocol）工具的规格；二是分层“演化”出合成工具——从几个大类（如金融交易、软件应用、机器人控制）出发，每类再演化出多个具体应用领域，为每个领域合成带清晰接口、描述和语义的专用工具，共 2 万多个。报告用 t-SNE 显示两者覆盖了工具空间的互补区域。</li>
+        <li><strong>Agent 多样化</strong>：合成各种系统提示，配上工具库里不同的工具组合，得到数千个能力、专长和行为模式不同的 agent。</li>
+        <li><strong>基于 rubric 的任务生成</strong>：为每个 agent 生成从简单到复杂的任务，每个任务配一个明确的 rubric：成功标准、预期的工具使用模式、评估检查点。</li>
+        <li><strong>多轮轨迹生成</strong>：LLM 生成的用户画像（有不同沟通风格与偏好）和 agent 多轮对话；工具执行由一个<strong>工具模拟器</strong>完成，报告说它在功能上等价于一个世界模型——每次调用后维护和更新状态，支持有持久影响的多步交互，并引入受控随机性，产生成功、部分失败和边界情况。</li>
+        <li><strong>质量评估与过滤</strong>：LLM 评审按 rubric 判断每条轨迹，只保留满足成功标准的。</li>
+        <li><strong>混合真实执行环境</strong>：模拟的保真度有上限，所以在真实性要紧的场景（尤其编码和软件工程）用真实沙箱，执行真代码、跑测试，以测试通过率等客观指标作为反馈。</li>
+      </ul>
+      <p>整体上，大规模生成 + 质量过滤本质上就是一种大规模拒绝采样（rejection sampling）。</p>
+      <h3>9.3 工具调用的 token 模板</h3>
+      <p>报告附录 B 给了工具调用格式，几个设计点值得记下：</p>
+      <ul>
+        <li><strong>工具声明用 TypeScript</strong>：比 OpenAI 兼容的 JSON Schema 短得多，又能表达类型和约束。为了兼容第三方框架，部分训练数据仍用 JSON 声明。</li>
+        <li><strong>调用 ID</strong>：格式 <code>functions.{工具名}:{计数}</code>，计数在整段对话里从 0 递增；一个回复里可以放多个调用（并行工具调用）。</li>
+        <li><strong>约束解码</strong>：受 lm-format-enforcer 启发，做了一个叫 enforcer 的模块。一旦生成了 <code>&lt;|tool_call_section_begin|&gt;</code>，后续工具相关 token 必须符合模板，参数 JSON 必须符合声明的 schema。</li>
+      </ul>
+
+      <h2 id="rl">10. 强化学习：可验证奖励、自我批评与三个技巧</h2>
+      <p>报告认为 RL 比 SFT 有更好的 token 效率和泛化。K2 在 K1.5 的基础上扩大了任务多样性和训练 FLOPs，搭了一个类 Gym 的可扩展框架。</p>
+      <h3>10.1 可验证奖励的“Gym”</h3>
+      <ul>
+        <li><strong>数学、STEM、逻辑</strong>：两条原则。<em>覆盖多样</em>：专家标注、内部 QA 抽取流水线和开源数据集，用标签系统有意补足覆盖不足的领域；逻辑任务包括结构化数据任务（多跳表格推理、跨表聚合）和谜题（24 点、数独、谜语、密码算术、摩尔斯码解码）。<em>难度适中</em>：太易、太难都没有学习信号，用 SFT 模型的 pass@k 估计难度，只留中等难度的题。</li>
+        <li><strong>复杂指令遵循</strong>：混合规则验证——能用代码判断的约束（长度、风格）由代码解释器确定性判断，需要细致理解的由 LLM 评审；再加一层 hack-check 专门检测“声称满足了指令其实没有”的欺骗行为。指令来源三路：数据团队写的复杂条件提示与 rubric、受 AutoIF 启发的 agentic 指令增强、一个专门生成能探出失败模式和边界情况的新指令的微调模型。</li>
+        <li><strong>忠实度</strong>：受 FACTS Grounding 启发，训练了一个句子级的忠实度评审模型，检测“在上下文中没有证据支撑的事实陈述”，作为奖励模型。</li>
+        <li><strong>代码与软件工程</strong>：竞赛题来自开源数据集和合成来源，为保证合成题的奖励正确，引入从预训练数据中检索出的人写单元测试；软件工程任务从 GitHub 收集大量 PR 和 issue，构造“用户提示/issue + 可执行单测”的开发环境，跑在 Kubernetes 上，支持超过 10000 个并发沙箱实例。</li>
+        <li><strong>安全</strong>：从人工整理的、覆盖常见风险类别（暴力、诈骗、歧视等）的种子提示出发，用自动提示进化流水线模拟复杂越狱（角色扮演、文学叙事、学术讨论）。三个组件：攻击模型迭代生成对抗提示，目标模型作答，评审模型按任务 rubric 给出“是否绕过”的二值标签。</li>
+      </ul>
+      <h3>10.2 超越验证：自我批评 rubric 奖励</h3>
+      <p>创意写作、开放问答这类主观任务没有可验证的答案。K2 的办法是让模型给自己的输出打分（Self-Critique Rubric Reward）：</p>
+      <ul>
+        <li><strong>自我批评的策略优化</strong>：K2 actor 对覆盖广泛场景的通用提示生成多个回答，K2 critic 按一组 rubric 做<strong>成对比较</strong>，给所有回答排序。rubric 包括：核心 rubric（代表 Kimi 认为的助手的基本价值，见下）、规定性 rubric（用于消除 reward hacking）、数据团队针对具体指令场景人工写的 rubric。某些 rubric 可以设为必选，但 K2 仍可以结合自己的先验去权衡。critic 能力在 SFT 阶段用开源和内部偏好数据初始化。</li>
+        <li><strong>闭环的 critic 精炼</strong>：RL 过程中，用可验证奖励任务上的 on-policy rollout 持续更新 critic，把 RLVR 里的客观信号蒸馏进评审模型。这样 critic 的主观判断有可验证数据做锚，并随策略的演化同步重新校准。</li>
+      </ul>
+      <p>附录 F 列了 rubric 原文。核心 rubric 三条：清晰与相关（简洁且完整回应意图，非必要不长列表，需要做选择时给出唯一明确答案）；对话流畅与投入；客观落地的互动（避免元评论和对用户的奉承）。规定性 rubric 两条：不准以夸赞开头（“好问题！”）；不准写解释“这个回答为什么好”的句子。报告也写了局限：这套 rubric 可能偏好显得自信、果断的回答，在本该表达不确定性或多视角的场景里，模型可能过度确定。</p>
+      <h3>10.3 RL 目标函数</h3>
+      <p>沿用 K1.5 的策略优化算法。对每个问题 \(x\)，从旧策略 \(\pi_{\text{old}}\) 采样 \(K\) 个回答，最小化</p>
+      $$L_{\text{RL}}(\theta) = \mathbb E_{x}\left[\frac1K\sum_{i=1}^K\Big(r(x,y_i)-\bar r(x) - \tau\log\frac{\pi_\theta(y_i|x)}{\pi_{\text{old}}(y_i|x)}\Big)^2\right],\qquad \bar r(x)=\frac1K\sum_i r(x,y_i).$$
+      <p>怎么理解这个平方损失？在 \(\theta=\theta_{\text{old}}\) 处 log 比值为 0，梯度是</p>
+      $$\nabla_\theta L = -\frac{2\tau}{K}\sum_i \big(r_i-\bar r\big)\,\nabla_\theta\log\pi_\theta(y_i|x),$$
+      <p>所以第一步梯度下降等价于带均值基线的策略梯度：比平均好的回答概率上升，差的下降。随着 \(\pi_\theta\) 偏离 \(\pi_{\text{old}}\)，损失要求 \(\tau\log(\pi_\theta/\pi_{\text{old}})\) 去“拟合”优势 \(r_i-\bar r\)，而不是无限推高，这起到类似 KL 正则的稳定作用（\(\tau\) 越大更新越保守）。这个目标也用 Muon 优化。</p>
+      <h3>10.4 三个技巧</h3>
+      <ul>
+        <li><strong>预算控制</strong>：RL 往往让回答越来越长。长回答在复杂推理里有用，但在非推理任务里不划算。K2 对每个样本按任务类型设最大 token 预算，超出的回答被截断并惩罚。报告说这显著提升了 token 效率，各领域都鼓励简洁而有效的解。</li>
+        <li><strong>PTX 损失</strong>：为防止联合 RL 训练中遗忘高质量数据，挑选一批高质量样本，通过辅助的 PTX 损失（InstructGPT 里的做法：在 RL 目标上加预训练式的语言建模损失）并入 RL 目标。既利用好数据，也降低对 RL 中有限任务集过拟合的风险，提升跨领域泛化。</li>
+        <li><strong>温度衰减</strong>：创意写作和复杂推理在训练初期需要高采样温度来探索，防止过早收敛到次优解；但后期或评测时温度高会带来过多随机性。所以用温度衰减调度，从探索逐渐转向利用。</li>
+      </ul>
+
+      <h2 id="rlinfra">11. RL 基础设施</h2>
+      <h3>11.1 共置架构与引擎切换</h3>
+      <p>和 K1.5 一样，K2 的同步 RL 用<strong>共置</strong>（colocated）架构：训练引擎和推理引擎在同一批机器上，一个工作时另一个释放或卸载 GPU 资源。每轮由中心控制器先调推理引擎生成数据，再让训练引擎训练，然后把新参数发给推理引擎。</p>
+      <p>rollout 期间训练引擎的参数卸载到 DRAM，恢复时只需一次 H2D 拷贝。难的是推理引擎：它要从训练引擎拿到新参数，而两者分片方式不同。到 K2 规模，用网络文件系统做重分片和广播不可行（需要每秒数 PB 的总带宽）。他们做了一个和训练节点共置的<strong>分布式 checkpoint engine</strong>：每个 worker 从训练引擎拿本地参数副本，然后在所有 checkpoint engine worker 间<strong>广播完整参数集</strong>，推理引擎只取自己需要的那一片。为控制显存，更新逐参数、流水线式进行。</p>
+      <p>“广播全部参数”比理论最优的“只传需要的”多传好几倍数据，但它让训练和推理引擎完全解耦、更易维护测试；而且因为同步开销小、网络带宽利用率高，实际上反而更快。K2 的完整参数更新不到 30 秒。代码开源在 MoonshotAI/checkpoint-engine。</p>
+      <p>附录 G 补充了流水线细节：每卡三个等大缓冲区——一个 H2D 缓冲、两个 IPC 缓冲（共享给推理引擎直接访问）。理想是三阶段流水（H2D、广播、推理引擎重载）；但在 H800 上并发 H2D 与广播会占满共享的 PCIe，三阶段退化成串行。所以实际用两阶段：先所有设备做一次同步 H2D，然后广播和重载并行。规模大时每卡分片小，整套参数一次就能放进 H2D 缓冲，开销消失。</p>
+      <h3>11.2 启动与故障恢复</h3>
+      <p>训练引擎启动时，每个 worker 只从磁盘读部分或不读参数，再广播给同伴，保证所有 worker 合起来只读一次 checkpoint。推理引擎是独立副本，不想引入额外同步屏障，所以复用 checkpoint engine：由它集体读盘，再用上面的方法更新未初始化的推理引擎。这也让系统对单点故障更鲁棒：单个推理副本可以独立重启。</p>
+      <h3>11.3 Agentic rollout</h3>
+      <ul>
+        <li>环境反馈（虚拟机、代码解释器）会阻塞，GPU 空闲。两个对策：重环境部署成可单独扩容的专用服务；大量并发 rollout 摊薄昂贵交互的延迟。</li>
+        <li>单条轨迹可能极长。用 K1.5 的 <strong>partial rollout</strong>：长尾的未完成任务暂停，下一轮迭代继续，不阻塞整轮。</li>
+        <li>仿 OpenAI Gym 设计统一接口，方便接入新环境。</li>
+      </ul>
+
+      <h2 id="eval">12. 评测结果</h2>
+      <p>所有对比都在<strong>非思考</strong>模式下进行（基线也用各自的非思考配置），输出上限 8192 token（SWE-bench Verified Agentless 为 16384）。下表挑了报告表 3 里的一部分，全部是报告原数。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>基准</th><th class="num">K2-Instruct</th><th class="num">DeepSeek-V3-0324</th><th class="num">Qwen3-235B-A22B</th><th class="num">Claude Sonnet 4</th><th class="num">Claude Opus 4</th><th class="num">GPT-4.1</th></tr></thead>
+          <tbody>
+            <tr><td>LiveCodeBench v6</td><td class="num">53.7</td><td class="num">46.9</td><td class="num">37.0</td><td class="num">48.5</td><td class="num">47.4</td><td class="num">44.7</td></tr>
+            <tr><td>OJBench</td><td class="num">27.1</td><td class="num">24.0</td><td class="num">11.3</td><td class="num">15.3</td><td class="num">19.6</td><td class="num">19.5</td></tr>
+            <tr><td>SWE-bench Verified（agentic 单次）</td><td class="num">65.8</td><td class="num">38.8</td><td class="num">34.4</td><td class="num">72.7*</td><td class="num">72.5*</td><td class="num">54.6</td></tr>
+            <tr><td>SWE-bench Verified（多次尝试）</td><td class="num">71.6</td><td class="num">—</td><td class="num">—</td><td class="num">80.2*</td><td class="num">79.4*</td><td class="num">—</td></tr>
+            <tr><td>SWE-bench Multilingual</td><td class="num">47.3</td><td class="num">25.8</td><td class="num">20.9</td><td class="num">51.0</td><td class="num">—</td><td class="num">31.5</td></tr>
+            <tr><td>τ²-Bench（三域平均）</td><td class="num">66.1</td><td class="num">48.8</td><td class="num">37.3</td><td class="num">—</td><td class="num">—</td><td class="num">—</td></tr>
+            <tr><td>ACEBench (En)</td><td class="num">76.5</td><td class="num">72.7</td><td class="num">70.5</td><td class="num">76.2</td><td class="num">75.6</td><td class="num">80.1</td></tr>
+            <tr><td>AIME 2025 (Avg@64)</td><td class="num">49.5</td><td class="num">46.7</td><td class="num">24.7*</td><td class="num">33.1*</td><td class="num">33.9*</td><td class="num">37.0</td></tr>
+            <tr><td>GPQA-Diamond (Avg@8)</td><td class="num">75.1</td><td class="num">68.4*</td><td class="num">62.9*</td><td class="num">70.0*</td><td class="num">74.9*</td><td class="num">66.3</td></tr>
+            <tr><td>MMLU-Redux</td><td class="num">92.7</td><td class="num">90.5</td><td class="num">89.2*</td><td class="num">93.6</td><td class="num">94.2</td><td class="num">92.4</td></tr>
+            <tr><td>IFEval (Prompt Strict)</td><td class="num">89.8</td><td class="num">81.1</td><td class="num">83.2*</td><td class="num">87.6</td><td class="num">87.4</td><td class="num">88.0</td></tr>
+            <tr><td>SimpleQA</td><td class="num">31.0</td><td class="num">27.7</td><td class="num">13.2</td><td class="num">15.9</td><td class="num">22.8</td><td class="num">42.3</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">* 表示报告从对应模型的技术报告或博客中引用的数字。τ²-Bench 三域平均的基线值取自报告附录 C 的文字（DeepSeek-V3-0324 48.8，Qwen3 37.3）。</p>
+      <p>基座模型（Kimi-K2-Base）方面，报告表 4 里 MMLU 87.79、MMLU-Pro 69.17、SimpleQA 35.25、EvalPlus 80.33、MATH 70.22、C-Eval 92.50，多数高于 DeepSeek-V3-Base、Llama 4 Maverick 和 Qwen2.5-72B 基座；GPQA-Diamond（48.11 vs V3 的 50.51）和 CMATH 略低于 V3。开放式评测上，截至 2025-07-17，K2-Instruct 在 LMSYS Arena 文本榜上是开源第一、总榜第五（3000 多票）。</p>
+      <p>报告自己写的局限：遇到很难的推理或工具定义不清时会生成过多 token，导致截断或工具调用不完整；不必要地开启工具会让某些任务表现下降；一次性构建完整软件项目不如放在 agentic 编码框架里用。</p>
+
+      <h2 id="take">13. 小结</h2>
+      <p>把 K2 拆开看，最值得带走的是三点：</p>
+      <ul>
+        <li><strong>优化器层面</strong>：Muon 的 token 效率优势在万亿规模上兑现了，代价是一个新的失稳模式（满秩更新让 \(W_q W_k^\top\) 的谱范数更容易增长）。QK-Clip 用“logit 对 \(W_q, W_k\) 双线性”这一点，在权重层面直接修正，逐头、按需、训练稳定后自动退出。MLA 下要小心共享的 RoPE key，只缩放头专属分量。</li>
+        <li><strong>数据层面</strong>：在高质量 token 受限时，“改写多份各看一遍”优于“原文看多遍”，K2 给了一个干净的 SimpleQA 对照。</li>
+        <li><strong>Agent 层面</strong>：大规模合成（工具库 → agent → 带 rubric 的任务 → 模拟器轨迹 → 评审过滤）配合真实沙箱，再用可验证奖励与自我批评 rubric 奖励统一做 RL，critic 本身也用可验证信号持续校准。</li>
+      </ul>
+      <p>系列的下一篇讲 Kimi Linear，它把 K2 之后 Moonshot 的注意力路线（KDA 线性注意力 + MLA 混合）完整摆了出来，也是后来 K3 的骨架。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Kimi Team. <em>Kimi K2: Open Agentic Intelligence</em>. arXiv:2507.20534（本文引用的是 v2 HTML 版）：<a href="https://arxiv.org/html/2507.20534#S2.SS1">§2.1 MuonClip</a>、<a href="https://arxiv.org/html/2507.20534#S2.SS2">§2.2 数据</a>、<a href="https://arxiv.org/html/2507.20534#S2.SS3">§2.3 架构</a>、<a href="https://arxiv.org/html/2507.20534#S2.SS4">§2.4 基础设施</a>、<a href="https://arxiv.org/html/2507.20534#S3">§3 后训练</a>、<a href="https://arxiv.org/html/2507.20534#S4">§4 评测</a>、<a href="https://arxiv.org/html/2507.20534#A5">附录 E</a>。</li>
+        <li>J. Liu et al. <em>Muon is Scalable for LLM Training</em>（Moonlight）. <a href="https://arxiv.org/abs/2502.16982">arXiv:2502.16982</a>：§2.2 权重衰减与更新 RMS、§2.3 分布式 Muon、§3.4 奇异值谱、附录 A、附录 D。</li>
+        <li>K. Jordan et al. <em>Muon: An optimizer for hidden layers in neural networks</em>（博客，2024）。</li>
+        <li>Kimi-K2-Instruct 的 <a href="https://huggingface.co/moonshotai/Kimi-K2-Instruct/blob/main/config.json">config.json</a>（MLA 与 MoE 尺寸）。</li>
+        <li>MoonshotAI/<a href="https://github.com/MoonshotAI/checkpoint-engine">checkpoint-engine</a>。</li>
+        <li>Kimi Team. <em>Kimi K3: Open Frontier Intelligence</em>. <a href="https://arxiv.org/abs/2607.24653">arXiv:2607.24653</a>，表 1（K2 的 MTP 层数）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="reports"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const NS = 'http://www.w3.org/2000/svg';
+    const el = (tag, attrs, parent) => { const e = document.createElementNS(NS, tag); for (const k in attrs) e.setAttribute(k, attrs[k]); if (parent) parent.appendChild(e); return e; };
+    const fmt = (x, d = 2) => Number(x).toFixed(d);
+    const human = (n) => n >= 1e12 ? (n / 1e12).toFixed(3) + 'T' : n >= 1e9 ? (n / 1e9).toFixed(1) + 'B' : (n / 1e6).toFixed(0) + 'M';
+
+    // ---------- seeded RNG ----------
+    function rng(seed) { let s = seed >>> 0; return () => { s = (s * 1664525 + 1013904223) >>> 0; return s / 4294967296; }; }
+    function gauss(r) { let u = 0, v = 0; while (u === 0) u = r(); v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); }
+
+    // ---------- small linear algebra ----------
+    const matmul = (A, B) => { const n = A.length, m = B[0].length, k = B.length; const C = []; for (let i = 0; i < n; i++) { const row = new Array(m).fill(0); for (let t = 0; t < k; t++) { const a = A[i][t]; if (a === 0) continue; const Bt = B[t]; for (let j = 0; j < m; j++) row[j] += a * Bt[j]; } C.push(row); } return C; };
+    const T = (A) => A[0].map((_, j) => A.map((r) => r[j]));
+    const fro = (A) => Math.sqrt(A.reduce((s, r) => s + r.reduce((t, x) => t + x * x, 0), 0));
+    const scale = (A, c) => A.map((r) => r.map((x) => x * c));
+    const add = (A, B) => A.map((r, i) => r.map((x, j) => x + B[i][j]));
+    function jacobiEig(S) { // symmetric -> eigenvalues
+      const n = S.length; const A = S.map((r) => r.slice());
+      for (let sweep = 0; sweep < 60; sweep++) {
+        let off = 0; for (let i = 0; i < n; i++) for (let j = i + 1; j < n; j++) off += A[i][j] * A[i][j];
+        if (off < 1e-20) break;
+        for (let p = 0; p < n; p++) for (let q = p + 1; q < n; q++) {
+          if (Math.abs(A[p][q]) < 1e-14) continue;
+          const th = (A[q][q] - A[p][p]) / (2 * A[p][q]);
+          const t = Math.sign(th || 1) / (Math.abs(th) + Math.sqrt(th * th + 1));
+          const c = 1 / Math.sqrt(t * t + 1), s = t * c;
+          for (let k = 0; k < n; k++) { const akp = A[k][p], akq = A[k][q]; A[k][p] = c * akp - s * akq; A[k][q] = s * akp + c * akq; }
+          for (let k = 0; k < n; k++) { const apk = A[p][k], aqk = A[q][k]; A[p][k] = c * apk - s * aqk; A[q][k] = s * apk + c * aqk; }
+        }
+      }
+      return A.map((r, i) => r[i]);
+    }
+    const svals = (G) => { const S = G.length <= G[0].length ? matmul(G, T(G)) : matmul(T(G), G); return jacobiEig(S).map((x) => Math.sqrt(Math.max(0, x))).sort((a, b) => b - a); };
+    const NSc = [3.4445, -4.7750, 2.0315];
+    function newtonSchulz(G, steps) {
+      let X = scale(G, 1 / (fro(G) + 1e-12)); let tr = false;
+      if (X.length > X[0].length) { X = T(X); tr = true; }
+      for (let s = 0; s < steps; s++) { const A = matmul(X, T(X)); const B = add(scale(A, NSc[1]), scale(matmul(A, A), NSc[2])); X = add(scale(X, NSc[0]), matmul(B, X)); }
+      return tr ? T(X) : X;
+    }
+    const sgn = (G) => G.map((r) => r.map((x) => (x > 0 ? 1 : x < 0 ? -1 : 0)));
+    const svdEntropy = (s) => { const tot = s.reduce((a, x) => a + x * x, 0); let h = 0; s.forEach((x) => { const p = x * x / tot; if (p > 0) h -= p * Math.log(p); }); return h / Math.log(s.length); };
+
+    // ---------- Muon demo ----------
+    (function muonDemo() {
+      const kappa = document.getElementById('md-kappa'), steps = document.getElementById('md-steps'), decay = document.getElementById('md-decay');
+      const ell = document.getElementById('md-ellipse'), poly = document.getElementById('md-poly'), bars = document.getElementById('md-bars');
+      const r = rng(7);
+      // random orthogonal-ish bases for 32x16
+      const n = 32, m = 16;
+      const randMat = (a, b) => Array.from({ length: a }, () => Array.from({ length: b }, () => gauss(r)));
+      function gramSchmidt(M) { const cols = T(M); const Q = []; cols.forEach((c) => { let v = c.slice(); Q.forEach((q) => { const d = v.reduce((s, x, i) => s + x * q[i], 0); v = v.map((x, i) => x - d * q[i]); }); const nv = Math.sqrt(v.reduce((s, x) => s + x * x, 0)); Q.push(v.map((x) => x / nv)); }); return T(Q); }
+      const U = gramSchmidt(randMat(n, m)), V = gramSchmidt(randMat(m, m));
+      const th1 = 0.6, th2 = -0.9;
+      const rot = (t) => [[Math.cos(t), -Math.sin(t)], [Math.sin(t), Math.cos(t)]];
+      function draw() {
+        const K = Math.pow(10, +kappa.value), k = +steps.value, dexp = +decay.value;
+        document.getElementById('md-kappa-o').textContent = K < 10 ? fmt(K, 1) : Math.round(K);
+        document.getElementById('md-steps-o').textContent = k;
+        document.getElementById('md-decay-o').textContent = fmt(dexp, 1);
+        // 2x2
+        const G2 = matmul(matmul(rot(th1), [[1, 0], [0, 1 / K]]), rot(th2));
+        const Gn = scale(G2, 1 / fro(G2)), O2 = newtonSchulz(G2, k), S2 = sgn(G2);
+        ell.innerHTML = '';
+        const cx = 150, cy = 110, R = 70;
+        el('circle', { cx, cy, r: R, class: 'grid' }, ell);
+        el('line', { x1: cx - 100, y1: cy, x2: cx + 100, y2: cy, class: 'axis' }, ell);
+        el('line', { x1: cx, y1: cy - 100, x2: cx, y2: cy + 100, class: 'axis' }, ell);
+        const curve = (M, cls, sc) => { let d = ''; for (let i = 0; i <= 96; i++) { const a = i / 96 * 2 * Math.PI; const x = Math.cos(a), y = Math.sin(a); const px = M[0][0] * x + M[0][1] * y, py = M[1][0] * x + M[1][1] * y; d += (i ? 'L' : 'M') + (cx + px * R * sc).toFixed(1) + ',' + (cy - py * R * sc).toFixed(1); } el('path', { d, class: cls }, ell); };
+        curve(Gn, 's-soft', 1); curve(S2, 's-acc2', 1 / Math.SQRT2); curve(O2, 's-acc', 1);
+        el('text', { x: 6, y: 16 }, ell).textContent = '虚线圆 = 单位圆；sign 按 1/√2 缩放';
+        const sv2 = svals(O2);
+        document.getElementById('md-r1').textContent = fmt(sv2[0], 3) + ' / ' + fmt(sv2[1], 3);
+        // polynomial
+        poly.innerHTML = '';
+        const P = { x0: 34, y0: 196, w: 250, h: 180 };
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0 + P.w, y2: P.y0, class: 'axis' }, poly);
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0, y2: P.y0 - P.h, class: 'axis' }, poly);
+        const ymax = 1.4;
+        const Y = (v) => P.y0 - v / ymax * P.h, X = (v) => P.x0 + v * P.w;
+        el('line', { x1: X(0), y1: Y(1), x2: X(1), y2: Y(1), class: 'grid' }, poly);
+        [0, 0.5, 1].forEach((v) => { el('text', { x: X(v) - 6, y: P.y0 + 14 }, poly).textContent = v; });
+        [0, 1].forEach((v) => { el('text', { x: 6, y: Y(v) + 4 }, poly).textContent = v; });
+        el('text', { x: P.x0 + P.w - 60, y: P.y0 - 6, class: 'lbl' }, poly).textContent = '初始 σ';
+        let d = '';
+        for (let i = 0; i <= 300; i++) { const s0 = i / 300; let s = s0; for (let t = 0; t < k; t++) s = NSc[0] * s + NSc[1] * s ** 3 + NSc[2] * s ** 5; d += (i ? 'L' : 'M') + X(s0).toFixed(1) + ',' + Y(Math.min(ymax, Math.max(0, s))).toFixed(1); }
+        el('path', { d, class: 's-acc' }, poly);
+        el('text', { x: P.x0 + 6, y: 16, class: 'lbl' }, poly).textContent = 'f^' + k + '(σ)，k = ' + k;
+        // 32x16
+        const sig = Array.from({ length: m }, (_, i) => Math.pow(i + 1, -dexp));
+        const G = matmul(matmul(U, sig.map((s, i) => sig.map((_, j) => (i === j ? s : 0)))), T(V));
+        // add small noise
+        const Gz = G.map((row) => row.map((x) => x + 0.002 * gauss(r)));
+        const sg = svals(Gz), ss = svals(sgn(Gz)), so = svals(newtonSchulz(Gz, k));
+        bars.innerHTML = '';
+        const B = { x0: 34, y0: 196, w: 556, h: 176 };
+        el('line', { x1: B.x0, y1: B.y0, x2: B.x0 + B.w, y2: B.y0, class: 'axis' }, bars);
+        [0, 0.5, 1].forEach((v) => { el('line', { x1: B.x0, y1: B.y0 - v * B.h, x2: B.x0 + B.w, y2: B.y0 - v * B.h, class: 'grid' }, bars); el('text', { x: 4, y: B.y0 - v * B.h + 4 }, bars).textContent = v; });
+        const gw = B.w / m, bw = gw / 4;
+        const norm = (a) => a.map((x) => x / a[0]);
+        [[norm(sg), 'f-soft'], [norm(ss), 'f-acc2'], [norm(so), 'f-acc']].forEach(([arr, cls], si) => {
+          arr.forEach((v, i) => { const hgt = Math.max(0.5, v * B.h); el('rect', { x: B.x0 + i * gw + bw * 0.5 + si * bw, y: B.y0 - hgt, width: bw * 0.9, height: hgt, class: cls }, bars); });
+        });
+        el('text', { x: B.x0 + B.w - 120, y: 14, class: 'lbl' }, bars).textContent = '奇异值序号 1 → 16';
+        document.getElementById('md-r2').textContent = fmt(svdEntropy(sg)) + ' / ' + fmt(svdEntropy(ss)) + ' / ' + fmt(svdEntropy(so));
+        document.getElementById('md-r3').textContent = fmt(so[so.length - 1], 2) + ' / ' + fmt(so[0], 2);
+      }
+      [kappa, steps, decay].forEach((x) => x.addEventListener('input', draw));
+      draw();
+    })();
+
+    // ---------- QK-Clip demo ----------
+    (function qkDemo() {
+      const tauI = document.getElementById('qk-tau'), nexpI = document.getElementById('qk-nexp'), wdI = document.getElementById('qk-wd');
+      const svg = document.getElementById('qk-chart');
+      let mode = 'head';
+      document.querySelectorAll('#qk-demo .seg button').forEach((b) => b.addEventListener('click', () => { mode = b.dataset.mode; document.querySelectorAll('#qk-demo .seg button').forEach((x) => x.setAttribute('aria-pressed', x === b)); run(); }));
+      const H = 32, STEPS = 3000, Tdec = 700;
+      function simulate(clip, tau, nexp, lam, global) {
+        const r = rng(11);
+        const heads = Array.from({ length: H }, (_, h) => ({ lq: 0, lk: 0, kap: Math.log(4 + 10 * r()), rate: h < nexp ? 0.0032 + 0.0018 * r() : 0.0006 + 0.0009 * r(), clipped: false }));
+        const maxS = [], normalMean = []; let lastClip = -1;
+        for (let t = 0; t < STEPS; t++) {
+          let mx = -Infinity, nm = 0, nc = 0;
+          for (const h of heads) {
+            const g = h.rate * Math.exp(-t / Tdec) - lam;
+            h.lq += g; h.lk += g;
+            if (h.lq < -2) h.lq = -2; if (h.lk < -2) h.lk = -2;
+          }
+          const S = heads.map((h) => h.kap + h.lq + h.lk); // log S
+          const gmax = Math.max(...S);
+          if (clip) {
+            heads.forEach((h, i) => {
+              const ls = global ? gmax : S[i];
+              if (ls > Math.log(tau)) { const lg = Math.log(tau) - ls; h.lq += lg / 2; h.lk += lg / 2; if (S[i] > Math.log(tau)) h.clipped = true; lastClip = t; }
+            });
+          }
+          heads.forEach((h, i) => { const ls = h.kap + h.lq + h.lk; if (ls > mx) mx = ls; if (i >= nexp) { nm += Math.exp(ls); nc++; } });
+          maxS.push(Math.exp(mx)); normalMean.push(nc ? nm / nc : 0);
+        }
+        return { maxS, normalMean, lastClip, frac: heads.filter((h) => h.clipped).length / H };
+      }
+      function run() {
+        const tau = +tauI.value, nexp = +nexpI.value, lam = 0.00035 * +wdI.value;
+        document.getElementById('qk-tau-o').textContent = tau;
+        document.getElementById('qk-nexp-o').textContent = nexp;
+        document.getElementById('qk-wd-o').textContent = fmt(+wdI.value, 1) + '×';
+        const base = simulate(false, tau, nexp, lam, false);
+        const clip = simulate(true, tau, nexp, lam, mode === 'global');
+        svg.innerHTML = '';
+        const P = { x0: 46, y0: 226, w: 540, h: 206 };
+        const lo = 1, hi = 1e5; const ly = (v) => P.y0 - (Math.log10(Math.max(lo, Math.min(hi, v))) - 0) / 5 * P.h;
+        const lx = (t) => P.x0 + t / STEPS * P.w;
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0 + P.w, y2: P.y0, class: 'axis' }, svg);
+        el('line', { x1: P.x0, y1: P.y0, x2: P.x0, y2: P.y0 - P.h, class: 'axis' }, svg);
+        [1, 10, 100, 1000, 10000, 100000].forEach((v) => { el('line', { x1: P.x0, y1: ly(v), x2: P.x0 + P.w, y2: ly(v), class: 'grid' }, svg); el('text', { x: 2, y: ly(v) + 4 }, svg).textContent = v >= 1000 ? (v / 1000) + 'k' : v; });
+        [0, 1000, 2000, 3000].forEach((t) => { el('text', { x: lx(t), y: P.y0 + 16, 'text-anchor': t === 3000 ? 'end' : 'middle' }, svg).textContent = t; });
+        el('text', { x: P.x0 + P.w - 70, y: P.y0 - 8, class: 'lbl' }, svg).textContent = '训练步数';
+        const path = (arr) => arr.map((v, t) => (t ? 'L' : 'M') + lx(t).toFixed(1) + ',' + ly(v).toFixed(1)).filter((_, t) => t % 5 === 0 || t === arr.length - 1).join('');
+        el('path', { d: path(base.maxS), class: 's-soft' }, svg);
+        el('line', { x1: P.x0, y1: ly(tau), x2: P.x0 + P.w, y2: ly(tau), class: 's-acc2', 'stroke-dasharray': '3 3' }, svg);
+        el('path', { d: path(clip.maxS), class: 's-acc' }, svg);
+        const peak = Math.max(...base.maxS);
+        document.getElementById('qk-r1').textContent = peak >= 1000 ? (peak / 1000).toFixed(1) + 'k' : peak.toFixed(0);
+        document.getElementById('qk-r2').textContent = (clip.frac * 100).toFixed(0) + '%';
+        document.getElementById('qk-r3').textContent = clip.lastClip < 0 ? '从未触发' : '第 ' + clip.lastClip + ' 步';
+        let a = 0, b = 0; for (let t = 0; t < STEPS; t++) { a += base.normalMean[t]; b += clip.normalMean[t]; }
+        document.getElementById('qk-r4').textContent = a > 0 ? Math.max(0, (1 - b / a) * 100).toFixed(1) + '%' : '–';
+      }
+      [tauI, nexpI, wdI].forEach((x) => x.addEventListener('input', run));
+      run();
+    })();
+
+    // ---------- MoE calculator ----------
+    (function moeDemo() {
+      const E = document.getElementById('moe-E'), k = document.getElementById('moe-k'), Hh = document.getElementById('moe-H'), Ls = document.getElementById('moe-L');
+      const ctxs = [4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288];
+      let preset = { d: 7168, layers: 61, dense: 1, denseFF: 18432, fi: 2048, shared: 1, V: 163840 };
+      const presets = { k2: { d: 7168, layers: 61, dense: 1, denseFF: 18432, fi: 2048, shared: 1, V: 163840, E: 384, k: 8, H: 64 }, v3: { d: 7168, layers: 61, dense: 3, denseFF: 18432, fi: 2048, shared: 1, V: 129280, E: 256, k: 8, H: 128 } };
+      document.querySelectorAll('#moe-demo .seg button').forEach((b) => b.addEventListener('click', () => {
+        const p = presets[b.dataset.preset]; preset = p; E.value = p.E; k.value = p.k; Hh.value = p.H;
+        document.querySelectorAll('#moe-demo .seg button').forEach((x) => x.setAttribute('aria-pressed', x === b)); calc();
+      }));
+      function calc() {
+        const p = preset, e = +E.value, kk = Math.min(+k.value, e), H = +Hh.value, L = ctxs[+Ls.value];
+        document.getElementById('moe-E-o').textContent = e;
+        document.getElementById('moe-k-o').textContent = kk;
+        document.getElementById('moe-H-o').textContent = H;
+        document.getElementById('moe-L-o').textContent = L >= 1024 ? (L / 1024) + 'K' : L;
+        const d = p.d;
+        const attn = d * 1536 + 1536 * H * 192 + d * 576 + 512 * H * 256 + H * 128 * d;
+        const expert = 3 * d * p.fi;
+        const moeL = p.layers - p.dense;
+        const common = attn * p.layers + 3 * d * p.denseFF * p.dense + moeL * e * d + 2 * p.V * d;
+        const tot = common + moeL * (e + p.shared) * expert;
+        const act = common + moeL * (kk + p.shared) * expert;
+        document.getElementById('moe-tot').textContent = human(tot);
+        document.getElementById('moe-act').textContent = human(act);
+        document.getElementById('moe-sp').textContent = fmt(e / kk, 1);
+        document.getElementById('moe-mem').textContent = (tot * 2 / 1e12).toFixed(2) + ' TB';
+        document.getElementById('moe-pf').textContent = (2 * act / 1e9).toFixed(0) + ' GFLOPs';
+        const af = 2 * H * L * (192 + 128) * p.layers;
+        document.getElementById('moe-af').textContent = (af / 1e9).toFixed(0) + ' GFLOPs';
+      }
+      [E, k, Hh, Ls].forEach((x) => x.addEventListener('input', calc));
+      calc();
+      // reported sparsity savings chart
+      const svg = document.getElementById('moe-chart');
+      const data = [['稀疏度 8', 1.69], ['稀疏度 16', 1.39], ['稀疏度 32', 1.15], ['稀疏度 48', 1.0]];
+      const P = { x0: 110, y0: 20, w: 440, rh: 40 };
+      el('text', { x: 4, y: 14, class: 'lbl' }, svg).textContent = '报告：达到验证 loss 1.5 时，稀疏度 48 相对各稀疏度节省的 FLOPs 倍数';
+      data.forEach(([lab, v], i) => {
+        const y = P.y0 + 18 + i * P.rh;
+        el('text', { x: 4, y: y + 18, class: 'lbl' }, svg).textContent = lab;
+        el('rect', { x: P.x0, y, width: v / 1.8 * P.w, height: 24, rx: 4, class: i === 3 ? 'f-acc2' : 'f-acc' }, svg);
+        el('text', { x: P.x0 + v / 1.8 * P.w + 8, y: y + 17 }, svg).textContent = i === 3 ? '基准（K2 选用）' : v.toFixed(2) + '×';
+      });
+    })();
+  })();
+  </script>
+</body>
+</html>
