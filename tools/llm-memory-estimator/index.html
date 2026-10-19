@@ -1,0 +1,235 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM 训练显存估算器 · Zunzhe Zhang</title>
+  <meta name="description" content="粗略估算 Transformer 规模、batch、序列长度、TP/DP/ZeRO 对单卡训练显存的影响。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <style>
+    .tool { max-width: 1100px; }
+    .tool-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; padding: 24px 0 16px; }
+    .tool-head h1 { margin: 0; font-size: clamp(26px, 4vw, 34px); letter-spacing: -0.02em; }
+    .tool-head p { margin: 6px 0 0; color: var(--text-soft); font-size: 15px; }
+    .grid { display: grid; grid-template-columns: minmax(260px, 360px) 1fr; gap: 16px; align-items: start; }
+    .panel { padding: 18px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); }
+    .controls { display: grid; gap: 12px; }
+    .controls label { display: grid; gap: 6px; font-size: 13px; color: var(--text-soft); }
+    .row { display: grid; grid-template-columns: 1fr 88px; gap: 8px; align-items: center; }
+    .controls input, .controls select { width: 100%; font: inherit; font-size: 14px; }
+    .controls input[type="number"], .controls select {
+      padding: 6px 8px; border: 1px solid var(--border); border-radius: 6px;
+      background: var(--bg); color: var(--text);
+    }
+    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; margin-bottom: 18px; }
+    .metric { padding: 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft); }
+    .metric .name { font-size: 12px; color: var(--text-soft); line-height: 1.3; }
+    .metric .value { margin-top: 8px; font-size: 22px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+    .barset { display: grid; gap: 10px; }
+    .barrow { display: grid; grid-template-columns: 100px 1fr 80px; gap: 10px; align-items: center; font-size: 14px; }
+    .barrow strong { text-align: right; font-variant-numeric: tabular-nums; }
+    .track { height: 14px; border-radius: 999px; background: var(--bg-soft); overflow: hidden; }
+    .fill { height: 100%; width: 0; border-radius: inherit; background: var(--accent); transition: width 0.18s ease; }
+    .note { margin-top: 16px; }
+    .formula { margin-top: 12px; font-size: 12.5px; line-height: 1.6; color: var(--text-faint); }
+    .status {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 12px; border: 1px solid var(--border); border-radius: 999px;
+      background: var(--surface); color: var(--text-soft); font-size: 13px; white-space: nowrap;
+    }
+    .status .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent); }
+    @media (max-width: 820px) {
+      .grid { grid-template-columns: 1fr; }
+      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .barrow { grid-template-columns: 84px 1fr 70px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap tool">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap tool">
+    <div class="tool-head">
+      <div>
+        <h1>LLM 训练显存估算器</h1>
+        <p>一个简化版估算器，用来观察 Transformer 规模、batch、序列长度、TP/DP/ZeRO 对单卡显存的影响。</p>
+      </div>
+      <div class="status"><span class="dot" id="fitDot"></span><span id="fitStatus">estimating</span></div>
+    </div>
+
+    <section class="grid">
+      <div class="panel">
+        <div class="controls">
+          <label>Preset
+            <select id="preset">
+              <option value="tiny">Llama-style Tiny</option>
+              <option value="8b" selected>Llama-style 8B</option>
+              <option value="70b">Llama-style 70B</option>
+              <option value="custom">Custom</option>
+            </select>
+          </label>
+          <label>Layers
+            <div class="row"><input id="layers" type="range" min="4" max="128" value="32"><input id="layersNum" type="number" min="4" max="128" value="32"></div>
+          </label>
+          <label>Hidden size
+            <div class="row"><input id="hidden" type="range" min="512" max="16384" step="128" value="4096"><input id="hiddenNum" type="number" min="512" max="16384" step="128" value="4096"></div>
+          </label>
+          <label>Sequence length
+            <div class="row"><input id="seq" type="range" min="512" max="32768" step="512" value="4096"><input id="seqNum" type="number" min="512" max="32768" step="512" value="4096"></div>
+          </label>
+          <label>Micro batch size
+            <div class="row"><input id="mbs" type="range" min="1" max="64" value="2"><input id="mbsNum" type="number" min="1" max="64" value="2"></div>
+          </label>
+          <label>Tensor parallel
+            <div class="row"><input id="tp" type="range" min="1" max="16" value="1"><input id="tpNum" type="number" min="1" max="16" value="1"></div>
+          </label>
+          <label>Data parallel / ZeRO shard count
+            <div class="row"><input id="dp" type="range" min="1" max="256" value="8"><input id="dpNum" type="number" min="1" max="256" value="8"></div>
+          </label>
+          <label>ZeRO stage
+            <select id="zero">
+              <option value="0">0 - no sharding</option>
+              <option value="1">1 - optimizer states</option>
+              <option value="2" selected>2 - optimizer + gradients</option>
+              <option value="3">3 - optimizer + gradients + params</option>
+            </select>
+          </label>
+          <label>Activation checkpointing
+            <select id="ckpt">
+              <option value="1">none</option>
+              <option value="0.55" selected>selective</option>
+              <option value="0.28">aggressive</option>
+            </select>
+          </label>
+          <label>GPU memory per card (GB)
+            <div class="row"><input id="gpu" type="range" min="16" max="192" step="8" value="80"><input id="gpuNum" type="number" min="16" max="192" step="8" value="80"></div>
+          </label>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="metrics">
+          <div class="metric"><div class="name">Approx parameters</div><div class="value" id="params">-</div></div>
+          <div class="metric"><div class="name">Per-GPU training memory</div><div class="value" id="total">-</div></div>
+          <div class="metric"><div class="name">Global batch tokens</div><div class="value" id="tokens">-</div></div>
+          <div class="metric"><div class="name">Rough train FLOPs / step</div><div class="value" id="flops">-</div></div>
+        </div>
+        <div class="barset">
+          <div class="barrow"><span>Parameters</span><div class="track"><div id="barParams" class="fill"></div></div><strong id="memParams">-</strong></div>
+          <div class="barrow"><span>Gradients</span><div class="track"><div id="barGrads" class="fill"></div></div><strong id="memGrads">-</strong></div>
+          <div class="barrow"><span>Optimizer</span><div class="track"><div id="barOpt" class="fill"></div></div><strong id="memOpt">-</strong></div>
+          <div class="barrow"><span>Activations</span><div class="track"><div id="barAct" class="fill"></div></div><strong id="memAct">-</strong></div>
+        </div>
+        <div class="callout note" id="note"></div>
+        <div class="formula">
+          Approximation: parameters ≈ layers × 16 × hidden² + 2 × vocab × hidden (vocab = 128k). Parameter and gradient tensors use bf16/fp16 bytes; Adam states are approximated as 12 bytes per parameter before ZeRO sharding. Activation memory is intentionally rough: layers × sequence × micro-batch × hidden × 2 bytes × 6 × checkpointing factor.
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="site-footer wrap tool"><a href="/projects/">← Projects</a></footer>
+
+  <script>
+    (() => {
+      const ids = ['layers', 'hidden', 'seq', 'mbs', 'tp', 'dp', 'gpu'];
+      const presets = {
+        tiny: { layers: 12, hidden: 768, seq: 2048, mbs: 4, tp: 1, dp: 4, gpu: 24, zero: '2', ckpt: '0.55' },
+        '8b': { layers: 32, hidden: 4096, seq: 4096, mbs: 2, tp: 1, dp: 8, gpu: 80, zero: '2', ckpt: '0.55' },
+        '70b': { layers: 80, hidden: 8192, seq: 8192, mbs: 1, tp: 8, dp: 32, gpu: 80, zero: '3', ckpt: '0.28' },
+      };
+      const $ = (id) => document.getElementById(id);
+
+      function toCustom() { $('preset').value = 'custom'; update(); }
+
+      ids.forEach((id) => {
+        $(id).addEventListener('input', () => { $(id + 'Num').value = $(id).value; toCustom(); });
+        $(id + 'Num').addEventListener('input', () => { $(id).value = $(id + 'Num').value; toCustom(); });
+      });
+      ['zero', 'ckpt'].forEach((id) => $(id).addEventListener('input', toCustom));
+
+      $('preset').addEventListener('input', (e) => {
+        const p = presets[e.target.value];
+        if (!p) return;
+        ids.forEach((id) => { $(id).value = p[id]; $(id + 'Num').value = p[id]; });
+        $('zero').value = p.zero;
+        $('ckpt').value = p.ckpt;
+        update();
+      });
+
+      function fmtGB(x) {
+        if (x >= 1024) return (x / 1024).toFixed(2) + ' TB';
+        if (x >= 10) return x.toFixed(1) + ' GB';
+        return x.toFixed(2) + ' GB';
+      }
+
+      function fmtCount(x) {
+        if (x >= 1e18) return (x / 1e18).toFixed(2) + 'E';
+        if (x >= 1e15) return (x / 1e15).toFixed(2) + 'P';
+        if (x >= 1e12) return (x / 1e12).toFixed(2) + 'T';
+        if (x >= 1e9) return (x / 1e9).toFixed(2) + 'B';
+        if (x >= 1e6) return (x / 1e6).toFixed(1) + 'M';
+        return Math.round(x).toLocaleString();
+      }
+
+      function update() {
+        const layers = +$('layers').value;
+        const hidden = +$('hidden').value;
+        const seq = +$('seq').value;
+        const mbs = +$('mbs').value;
+        const tp = Math.max(1, +$('tp').value);
+        const dp = Math.max(1, +$('dp').value);
+        const gpu = +$('gpu').value;
+        const zero = +$('zero').value;
+        const ckpt = +$('ckpt').value;
+        const vocab = 128000;
+
+        const params = layers * 16 * hidden * hidden + 2 * vocab * hidden;
+        const paramGB = params * 2 / 1e9 / (zero >= 3 ? dp : 1) / tp;
+        const gradGB = params * 2 / 1e9 / (zero >= 2 ? dp : 1) / tp;
+        const optGB = params * 12 / 1e9 / (zero >= 1 ? dp : 1) / tp;
+        const actGB = layers * seq * mbs * hidden * 2 * 6 / 1e9 * ckpt / tp;
+        const totalGB = paramGB + gradGB + optGB + actGB;
+        const tokens = seq * mbs * dp;
+
+        $('params').textContent = fmtCount(params);
+        $('total').textContent = fmtGB(totalGB);
+        $('tokens').textContent = fmtCount(tokens);
+        $('flops').textContent = fmtCount(6 * params * tokens);
+
+        const parts = [[paramGB, 'memParams', 'barParams'], [gradGB, 'memGrads', 'barGrads'], [optGB, 'memOpt', 'barOpt'], [actGB, 'memAct', 'barAct']];
+        const maxPart = Math.max(...parts.map((p) => p[0]), 1);
+        parts.forEach(([value, label, bar]) => {
+          $(label).textContent = fmtGB(value);
+          $(bar).style.width = Math.max(2, value / maxPart * 100) + '%';
+        });
+
+        if (totalGB <= gpu * 0.82) {
+          $('fitDot').style.background = '#16a34a';
+          $('fitStatus').textContent = 'fits comfortably';
+          $('note').textContent = '估算显存低于单卡容量的 82%。仍需为 kernel workspace、fragmentation、通信 buffer 和 dataloader 留出余量。';
+        } else if (totalGB <= gpu) {
+          $('fitDot').style.background = '#ca8a04';
+          $('fitStatus').textContent = 'tight fit';
+          $('note').textContent = '估算值接近单卡上限。真实训练可能因为显存碎片、通信 buffer 或更高激活峰值而 OOM。';
+        } else {
+          $('fitDot').style.background = '#dc2626';
+          $('fitStatus').textContent = 'likely OOM';
+          $('note').textContent = '估算值超过单卡容量。可以尝试更高 ZeRO stage、更大 TP、更小 micro batch、更强 activation checkpointing，或减少序列长度。';
+        }
+      }
+
+      update();
+    })();
+  </script>
+</body>
+</html>

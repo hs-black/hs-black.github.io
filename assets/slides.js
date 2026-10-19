@@ -17,7 +17,7 @@
   ui.className = 'deck-ui';
   ui.innerHTML =
     '<div class="deck-progress"></div>' +
-    '<div class="deck-bar"><a href="/">← 返回博客</a>' +
+    '<div class="deck-bar"><a href="/blog/">← 返回博客</a>' +
     '<span><span class="deck-hint">← → 翻页 · F 全屏　</span><span class="deck-count"></span></span></div>';
   document.body.appendChild(ui);
   const progress = ui.querySelector('.deck-progress');

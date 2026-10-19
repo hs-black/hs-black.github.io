@@ -1,32 +1,86 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="en">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>hs-black</title>
-  <meta name="description" content="hs-black 的博客：大模型、实验与想法。">
+  <title>Zunzhe Zhang</title>
+  <meta name="description" content="Zunzhe Zhang is a Computer Science undergraduate at Tsinghua University working on embodied AI, Vision-Language-Action models, LLM agents, and robust robotic control.">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="alternate" type="application/rss+xml" title="hs-black" href="/feed.xml">
+  <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
   <link rel="stylesheet" href="/assets/site.css">
 </head>
 <body>
   <header class="site-header wrap">
-    <a class="site-logo" href="/"><span class="dot"></span>hs-black</a>
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
     <nav class="site-nav">
-      <a href="https://github.com/hs-black">GitHub</a>
-      <a href="/feed.xml">RSS</a>
+      <a href="/" aria-current="page">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/">Blog</a>
     </nav>
   </header>
 
   <main class="wrap">
-    <section class="hero">
-      <h1>记录在大模型里<br>摸索的过程</h1>
-      <p>文章、交互演示和幻灯片。每一页都是手写的 HTML，没有生成器。</p>
-      <div class="token-stream" id="stream" aria-hidden="true"></div>
+    <section class="profile">
+      <img class="avatar" src="/assets/img/avatar.jpg" alt="Zunzhe Zhang" width="148" height="148">
+      <div>
+        <h1>Zunzhe Zhang</h1>
+        <p class="role">B.S. Candidate in Computer Science<br><a href="https://iiis.tsinghua.edu.cn/">Institute for Interdisciplinary Information Sciences</a>, Tsinghua University</p>
+        <div class="token-stream" id="stream" aria-hidden="true"></div>
+        <div class="links">
+          <a href="mailto:zhang-zz22@mails.tsinghua.edu.cn">Email</a>
+          <a href="https://github.com/hs-black">GitHub</a>
+          <a href="/files/resume.pdf">Resume (PDF)</a>
+          <a href="/feed.xml">RSS</a>
+        </div>
+      </div>
     </section>
 
-    <h2 class="section-title">文章</h2>
-    <!-- Newest first. Each entry: title, kind, date, one-line description. -->
+    <h2 class="section-title">About</h2>
+    <div class="prose" style="padding-top: 0">
+      <p>I am a B.S. candidate in Computer Science at the Institute for Interdisciplinary Information Sciences, Tsinghua University. My research focuses on embodied intelligence: agents that connect perception, language, memory, and continuous control to act reliably in physical or simulated environments.</p>
+      <p>Recently, I have been working on Vision-Language-Action foundation models, flow-matching control policies, LLM-based embodied agents, and interactive multi-agent simulation. I am also interested in evaluation and simulation tooling: how to expose meaningful failures, generate useful data, and make robotic policies more robust outside narrow demos.</p>
+      <p>I previously worked on embodied AI research with Prof. Chuang Gan at UMass Amherst, contributing to projects on LLM agents and virtual communities. I also worked as a VLA algorithm intern at Galaxea Inc., where I explored continuous action generation and adaptive robotic control.</p>
+    </div>
+    <ul class="chips" style="margin-top: 20px">
+      <li>Embodied AI</li>
+      <li>Vision-Language-Action Models</li>
+      <li>LLM Agents</li>
+      <li>Robotic Control</li>
+      <li>Flow and Diffusion Policies</li>
+    </ul>
+
+    <div class="section-head">
+      <h2 class="section-title">Selected Papers</h2>
+      <a href="/papers/">All papers →</a>
+    </div>
+    <!-- Keep in sync with /papers/ (short form: title, authors, venue, links). -->
+    <ul class="papers">
+      <li class="paper">
+        <h3 class="paper-title">Generative Control as Optimization: Time Unconditional Flow Matching for Adaptive and Robust Robotic Control</h3>
+        <div class="paper-authors"><span class="me">Zunzhe Zhang</span>*, Runhan Huang*, Yicheng Liu, Shaoting Zhu, Linzhan Mou, Hang Zhao</div>
+        <div class="paper-venue"><span class="venue">ICLR 2026 Workshops</span> <span class="note">(LLA and ReALM-GEN) · * equal contribution</span></div>
+        <div class="paper-links"><a href="https://arxiv.org/abs/2603.17834">arXiv</a><a href="https://hrh6666.github.io/GeCO/">Project</a></div>
+      </li>
+      <li class="paper">
+        <h3 class="paper-title">Virtual Community: An Open World for Humans, Robots, and Society</h3>
+        <div class="paper-authors">Qinhong Zhou, Hongxin Zhang, Xiangye Lin, Zheyuan Zhang, Yutian Chen, Wenjun Liu, <span class="me">Zunzhe Zhang</span>, Sunli Chen, Lixing Fang, Qiushi Lyu, Xinyu Sun, Jincheng Yang, Zeyuan Wang, Bao Chi Dang, Zhehuan Chen, Daksha Ladia, Quang Vinh Dang, Jiageng Liu, Chuang Gan</div>
+        <div class="paper-venue"><span class="venue">ICLR 2026</span></div>
+        <div class="paper-links"><a href="https://arxiv.org/abs/2508.14893">arXiv</a><a href="https://virtual-community-ai.github.io/">Project</a><a href="https://github.com/UMass-Embodied-AGI/Virtual-Community">Code</a></div>
+      </li>
+      <li class="paper">
+        <h3 class="paper-title">Ella: Embodied Social Agents with Lifelong Memory</h3>
+        <div class="paper-authors">Hongxin Zhang, Zheyuan Zhang, Zeyuan Wang, <span class="me">Zunzhe Zhang</span>, Lixing Fang, Qinhong Zhou, Chuang Gan</div>
+        <div class="paper-venue"><span class="venue">ICML 2025 MAS Workshop</span></div>
+        <div class="paper-links"><a href="https://arxiv.org/abs/2506.24019">arXiv</a><a href="https://umass-embodied-agi.github.io/Ella/">Project</a><a href="https://github.com/UMass-Embodied-AGI/Ella">Code</a></div>
+      </li>
+    </ul>
+
+    <div class="section-head">
+      <h2 class="section-title">Recent Posts</h2>
+      <a href="/blog/">Archive →</a>
+    </div>
+    <!-- The newest 3 posts from /blog/. -->
     <ul class="post-list">
       <li>
         <a href="/posts/next-token/">
@@ -43,20 +97,49 @@
         </a>
       </li>
     </ul>
+
+    <h2 class="section-title">Experience</h2>
+    <ul class="cv">
+      <li>
+        <span class="what">VLA Algorithm Intern</span><span class="when">Nov 2025 – May 2026</span>
+        <span class="where">Galaxea Inc.</span>
+        <span class="detail">Worked on algorithmic improvements for Vision-Language-Action foundation models, focusing on robust continuous action generation for embodied control. Developed GeCO, a time-unconditional flow-matching framework for adaptive and robust robotic control.</span>
+      </li>
+      <li>
+        <span class="what">Embodied AI Intern</span><span class="when">Feb 2025 – Aug 2025</span>
+        <span class="where">UMass Amherst · with Prof. Chuang Gan</span>
+        <span class="detail">Worked on LLM-based embodied agents and interactive multi-agent simulation environments. Contributed to ELLA and the Virtual Community project.</span>
+      </li>
+    </ul>
+
+    <h2 class="section-title">Education</h2>
+    <ul class="cv">
+      <li>
+        <span class="what">B.S. Candidate in Computer Science</span><span class="when">2022 – 2027</span>
+        <span class="where">Institute for Interdisciplinary Information Sciences, Tsinghua University</span>
+        <span class="detail">GPA 3.73 / 4.0. Selected coursework: Deep Learning, Deep Reinforcement Learning, Algorithm Design, Linear Algebra, Calculus, Probability and Statistics, Artificial Intelligence: Principles and Technology.</span>
+      </li>
+    </ul>
+
+    <h2 class="section-title">Awards</h2>
+    <ul class="cv">
+      <li><span class="what">School Scholarship, Tsinghua University</span><span class="when">2023</span></li>
+      <li><span class="what">Gold Medal, CCPC Guilin Regional Contest</span><span class="when">2022</span></li>
+      <li><span class="what">Freshman Scholarship, Tsinghua University</span><span class="when">2022</span></li>
+      <li><span class="what">Gold Medal, National Olympiad in Informatics (NOI), China</span><span class="when">2021</span></li>
+      <li><span class="what">International Gold Medal, Asia-Pacific Informatics Olympiad (APIO)</span><span class="when">2021</span></li>
+    </ul>
   </main>
 
-  <footer class="site-footer wrap">© 2026 hs-black</footer>
+  <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
 
   <script>
-    // Hero: types out a sentence token by token, tinted by a made-up
-    // "confidence", then starts over.
+    // Types the tagline out token by token, tinted by a made-up "confidence".
     (() => {
       const el = document.getElementById('stream');
       const tokens = [
-        ['你好', .9], ['，', .95], ['这里', .6], ['是', .8], [' hs', .4], ['-black', .7],
-        ['的', .9], ['博客', .85], ['。', .9], ['最近', .5], ['在', .7], ['折腾', .3],
-        ['大', .8], ['模型', .95], ['，', .6], ['顺便', .35], ['把', .5], ['想法', .55],
-        ['写', .6], ['下来', .8], ['。', .95],
+        ['Emb', .5], ['odied', .9], [' AI', .95], [',', .8], [' VLA', .4], [' models', .7],
+        [',', .85], [' and', .9], [' robotic', .45], [' control', .8],
       ];
       const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
       const caret = document.createElement('span');
@@ -67,7 +150,6 @@
         s.className = 'tok';
         s.textContent = text;
         s.style.setProperty('--p', p);
-        s.title = 'p ≈ ' + p.toFixed(2);
         return s;
       }
 
@@ -75,13 +157,13 @@
 
       let i = 0;
       function tick() {
-        if (i === 0) { el.replaceChildren(caret); }
+        if (i === 0) el.replaceChildren(caret);
         if (i < tokens.length) {
           el.insertBefore(chip(tokens[i++]), caret);
-          setTimeout(tick, 120 + Math.random() * 220);
+          setTimeout(tick, 140 + Math.random() * 220);
         } else {
           i = 0;
-          setTimeout(tick, 4000);
+          setTimeout(tick, 5000);
         }
       }
       tick();

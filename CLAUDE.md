@@ -1,6 +1,7 @@
 # hs-black.github.io
 
-Personal blog about LLMs, served by GitHub Pages straight from this repo.
+Personal site and blog of Zunzhe Zhang (Tsinghua IIIS; embodied AI, VLA
+models, LLMs), served by GitHub Pages straight from this repo.
 There is **no generator and no build step**: every page is hand-written HTML,
 and whatever is in the publishing branch is what goes live.
 The owner asks Claude to write the posts; this file is how to do that.
@@ -8,15 +9,21 @@ The owner asks Claude to write the posts; this file is how to do that.
 ## Layout
 
 ```
-index.html            home page; the post list is hand-maintained here
+index.html            home: profile, about, selected papers, recent posts, CV
+papers/index.html     full publication list (abstract + BibTeX toggles)
+projects/index.html   projects and tools
+blog/index.html       archive of all posts, grouped by year, filter by kind
+posts/<slug>/index.html   one folder per post
+tools/<name>/index.html   standalone interactive tools (linked from projects)
 feed.xml              RSS; hand-maintained, one <item> per post
 404.html
 .nojekyll             stops GitHub Pages from running Jekyll
 assets/site.css       shared styles + color tokens (light/dark)
 assets/slides.css     slide-deck styles (load after site.css)
 assets/slides.js      slide engine (navigation, fragments, slidechange event)
+assets/img/           avatar and other shared images
 assets/favicon.svg
-posts/<slug>/index.html   one folder per post
+files/resume.pdf      linked from the home page
 templates/article.html    starting point for an article / interactive post
 templates/deck.html       starting point for a slide deck
 ```
@@ -29,12 +36,27 @@ folder and are referenced relatively.
 
 1. Pick a short lowercase slug (`kv-cache`, `rlhf-notes`) and copy the right
    template to `posts/<slug>/index.html`.
-2. Fill in `<title>` (`标题 · hs-black`), `<meta name="description">`, the
+2. Fill in `<title>` (`标题 · Zunzhe Zhang`), `<meta name="description">`, the
    `<h1>`, the kind label and the date.
-3. Add an entry at the **top** of the list in `index.html`, matching the
-   existing entries (title, kind, `<time>`, one-line description).
-4. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
-5. Preview locally (below), then commit and push.
+3. Add an entry at the **top** of the current year in `blog/index.html`
+   (start a new `<section class="archive-year">` for a new year), with the
+   right `data-kind`.
+4. Update "Recent Posts" on `index.html`: it shows the newest **3** posts,
+   so add the new one on top and drop the fourth.
+5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
+6. Preview locally (below), then commit and push.
+
+The header nav (Home / Papers / Projects / Blog) is copied into every page;
+mark the current section with `aria-current="page"`. If the nav changes,
+change it in every page and both templates.
+
+## Adding a paper
+
+Add it at the top of `papers/index.html` (authors with the owner in
+`<span class="me">`, venue, one-line summary, links, abstract, BibTeX), and
+add the short form to "Selected Papers" on `index.html` if it should be
+featured. Only use metadata the owner gives or that you have verified (arXiv
+page etc.); never guess venues, author order or years.
 
 Kinds, used in both the post header and the home list:
 
@@ -46,7 +68,8 @@ Kinds, used in both the post header and the home list:
 
 ## Writing
 
-- Posts are in Chinese unless the owner asks otherwise. Write in the owner's
+- Personal / academic pages (home, papers, projects) are in English; posts
+  are in Chinese unless the owner asks otherwise. Write in the owner's
   first-person voice, plainly; no filler intros or hype.
 - Technical accuracy matters more than flourish. When numbers in a demo are
   made up for illustration, say so on the page. Do not state specific facts

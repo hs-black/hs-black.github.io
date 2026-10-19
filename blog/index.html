@@ -1,0 +1,80 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Blog · Zunzhe Zhang</title>
+  <meta name="description" content="全部文章、交互演示和幻灯片，按年份归档。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>Blog</h1>
+      <p class="post-meta">文章、交互演示和幻灯片。每一页都是手写的 HTML。 · <a href="/feed.xml">RSS</a></p>
+    </header>
+
+    <div class="filters" role="group" aria-label="按类型筛选">
+      <button type="button" data-kind="all" aria-pressed="true">全部</button>
+      <button type="button" data-kind="article" aria-pressed="false">文章</button>
+      <button type="button" data-kind="interactive" aria-pressed="false">交互</button>
+      <button type="button" data-kind="deck" aria-pressed="false">幻灯片</button>
+    </div>
+
+    <!-- Archive: one <section> per year, newest first. Each <li> carries
+         data-kind="article|interactive|deck" for the filter buttons. -->
+    <section class="archive-year">
+      <h2 class="year">2026</h2>
+      <ul class="post-list">
+        <li data-kind="deck">
+          <a href="/posts/next-token/">
+            <span class="post-title">一次只猜一个 token</span>
+            <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-19">10-19</time></span>
+            <span class="post-desc">用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。</span>
+          </a>
+        </li>
+        <li data-kind="interactive">
+          <a href="/posts/hello-world/">
+            <span class="post-title">新博客，从零开始</span>
+            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
+            <span class="post-desc">这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。</span>
+          </a>
+        </li>
+      </ul>
+    </section>
+  </main>
+
+  <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
+
+  <script>
+    (() => {
+      const buttons = document.querySelectorAll('.filters button');
+      buttons.forEach((b) => b.addEventListener('click', () => {
+        const kind = b.dataset.kind;
+        buttons.forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
+        document.querySelectorAll('.archive-year').forEach((year) => {
+          let shown = 0;
+          year.querySelectorAll('li[data-kind]').forEach((li) => {
+            const show = kind === 'all' || li.dataset.kind === kind;
+            li.hidden = !show;
+            if (show) shown++;
+          });
+          year.hidden = shown === 0;
+        });
+      }));
+    })();
+  </script>
+</body>
+</html>

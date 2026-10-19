@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Papers · Zunzhe Zhang</title>
+  <meta name="description" content="Publications by Zunzhe Zhang on embodied AI, Vision-Language-Action models, and robotic control.">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/" aria-current="page">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>Papers</h1>
+      <p class="post-meta">* equal contribution</p>
+    </header>
+
+    <!-- Newest first. Each paper: title, authors (self in .me), venue, summary, links, abstract, BibTeX. -->
+    <ul class="papers">
+      <li class="paper">
+        <h2 class="paper-title">Generative Control as Optimization: Time Unconditional Flow Matching for Adaptive and Robust Robotic Control</h2>
+        <div class="paper-authors"><span class="me">Zunzhe Zhang</span>*, Runhan Huang*, Yicheng Liu, Shaoting Zhu, Linzhan Mou, Hang Zhao</div>
+        <div class="paper-venue"><span class="venue">ICLR 2026 Workshops</span> <span class="note">(LLA and ReALM-GEN)</span></div>
+        <p class="paper-summary">GeCO turns flow-matching robotic control into adaptive optimization, improving efficiency, robustness, and out-of-distribution awareness for VLA policies.</p>
+        <div class="paper-links">
+          <a href="https://arxiv.org/abs/2603.17834">arXiv</a>
+          <a href="https://arxiv.org/pdf/2603.17834">PDF</a>
+          <a href="https://hrh6666.github.io/GeCO/">Project</a>
+          <details><summary>Abstract</summary><p class="paper-extra">Generative Control as Optimization (GeCO) reframes flow-matching action generation for robotic control as adaptive iterative optimization. Instead of following a fixed integration schedule, GeCO learns a stationary velocity field in action-sequence space so inference can stop early for simple states and refine longer for difficult states. The same stationary geometry also provides a training-free signal for detecting out-of-distribution states, supporting safer deployment of Vision-Language-Action policies.</p></details>
+          <details><summary>BibTeX</summary><pre class="paper-extra">@inproceedings{zhang2026generative,
+  title={Generative Control as Optimization: Time Unconditional Flow Matching for Adaptive and Robust Robotic Control},
+  author={Zhang, Zunzhe and Huang, Runhan and Liu, Yicheng and Zhu, Shaoting and Mou, Linzhan and Zhao, Hang},
+  booktitle={ICLR Workshops},
+  year={2026},
+  url={https://arxiv.org/abs/2603.17834},
+  doi={10.48550/arXiv.2603.17834}
+}</pre></details>
+        </div>
+      </li>
+
+      <li class="paper">
+        <h2 class="paper-title">Virtual Community: An Open World for Humans, Robots, and Society</h2>
+        <div class="paper-authors">Qinhong Zhou, Hongxin Zhang, Xiangye Lin, Zheyuan Zhang, Yutian Chen, Wenjun Liu, <span class="me">Zunzhe Zhang</span>, Sunli Chen, Lixing Fang, Qiushi Lyu, Xinyu Sun, Jincheng Yang, Zeyuan Wang, Bao Chi Dang, Zhehuan Chen, Daksha Ladia, Quang Vinh Dang, Jiageng Liu, Chuang Gan</div>
+        <div class="paper-venue"><span class="venue">ICLR 2026</span> <span class="note">International Conference on Learning Representations</span></div>
+        <p class="paper-summary">An open-world platform and benchmark suite for studying human-robot coexistence, embodied social intelligence, and multi-agent planning.</p>
+        <div class="paper-links">
+          <a href="https://arxiv.org/abs/2508.14893">arXiv</a>
+          <a href="https://arxiv.org/pdf/2508.14893">PDF</a>
+          <a href="https://virtual-community-ai.github.io/">Project</a>
+          <a href="https://github.com/UMass-Embodied-AGI/Virtual-Community">Code</a>
+          <details><summary>Abstract</summary><p class="paper-extra">Virtual Community is an open-world platform for studying embodied social intelligence across humans, robots, and society. Built on real-world grounded 3D scenes and a multi-agent physics simulator, it supports social interaction, robot-human coexistence, and large-scale community generation. The paper introduces benchmark challenges for community planning and heterogeneous robot collaboration, highlighting open problems in high-level planning and low-level cooperative control.</p></details>
+          <details><summary>BibTeX</summary><pre class="paper-extra">@inproceedings{zhou2026virtual,
+  title={Virtual Community: An Open World for Humans, Robots, and Society},
+  author={Zhou, Qinhong and Zhang, Hongxin and Lin, Xiangye and Zhang, Zheyuan and Chen, Yutian and Liu, Wenjun and Zhang, Zunzhe and Chen, Sunli and Fang, Lixing and Lyu, Qiushi and Sun, Xinyu and Yang, Jincheng and Wang, Zeyuan and Dang, Bao Chi and Chen, Zhehuan and Ladia, Daksha and Dang, Quang Vinh and Liu, Jiageng and Gan, Chuang},
+  booktitle={International Conference on Learning Representations},
+  year={2026},
+  url={https://arxiv.org/abs/2508.14893},
+  doi={10.48550/arXiv.2508.14893}
+}</pre></details>
+        </div>
+      </li>
+
+      <li class="paper">
+        <h2 class="paper-title">Ella: Embodied Social Agents with Lifelong Memory</h2>
+        <div class="paper-authors">Hongxin Zhang, Zheyuan Zhang, Zeyuan Wang, <span class="me">Zunzhe Zhang</span>, Lixing Fang, Qinhong Zhou, Chuang Gan</div>
+        <div class="paper-venue"><span class="venue">ICML 2025 MAS Workshop</span></div>
+        <p class="paper-summary">An embodied social agent with structured lifelong memory for open-world social interaction and multi-agent decision-making.</p>
+        <div class="paper-links">
+          <a href="https://arxiv.org/abs/2506.24019">arXiv</a>
+          <a href="https://arxiv.org/pdf/2506.24019">PDF</a>
+          <a href="https://umass-embodied-agi.github.io/Ella/">Project</a>
+          <a href="https://github.com/UMass-Embodied-AGI/Ella">Code</a>
+          <details><summary>Abstract</summary><p class="paper-extra">Ella is an embodied social agent designed for lifelong learning in a 3D open world. It combines foundation models with a structured, non-parametric long-term multimodal memory system, including name-centric semantic memory and spatiotemporal episodic memory. Through extended observation and social interaction, Ella retrieves relevant memories, plans daily behavior, builds relationships, and adapts in multi-agent community settings.</p></details>
+          <details><summary>BibTeX</summary><pre class="paper-extra">@inproceedings{zhang2025ella,
+  title={Ella: Embodied Social Agents with Lifelong Memory},
+  author={Zhang, Hongxin and Zhang, Zheyuan and Wang, Zeyuan and Zhang, Zunzhe and Fang, Lixing and Zhou, Qinhong and Gan, Chuang},
+  booktitle={ICML MAS Workshop},
+  year={2025},
+  url={https://arxiv.org/abs/2506.24019},
+  doi={10.48550/arXiv.2506.24019}
+}</pre></details>
+        </div>
+      </li>
+    </ul>
+  </main>
+
+  <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
+</body>
+</html>
