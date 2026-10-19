@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Qwen3-Next：混合线性注意力与超稀疏 MoE · Zunzhe Zhang</title>
-  <meta name="description" content="从线性注意力推到 Gated DeltaNet、门控注意力、3:1 混合、512 专家 MoE 与 MTP。">
+  <meta name="description" content="从线性注意力推到 Gated DeltaNet、门控注意力、3:1 混合、512 expert MoE 与 MTP。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
@@ -88,9 +88,9 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
-      <p>Qwen3-Next-80B-A3B 是 Qwen 团队 2025 年 9 月发布的模型：总参数约 80B，每个 token 只激活约 3B。它没有出单独的技术报告，官方材料是一篇博客、两个 Hugging Face 模型卡和 <code>config.json</code>。这几份材料把架构上的改动说清楚了，但写得很密：混合注意力（Gated DeltaNet 加 Gated Attention，比例 3:1）、512 个专家的高稀疏 MoE、零中心且带权重衰减的 LayerNorm、归一化的路由器初始化、多 token 预测（MTP）。每一项背后都有一两篇论文。</p>
-      <p>这篇笔记把这些东西从头推一遍：先从 softmax 注意力推到线性注意力，再推 Delta 规则和 Gated DeltaNet 的递推式与分块并行算法，然后讲门控注意力为什么能消掉 attention sink，最后算清楚 3:1 混合与 512 专家在显存和计算上到底省了多少。文中的数字，凡是来自官方材料的都标了出处；我自己算的（参数量、KV cache 大小、FLOPs）会写明是按 <code>config.json</code> 推出来的。</p>
-      <p>这套架构后来没有停在 Qwen3-Next：Qwen3-Coder-Next、Qwen3.5、Qwen3.6、Qwen3.8 都沿用了它，最后一节按各自的 config 和模型卡整理了一张对照表。</p>
+      <p>Qwen3-Next-80B-A3B 是 Qwen 团队 2025 年 9 月发布的模型：总参数约 80B，每个 token 只激活约 3B。它在架构上一口气改了好几处：混合注意力（Gated DeltaNet 加 Gated Attention，比例 3:1）、512 个 expert 的高稀疏 MoE、零中心且带权重衰减的 LayerNorm、归一化的 router 初始化、多 token 预测（MTP）。每一项背后都有一两篇论文，单看名字很难知道它们解决什么问题。</p>
+      <p>这篇把这些东西从头推一遍：先从 softmax 注意力推到线性注意力，再推 Delta 规则和 Gated DeltaNet 的递推式与分块并行算法，然后讲门控注意力为什么能消掉 attention sink，最后算清楚 3:1 混合与 512 个 expert 在显存和计算上到底省了多少。参数量、KV cache 大小和 FLOPs 都是按模型的配置逐项算出来的。</p>
+      <p>这套架构后来没有停在 Qwen3-Next：Qwen3-Coder-Next、Qwen3.5、Qwen3.6、Qwen3.8 都沿用了它，最后一节整理了一张对照表。</p>
 
       <nav class="toc" aria-label="目录">
         <b>目录</b>
@@ -104,22 +104,22 @@
           <li><a href="#gated-attn">Gated Attention：SDPA 之后加一个门</a></li>
           <li><a href="#hybrid">3:1 混合布局与长上下文成本</a></li>
           <li><a href="#moe">高稀疏 MoE：512 选 10 + 1</a></li>
-          <li><a href="#stability">训练稳定性：零中心 Norm 与路由器初始化</a></li>
+          <li><a href="#stability">训练稳定性：零中心 Norm 与 router 初始化</a></li>
           <li><a href="#mtp">多 token 预测与投机解码</a></li>
-          <li><a href="#results">训练效率与长上下文：官方给出的数字</a></li>
+          <li><a href="#results">训练效率与长上下文的实测结果</a></li>
           <li><a href="#config">完整配置表</a></li>
           <li><a href="#later">后来：Qwen3.5、3.6、3.8 与 Flash-Next</a></li>
           <li><a href="#summary">小结</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </nav>
 
       <!-- ============================================================ -->
       <h2 id="overview">1. 全局：一个 80B-A3B 的模型长什么样</h2>
-      <p>先看骨架。Qwen3-Next-80B-A3B 有 48 层，隐藏维度 \(d=2048\)。每一层都是 Pre-Norm 残差结构：「token 混合器」（负责在序列维度上交换信息）加「通道混合器」（逐 token 的 FFN）。和 Qwen3 不同的是：</p>
+      <p>先看骨架。Qwen3-Next-80B-A3B 有 48 层，隐藏维度 \(d=2048\)。每一层都是 Pre-Norm 残差结构：「token 混合器」（负责在序列维度上交换信息）加「通道混合器」（逐 token 的 FFN）。和 Qwen3 相比，有三处不同：</p>
       <ul>
-        <li><strong>token 混合器有两种。</strong>每 4 层里，前 3 层用 Gated DeltaNet（一种线性注意力），第 4 层用 Gated Attention（带输出门的标准 softmax 注意力）。模型卡写作 <code>12 * (3 * (Gated DeltaNet -&gt; MoE) -&gt; 1 * (Gated Attention -&gt; MoE))</code>。config 里对应 <code>full_attention_interval = 4</code>，transformers 的实现中第 \(i\) 层（从 0 数）当 \((i+1)\bmod 4 = 0\) 时是全注意力，也就是第 3、7、11、…、47 层。</li>
-        <li><strong>每一层的 FFN 都是 MoE。</strong>512 个路由专家，每个 token 选 10 个，再加 1 个所有 token 都走的共享专家；每个专家是中间维度 512 的 SwiGLU。</li>
+        <li><strong>token 混合器有两种。</strong>每 4 层里，前 3 层用 Gated DeltaNet（一种线性注意力），第 4 层用 Gated Attention（带输出门的标准 softmax 注意力）。整体就是 <code>12 × (3 × (Gated DeltaNet → MoE) → 1 × (Gated Attention → MoE))</code>：第 \(i\) 层（从 0 数）当 \((i+1)\bmod 4 = 0\) 时是全注意力，也就是第 3、7、11、…、47 层。</li>
+        <li><strong>每一层的 FFN 都是 MoE。</strong>512 个 routed expert，每个 token 选 10 个，再加 1 个所有 token 都走的 shared expert；每个 expert 是中间维度 512 的 SwiGLU。</li>
         <li><strong>主干之外还有一个 MTP 模块</strong>，训练时预测更远的 token，推理时当投机解码的草稿模型。</li>
       </ul>
 
@@ -167,24 +167,24 @@
             <rect class="box" x="500" y="40" width="16" height="12" rx="3"/><text x="522" y="51">MoE FFN（48 层）</text>
           </g>
         </svg>
-        <figcaption>图 1　Qwen3-Next-80B-A3B 的层结构（按模型卡与 config 重画）。</figcaption>
+        <figcaption>图 1　Qwen3-Next-80B-A3B 的层结构。</figcaption>
       </figure>
 
-      <p>按 config 算一下参数分布（我用 transformers 的模块形状逐项累加，和模型卡的「80B 总参数、79B 非嵌入参数」对得上）：</p>
+      <p>按各模块的形状逐项累加，参数分布如下（合计约 80B，其中非嵌入参数约 79B）：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>部分</th><th class="num">每层参数</th><th class="num">层数</th><th class="num">合计</th></tr></thead>
           <tbody>
             <tr><td>Gated DeltaNet 混合器</td><td class="num">33.7M</td><td class="num">36</td><td class="num">1.21B</td></tr>
             <tr><td>Gated Attention 混合器</td><td class="num">27.3M</td><td class="num">12</td><td class="num">0.33B</td></tr>
-            <tr><td>MoE（512 专家 + 共享专家 + 路由器）</td><td class="num">1.615B</td><td class="num">48</td><td class="num">77.5B</td></tr>
+            <tr><td>MoE（512 expert + shared expert + router）</td><td class="num">1.615B</td><td class="num">48</td><td class="num">77.5B</td></tr>
             <tr><td>词嵌入 + 输出头（不共享）</td><td class="num">—</td><td class="num">—</td><td class="num">0.62B</td></tr>
             <tr><td><b>总计</b></td><td></td><td></td><td class="num"><b>≈ 79.7B</b></td></tr>
             <tr><td>每 token 激活（非嵌入）</td><td></td><td></td><td class="num">≈ 3.25B</td></tr>
           </tbody>
         </table>
       </div>
-      <p>可以看到 97% 的参数在专家里，而 token 混合器总共才 1.5B。权重文件里还有一个 <code>mtp.*</code> 模块（约 1.65B），所以 safetensors 的总大小是 162.6 GB（bf16，约 81.3B 个数）。</p>
+      <p>可以看到 97% 的参数在 expert 里，而 token 混合器总共才 1.5B。权重文件里还有一个 <code>mtp.*</code> 模块（约 1.65B），所以 safetensors 的总大小是 162.6 GB（bf16，约 81.3B 个数）。</p>
 
       <!-- ============================================================ -->
       <h2 id="linear">2. 从 softmax 注意力到线性注意力</h2>
@@ -193,13 +193,13 @@
       $$o_t=\sum_{j\le t}\frac{\exp(q_t^\top k_j/\sqrt{d_k})}{\sum_{l\le t}\exp(q_t^\top k_l/\sqrt{d_k})}\,v_j .$$
       <p>写成矩阵：\(O=\mathrm{softmax}\big((QK^\top/\sqrt{d_k})\odot M\big)V\)，\(M\) 是因果掩码。两个成本：</p>
       <ul>
-        <li><strong>训练 / 预填充</strong>：要算 \(N\times N\) 的分数矩阵，FLOPs 是 \(O(N^2 d)\)。FlashAttention 不存这个矩阵，但计算量还是平方的。</li>
-        <li><strong>解码</strong>：生成第 \(t\) 个 token 时要和之前所有 \(t-1\) 个键值做点积，所以每步 \(O(t\,d)\)，并且要把所有 \(k_j, v_j\) 存成 KV cache，显存随长度线性增长。在 256K 上下文下，KV cache 往往比模型权重还大。</li>
+        <li><strong>训练与 prefill</strong>（一次性处理整段输入）：要算 \(N\times N\) 的分数矩阵，FLOPs 是 \(O(N^2 d)\)。FlashAttention 不存这个矩阵，但计算量还是平方的。</li>
+        <li><strong>decode</strong>（逐个生成新 token）：生成第 \(t\) 个 token 时要和之前所有 \(t-1\) 个键值做点积，所以每步 \(O(t\,d)\)，并且要把所有 \(k_j, v_j\) 存成 KV cache，显存随长度线性增长。在 256K 上下文下，KV cache 往往比模型权重还大。</li>
       </ul>
       <p>根源在于 softmax：\(\exp(q^\top k)\) 不能拆成「只依赖 \(q\)」乘「只依赖 \(k\)」的形式，所以每个查询都得重新扫一遍所有键。</p>
 
       <h3>2.2 核化：把 exp 换成特征内积</h3>
-      <p>Katharopoulos 等人（2020）的想法是把相似度 \(\exp(q^\top k)\) 换成某个特征映射的内积 \(\phi(q)^\top\phi(k)\)：</p>
+      <p>线性注意力的想法是把相似度 \(\exp(q^\top k)\) 换成某个特征映射的内积 \(\phi(q)^\top\phi(k)\)：</p>
       $$o_t=\frac{\sum_{j\le t}\big(\phi(q_t)^\top\phi(k_j)\big)v_j}{\sum_{l\le t}\phi(q_t)^\top\phi(k_l)}
       =\frac{\Big(\sum_{j\le t}v_j\phi(k_j)^\top\Big)\phi(q_t)}{\Big(\sum_{l\le t}\phi(k_l)\Big)^\top\phi(q_t)} .$$
       <p>第二个等号只用了矩阵乘法的结合律：\(\big(\phi(q)^\top\phi(k)\big)v = \big(v\,\phi(k)^\top\big)\phi(q)\)。括号里的求和与 \(q_t\) 无关，可以提前累加。</p>
@@ -209,8 +209,8 @@
       <h3>2.3 递推形式：线性注意力是一个 RNN</h3>
       <p>令 \(S_t=\sum_{j\le t}v_jk_j^\top\in\mathbb R^{d_v\times d_k}\)，就得到</p>
       $$S_t=S_{t-1}+v_tk_t^\top,\qquad o_t=S_tq_t .$$
-      <p>这就是一个以矩阵 \(S_t\) 为隐状态的 RNN。解码时每步只做一次外积更新和一次矩阵-向量乘，代价 \(O(d_kd_v)\)，和已经生成了多少 token 无关；显存也只需要存 \(S_t\)，不需要 KV cache。</p>
-      <p>\(S\) 可以理解为一个<strong>联想记忆</strong>（associative memory）：写入时把「键 → 值」的映射以外积形式叠加进去，读出时用查询去「检索」：\(S q=\sum_j v_j(k_j^\top q)\)，即所有存过的值按键与查询的相似度加权求和。Schlag 等人（2021）指出这和 90 年代的 fast weight programmer 是同一个东西：\(S\) 是一组「快权重」，由慢权重（投影矩阵）在每一步编程。</p>
+      <p>这就是一个以矩阵 \(S_t\) 为隐状态的 RNN。decode 时每步只做一次外积更新和一次矩阵-向量乘，代价 \(O(d_kd_v)\)，和已经生成了多少 token 无关；显存也只需要存 \(S_t\)，不需要 KV cache。</p>
+      <p>\(S\) 可以理解为一个<strong>联想记忆</strong>（associative memory）：写入时把「键 → 值」的映射以外积形式叠加进去，读出时用查询去「检索」：\(S q=\sum_j v_j(k_j^\top q)\)，即所有存过的值按键与查询的相似度加权求和。这和 90 年代的 fast weight programmer 是同一个东西：\(S\) 是一组「快权重」，由慢权重（投影矩阵）在每一步编程。</p>
 
       <h3>2.4 并行形式与分块形式</h3>
       <p>训练时不想一个个 token 地递推（GPU 上串行很慢）。展开递推得到并行形式：</p>
@@ -218,7 +218,7 @@
       <p>和 softmax 注意力只差一个 softmax，但这样又回到了 \(O(N^2)\)。实际用的是两者的折中——<strong>分块形式</strong>（chunkwise）：把序列切成长度为 \(C\) 的块，块与块之间用递推传状态，块内部用并行形式。设第 \([i]\) 块开始时的状态为 \(S_{[i]}\)，块内的 \(Q_{[i]},K_{[i]},V_{[i]}\in\mathbb R^{C\times d}\)，则</p>
       $$O_{[i]}=\underbrace{Q_{[i]}S_{[i]}^\top}_{\text{块间：读历史状态}}+\underbrace{\big(Q_{[i]}K_{[i]}^\top\odot M\big)V_{[i]}}_{\text{块内：小的并行注意力}},\qquad
       S_{[i+1]}=S_{[i]}+V_{[i]}^\top K_{[i]} .$$
-      <p>每块的成本是 \(O(C^2d+Cd^2)\)，总成本 \(O(NCd+Nd^2)\)，对 \(N\) 线性；而且全部是稠密矩阵乘，能吃满 Tensor Core。串行步数从 \(N\) 降到 \(N/C\)。transformers 里 Qwen3-Next 的参考实现用的 \(C=64\)。</p>
+      <p>每块的成本是 \(O(C^2d+Cd^2)\)，总成本 \(O(NCd+Nd^2)\)，对 \(N\) 线性；而且全部是稠密矩阵乘，能吃满 Tensor Core。串行步数从 \(N\) 降到 \(N/C\)。Qwen3-Next 用的块长是 \(C=64\)。</p>
 
       <h3>2.5 问题：加性记忆会「撑爆」</h3>
       <p>线性注意力在语言建模困惑度上能接近 Transformer，但在需要精确回忆的任务（在上下文里找某个 key 对应的 value、多跳检索、长文问答）上明显落后。原因可以从联想记忆的角度直接看出来。假设所有键都是单位向量，读出第 \(i\) 个键：</p>
@@ -246,7 +246,7 @@
         <li>\(\beta_t\in(0,1)\) 时是部分改写：\(S_tk_t=(1-\beta_t)S_{t-1}k_t+\beta_tv_t\)，在旧值和新值之间插值。\(\beta_t\) 由网络根据当前 token 决定（Qwen3-Next 里是 \(\sigma(W_bx_t)\)），相当于一个数据依赖的学习率。</li>
         <li>转移矩阵 \(I-\beta_tk_tk_t^\top\) 是广义 Householder 矩阵。当 \(\lVert k_t\rVert=1\)、\(0\le\beta_t\le 2\) 时，它的特征值是 \(1-\beta_t\)（在 \(k_t\) 方向）和 1（其它方向），谱范数不超过 1，递推不会爆炸。这也是为什么 Gated DeltaNet 要对 \(k\) 做 L2 归一化。</li>
       </ul>
-      <p>下面这个演示用 \(d_k=d_v=4\) 的玩具状态，逐个 token 写入键值对，左边用加性更新（线性注意力），右边用（门控）Delta 规则，并实时显示每个已写入键的检索误差 \(\lVert S k_i - v_i^{\text{最新}}\rVert\)。键和值是用固定随机种子生成的，只为示意。</p>
+      <p>下面这个演示用 \(d_k=d_v=4\) 的玩具状态，逐个 token 写入键值对，左边用加性更新（线性注意力），右边用（门控）Delta 规则，并实时显示每个已写入键的检索误差 \(\lVert S k_i - v_i^{\text{最新}}\rVert\)。键和值由固定随机种子生成（示意）。</p>
 
       <div class="demo" id="dr-demo">
         <div class="demo-label">演示 1 · Delta 规则 vs 加性更新（d = 4）</div>
@@ -301,12 +301,12 @@
       <p>给加性更新加一个数据依赖的标量衰减 \(\alpha_t\in(0,1)\)：</p>
       $$S_t=\alpha_tS_{t-1}+v_tk_t^\top .$$
       <p>这就是 Mamba2（在每个头上用标量衰减）所对应的线性注意力形式；GLA 用的是逐维（向量）衰减。展开后，第 \(j\) 个 token 对第 \(t\) 步的贡献被乘上 \(\prod_{s=j+1}^{t}\alpha_s\)，即它「经过的所有门」的乘积。\(\alpha_t\) 接近 0 时整块清空记忆（比如遇到文档边界），接近 1 时保留。</p>
-      <p>门控擅长<em>快速、整体地</em>遗忘，但它对所有内容一视同仁：想忘掉某一个键值对，就必须连带衰减所有别的。Delta 规则正相反，擅长<em>精确地</em>修改某个键，但不能快速清空。Gated DeltaNet 论文的观察就是这两者互补。</p>
+      <p>门控擅长<em>快速、整体地</em>遗忘，但它对所有内容一视同仁：想忘掉某一个键值对，就必须连带衰减所有别的。Delta 规则正相反，擅长<em>精确地</em>修改某个键，但不能快速清空。两者正好互补，Gated DeltaNet 就是把它们合在一起。</p>
 
       <h3>4.2 门控 Delta 规则</h3>
       <p>把两者合起来：</p>
       $$\boxed{S_t=S_{t-1}\Big(\alpha_t\big(I-\beta_tk_tk_t^\top\big)\Big)+\beta_tv_tk_t^\top,\qquad o_t=S_tq_t}$$
-      <p>从在线学习的角度看，这等价于：先对旧状态做一步权重衰减（\(S\leftarrow\alpha_tS\)），再对平方损失做一步梯度下降。和 transformers 里 <code>torch_recurrent_gated_delta_rule</code> 的写法一一对应：</p>
+      <p>从在线学习的角度看，这等价于：先对旧状态做一步权重衰减（\(S\leftarrow\alpha_tS\)），再对平方损失做一步梯度下降。写成逐 token 的代码：</p>
       <pre><code># 每个头，S 的形状是 [d_k, d_v]（代码里是转置的约定：读出用 qᵀS）
 S = S * exp(g_t)                     # α_t = exp(g_t)，g_t ≤ 0
 pred = S.T @ k_t                     # 旧记忆对 k_t 的预测
@@ -317,11 +317,11 @@ o_t = S.T @ q_t</code></pre>
       <h3>4.3 门怎么参数化</h3>
       <p>Qwen3-Next 的 \(\alpha_t\) 沿用 Mamba2 的「离散化」写法。每个值头 \(h\) 有一个可学习的 \(A_h>0\)（以 \(\log A_h\) 存储）和偏置 \(\Delta_h\)，输入投影给出一个标量 \(a_t\)：</p>
       $$g_t=-A_h\cdot\mathrm{softplus}(a_t+\Delta_h),\qquad \alpha_t=e^{g_t}\in(0,1).$$
-      <p>softplus 保证步长 \(\mathrm{softplus}(\cdot)>0\)，\(A_h>0\) 保证 \(g_t\lt 0\)。在 Mamba 的连续时间视角下，\(\mathrm{softplus}(a_t+\Delta_h)\) 是时间步长 \(\Delta t\)，\(e^{-A\Delta t}\) 是零阶保持离散化下的衰减。transformers 里 \(A\) 初始化为 \([0.01,16]\) 上的均匀分布、\(\Delta\) 初始化为 1（这是开源实现的初始化，官方训练时是否相同我没有查到）。写入强度 \(\beta_t=\sigma(b_t)\)，也是每个值头一个标量。在 log 空间里计算 \(g_t\) 有个好处：分块算法需要的累积衰减 \(\prod\alpha\) 变成 \(g\) 的前缀和，不会下溢。</p>
+      <p>softplus 保证步长 \(\mathrm{softplus}(\cdot)>0\)，\(A_h>0\) 保证 \(g_t\lt 0\)。在 Mamba 的连续时间视角下，\(\mathrm{softplus}(a_t+\Delta_h)\) 是时间步长 \(\Delta t\)，\(e^{-A\Delta t}\) 是零阶保持离散化下的衰减。初始化时 \(A\) 取 \([0.01,16]\) 上的均匀分布，\(\Delta\) 取 1，于是不同的头一开始就有快慢不同的遗忘速度。写入强度 \(\beta_t=\sigma(b_t)\)，也是每个值头一个标量。在 log 空间里计算 \(g_t\) 有个好处：分块算法需要的累积衰减 \(\prod\alpha\) 变成 \(g\) 的前缀和，不会下溢。</p>
 
       <!-- ============================================================ -->
       <h2 id="chunk">5. 分块并行算法：训练时怎么算得快</h2>
-      <p>门控 Delta 规则的转移矩阵 \(\alpha_t(I-\beta_tk_tk_t^\top)\) 依赖于状态本身的投影，不再是简单的加法，所以 2.4 节那种「块内并行、块间加」的写法不能直接用。DeltaNet 并行化论文（Yang 等，2024）给出的办法是用 WY 表示 / UT 变换把一串 Householder 乘积压缩成低秩形式。我在这里按 Gated DeltaNet 的情况完整推一遍（推导结果我用 numpy 对逐 token 递推做过数值核对，误差在 \(10^{-15}\) 量级）。</p>
+      <p>门控 Delta 规则的转移矩阵 \(\alpha_t(I-\beta_tk_tk_t^\top)\) 依赖于状态本身的投影，不再是简单的加法，所以 2.4 节那种「块内并行、块间加」的写法不能直接用。解决办法是用 WY 表示和 UT 变换，把一串 Householder 乘积压缩成低秩形式。下面先推没有门控的情况，再加上门控。</p>
 
       <h3>5.1 块内展开</h3>
       <p>考虑一个长度为 \(C\) 的块，块开始时的状态为 \(S_0\)，块内位置记为 \(r=1,\dots,C\)。定义块内累积衰减</p>
@@ -331,12 +331,12 @@ o_t = S.T @ q_t</code></pre>
       <p>其中 \(w_j\in\mathbb R^{d_k},u_j\in\mathbb R^{d_v}\) 满足</p>
       $$w_r=\beta_r\Big(k_r-\sum_{j\lt r}(k_j^\top k_r)\,w_j\Big),\qquad u_r=\beta_r\Big(v_r-\sum_{j\lt r}(k_j^\top k_r)\,u_j\Big).$$
       <p class="eqnote">（归纳步：把 \(S_{r-1}\) 的表达式代入 \(S_r=S_{r-1}+\beta_r(v_r-S_{r-1}k_r)k_r^\top\)，\(S_{r-1}k_r=S_0k_r+\sum_{j\lt r}(u_j-S_0w_j)(k_j^\top k_r)\)，整理即得。）</p>
-      <p>这两个递推都是「下三角线性方程组」。记 \(A\) 为严格下三角矩阵，\(A_{rj}=\beta_r\,k_r^\top k_j\)（\(j\lt r\)），则</p>
+      <p>这两个递推是串行的：\(w_r\) 依赖于所有更早的 \(w_j\)。但把它们移项就会发现，它们其实是「下三角线性方程组」。记 \(A\) 为严格下三角矩阵，\(A_{rj}=\beta_r\,k_r^\top k_j\)（\(j\lt r\)），则</p>
       $$(I+A)\,W=\mathrm{diag}(\beta)K,\qquad (I+A)\,U=\mathrm{diag}(\beta)V .$$
-      <p>\(T=(I+A)^{-1}\) 只是一个 \(C\times C\) 的单位下三角矩阵求逆（前代法，或者 <code>solve_triangular</code>），这就是所谓的 UT 变换。一个块里所有的 Householder 乘积，被压缩成了 \(W,U\) 两个 \(C\times d\) 的矩阵。</p>
+      <p>\(T=(I+A)^{-1}\) 只是一个 \(C\times C\) 的单位下三角矩阵求逆（前代法，或者 <code>solve_triangular</code>），这一步叫 UT 变换。一个块里所有的 Householder 乘积，被压缩成了 \(W,U\) 两个 \(C\times d\) 的矩阵。</p>
 
       <h3>5.2 加上门控</h3>
-      <p>有衰减时，把每个贡献按「它之后经过的衰减」缩放即可。推导方式相同，结果是：</p>
+      <p>有衰减时，第 \(j\) 个 token 写入的内容到第 \(r\) 步时已经被乘上了 \(\Gamma_{rj}\)，所以把每个贡献按「它之后经过的衰减」缩放即可。归纳过程完全相同，结果是：</p>
       $$A_{rj}=\beta_r\,\Gamma_{rj}\,k_r^\top k_j\ (j\lt r),\qquad
       U=(I+A)^{-1}\mathrm{diag}(\beta)V,\qquad
       W=(I+A)^{-1}\mathrm{diag}(\beta\odot\gamma)K .$$
@@ -352,12 +352,12 @@ o_t = S.T @ q_t</code></pre>
     Δ   = U − W S₀ᵀ                            # 减去旧状态的预测
     O_i = diag(γ) Q S₀ᵀ + (Q Kᵀ ⊙ Γ ⊙ M) Δ
     S₀  = γ_C S₀ + Δᵀ diag(γ_C/γ) K</code></pre>
-      <p>成本分析：每块有若干 \(C\times C\times d\) 和 \(C\times d\times d\) 的矩阵乘，加一个 \(C\times C\) 三角求解，总 FLOPs 约 \(O(N(Cd+d^2))\)；串行深度是 \(N/C\)。和 softmax 注意力的 \(O(N^2d)\) 相比，长序列时省下的是整整一个 \(N/C\) 的因子。transformers 的参考实现就是这个流程（<code>torch_chunk_gated_delta_rule</code>），生产环境用 flash-linear-attention 库里的 Triton kernel <code>chunk_gated_delta_rule</code>，它在此基础上还做了块内的进一步分解和 kernel 融合。</p>
-      <p>解码阶段不需要分块：每生成一个 token 就按 4.2 节的递推式走一步，代价是常数。</p>
+      <p>成本分析：每块有若干 \(C\times C\times d\) 和 \(C\times d\times d\) 的矩阵乘，加一个 \(C\times C\) 三角求解，总 FLOPs 约 \(O(N(Cd+d^2))\)；串行深度是 \(N/C\)。和 softmax 注意力的 \(O(N^2d)\) 相比，长序列时省下的是整整一个 \(N/C\) 的因子。实际训练和推理用的是 flash-linear-attention 库里的 Triton kernel <code>chunk_gated_delta_rule</code>，它在这个流程的基础上还做了块内的进一步分解和 kernel 融合。</p>
+      <p>decode 阶段不需要分块：每生成一个 token 就按 4.2 节的递推式走一步，代价是常数。</p>
 
       <!-- ============================================================ -->
       <h2 id="gdn-layer">6. Qwen3-Next 里的 Gated DeltaNet 层</h2>
-      <p>上面讲的是「核心递推」。一个完整的 Gated DeltaNet 层在它前后还包了一圈东西。按 transformers 的 <code>Qwen3NextGatedDeltaNet</code> 和 config 逐步走一遍（\(x_t\in\mathbb R^{2048}\) 是 RMSNorm 之后的输入）：</p>
+      <p>上面讲的是「核心递推」。一个完整的 Gated DeltaNet 层在它前后还包了一圈东西。我们按数据流逐步走一遍（\(x_t\in\mathbb R^{2048}\) 是 RMSNorm 之后的输入）：</p>
 
       <figure class="fig scroll">
         <svg viewBox="0 0 720 300" role="img" aria-label="Gated DeltaNet 层的数据流">
@@ -380,19 +380,19 @@ o_t = S.T @ q_t</code></pre>
           <path class="line" d="M650 200 H 665 V 250"/>
           <rect class="box" x="620" y="250" width="95" height="40" rx="8"/><text x="667" y="268" text-anchor="middle" font-size="12">out_proj</text><text x="667" y="283" text-anchor="middle" font-size="11" class="soft">4096 → 2048</text>
         </svg>
-        <figcaption>图 2　Gated DeltaNet 层（按 transformers 实现重画；维度来自 config）。</figcaption>
+        <figcaption>图 2　Gated DeltaNet 层的数据流。</figcaption>
       </figure>
 
       <ol>
         <li><strong>输入投影</strong>。<code>in_proj_qkvz</code>：\(2048\to12288\)，切成 \(q\)（16 头 × 128）、\(k\)（16 头 × 128）、\(v\)（32 头 × 128）、\(z\)（32 头 × 128）。<code>in_proj_ba</code>：\(2048\to64\)，切成 32 个 \(b\) 和 32 个 \(a\)（每个值头各一个）。</li>
-        <li><strong>短卷积</strong>。把 \(q,k,v\) 拼成 8192 个通道，做核长 4 的因果 depthwise 1D 卷积，再接 SiLU。它让每个 token 的 \(q,k,v\) 看到前 3 个 token 的局部信息，这对「归纳头」类型的模式（看到 A B … A 时预测 B）很有帮助——线性注意力本身没有位置编码，局部的位置感主要靠它。解码时只要缓存最近 3 个 token 的这 8192 维输入。</li>
+        <li><strong>短卷积</strong>。把 \(q,k,v\) 拼成 8192 个通道，做核长 4 的因果 depthwise 1D 卷积，再接 SiLU。它让每个 token 的 \(q,k,v\) 看到前 3 个 token 的局部信息，这对「归纳头」类型的模式（看到 A B … A 时预测 B）很有帮助——线性注意力本身没有位置编码，局部的位置感主要靠它。decode 时只要缓存最近 3 个 token 的这 8192 维输入。</li>
         <li><strong>归一化</strong>。对每个头的 \(q,k\) 做 L2 归一化（保证 \(\lVert k\rVert=1\)，Delta 规则的转移矩阵稳定），\(q\) 再乘 \(1/\sqrt{128}\)。</li>
-        <li><strong>QK 头少于 V 头</strong>。config 是 <code>linear_num_key_heads = 16</code>、<code>linear_num_value_heads = 32</code>：每个 \(q,k\) 头被 <code>repeat_interleave</code> 复制给 2 个值头使用。这和 GQA 方向相反（GQA 是多个 Q 头共享一组 KV），这里是两个值头共享一组 \((q,k)\)，但各自有独立的 \(v\)、\(\alpha\)、\(\beta\) 和状态。所以状态一共 32 份，每份 \(128\times128\)。</li>
-        <li><strong>核心递推</strong>：门控 Delta 规则，训练 / 预填充用分块算法，解码用逐 token 递推。</li>
-        <li><strong>输出门</strong>。对每个头的输出（128 维）做 RMSNorm，乘上 \(\mathrm{SiLU}(z)\)，32 个头拼成 4096 维，再经 <code>out_proj</code> 回到 2048。这个「norm 后乘门」的结构来自 Mamba2 / Gated DeltaNet 论文的块设计。</li>
+        <li><strong>QK 头少于 V 头</strong>：16 个 QK 头、32 个 V 头，每个 \(q,k\) 头被 <code>repeat_interleave</code> 复制给 2 个值头使用。这和 GQA 方向相反（GQA 是多个 Q 头共享一组 KV），这里是两个值头共享一组 \((q,k)\)，但各自有独立的 \(v\)、\(\alpha\)、\(\beta\) 和状态。所以状态一共 32 份，每份 \(128\times128\)。</li>
+        <li><strong>核心递推</strong>：门控 Delta 规则，训练 / prefill 用分块算法，decode 用逐 token 递推。</li>
+        <li><strong>输出门</strong>。对每个头的输出（128 维）做 RMSNorm，乘上 \(\mathrm{SiLU}(z)\)，32 个头拼成 4096 维，再经 <code>out_proj</code> 回到 2048。这个「norm 后乘门」的结构和 Mamba2、Gated DeltaNet 的块设计一样。</li>
       </ol>
       <p>每层参数量：\(2048\times12288+2048\times64+8192\times4+4096\times2048+\dots\approx33.7\text{M}\)。</p>
-      <p><strong>解码状态有多大？</strong>每层 32 头 × \(128\times128\) = 524,288 个数。若以 fp32 存（Qwen3.5 的 config 里写明了 <code>mamba_ssm_dtype: float32</code>；Qwen3-Next 的 config 里没有这一项），36 层共 72 MiB；卷积缓存 36 × 8192 × 3 个 bf16 约 1.7 MiB。这些和上下文长度无关。作为对比，12 个全注意力层的 KV cache 是每 token 24 KiB（下一节细算），所以大约在 3K token 时两者相当，再往后 KV cache 就占大头了。</p>
+      <p><strong>decode 状态有多大？</strong>每层 32 头 × \(128\times128\) = 524,288 个数。若以 fp32 存（后来的 Qwen3.5 在配置里明确指定了 fp32 状态），36 层共 72 MiB；卷积缓存 36 × 8192 × 3 个 bf16 约 1.7 MiB。这些和上下文长度无关。作为对比，12 个全注意力层的 KV cache 是每 token 24 KiB（下一节细算），所以大约在 3K token 时两者相当，再往后 KV cache 就占大头了。</p>
 
       <!-- ============================================================ -->
       <h2 id="gated-attn">7. Gated Attention：SDPA 之后加一个门</h2>
@@ -400,16 +400,16 @@ o_t = S.T @ q_t</code></pre>
       <p>那 12 个全注意力层是在 Qwen3 的 GQA 注意力上改的：</p>
       <ul>
         <li>16 个查询头，2 个 KV 头（GQA，每 8 个查询头共享一组 KV）；</li>
-        <li>每头维度从 128 提到 256（博客原话：increase the dimension per attention head from 128 to 256）；</li>
+        <li>每头维度从 128 提到 256；</li>
         <li>保留 Qwen3 的 QK-Norm（对每个头的 \(q,k\) 做 RMSNorm 后再算点积）；</li>
-        <li><strong>部分 RoPE</strong>：<code>partial_rotary_factor = 0.25</code>，只对 256 维里的前 64 维施加旋转位置编码，剩下 192 维不带位置信息；<code>rope_theta = 10,000,000</code>。博客说这样能改善向更长序列外推；</li>
+        <li><strong>部分 RoPE</strong>：<code>partial_rotary_factor = 0.25</code>，只对 256 维里的前 64 维施加旋转位置编码，剩下 192 维不带位置信息；<code>rope_theta = 10,000,000</code>。目的是改善向更长序列的外推；</li>
         <li><strong>输出门</strong>：下面细说。</li>
       </ul>
 
       <h3>7.2 门的位置和形式</h3>
-      <p>Qwen 团队的 Gated Attention 论文（Qiu 等，2025）系统比较了 30 多种在注意力里加门的方式（门放在 \(Q\)、\(K\)、\(V\) 投影之后，放在 SDPA 输出之后，放在输出投影之后；逐元素还是逐头；各头独立还是共享；乘性还是加性），用 15B MoE 和 1.7B 稠密模型在 3.5T token 上训练。结论是：<strong>在 SDPA（scaled dot-product attention）输出之后、输出投影之前，加一个逐元素、各头独立、依赖当前查询 token 的 sigmoid 门</strong>效果最好：</p>
+      <p>在注意力里加门的方式有很多。Qwen 团队系统比较了 30 多种在注意力里加门的方式（门放在 \(Q\)、\(K\)、\(V\) 投影之后，放在 SDPA 输出之后，放在输出投影之后；逐元素还是逐头；各头独立还是共享；乘性还是加性），用 15B MoE 和 1.7B 稠密模型在 3.5T token 上训练。结论是：<strong>在 SDPA（scaled dot-product attention）输出之后、输出投影之前，加一个逐元素、各头独立、依赖当前查询 token 的 sigmoid 门</strong>效果最好：</p>
       $$Y=\mathrm{SDPA}(Q,K,V)\odot\sigma(XW_\theta),\qquad \text{out}=YW_O .$$
-      <p>在 Qwen3-Next 的实现里，<code>q_proj</code> 的输出维度是 \(16\times256\times2=8192\)：每个头输出 512 维，前 256 维是查询，后 256 维是门的 logit。注意力输出（16 × 256 = 4096 维）逐元素乘 \(\sigma(\text{gate})\)，再进 <code>o_proj</code>。多出来的参数是 \(2048\times4096\approx8.4\)M 每层。</p>
+      <p>具体实现上，<code>q_proj</code> 的输出维度是 \(16\times256\times2=8192\)：每个头输出 512 维，前 256 维是查询，后 256 维是门的 logit。注意力输出（16 × 256 = 4096 维）逐元素乘 \(\sigma(\text{gate})\)，再进 <code>o_proj</code>。多出来的参数是 \(2048\times4096\approx8.4\)M 每层。</p>
 
       <figure class="fig scroll">
         <svg viewBox="0 0 720 135" role="img" aria-label="Gated Attention 数据流：q_proj 同时输出查询与门，SDPA 输出乘以 sigmoid 门后进入输出投影">
@@ -428,18 +428,18 @@ o_t = S.T @ q_t</code></pre>
           <path class="line" d="M570 85 H 600"/>
           <rect class="box" x="600" y="65" width="105" height="40" rx="8"/><text x="652" y="83" text-anchor="middle" font-size="12">o_proj</text><text x="652" y="98" text-anchor="middle" font-size="11" class="soft">4096 → 2048</text>
         </svg>
-        <figcaption>图 3　Gated Attention（按 transformers 实现重画）。</figcaption>
+        <figcaption>图 3　Gated Attention 的数据流。</figcaption>
       </figure>
 
       <h3>7.3 为什么有用（一）：给低秩映射加非线性</h3>
       <p>看单个头。如果没有门，值投影 \(W_V\in\mathbb R^{d\times d_h}\) 和输出投影里对应这个头的那块 \(W_O^{(h)}\in\mathbb R^{d_h\times d}\) 之间只隔着一个「对 token 加权平均」：</p>
       $$\text{out}^{(h)}_t=\Big(\sum_j a_{tj}\,x_jW_V\Big)W_O^{(h)}=\sum_j a_{tj}\,x_j\,\big(W_VW_O^{(h)}\big).$$
-      <p>\(W_VW_O^{(h)}\) 是一个秩不超过 \(d_h\) 的 \(d\times d\) 矩阵，而且在 \(j\) 维的加权平均是线性的，所以两个投影可以合并成一个低秩线性映射。论文的解释是：在 SDPA 之后（或在 \(V\) 之后）插入一个非线性门，打断了这个合并，提升了这段低秩映射的表达能力。论文报告这一改动让困惑度最多降约 0.2，MMLU 提升约 2 个点。博客里的说法是「减少注意力中的低秩问题」。</p>
+      <p>\(W_VW_O^{(h)}\) 是一个秩不超过 \(d_h\) 的 \(d\times d\) 矩阵，而且在 \(j\) 维的加权平均是线性的，所以两个投影可以合并成一个低秩线性映射。在 SDPA 之后（或在 \(V\) 之后）插入一个非线性门，就打断了这个合并，提升了这段低秩映射的表达能力。实验中这一改动让困惑度最多降约 0.2，MMLU 提升约 2 个点。</p>
 
       <h3>7.4 为什么有用（二）：attention sink 与 massive activation</h3>
-      <p><strong>Attention sink</strong>（Xiao 等，2023）：训练好的 LLM 里，很多头会把大量注意力分给序列第一个 token，即使它没有语义。一种解释是 softmax 的权重必须加起来等于 1：当一个头在当前位置「什么都不想看」时，它也得把概率放在某处，于是学会了一个无害的垃圾桶——第一个 token。</p>
-      <p><strong>Massive activation</strong>（Sun 等，2024）：残差流里少数几个维度会出现比典型值大几个数量级的激活，常出现在第一个 token 或分隔符上，和 attention sink 相伴出现。这些巨大的值在 bf16 训练里容易带来数值问题。</p>
-      <p>输出门给了模型另一种「什么都不输出」的方式：直接把门关成接近 0。论文里测得 SDPA 输出门的分数大多远小于 0.5，平均约 0.116，也就是门是稀疏的。在他们的 1.7B 稠密模型实验里（论文表 4）：</p>
+      <p><strong>Attention sink</strong>：训练好的 LLM 里，很多头会把大量注意力分给序列第一个 token，即使它没有语义。一种解释是 softmax 的权重必须加起来等于 1：当一个头在当前位置「什么都不想看」时，它也得把概率放在某处，于是学会了一个无害的垃圾桶——第一个 token。</p>
+      <p><strong>Massive activation</strong>：残差流里少数几个维度会出现比典型值大几个数量级的激活，常出现在第一个 token 或分隔符上，和 attention sink 相伴出现。这些巨大的值在 bf16 训练里容易带来数值问题。</p>
+      <p>输出门给了模型另一种「什么都不输出」的方式：直接把门关成接近 0。实测 SDPA 输出门的分数大多远小于 0.5，平均约 0.116，也就是门是稀疏的。在 1.7B 稠密模型上的对比：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>设置</th><th class="num">首 token 注意力占比</th><th class="num">最大激活（层均）</th><th class="num">PPL</th></tr></thead>
@@ -450,19 +450,19 @@ o_t = S.T @ q_t</code></pre>
           </tbody>
         </table>
       </div>
-      <p>论文还有一个有意思的对照：只在 \(V\) 投影后加门，massive activation 也会降下来，但 attention sink 仍然存在。所以作者的结论是 massive activation 不是 attention sink 的必要条件，消除 sink 的关键是<em>依赖查询、各头独立</em>的稀疏门。Qwen3-Next 博客把这件事列在「训练稳定性」下面：输出门帮助消除 attention sink 和 massive activation，保证整个模型的数值稳定。</p>
+      <p>还有一个有意思的对照：只在 \(V\) 投影后加门，massive activation 也会降下来，但 attention sink 仍然存在。可见 massive activation 不是 attention sink 的必要条件，消除 sink 的关键是<em>依赖查询、各头独立</em>的稀疏门。对 Qwen3-Next 来说，这首先是一个训练稳定性的设计：消除 attention sink 和 massive activation，整个模型的数值就更稳定。</p>
       <p>Gated DeltaNet 层里的 \(\mathrm{SiLU}(z)\) 输出门是同一个思路在线性注意力上的版本，所以 Qwen3-Next 的 48 个 token 混合器全部带有输出门。</p>
 
       <!-- ============================================================ -->
       <h2 id="hybrid">8. 3:1 混合布局与长上下文成本</h2>
       <h3>8.1 为什么不全用线性注意力</h3>
-      <p>博客的说法很直接：只用线性注意力，速度快但「回忆」能力弱；只用标准注意力，推理贵且慢。线性注意力的状态是固定大小的（这里每层 32 × 128 × 128），无论 Delta 规则写得多聪明，它都是对过去的有损压缩；而 softmax 注意力的 KV cache 原样保留了每个 token，精确检索没有容量上限。混合的思路是：大部分层用线性注意力处理局部和「可压缩」的信息，少数全注意力层负责精确的长程检索。</p>
-      <p>博客报告了两点系统实验的结论：</p>
+      <p>道理很直接：只用线性注意力，速度快但「回忆」能力弱；只用标准注意力，推理贵且慢。线性注意力的状态是固定大小的（这里每层 32 × 128 × 128），无论 Delta 规则写得多聪明，它都是对过去的有损压缩；而 softmax 注意力的 KV cache 原样保留了每个 token，精确检索没有容量上限。混合的思路是：大部分层用线性注意力处理局部和「可压缩」的信息，少数全注意力层负责精确的长程检索。</p>
+      <p>Qwen 团队的系统实验有两点结论：</p>
       <ul>
         <li>在线性注意力的候选里，Gated DeltaNet 的 in-context learning 能力强于常用的滑动窗口注意力和 Mamba2；</li>
         <li>把 Gated DeltaNet 和标准注意力按 3:1 混合（75% 的层用 Gated DeltaNet，25% 用标准注意力），效果稳定地优于任何单一架构，同时效率更高。</li>
       </ul>
-      <p>博客没有公布具体的比例消融曲线，所以我这里不展开「为什么是 3:1 而不是 7:1」——这是官方没给数据的地方。</p>
+      <p>至于为什么是 3:1 而不是 7:1，比例的消融数据没有公开。</p>
 
       <figure class="fig-strip fig">
         <svg viewBox="0 0 720 90" role="img" aria-label="48 层的排布：每 4 层中第 4 层是全注意力" id="layer-strip"></svg>
@@ -470,13 +470,13 @@ o_t = S.T @ q_t</code></pre>
       </figure>
 
       <h3>8.2 算账：KV cache 与 FLOPs</h3>
-      <p>下面按 config 算解码时的缓存和计算。记 \(L\) 为上下文长度。</p>
+      <p>现在来算 decode 时的缓存和计算。记 \(L\) 为上下文长度。</p>
       <p><strong>KV cache。</strong>每个全注意力层每 token 存 \(2\times n_{kv}\times d_h=2\times2\times256=1024\) 个数，12 层共 12,288 个，bf16 下 24 KiB/token。256K（262,144）token 时是 6 GiB。如果 48 层全是同样的注意力层，就是 96 KiB/token、256K 时 24 GiB。作为参照，Qwen3-32B（64 层、8 个 KV 头、头维 128）是 256 KiB/token，256K 时 64 GiB。</p>
-      <p><strong>每 token 解码 FLOPs。</strong>一个注意力层读 \(L\) 个 KV 的核心计算是 \(QK^\top\) 和 \(AV\) 各 \(2n_hd_hL\)，共 \(4n_hd_hL=16384L\)。一个 Gated DeltaNet 层的核心递推每头约 \(7d_kd_v\)（衰减、预测、外积写入、读出），32 头共约 3.7 MFLOPs，与 \(L\) 无关。其余（所有线性投影、MoE、输出头）按 \(2\times\) 激活参数计。</p>
+      <p><strong>每 token decode FLOPs。</strong>一个注意力层读 \(L\) 个 KV 的核心计算是 \(QK^\top\) 和 \(AV\) 各 \(2n_hd_hL\)，共 \(4n_hd_hL=16384L\)。一个 Gated DeltaNet 层的核心递推每头约 \(7d_kd_v\)（衰减、预测、外积写入、读出），32 头共约 3.7 MFLOPs，与 \(L\) 无关。其余（所有线性投影、MoE、输出头）按 \(2\times\) 激活参数计。</p>
       <p>下面的计算器把这些式子都写进去了。「全注意力版」是一个假想的对照：48 层都用 Qwen3-Next 的 Gated Attention 层，其它不变。</p>
 
       <div class="demo" id="ctx-demo">
-        <div class="demo-label">演示 2 · 上下文长度 vs 显存与计算（按 config 计算）</div>
+        <div class="demo-label">演示 2 · 上下文长度 vs 显存与计算</div>
         <div class="ctrls">
           <label class="ctrl"><span>上下文长度</span><input type="range" id="cx-len" min="10" max="20" step="0.05" value="15"><output id="cx-len-v"></output></label>
           <label class="ctrl"><span>并发序列数</span><input type="range" id="cx-b" min="0" max="7" step="1" value="0"><output id="cx-b-v"></output></label>
@@ -489,7 +489,7 @@ o_t = S.T @ q_t</code></pre>
         </div>
         <div class="row2">
           <span>曲线</span>
-          <div class="seg" id="cx-view"><button aria-pressed="true" data-v="mem">每序列缓存</button><button aria-pressed="false" data-v="dec">解码 FLOPs/token</button><button aria-pressed="false" data-v="pre">预填充总 FLOPs</button></div>
+          <div class="seg" id="cx-view"><button aria-pressed="true" data-v="mem">每序列缓存</button><button aria-pressed="false" data-v="dec">decode FLOPs/token</button><button aria-pressed="false" data-v="pre">prefill 总 FLOPs</button></div>
         </div>
         <div class="chart" id="cx-chart"></div>
         <div class="legend">
@@ -498,53 +498,53 @@ o_t = S.T @ q_t</code></pre>
           <span><i style="background:var(--text-faint)"></i>Qwen3-32B（参照）</span>
         </div>
         <div class="readout" id="cx-out"></div>
-        <p class="note">FLOPs 是理论值；线性层的预填充 FLOPs 按块长 C = 64 的分块算法粗估。真实吞吐还受显存带宽、kernel 实现和并行方式影响，不能直接换算成速度。权重显存按 bf16、含 MTP 约 81.3B 参数计。</p>
+        <p class="note">FLOPs 是理论值；线性层的 prefill FLOPs 按块长 C = 64 的分块算法粗估。真实吞吐还受显存带宽、kernel 实现和并行方式影响，不能直接换算成速度。权重显存按 bf16、含 MTP 约 81.3B 参数计。</p>
       </div>
 
       <p>拖一拖就能看出几件事：</p>
       <ul>
-        <li><strong>短上下文时差别不大。</strong>4K token 时，混合版和全注意力版的解码 FLOPs 都被 MoE 和投影主导，注意力核心只占一小部分。这时候 Qwen3-Next 的优势主要来自 MoE 的稀疏（与 Qwen3-32B 相比）。</li>
-        <li><strong>长上下文时缓存成了主角。</strong>256K 时混合版每序列 6 GiB KV + 72 MiB 状态，全注意力版 24 GiB。解码是访存受限的：每生成一个 token，都要把这条序列的整份 KV cache 从显存读一遍。缓存小 4 倍，同样显存能并发的序列数就多约 4 倍，每步读的字节也少 4 倍。</li>
-        <li><strong>即便是混合版，到三四万 token 时，12 层注意力核心的解码 FLOPs 就和模型其余部分（MoE、投影、输出头）相当了；256K 时占到近九成。</strong>这也是为什么后来的 Qwen3.8-Flash-Next 进一步把这 12 层换成了稀疏注意力（见最后一节）。</li>
+        <li><strong>短上下文时差别不大。</strong>4K token 时，混合版和全注意力版的 decode FLOPs 都被 MoE 和投影主导，注意力核心只占一小部分。这时候 Qwen3-Next 的优势主要来自 MoE 的稀疏（与 Qwen3-32B 相比）。</li>
+        <li><strong>长上下文时缓存成了主角。</strong>256K 时混合版每序列 6 GiB KV + 72 MiB 状态，全注意力版 24 GiB。decode 是访存受限的：每生成一个 token，都要把这条序列的整份 KV cache 从显存读一遍。缓存小 4 倍，同样显存能并发的序列数就多约 4 倍，每步读的字节也少 4 倍。</li>
+        <li><strong>即便是混合版，到三四万 token 时，12 层注意力核心的 decode FLOPs 就和模型其余部分（MoE、投影、输出头）相当了；256K 时占到近九成。</strong>这也是为什么后来的 Qwen3.8-Flash-Next 进一步把这 12 层换成了稀疏注意力（见最后一节）。</li>
       </ul>
 
       <!-- ============================================================ -->
       <h2 id="moe">9. 高稀疏 MoE：512 选 10 + 1</h2>
       <h3>9.1 MoE 层回顾</h3>
-      <p>Mixture-of-Experts 把一个大 FFN 换成 \(E\) 个小 FFN（专家），每个 token 只用其中 \(k\) 个。Qwen3-Next 的 MoE 层（transformers 里直接复用了 Qwen2-MoE 的模块）是：</p>
+      <p>Mixture-of-Experts 把一个大 FFN 换成 \(E\) 个小 FFN（expert），每个 token 只用其中 \(k\) 个，由一个 router 打分决定用哪几个。Qwen3-Next 的 MoE 层（和 Qwen2-MoE 的结构相同）是：</p>
       $$p=\mathrm{softmax}(W_rx)\in\mathbb R^{512},\qquad \mathcal T=\mathrm{TopK}(p,10),\qquad \tilde p_i=\frac{p_i}{\sum_{j\in\mathcal T}p_j},$$
       $$y=\sum_{i\in\mathcal T}\tilde p_i\,E_i(x)+\sigma(w_s^\top x)\,E_{\text{shared}}(x).$$
       <ul>
-        <li>路由器 \(W_r\in\mathbb R^{512\times2048}\)，softmax 之后取 top-10，再在这 10 个上重新归一化（<code>norm_topk_prob = true</code>）。</li>
-        <li>每个专家 \(E_i\) 是 SwiGLU：\(E_i(x)=W_2^{(i)}\big(\mathrm{SiLU}(W_1^{(i)}x)\odot W_3^{(i)}x\big)\)，中间维度 512，参数 \(3\times2048\times512\approx3.15\)M。</li>
-        <li>共享专家结构相同（中间维度 512），所有 token 都过，但输出乘一个由 token 决定的标量门 \(\sigma(w_s^\top x)\)。</li>
+        <li>router \(W_r\in\mathbb R^{512\times2048}\)，softmax 之后取 top-10，再在这 10 个上重新归一化（<code>norm_topk_prob = true</code>）。</li>
+        <li>每个 expert \(E_i\) 是 SwiGLU：\(E_i(x)=W_2^{(i)}\big(\mathrm{SiLU}(W_1^{(i)}x)\odot W_3^{(i)}x\big)\)，中间维度 512，参数 \(3\times2048\times512\approx3.15\)M。</li>
+        <li>shared expert 结构相同（中间维度 512），所有 token 都过，但输出乘一个由 token 决定的标量门 \(\sigma(w_s^\top x)\)。</li>
       </ul>
-      <p>每层 MoE 总参数 \(512\times3.15\text{M}+3.15\text{M}+1.05\text{M}\approx1.615\)B，每 token 激活 \(11\times3.15\text{M}+1.05\text{M}\approx35.7\)M，专家部分的激活比约 \(11/513\approx2.1\%\)。</p>
+      <p>每层 MoE 总参数 \(512\times3.15\text{M}+3.15\text{M}+1.05\text{M}\approx1.615\)B，每 token 激活 \(11\times3.15\text{M}+1.05\text{M}\approx35.7\)M，expert 部分的激活比约 \(11/513\approx2.1\%\)。</p>
 
       <h3>9.2 和 Qwen3 的 MoE 比</h3>
       <div class="table-wrap">
         <table>
           <thead><tr><th></th><th class="num">Qwen3-30B-A3B</th><th class="num">Qwen3-Next-80B-A3B</th></tr></thead>
           <tbody>
-            <tr><td>路由专家数</td><td class="num">128</td><td class="num">512</td></tr>
-            <tr><td>每 token 激活的路由专家</td><td class="num">8</td><td class="num">10</td></tr>
-            <tr><td>共享专家</td><td class="num">0</td><td class="num">1</td></tr>
-            <tr><td>专家中间维度</td><td class="num">768</td><td class="num">512</td></tr>
-            <tr><td>每 token 激活的专家 FFN 宽度</td><td class="num">8 × 768 = 6144</td><td class="num">11 × 512 = 5632</td></tr>
-            <tr><td>总参数（按 config 计算）</td><td class="num">30.5B</td><td class="num">79.7B</td></tr>
-            <tr><td>非嵌入激活参数（按 config 计算）</td><td class="num">2.73B</td><td class="num">3.25B</td></tr>
+            <tr><td>routed expert 数</td><td class="num">128</td><td class="num">512</td></tr>
+            <tr><td>每 token 激活的 routed expert</td><td class="num">8</td><td class="num">10</td></tr>
+            <tr><td>shared expert</td><td class="num">0</td><td class="num">1</td></tr>
+            <tr><td>expert 中间维度</td><td class="num">768</td><td class="num">512</td></tr>
+            <tr><td>每 token 激活的 expert FFN 宽度</td><td class="num">8 × 768 = 6144</td><td class="num">11 × 512 = 5632</td></tr>
+            <tr><td>总参数</td><td class="num">30.5B</td><td class="num">79.7B</td></tr>
+            <tr><td>非嵌入激活参数</td><td class="num">2.73B</td><td class="num">3.25B</td></tr>
           </tbody>
         </table>
       </div>
-      <p>激活的 FFN 宽度几乎没变，专家总数翻了 4 倍、单个专家变窄。博客给出的依据是：在使用全局负载均衡的前提下，<strong>固定激活专家不变、增加专家总参数，训练 loss 会稳定下降</strong>。直观理解：激活参数决定每 token 的计算量，总参数决定模型能存多少知识；在激活量固定时，把专家切细、切多，还会让可选的专家组合数暴涨（\(\binom{128}{8}\approx10^{12}\)，\(\binom{512}{10}\approx3\times10^{20}\)），路由能做更细的专门化。代价是总参数（显存、专家并行的通信）上涨。博客说「80B 总参、每步约 3B 激活」对应 3.7% 的激活比（这是 3B/80B 的粗略比值；按非嵌入参数精确算是 3.25B / 79.05B ≈ 4.1%）。</p>
+      <p>激活的 FFN 宽度几乎没变，expert 总数翻了 4 倍、单个 expert 变窄。这样做的依据是 Qwen 团队的一个实验观察：在使用全局负载均衡的前提下，<strong>固定激活 expert 不变、增加 expert 总参数，训练 loss 会稳定下降</strong>。直观理解：激活参数决定每 token 的计算量，总参数决定模型能存多少知识；在激活量固定时，把 expert 切细、切多，还会让可选的 expert 组合数暴涨（\(\binom{128}{8}\approx10^{12}\)，\(\binom{512}{10}\approx3\times10^{20}\)），路由能做更细的专门化。代价是总参数（显存、expert 并行的通信）上涨。Qwen 团队把它概括为「只激活 3.7% 的参数」，这是 3B / 80B 的粗略比值；按非嵌入参数算是 3.25B / 79.05B ≈ 4.1%。</p>
 
       <h3>9.3 负载均衡：全局 batch 上的辅助损失</h3>
-      <p>MoE 训练要防止路由塌缩到少数专家。标准的负载均衡损失（LBL）是</p>
+      <p>MoE 训练要防止路由塌缩到少数 expert。标准的负载均衡损失（LBL）是</p>
       $$\mathcal L_{\text{bal}}=N_E\sum_{i=1}^{N_E}f_i\,P_i ,$$
-      <p>\(f_i\) 是被路由到专家 \(i\) 的 token 比例，\(P_i\) 是专家 \(i\) 的平均路由概率。均匀分布时该损失取最小值。Qwen 团队在 <em>Demons in the Detail</em>（2025）里指出一个实现细节：常见框架在每个 micro-batch 里单独算 \(f_i\)，而一个 micro-batch 里往往只有几条序列，于是约束实际上变成了「每条序列内部都要均匀用所有专家」，连一段纯代码都要均匀分给所有专家，抑制了专家的专门化。他们的做法是跨 micro-batch / 数据并行组同步 \(f_i\)，在全局 batch 上算 LBL。博客说 Qwen3-Next 的稀疏 MoE 就是在这种全局负载均衡下做的。config 里的 <code>router_aux_loss_coef</code> 是 0.001。</p>
+      <p>\(f_i\) 是被路由到 expert \(i\) 的 token 比例，\(P_i\) 是 expert \(i\) 的平均路由概率。均匀分布时该损失取最小值。这里有一个容易忽略的实现细节：常见框架在每个 micro-batch 里单独算 \(f_i\)，而一个 micro-batch 里往往只有几条序列，于是约束实际上变成了「每条序列内部都要均匀用所有 expert」，连一段纯代码都要均匀分给所有 expert，抑制了 expert 的专门化。改进的做法是跨 micro-batch / 数据并行组同步 \(f_i\)，在全局 batch 上算 LBL，只要求整个 batch 上的负载均匀。Qwen3-Next 的稀疏 MoE 就是在这种全局负载均衡下训练的，损失系数 <code>router_aux_loss_coef</code> 是 0.001。</p>
 
       <h3>9.4 激活参数计算器</h3>
-      <p>选一个预设，或者自己拖参数。总参数和激活参数都按 config 字段逐模块计算（包括注意力 / 线性注意力层、嵌入、输出头）。预设里的模型我都用公开 config 核对过：算出来的总参数和模型卡写的一致（30.5B、79.7B、397B 级、2.4T 级）。</p>
+      <p>选一个预设，或者自己拖参数。总参数和激活参数都按模型结构逐模块计算（包括注意力 / 线性注意力层、嵌入、输出头），预设模型算出来的总参数分别是 30.5B、79.7B、约 397B 和约 2.4T，和它们名字里的规模一致。</p>
 
       <div class="demo" id="moe-demo">
         <div class="demo-label">演示 3 · MoE 激活参数计算器</div>
@@ -554,52 +554,52 @@ o_t = S.T @ q_t</code></pre>
           <button class="btn" id="moe-reroll">换一个 token 的路由</button>
         </div>
         <div class="ctrls">
-          <label class="ctrl"><span>路由专家数 E</span><input type="range" id="moe-e" min="8" max="1024" step="8" value="512"><output id="moe-e-v"></output></label>
+          <label class="ctrl"><span>routed expert 数 E</span><input type="range" id="moe-e" min="8" max="1024" step="8" value="512"><output id="moe-e-v"></output></label>
           <label class="ctrl"><span>每 token 激活 k</span><input type="range" id="moe-k" min="1" max="32" step="1" value="10"><output id="moe-k-v"></output></label>
-          <label class="ctrl"><span>共享专家数</span><input type="range" id="moe-s" min="0" max="2" step="1" value="1"><output id="moe-s-v"></output></label>
-          <label class="ctrl"><span>专家中间维度</span><input type="range" id="moe-f" min="128" max="4096" step="64" value="512"><output id="moe-f-v"></output></label>
+          <label class="ctrl"><span>shared expert 数</span><input type="range" id="moe-s" min="0" max="2" step="1" value="1"><output id="moe-s-v"></output></label>
+          <label class="ctrl"><span>expert 中间维度</span><input type="range" id="moe-f" min="128" max="4096" step="64" value="512"><output id="moe-f-v"></output></label>
         </div>
         <div class="moe-cells" id="moe-cells"></div>
         <div class="compbar" id="moe-bar" aria-hidden="true"></div>
         <div class="legend">
-          <span><i style="background:var(--accent)"></i>激活的专家</span>
-          <span><i style="background:var(--accent-2)"></i>共享专家</span>
+          <span><i style="background:var(--accent)"></i>激活的 expert</span>
+          <span><i style="background:var(--accent-2)"></i>shared expert</span>
           <span><i style="background:var(--text-faint)"></i>其它（注意力 / 线性层 / 嵌入）</span>
-          <span><i style="background:var(--border)"></i>未激活的专家</span>
+          <span><i style="background:var(--border)"></i>未激活的 expert</span>
         </div>
         <div class="readout" id="moe-out"></div>
-        <p class="note">上方格子是一个 token 的路由示意（随机抽取，不是真实路由）。条形图是总参数的组成。激活参数包含嵌入与输出头时，与模型卡中「A3B / A17B」等名字对应的口径不一定相同。</p>
+        <p class="note">上方格子是一个 token 的路由示意（随机抽取，不是真实路由）。条形图是总参数的组成。激活参数包含嵌入与输出头时，与模型名中「A3B / A17B」等名字对应的口径不一定相同。</p>
       </div>
 
       <!-- ============================================================ -->
-      <h2 id="stability">10. 训练稳定性：零中心 Norm 与路由器初始化</h2>
+      <h2 id="stability">10. 训练稳定性：零中心 Norm 与 router 初始化</h2>
       <h3>10.1 零中心、带权重衰减的 RMSNorm</h3>
-      <p>RMSNorm 的标准形式是 \(y=\dfrac{x}{\mathrm{rms}(x)}\odot\gamma\)，\(\mathrm{rms}(x)=\sqrt{\tfrac1d\sum_ix_i^2+\epsilon}\)，可学习的增益 \(\gamma\) 初始化为 1。博客说 Qwen3 里用了 QK-Norm，但观察到一些 LayerNorm 的权重变得异常大。Norm 的增益直接乘在激活上，在 QK-Norm 里它更是直接缩放注意力 logit，权重过大会让 softmax 过尖、数值不稳定。</p>
+      <p>RMSNorm 的标准形式是 \(y=\dfrac{x}{\mathrm{rms}(x)}\odot\gamma\)，\(\mathrm{rms}(x)=\sqrt{\tfrac1d\sum_ix_i^2+\epsilon}\)，可学习的增益 \(\gamma\) 初始化为 1。Qwen3 用了 QK-Norm，训练中却观察到一些 LayerNorm 的权重变得异常大。Norm 的增益直接乘在激活上，在 QK-Norm 里它更是直接缩放注意力 logit，权重过大会让 softmax 过尖、数值不稳定。</p>
       <p>自然的想法是给增益加权重衰减，但普通参数化下这不合理：权重衰减把参数往 0 拉，而 \(\gamma=0\) 意味着把输出清零，这不是「没有效果」的默认状态。所以通常 Norm 的增益是被排除在权重衰减之外的。</p>
-      <p>Qwen3-Next 的做法是换成<strong>零中心参数化</strong>（来自 Gemma 的实现）：</p>
+      <p>Qwen3-Next 的做法是换成<strong>零中心参数化</strong>（Gemma 用的也是这种形式）：</p>
       $$y=\frac{x}{\mathrm{rms}(x)}\odot(1+w),\qquad w\ \text{初始化为}\ 0 .$$
-      <p>这和原来的形式表达能力完全一样（\(\gamma=1+w\)），区别在于参数的「零点」变成了「增益为 1」。这时再对 \(w\) 施加权重衰减，拉向的是 \(\gamma=1\)，即恒等缩放，这是一个合理的先验，能防止增益无限增长。transformers 里的 <code>Qwen3NextRMSNorm</code> 正是这个形式（继承自 <code>Gemma3RMSNorm</code>，权重初始化为 0，前向乘 \(1+w\)），用于每层的输入 / 注意力后 Norm、最终 Norm 和注意力里的 q_norm / k_norm。线性注意力输出端的 <code>RMSNormGated</code> 则是普通参数化（权重初始化为 1）。</p>
+      <p>这和原来的形式表达能力完全一样（\(\gamma=1+w\)），区别在于参数的「零点」变成了「增益为 1」。这时再对 \(w\) 施加权重衰减，拉向的是 \(\gamma=1\)，即恒等缩放，这是一个合理的先验，能防止增益无限增长。这种 Norm 用在每层的输入 / 注意力后 Norm、最终 Norm 和注意力里的 q_norm / k_norm 上；线性注意力输出端的门控 RMSNorm 则是普通参数化（权重初始化为 1）。</p>
 
-      <h3>10.2 归一化的路由器初始化</h3>
-      <p>路由器的打分是 \(s_i=w_i^\top x\)，\(w_i\) 是 \(W_r\) 的第 \(i\) 行。如果随机初始化，不同行的范数 \(\lVert w_i\rVert\) 会有随机差异，范数大的专家在训练一开始就系统性地得到更高分，被选得更多，于是被训练得更多，形成「先发优势」。博客说 Qwen3-Next 在初始化时对路由器参数做了归一化，让每个专家在训练早期被无偏地选择，减少随机初始化带来的噪声。引用的是 σ-MoE 论文（Csordás 等，2023）：先从 \(\mathcal N(0,1)\) 采样，把每一行缩放到单位范数，再整体缩放到所需的标准差。这样初始打分 \(s_i=\lVert w_i\rVert\lVert x\rVert\cos\theta_i\) 只取决于夹角 \(\theta_i\)，不再带有每个专家固定的随机放大系数。512 个专家时这件事更重要：专家越多，行范数的极值偏差越大。</p>
+      <h3>10.2 归一化的 router 初始化</h3>
+      <p>router 的打分是 \(s_i=w_i^\top x\)，\(w_i\) 是 \(W_r\) 的第 \(i\) 行。如果随机初始化，不同行的范数 \(\lVert w_i\rVert\) 会有随机差异，范数大的 expert 在训练一开始就系统性地得到更高分，被选得更多，于是被训练得更多，形成「先发优势」。Qwen3-Next 在初始化时对 router 参数做了归一化，让每个 expert 在训练早期被无偏地选择。具体做法来自 σ-MoE：先从 \(\mathcal N(0,1)\) 采样，把每一行缩放到单位范数，再整体缩放到所需的标准差。这样初始打分 \(s_i=\lVert w_i\rVert\lVert x\rVert\cos\theta_i\) 只取决于夹角 \(\theta_i\)，不再带有每个 expert 固定的随机放大系数。512 个 expert 时这件事更重要：expert 越多，行范数的极值偏差越大。</p>
 
       <h3>10.3 小结：几处稳定性设计</h3>
       <ul>
         <li>注意力输出门：消除 attention sink 和 massive activation（第 7 节）；</li>
         <li>零中心 + 权重衰减的 Norm：防止 Norm 权重异常增长；</li>
-        <li>归一化路由器初始化：避免早期路由的随机偏向；</li>
+        <li>归一化 router 初始化：避免早期路由的随机偏向；</li>
         <li>Gated DeltaNet 内部：\(q,k\) 的 L2 归一化让转移矩阵谱范数不超过 1，输出 RMSNorm 控制尺度。</li>
       </ul>
-      <p>博客特别说了一句：这些设计让小规模实验更可靠，大规模训练更平稳。对做预训练的人来说，前半句其实更重要——小模型上的消融结论能不能外推，很大程度取决于训练是否稳定。</p>
+      <p>这些设计让小规模实验更可靠，大规模训练更平稳。对做预训练的人来说，前半句其实更重要——小模型上的消融结论能不能外推，很大程度取决于训练是否稳定。</p>
 
       <!-- ============================================================ -->
       <h2 id="mtp">11. 多 token 预测与投机解码</h2>
       <h3>11.1 MTP 模块的结构</h3>
-      <p>标准语言模型在位置 \(t\) 只预测 \(x_{t+1}\)。多 token 预测（MTP）在训练时额外让模型预测 \(x_{t+2}\) 等更远的 token，给主干更密的训练信号；推理时，这个额外的预测头可以当草稿模型用。Qwen3-Next 的 MTP 模块按 DeepSeek-V3 的串行方式组织。从权重文件里的张量名和 vLLM 的 <code>qwen3_next_mtp.py</code> 可以还原出它的结构：</p>
+      <p>标准语言模型在位置 \(t\) 只预测 \(x_{t+1}\)。多 token 预测（MTP）在训练时额外让模型预测 \(x_{t+2}\) 等更远的 token，给主干更密的训练信号；推理时，这个额外的预测头可以当草稿模型用。Qwen3-Next 的 MTP 模块和 DeepSeek-V3 一样是串行组织的，结构如下：</p>
       <ol>
         <li>输入两样东西：主干最后一层在位置 \(t\) 的隐状态 \(h_t\)，以及下一个 token \(x_{t+1}\) 的嵌入 \(e(x_{t+1})\)（与主干共享嵌入表）；</li>
         <li>两者各自过一个 RMSNorm（<code>pre_fc_norm_embedding</code>、<code>pre_fc_norm_hidden</code>），拼接成 4096 维，经线性层 <code>fc</code> 投回 2048 维；</li>
-        <li>过 <strong>1 个</strong>完整的 Transformer 层（权重名显示是全注意力 + MoE，和主干的注意力层同构）；</li>
+        <li>过 <strong>1 个</strong>完整的 Transformer 层（全注意力 + MoE，和主干的注意力层同构）；</li>
         <li>最后一个 RMSNorm，再用（共享的）输出头预测 \(x_{t+2}\)。</li>
       </ol>
 
@@ -618,17 +618,17 @@ o_t = S.T @ q_t</code></pre>
           <rect class="box" x="545" y="60" width="165" height="40" rx="8"/><text x="627" y="78" text-anchor="middle" font-size="12">Norm + 共享输出头</text><text x="627" y="93" text-anchor="middle" font-size="11" class="soft">预测 xₜ₊₂</text>
           <text x="460" y="150" text-anchor="middle" font-size="12" class="soft">推理时可以把输出再喂回自己，递归地起草多步</text>
         </svg>
-        <figcaption>图 5　MTP 模块（按权重名与 vLLM 实现重画）。</figcaption>
+        <figcaption>图 5　MTP 模块。</figcaption>
       </figure>
 
-      <p>训练目标是在主干的下一 token 交叉熵之外加上 MTP 头的交叉熵（DeepSeek-V3 的做法是乘一个权重 \(\lambda\) 后相加；Qwen3-Next 用的权重和预测深度官方没有公布）。博客强调了两点：MTP 本身提升了模型的整体表现；并且他们专门优化了 MTP 的<strong>多步推理</strong>性能，「通过保持训练与推理一致的多步训练」进一步提高真实场景下投机解码的接受率。vLLM 的实现里，起草第 \(s\) 步时用的是第 \(s \bmod n_{\text{mtp}}\) 个 MTP 层；Qwen3-Next 只有 1 层，所以多步起草就是把同一个 MTP 层递归地用多次。「多步训练」应该就是在训练时也这样递归地展开，让这个层见过自己上一步的输出作为输入。</p>
+      <p>训练目标是在主干的下一 token 交叉熵之外加上 MTP 头的交叉熵（DeepSeek-V3 的做法是乘一个权重 \(\lambda\) 后相加；Qwen3-Next 用的权重没有公开）。MTP 有两个作用：一是更密的训练信号本身提升了模型的整体表现；二是推理时当草稿模型。Qwen3-Next 只有 1 层 MTP，要起草多个 token，就把同一个 MTP 层递归地用多次：第二步的输入是它自己第一步的输出。如果训练时只见过主干给的隐状态，这种递归用法就和训练不一致，越往后猜得越差。所以 Qwen3-Next 专门做了「训练与推理一致的多步训练」，以提高多步起草时的接受率。</p>
 
       <h3>11.2 投机解码</h3>
-      <p>投机解码（Leviathan 等，2023）的流程：便宜的草稿模型先连续猜 \(\gamma\) 个 token；大模型用一次前向（相当于一次长度为 \(\gamma+1\) 的预填充）并行地验证这些猜测，从头开始接受，直到第一个被拒的位置，并在那里补上一个自己采样的 token。用拒绝采样的接受规则，输出分布和只用大模型采样完全一致。</p>
+      <p>投机解码的流程：便宜的草稿模型先连续猜 \(\gamma\) 个 token；大模型用一次前向（相当于一次长度为 \(\gamma+1\) 的 prefill）并行地验证这些猜测，从头开始接受，直到第一个被拒的位置，并在那里补上一个自己采样的 token。用拒绝采样的接受规则，输出分布和只用大模型采样完全一致。</p>
       <p>如果每个草稿 token 被接受的概率是独立同分布的 \(p\)，一次验证平均产出的 token 数是</p>
       $$\mathbb E[\text{tokens}]=\frac{1-p^{\gamma+1}}{1-p}.$$
-      <p>MTP 头当草稿模型的好处：它只有一层，起草很便宜；它读的是主干的隐状态，比独立的小模型更「懂」主干，接受率更高；而且是和主干一起训练出来的，不用另外蒸馏。模型卡推荐的部署参数是 SGLang <code>--speculative-num-steps 3 --speculative-num-draft-tokens 4</code>、vLLM <code>num_speculative_tokens: 2</code>。</p>
-      <p>对混合模型来说，投机解码还有一个工程细节（这是我的理解，不是官方材料里的内容）：全注意力层被拒绝的 token 只要把 KV cache 截断即可，但 Gated DeltaNet 的状态是原地更新的，回滚需要保留验证过程中每个位置的状态（或者至少能从接受位置重新算），这也是推理框架需要为 Qwen3-Next 专门适配的地方。</p>
+      <p>MTP 头当草稿模型的好处：它只有一层，起草很便宜；它读的是主干的隐状态，比独立的小模型更「懂」主干，接受率更高；而且是和主干一起训练出来的，不用另外蒸馏。推荐的部署参数是 SGLang <code>--speculative-num-steps 3 --speculative-num-draft-tokens 4</code>、vLLM <code>num_speculative_tokens: 2</code>。</p>
+      <p>对混合模型来说，投机解码还有一个工程上的麻烦：全注意力层里被拒绝的 token 只要把 KV cache 截断即可，但 Gated DeltaNet 的状态是原地更新的，没法“截断”。回滚需要保留验证过程中每个位置的状态（或者能从接受位置重新算），推理框架要为这类模型专门适配。</p>
 
       <div class="demo" id="sd-demo">
         <div class="demo-label">小演示 · 投机解码的期望收益（理想化模型）</div>
@@ -638,33 +638,33 @@ o_t = S.T @ q_t</code></pre>
           <label class="ctrl"><span>每步起草成本 c</span><input type="range" id="sd-c" min="0" max="0.3" step="0.01" value="0.05"><output id="sd-c-v"></output></label>
         </div>
         <div class="readout" id="sd-out"></div>
-        <p class="note">假设各位置接受独立同分布；c 是一次起草相对一次主干解码步的成本，验证 γ+1 个 token 的成本按 1 次解码步计（解码访存受限时近似成立）。p 和 c 都是假设值，不是 Qwen3-Next 的实测。</p>
+        <p class="note">假设各位置接受独立同分布；c 是一次起草相对一次主干 decode 步的成本，验证 γ+1 个 token 的成本按 1 次 decode 步计（decode 访存受限时近似成立）。p 和 c 是假设值（示意）。</p>
       </div>
 
       <!-- ============================================================ -->
-      <h2 id="results">12. 训练效率与长上下文：官方给出的数字</h2>
-      <p>以下全部来自博客和模型卡，我只做了整理。</p>
+      <h2 id="results">12. 训练效率与长上下文的实测结果</h2>
+      <p>前面算的都是理论账，这一节看 Qwen 团队公布的实际结果。</p>
       <h3>12.1 预训练</h3>
       <ul>
         <li>训练数据：从 Qwen3 的 36T token 预训练语料中均匀采样的 15T token 子集。</li>
         <li>GPU 时：不到 Qwen3-30B-A3B 的 80%；是 Qwen3-32B 计算成本的 9.3%。</li>
-        <li>Qwen3-Next-80B-A3B-Base 只激活 Qwen3-32B-Base 约 1/10 的非嵌入参数（按 config 算：3.25B / 31.2B ≈ 10.4%），在大多数基准上超过 Qwen3-32B-Base，并显著超过 Qwen3-30B-A3B。</li>
+        <li>Qwen3-Next-80B-A3B-Base 只激活 Qwen3-32B-Base 约 1/10 的非嵌入参数（3.25B / 31.2B ≈ 10.4%），在大多数基准上超过 Qwen3-32B-Base，并显著超过 Qwen3-30B-A3B。</li>
       </ul>
       <h3>12.2 推理吞吐（相对 Qwen3-32B）</h3>
       <div class="table-wrap">
         <table>
           <thead><tr><th>阶段</th><th class="num">4K 上下文</th><th class="num">32K 以上</th></tr></thead>
           <tbody>
-            <tr><td>预填充吞吐</td><td class="num">接近 7 倍</td><td class="num">超过 10 倍</td></tr>
-            <tr><td>解码吞吐</td><td class="num">接近 4 倍</td><td class="num">超过 10 倍</td></tr>
+            <tr><td>prefill 吞吐</td><td class="num">接近 7 倍</td><td class="num">超过 10 倍</td></tr>
+            <tr><td>decode 吞吐</td><td class="num">接近 4 倍</td><td class="num">超过 10 倍</td></tr>
           </tbody>
         </table>
       </div>
-      <p>和第 8 节的计算对一下：4K 时差异主要来自激活参数（3.25B vs 31.2B 非嵌入）；32K 以上 KV cache 的差距（24 KiB vs 256 KiB / token，约 10.7 倍）开始主导解码，这与「超过 10 倍」的量级一致。模型卡也提醒，效率提升高度依赖实现，推荐用 SGLang 或 vLLM。</p>
+      <p>这和第 8 节的计算吻合：4K 时差异主要来自激活参数（3.25B vs 31.2B 非嵌入）；32K 以上 KV cache 的差距（24 KiB vs 256 KiB / token，约 10.7 倍）开始主导 decode，正好是「超过 10 倍」的量级。当然，实际的效率提升高度依赖推理框架的实现，SGLang 和 vLLM 都已经支持。</p>
       <h3>12.3 长上下文</h3>
       <ul>
-        <li>原生上下文 262,144 token。超过这个长度时用 YaRN（RoPE 缩放）外推，官方在 100 万 token 上验证过，推荐配置 <code>factor: 4.0, original_max_position_embeddings: 262144</code>，最大长度 1,010,000。由于开源框架实现的是静态 YaRN（缩放因子不随输入长度变），可能影响短文本表现，官方建议只在需要时开启，并按实际长度调整 factor（例如常用长度 524,288 时用 2.0）。注意 YaRN 只作用于 12 个全注意力层的 RoPE 维度（每头前 64 维）；线性注意力层本身没有位置编码。</li>
-        <li>RULER（100 万 token 版本，每个长度 260 个样本）上，Qwen3-Next-80B-A3B-Instruct 的平均分 91.8，高于 Qwen3-30B-A3B-Instruct-2507 的 86.8，略低于 Qwen3-235B-A22B-Instruct-2507 的 92.5。博客的说法是在 256K 以内它全面超过 Qwen3-30B-A3B-Instruct-2507，甚至超过 Qwen3-235B-A22B-Instruct-2507。部分数据点：</li>
+        <li>原生上下文 262,144 token。超过这个长度时用 YaRN（RoPE 缩放）外推，在 100 万 token 上验证过，推荐配置 <code>factor: 4.0, original_max_position_embeddings: 262144</code>，最大长度 1,010,000。由于开源框架实现的是静态 YaRN（缩放因子不随输入长度变），可能影响短文本表现，所以只在需要时开启，并按实际长度调整 factor（例如常用长度 524,288 时用 2.0）。注意 YaRN 只作用于 12 个全注意力层的 RoPE 维度（每头前 64 维）；线性注意力层本身没有位置编码。</li>
+        <li>RULER（100 万 token 版本，每个长度 260 个样本）上，Qwen3-Next-80B-A3B-Instruct 的平均分 91.8，高于 Qwen3-30B-A3B-Instruct-2507 的 86.8，略低于 Qwen3-235B-A22B-Instruct-2507 的 92.5。在原生的 256K 以内，它全面超过 Qwen3-30B-A3B-Instruct-2507，基本也不输 Qwen3-235B-A22B-Instruct-2507。部分数据点：</li>
       </ul>
       <div class="table-wrap">
         <table>
@@ -676,13 +676,13 @@ o_t = S.T @ q_t</code></pre>
           </tbody>
         </table>
       </div>
-      <p class="eqnote">Qwen3-Next 评测时开了 YaRN，Qwen3-2507 系列开了 Dual Chunk Attention（模型卡注）。逐列看，256K 以内 Qwen3-Next 只在 192K 一列略低于 235B（94.0 对 94.5），其余持平或更高；超过原生长度（256K）以后，它的下降比 235B 快。</p>
+      <p class="eqnote">Qwen3-Next 评测时开了 YaRN，Qwen3-2507 系列开了 Dual Chunk Attention。逐列看，256K 以内 Qwen3-Next 只在 192K 一列略低于 235B（94.0 对 94.5），其余持平或更高；超过原生长度（256K）以后，它的下降比 235B 快。</p>
       <h3>12.4 后训练</h3>
-      <p>发布了 Instruct（不输出思考过程）和 Thinking 两个版本。博客说他们解决了「混合注意力 + 高稀疏 MoE」架构在强化学习训练中长期存在的稳定性和效率问题，但没有披露具体方法。Instruct 版在不少基准上接近 Qwen3-235B-A22B-Instruct-2507（模型卡表格中，比如 Arena-Hard v2 为 82.7 对 79.2，LiveCodeBench v6 为 56.6 对 51.8，但 Aider-Polyglot 为 49.8 对 57.3、TAU2-Retail 为 57.3 对 74.6，并非全面持平）。</p>
+      <p>发布了 Instruct（不输出思考过程）和 Thinking 两个版本。Qwen 团队称解决了「混合注意力 + 高稀疏 MoE」架构在强化学习训练中的稳定性和效率问题，具体方法没有公开。Instruct 版在不少基准上接近 Qwen3-235B-A22B-Instruct-2507（比如 Arena-Hard v2 为 82.7 对 79.2，LiveCodeBench v6 为 56.6 对 51.8，但 Aider-Polyglot 为 49.8 对 57.3、TAU2-Retail 为 57.3 对 74.6，并非全面持平）。</p>
 
       <!-- ============================================================ -->
       <h2 id="config">13. 完整配置表</h2>
-      <p>来自 <code>Qwen/Qwen3-Next-80B-A3B-Instruct</code> 的 <code>config.json</code>（Thinking 版的 config 完全相同），右列是我的注释。</p>
+      <p>下面是 Qwen3-Next-80B-A3B 的 <code>config.json</code> 里的主要字段（Instruct 与 Thinking 两个版本相同）。</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>字段</th><th>值</th><th>含义</th></tr></thead>
@@ -697,10 +697,10 @@ o_t = S.T @ q_t</code></pre>
             <tr><td><code>linear_num_key_heads</code> / <code>linear_num_value_heads</code></td><td>16 / 32</td><td>Gated DeltaNet 的 QK 头 / V 头</td></tr>
             <tr><td><code>linear_key_head_dim</code> / <code>linear_value_head_dim</code></td><td>128 / 128</td><td>每头状态 128 × 128</td></tr>
             <tr><td><code>linear_conv_kernel_dim</code></td><td>4</td><td>短卷积核长</td></tr>
-            <tr><td><code>num_experts</code></td><td>512</td><td>每层路由专家数</td></tr>
-            <tr><td><code>num_experts_per_tok</code></td><td>10</td><td>每 token 选中的路由专家</td></tr>
-            <tr><td><code>moe_intermediate_size</code></td><td>512</td><td>路由专家的 SwiGLU 中间维度</td></tr>
-            <tr><td><code>shared_expert_intermediate_size</code></td><td>512</td><td>共享专家（1 个）的中间维度</td></tr>
+            <tr><td><code>num_experts</code></td><td>512</td><td>每层 routed expert 数</td></tr>
+            <tr><td><code>num_experts_per_tok</code></td><td>10</td><td>每 token 选中的 routed expert</td></tr>
+            <tr><td><code>moe_intermediate_size</code></td><td>512</td><td>routed expert 的 SwiGLU 中间维度</td></tr>
+            <tr><td><code>shared_expert_intermediate_size</code></td><td>512</td><td>shared expert（1 个）的中间维度</td></tr>
             <tr><td><code>norm_topk_prob</code></td><td>true</td><td>top-k 概率重新归一化</td></tr>
             <tr><td><code>router_aux_loss_coef</code></td><td>0.001</td><td>负载均衡损失系数</td></tr>
             <tr><td><code>decoder_sparse_step</code> / <code>mlp_only_layers</code></td><td>1 / []</td><td>每一层都是 MoE</td></tr>
@@ -716,10 +716,10 @@ o_t = S.T @ q_t</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="later">14. 后来：Qwen3.5、3.6、3.8 与 Flash-Next</h2>
-      <p>Qwen3-Next 的博客结尾说，会继续改进这一架构来开发 Qwen3.5。事后看，这套「3 × Gated DeltaNet + 1 × Gated Attention、高稀疏 MoE、MTP」的骨架确实成了之后 Qwen 主线模型的基础。以下只列我从 Hugging Face 上的 config 和模型卡核对过的事实：</p>
+      <p>Qwen3-Next 发布时，Qwen 团队说会在这一架构上继续开发 Qwen3.5。事后看，这套「3 × Gated DeltaNet + 1 × Gated Attention、高稀疏 MoE、MTP」的骨架确实成了之后 Qwen 主线模型的基础：</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>模型（发布时间）</th><th>层数 / 布局</th><th>d</th><th>GDN 头（QK / V）</th><th>注意力头（Q / KV，头维）</th><th>专家（总 / 路由激活 + 共享，宽度）</th><th>参数</th></tr></thead>
+          <thead><tr><th>模型（发布时间）</th><th>层数 / 布局</th><th>d</th><th>GDN 头（QK / V）</th><th>注意力头（Q / KV，头维）</th><th>expert（总 / 路由激活 + 共享，宽度）</th><th>参数</th></tr></thead>
           <tbody>
             <tr><td>Qwen3-Next-80B-A3B（2025-09）</td><td>48，12 × (3+1)</td><td class="num">2048</td><td>16 / 32</td><td>16 / 2，256</td><td>512 / 10+1，512</td><td>80B / 3B</td></tr>
             <tr><td>Qwen3-Coder-Next（2026-01）</td><td>48，12 × (3+1)</td><td class="num">2048</td><td>16 / 32</td><td>16 / 2，256</td><td>512 / 10+1，512</td><td>80B / 3B</td></tr>
@@ -734,29 +734,30 @@ o_t = S.T @ q_t</code></pre>
       </div>
       <p>几点观察：</p>
       <ul>
-        <li><strong>Qwen3-Coder-Next</strong> 的 config 与 Qwen3-Next 完全同构（<code>model_type: qwen3_next</code>，只有 <code>rope_theta</code> 改成了 5,000,000），是同一架构上的代码 Agent 模型。</li>
-        <li><strong>Qwen3.5</strong> 换了新的 <code>model_type</code>（<code>qwen3_5_moe</code> / <code>qwen3_5</code>），成为原生多模态模型（带视觉编码器，模型卡称 early fusion），词表扩到 248,320，位置编码改成交织的多维 RoPE（<code>mrope_section [11, 11, 10]</code>，合起来正好是部分 RoPE 的 64 维的一半频率数），但语言模型的骨架就是 Qwen3-Next：3:1 的 Gated DeltaNet / Gated Attention（config 里明确写着 <code>attn_output_gate: true</code>）、部分 RoPE 0.25、头维 256、2 个 KV 头、MTP（<code>mtp_num_hidden_layers: 1</code>，模型卡写 trained with multi-steps）。线性注意力状态精度 <code>mamba_ssm_dtype: float32</code>。规模扩大时，变的主要是 V 头数（32 → 64 → 128）和专家宽度（512 → 1024 → 2048），QK 头一直是 16、专家数一直是 512 选 10 + 1。</li>
+        <li><strong>Qwen3-Coder-Next</strong> 与 Qwen3-Next 结构完全相同（只有 <code>rope_theta</code> 改成了 5,000,000），是同一架构上的代码 Agent 模型。</li>
+        <li><strong>Qwen3.5</strong> 成为原生多模态模型（带视觉编码器，early fusion），词表扩到 248,320，位置编码改成交织的多维 RoPE（<code>mrope_section [11, 11, 10]</code>，合起来正好是部分 RoPE 的 64 维的一半频率数），但语言模型的骨架就是 Qwen3-Next：3:1 的 Gated DeltaNet / Gated Attention（注意力输出门 <code>attn_output_gate: true</code>）、部分 RoPE 0.25、头维 256、2 个 KV 头、1 层 MTP（同样做了多步训练），线性注意力状态用 fp32。规模扩大时，变的主要是 V 头数（32 → 64 → 128）和 expert 宽度（512 → 1024 → 2048），QK 头一直是 16、expert 数一直是 512 选 10 + 1。</li>
         <li><strong>Qwen3.5-27B</strong> 说明这套混合注意力也被用在了稠密模型上。</li>
-        <li><strong>Qwen3.8-2.4T-A95B</strong> 的模型卡明确写「Built on the architectural foundation of Qwen3.5」，把同一骨架推到了 2.4T 总参数。</li>
-        <li><strong>Qwen3.8-Flash-Next</strong> 被称为 Qwen4 架构的实验性预览，开始改动骨架本身：把 Gated Attention 换成了 Qwen Sparse Attention（QSA，按微块而非单个 token 做选择，带一个 MQA 结构的索引器，预算 512 块或 2048 token），加入 Gated Residual（4 个分支的加宽残差流，带数据依赖的读门和逐分支的写门）、n-gram 嵌入（2000 万个二元 / 三元组嵌入，挂在第 2 层），训练上对不同权重分别使用 Muon 和 AdamW。Gated DeltaNet 层和 512 选 10 + 1 的 MoE 保留了下来。它有单独的技术报告，细节超出本文范围。</li>
+        <li><strong>Qwen3.8-2.4T-A95B</strong> 建立在 Qwen3.5 的架构上，把同一骨架推到了 2.4T 总参数。</li>
+        <li><strong>Qwen3.8-Flash-Next</strong> 定位是 Qwen4 架构的实验性预览，开始改动骨架本身：把 Gated Attention 换成了 Qwen Sparse Attention（QSA，按微块而非单个 token 做选择，带一个 MQA 结构的索引器，预算 512 块或 2048 token），加入 Gated Residual（4 个分支的加宽残差流，带数据依赖的读门和逐分支的写门）、n-gram 嵌入（2000 万个二元 / 三元组嵌入，挂在第 2 层），训练上对不同权重分别使用 Muon 和 AdamW。Gated DeltaNet 层和 512 选 10 + 1 的 MoE 保留了下来。它的细节值得单独写一篇。</li>
       </ul>
-      <p>换句话说，从 Qwen3-Next 到 Qwen3.8，「3:1 的 Gated DeltaNet 混合 + 512 专家 + MTP」这个组合在一年里被沿用到了从 35B 到 2.4T 的模型上；到 Flash-Next，被替换掉的是那 1/4 的全注意力层——这正好对应第 8 节的观察：长上下文下，剩下的全注意力层成了新的瓶颈。</p>
+      <p>换句话说，从 Qwen3-Next 到 Qwen3.8，「3:1 的 Gated DeltaNet 混合 + 512 expert + MTP」这个组合在一年里被沿用到了从 35B 到 2.4T 的模型上；到 Flash-Next，被替换掉的是那 1/4 的全注意力层——这正好对应第 8 节的观察：长上下文下，剩下的全注意力层成了新的瓶颈。</p>
 
       <!-- ============================================================ -->
       <h2 id="summary">15. 小结</h2>
       <ul>
-        <li><strong>线性注意力</strong>把 softmax 换成内积后，注意力变成一个以 \(d_k\times d_v\) 矩阵为状态的 RNN：训练可以分块并行，解码每步常数代价，没有 KV cache。代价是固定容量的有损记忆。</li>
+        <li><strong>线性注意力</strong>把 softmax 换成内积后，注意力变成一个以 \(d_k\times d_v\) 矩阵为状态的 RNN：训练可以分块并行，decode 每步常数代价，没有 KV cache。代价是固定容量的有损记忆。</li>
         <li><strong>Delta 规则</strong>把写入改成「对平方损失做一步在线梯度下降」，能改写已有的键；<strong>门控</strong>能整体遗忘。<strong>Gated DeltaNet</strong> 把两者结合，靠 UT 变换做到块内并行。</li>
         <li><strong>Gated Attention</strong> 在 SDPA 输出后加逐元素 sigmoid 门，给低秩的 \(W_VW_O\) 加了非线性，并通过稀疏门消除 attention sink 和 massive activation。</li>
         <li><strong>3:1 混合</strong>：36 层线性注意力 + 12 层全注意力，KV cache 降到全注意力版的 1/4，长上下文下仍保留精确检索能力。</li>
-        <li><strong>512 选 10 + 1 的 MoE</strong>：激活宽度和 Qwen3-30B-A3B 相当，总参数多 2.6 倍；配合全局 batch 的负载均衡和归一化的路由器初始化。</li>
+        <li><strong>512 选 10 + 1 的 MoE</strong>：激活宽度和 Qwen3-30B-A3B 相当，总参数多 2.6 倍；配合全局 batch 的负载均衡和归一化的 router 初始化。</li>
         <li><strong>零中心 Norm + 权重衰减</strong>：让 Norm 增益的权重衰减拉向 1 而不是 0。</li>
         <li><strong>MTP</strong>：一层的串行 MTP 模块，训练时提升效果，推理时做投机解码的草稿，并做了多步训练以提高多步起草的接受率。</li>
       </ul>
       <p>如果只记一件事：Qwen3-Next 的效率来自两个正交的方向——<em>沿序列方向</em>用线性注意力把大部分层的成本从 \(O(L)\) 降到 \(O(1)\)，<em>沿参数方向</em>用高稀疏 MoE 把每 token 的计算和总参数解耦。两者叠在一起，才有「训练成本约为 Qwen3-32B 的 9.3%、32K 以上吞吐超过 10 倍」的结果。</p>
 
       <!-- ============================================================ -->
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
+      <p>Qwen3-Next 没有单独的技术报告，架构细节和实验结果来自官方博客、模型卡和 <code>config.json</code>；文中的参数量、缓存大小和 FLOPs 是按 config 和 transformers 的实现算出来的。想对着代码读一遍，推荐从 transformers 的 <code>modular_qwen3_next.py</code> 开始，它很短，Gated DeltaNet 的逐 token 递推和分块算法（<code>torch_recurrent_gated_delta_rule</code>、<code>torch_chunk_gated_delta_rule</code>）都有纯 PyTorch 版本。</p>
       <ol>
         <li>Qwen Team. <a href="https://qwen.ai/blog?id=4074cca80393150c248e508aa62983f9cb7d27cd&amp;from=research.latest-advancements-list">Qwen3-Next: Towards Ultimate Training &amp; Inference Efficiency</a>（博客，2025-09-10）：Key Features、Pre-training、Post-training 各节。</li>
         <li><a href="https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct">Qwen3-Next-80B-A3B-Instruct 模型卡</a>（Model Overview、Processing Ultra-Long Texts、Long-Context Performance）与 <a href="https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Instruct/blob/main/config.json">config.json</a>；<a href="https://huggingface.co/Qwen/Qwen3-Next-80B-A3B-Thinking">Thinking 版模型卡</a>。</li>
@@ -965,7 +966,7 @@ o_t = S.T @ q_t</code></pre>
     /* ---------------- demo 2: context calculator ---------------- */
     (() => {
       const V = 151936, H = 2048;
-      // per-layer params from config
+      // per-layer params
       const ATT = 27263488, GDN = 33718464;
       const MOE_ACT = 11 * 3 * H * 512 + H * 512 + H;
       const NORMS = 48 * 2 * H + H;
@@ -1065,11 +1066,11 @@ o_t = S.T @ q_t</code></pre>
           ['缓存之比', (m.full.mem / m.next.mem).toFixed(2) + '×'],
           [B + ' 条序列：权重 + 缓存（混合）', fmtB(WEIGHTS + B * m.next.mem)],
           [B + ' 条序列：权重 + 缓存（全注意力）', fmtB(WEIGHTS + B * m.full.mem)],
-          ['解码 FLOPs/token（混合）', fmtF(m.next.dec)],
-          ['解码 FLOPs/token（全注意力）', fmtF(m.full.dec)],
+          ['decode FLOPs/token（混合）', fmtF(m.next.dec)],
+          ['decode FLOPs/token（全注意力）', fmtF(m.full.dec)],
           ['混合版中注意力核心占比', (m.next.attDec / m.next.dec * 100).toFixed(1) + '%'],
-          ['预填充总 FLOPs（混合）', fmtF(m.next.pre)],
-          ['预填充总 FLOPs（全注意力）', fmtF(m.full.pre)],
+          ['prefill 总 FLOPs（混合）', fmtF(m.next.pre)],
+          ['prefill 总 FLOPs（全注意力）', fmtF(m.full.pre)],
           ['对照 Qwen3-32B 缓存 / 序列', fmtB(m.q.mem)],
         ];
         $('cx-out').innerHTML = items.map(([k, v]) => '<div><span class="k">' + k + '</span><span class="v">' + v + '</span></div>').join('');
@@ -1122,7 +1123,7 @@ o_t = S.T @ q_t</code></pre>
         const svg = document.createElementNS(NS, 'svg');
         svg.setAttribute('viewBox', '0 0 ' + W + ' ' + Math.max(Ht, 24));
         svg.setAttribute('role', 'img');
-        svg.setAttribute('aria-label', E + ' 个专家中选中 ' + k + ' 个的示意');
+        svg.setAttribute('aria-label', E + ' 个 expert 中选中 ' + k + ' 个的示意');
         for (let i = 0; i < E; i++) {
           const x = (i % cols) * (cw + gap), y = Math.floor(i / cols) * (cw + gap) + 2;
           el('rect', { x, y, width: cw, height: cw, rx: 2, fill: chosen.has(i) ? 'var(--accent)' : 'var(--border)' }, svg);
@@ -1144,7 +1145,7 @@ o_t = S.T @ q_t</code></pre>
           ['激活（非嵌入）', fmtP(r.actNonEmb)],
           ['激活（含嵌入与输出头）', fmtP(r.actAll)],
           ['激活比（非嵌入）', (r.actNonEmb / (r.total - r.emb) * 100).toFixed(2) + '%'],
-          ['专家参数激活比', ((k + s) / (E + s) * 100).toFixed(2) + '%'],
+          ['expert 参数激活比', ((k + s) / (E + s) * 100).toFixed(2) + '%'],
           ['每层路由组合数', '10^' + log10C(E, k).toFixed(1)],
           ['每 token 前向 FLOPs（≈2×激活非嵌入）', (r.perTokFlops / 1e9).toFixed(1) + ' G'],
           ['bf16 权重', (r.total * 2 / 2 ** 30).toFixed(0) + ' GiB'],
