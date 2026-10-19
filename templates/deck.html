@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>TITLE · hs-black</title>
+  <meta name="description" content="ONE-LINE DESCRIPTION">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <style>
+    /* Deck-specific styles go here. Sizes are canvas pixels (1280x720). */
+  </style>
+</head>
+<body class="deck-page">
+  <main class="deck"><div class="stage">
+
+    <!-- Title slide. .rise animates on entry; stagger with --d. -->
+    <section class="slide center">
+      <div class="kicker rise">KICKER</div>
+      <h1 class="rise" style="--d: 1">TITLE</h1>
+      <p class="muted rise" style="--d: 2">Subtitle</p>
+    </section>
+
+    <!-- Content slide. .fragment reveals one item per key press. -->
+    <section class="slide" id="example">
+      <div class="kicker">SECTION</div>
+      <h2>Slide heading</h2>
+      <ul>
+        <li class="fragment">First point</li>
+        <li class="fragment">Second point</li>
+      </ul>
+    </section>
+
+  </div></main>
+
+  <script src="/assets/slides.js"></script>
+  <script>
+    // Per-slide animations: run when a slide with a given id is entered.
+    document.addEventListener('slidechange', (e) => {
+      if (e.detail.slide.id === 'example') {
+        // start animation
+      }
+    });
+  </script>
+</body>
+</html>

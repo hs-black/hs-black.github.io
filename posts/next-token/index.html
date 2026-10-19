@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>一次只猜一个 token · hs-black</title>
+  <meta name="description" content="用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/slides.css">
+  <style>
+    .chips { display: flex; flex-wrap: wrap; gap: 12px; font-family: var(--font-mono); font-size: 34px; }
+    .chip {
+      padding: 6px 16px; border-radius: 12px;
+      background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
+      white-space: pre;
+    }
+    .chip .id { display: block; font-size: 16px; color: var(--text-faint); text-align: center; }
+    .slide.is-active .chips .chip { animation: deck-rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--i) * 140ms + 200ms); }
+    .slide .chips .chip { opacity: 0; }
+
+    .dist { display: grid; gap: 14px; width: 100%; }
+    .dist-row { display: grid; grid-template-columns: 120px 1fr 90px; align-items: center; gap: 20px; font-size: 26px; }
+    .dist-row .w { font-family: var(--font-mono); text-align: right; }
+    .dist-track { height: 34px; border-radius: 8px; background: var(--bg-soft); overflow: hidden; }
+    .dist-fill { height: 100%; width: 0; border-radius: 8px; background: var(--accent); transition: width 0.9s cubic-bezier(0.2, 0.7, 0.2, 1); }
+    .dist-row:first-child .dist-fill { background: var(--accent-2); }
+    .dist-row .p { font-family: var(--font-mono); font-size: 22px; color: var(--text-soft); }
+
+    .loop-text { font-family: var(--font-mono); font-size: 40px; line-height: 1.6; min-height: 3.2em; }
+    .loop-text .new { color: var(--accent-2); }
+    .loop-text .caret { display: inline-block; width: 0.5em; height: 1em; vertical-align: -0.12em; background: var(--accent); animation: blink 1s steps(1) infinite; }
+
+    .pipeline { display: flex; align-items: center; gap: 18px; font-size: 26px; }
+    .pipeline .box { padding: 18px 24px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow); text-align: center; }
+    .pipeline .box small { display: block; font-size: 17px; color: var(--text-faint); }
+    .pipeline .arrow { color: var(--text-faint); font-size: 30px; }
+    .pipeline .box.hot { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow); }
+
+    .big-number { font-size: 120px; font-weight: 700; line-height: 1; letter-spacing: -0.04em; }
+  </style>
+</head>
+<body class="deck-page">
+  <main class="deck"><div class="stage">
+
+    <section class="slide center">
+      <div class="kicker rise">LLM 101</div>
+      <h1 class="rise" style="--d: 1">一次只猜一个 token</h1>
+      <p class="muted rise" style="--d: 2">大模型生成文本的全部流程，其实是一个很短的循环</p>
+      <p class="small muted rise" style="--d: 4">按 → 或点击屏幕继续</p>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">第 1 步 · 切词</div>
+      <h2>模型看到的不是字，是 token</h2>
+      <div class="chips">
+        <span class="chip" style="--i: 0">The<span class="id">464</span></span>
+        <span class="chip" style="--i: 1"> cat<span class="id">3797</span></span>
+        <span class="chip" style="--i: 2"> sat<span class="id">3332</span></span>
+        <span class="chip" style="--i: 3"> on<span class="id">319</span></span>
+        <span class="chip" style="--i: 4"> the<span class="id">262</span></span>
+      </div>
+      <p class="muted fragment">文本先被切成片段，每个片段对应词表里的一个编号。常见词通常是一个 token，生僻词会被拆成几块。</p>
+      <p class="small muted fragment">（编号仅为示意，不同模型的词表各不相同。）</p>
+    </section>
+
+    <section class="slide" id="scores">
+      <div class="kicker">第 2 步 · 打分</div>
+      <h2>对下一个 token，给整个词表打分</h2>
+      <p class="muted">「The cat sat on the ___」，下一个是什么？</p>
+      <div class="dist" id="dist">
+        <div class="dist-row"><span class="w">mat</span><div class="dist-track"><div class="dist-fill" data-p="0.41"></div></div><span class="p">41%</span></div>
+        <div class="dist-row"><span class="w">floor</span><div class="dist-track"><div class="dist-fill" data-p="0.18"></div></div><span class="p">18%</span></div>
+        <div class="dist-row"><span class="w">bed</span><div class="dist-track"><div class="dist-fill" data-p="0.12"></div></div><span class="p">12%</span></div>
+        <div class="dist-row"><span class="w">roof</span><div class="dist-track"><div class="dist-fill" data-p="0.06"></div></div><span class="p">6%</span></div>
+        <div class="dist-row"><span class="w">…</span><div class="dist-track"><div class="dist-fill" data-p="0.23"></div></div><span class="p">23%</span></div>
+      </div>
+      <p class="small muted">概率为示意。最后一行是词表里其余几万个 token 加起来的份额。</p>
+    </section>
+
+    <section class="slide">
+      <div class="kicker">第 3 步 · 采样</div>
+      <h2>从分布里抽一个</h2>
+      <ul>
+        <li class="fragment dim-after"><span class="accent">贪心</span>：永远选概率最高的，稳定但容易重复</li>
+        <li class="fragment dim-after"><span class="accent">temperature</span>：先把分数除以 T 再算概率，T 大更随机，T 小更保守</li>
+        <li class="fragment dim-after"><span class="accent">top-p</span>：只在累计概率达到 p 的头部 token 里抽，砍掉长尾</li>
+      </ul>
+      <p class="small muted fragment">想亲手拖一拖 T：<a href="/posts/hello-world/">新博客，从零开始</a> 里有交互演示。</p>
+    </section>
+
+    <section class="slide" id="loop">
+      <div class="kicker">第 4 步 · 再来一遍</div>
+      <h2>把新 token 接到末尾，重复</h2>
+      <div class="loop-text" id="loop-text"></div>
+      <p class="muted">这叫<span class="accent">自回归</span>：每一步的输出，都是下一步的输入。</p>
+    </section>
+
+    <section class="slide center">
+      <div class="kicker rise">整体</div>
+      <div class="pipeline rise" style="--d: 1" id="pipeline">
+        <div class="box">文本<small>prompt</small></div><span class="arrow">→</span>
+        <div class="box">切词<small>tokenizer</small></div><span class="arrow">→</span>
+        <div class="box">Transformer<small>算出分数</small></div><span class="arrow">→</span>
+        <div class="box">采样<small>选一个 token</small></div><span class="arrow">↺</span>
+      </div>
+      <p class="muted rise" style="--d: 3">箭头绕回去，直到抽到「结束」token 或达到长度上限。</p>
+    </section>
+
+    <section class="slide center">
+      <div class="kicker">所以</div>
+      <div class="big-number rise" style="--d: 1">1</div>
+      <p class="rise" style="--d: 2">模型每次只做一件事：预测<span class="accent-2">下一个</span> token</p>
+      <p class="muted fragment">回答问题、写代码、做推理，都是这一件事重复几百上千次的结果。</p>
+      <p class="muted fragment">难的部分全在中间那个 Transformer 怎么打分，那是以后的话题。</p>
+    </section>
+
+    <section class="slide center">
+      <h2 class="rise">谢谢</h2>
+      <p class="muted rise" style="--d: 1"><a href="/">← 回到博客</a></p>
+    </section>
+
+  </div></main>
+
+  <script src="/assets/slides.js"></script>
+  <script>
+    (() => {
+      // Slide "scores": grow the bars each time the slide is entered.
+      const fills = document.querySelectorAll('#dist .dist-fill');
+      // Slide "pipeline": light up the boxes one after another.
+      const boxes = document.querySelectorAll('#pipeline .box');
+      // Slide "loop": type the sentence out one token at a time.
+      const loopText = document.getElementById('loop-text');
+      const prompt = ['The', ' cat', ' sat', ' on', ' the'];
+      const generated = [' mat', '.', ' It', ' was', ' warm', '.'];
+      let timers = [];
+
+      function clearTimers() { timers.forEach(clearTimeout); timers = []; }
+      function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
+
+      function playLoop() {
+        loopText.innerHTML = '';
+        const caret = document.createElement('span');
+        caret.className = 'caret';
+        loopText.append(prompt.join(''), caret);
+        generated.forEach((tok, i) => {
+          later(() => {
+            const s = document.createElement('span');
+            s.className = 'new';
+            s.textContent = tok;
+            loopText.insertBefore(s, caret);
+          }, 700 + i * 650);
+        });
+      }
+
+      function playPipeline() {
+        boxes.forEach((b) => b.classList.remove('hot'));
+        let k = 0;
+        const step = () => {
+          boxes.forEach((b, i) => b.classList.toggle('hot', i === k % boxes.length));
+          k++;
+          later(step, 700);
+        };
+        later(step, 900);
+      }
+
+      document.addEventListener('slidechange', (e) => {
+        clearTimers();
+        const id = e.detail.slide.id;
+        fills.forEach((f) => { f.style.width = '0'; });
+        if (id === 'scores') {
+          later(() => fills.forEach((f) => { f.style.width = f.dataset.p * 100 + '%'; }), 350);
+        }
+        if (id === 'loop') playLoop();
+        if (e.detail.slide.contains(boxes[0])) playPipeline();
+      });
+    })();
+  </script>
+</body>
+</html>

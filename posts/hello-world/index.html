@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>新博客，从零开始 · hs-black</title>
+  <meta name="description" content="这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <style>
+    .bars { display: grid; gap: 8px; margin-top: 16px; }
+    .bar-row { display: grid; grid-template-columns: 3.2em 1fr 3.6em; align-items: center; gap: 10px; font-size: 15px; }
+    .bar-track { height: 22px; border-radius: 6px; background: var(--bg-soft); overflow: hidden; }
+    .bar-fill { height: 100%; width: 0; border-radius: 6px; background: var(--accent); transition: width 0.35s cubic-bezier(0.2, 0.7, 0.2, 1); }
+    .bar-row.hit .bar-fill { background: var(--accent-2); }
+    .bar-pct { font-family: var(--font-mono); font-size: 13px; color: var(--text-soft); text-align: right; }
+    .controls { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 20px; margin-top: 12px; }
+    .controls label { display: flex; align-items: center; gap: 10px; font-size: 15px; }
+    .controls input[type="range"] { width: 180px; }
+    .temp-val { font-family: var(--font-mono); min-width: 2.6em; }
+    .prompt { font-size: 20px; margin-top: 8px; }
+    .prompt .out { color: var(--accent-2); font-weight: 600; }
+    .sample-log { margin-top: 12px; font-size: 14px; color: var(--text-soft); min-height: 1.6em; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>hs-black</a>
+    <nav class="site-nav"><a href="/">全部文章</a></nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>新博客，从零开始</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+
+    <article class="prose">
+      <p>以前的博客停在了 2020 年，那时候还在写 OI 题解。现在的兴趣在大模型上，干脆换一个新的地方重新开始。</p>
+
+      <h2>为什么不用生成器</h2>
+      <p>Hexo、Hugo 这类工具适合「写 Markdown，统一套模板」。但我想写的东西里，有不少不是纯文字：一个能拖动的参数、一段跟着讲解动起来的图、一套能直接拿去讲的幻灯片。这些东西在 Markdown 里写起来很别扭。</p>
+      <p>所以这个博客的规则很简单：</p>
+      <ul>
+        <li>每篇文章就是 <code>posts/&lt;名字&gt;/index.html</code>，一个完整的网页，想放什么交互就放什么；</li>
+        <li>所有页面共用一份样式 <code>assets/site.css</code>，幻灯片再加一个很小的翻页引擎 <code>assets/slides.js</code>；</li>
+        <li>推到 GitHub 上，GitHub Pages 直接把文件原样发出去，没有构建步骤。</li>
+      </ul>
+      <p>文章和演示主要由 Claude 帮我写，我负责想法和把关。</p>
+
+      <h2>先放一个小演示</h2>
+      <p>大模型每一步都会对词表里所有 token 打一个分数（logit），再用 softmax 把分数变成概率，然后从中抽一个。<strong>temperature</strong> 控制抽样前分布有多「尖」：先把每个 logit 除以 T，再做 softmax。</p>
+      <p>下面的分数是我编的，只为示意。拖动滑块看看分布怎么变：</p>
+
+      <div class="demo" id="temp-demo">
+        <div class="demo-label">Temperature 采样</div>
+        <div class="prompt">今天天气真<span class="out" id="out">▍</span></div>
+        <div class="controls">
+          <label>T = <input type="range" id="temp" min="0.1" max="2" step="0.05" value="1"><span class="temp-val" id="temp-val">1.00</span></label>
+          <button class="btn primary" id="sample">抽一个</button>
+          <button class="btn" id="sample-many">抽 100 次</button>
+        </div>
+        <div class="bars" id="bars"></div>
+        <div class="sample-log" id="log"></div>
+      </div>
+
+      <p>T 越小，概率越集中在分数最高的「好」上，接近每次都选最可能的那个（贪心解码）；T 越大，分布越平，不太可能的词也会被抽到，输出更有变化，也更容易跑偏。</p>
+      <p>下一篇是一套幻灯片，用动画把这一步放回完整的生成循环里：<a href="/posts/next-token/">一次只猜一个 token</a>。</p>
+    </article>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/">← 返回首页</a></footer>
+
+  <script>
+    (() => {
+      const vocab = [
+        ['好', 3.2], ['不错', 2.6], ['热', 2.1], ['冷', 1.6], ['糟糕', 0.8], ['奇怪', 0.2],
+      ];
+      const temp = document.getElementById('temp');
+      const tempVal = document.getElementById('temp-val');
+      const bars = document.getElementById('bars');
+      const out = document.getElementById('out');
+      const log = document.getElementById('log');
+
+      const rows = vocab.map(([word]) => {
+        const row = document.createElement('div');
+        row.className = 'bar-row';
+        row.innerHTML = '<span></span><div class="bar-track"><div class="bar-fill"></div></div><span class="bar-pct"></span>';
+        row.children[0].textContent = word;
+        bars.appendChild(row);
+        return row;
+      });
+
+      function probs(T) {
+        const z = vocab.map(([, l]) => l / T);
+        const m = Math.max(...z);
+        const e = z.map((v) => Math.exp(v - m));
+        const s = e.reduce((a, b) => a + b, 0);
+        return e.map((v) => v / s);
+      }
+
+      function draw(p) {
+        let r = Math.random();
+        for (let i = 0; i < p.length; i++) { r -= p[i]; if (r < 0) return i; }
+        return p.length - 1;
+      }
+
+      function update() {
+        const T = parseFloat(temp.value);
+        tempVal.textContent = T.toFixed(2);
+        probs(T).forEach((p, i) => {
+          rows[i].querySelector('.bar-fill').style.width = (p * 100).toFixed(1) + '%';
+          rows[i].querySelector('.bar-pct').textContent = (p * 100).toFixed(1) + '%';
+        });
+      }
+
+      function highlight(i) {
+        rows.forEach((r, k) => r.classList.toggle('hit', k === i));
+      }
+
+      document.getElementById('sample').addEventListener('click', () => {
+        const i = draw(probs(parseFloat(temp.value)));
+        out.textContent = vocab[i][0];
+        highlight(i);
+        log.textContent = '抽到了「' + vocab[i][0] + '」';
+      });
+
+      document.getElementById('sample-many').addEventListener('click', () => {
+        const p = probs(parseFloat(temp.value));
+        const counts = vocab.map(() => 0);
+        for (let n = 0; n < 100; n++) counts[draw(p)]++;
+        highlight(-1);
+        out.textContent = '▍';
+        log.textContent = '100 次里：' + vocab.map(([w], i) => w + ' ' + counts[i]).join(' · ');
+      });
+
+      temp.addEventListener('input', () => { highlight(-1); update(); });
+      update();
+    })();
+  </script>
+</body>
+</html>

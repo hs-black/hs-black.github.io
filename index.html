@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>hs-black</title>
+  <meta name="description" content="hs-black 的博客：大模型、实验与想法。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="alternate" type="application/rss+xml" title="hs-black" href="/feed.xml">
+  <link rel="stylesheet" href="/assets/site.css">
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>hs-black</a>
+    <nav class="site-nav">
+      <a href="https://github.com/hs-black">GitHub</a>
+      <a href="/feed.xml">RSS</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <section class="hero">
+      <h1>记录在大模型里<br>摸索的过程</h1>
+      <p>文章、交互演示和幻灯片。每一页都是手写的 HTML，没有生成器。</p>
+      <div class="token-stream" id="stream" aria-hidden="true"></div>
+    </section>
+
+    <h2 class="section-title">文章</h2>
+    <!-- Newest first. Each entry: title, kind, date, one-line description. -->
+    <ul class="post-list">
+      <li>
+        <a href="/posts/next-token/">
+          <span class="post-title">一次只猜一个 token</span>
+          <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-19">2026-10-19</time></span>
+          <span class="post-desc">用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。</span>
+        </a>
+      </li>
+      <li>
+        <a href="/posts/hello-world/">
+          <span class="post-title">新博客，从零开始</span>
+          <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></span>
+          <span class="post-desc">这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。</span>
+        </a>
+      </li>
+    </ul>
+  </main>
+
+  <footer class="site-footer wrap">© 2026 hs-black</footer>
+
+  <script>
+    // Hero: types out a sentence token by token, tinted by a made-up
+    // "confidence", then starts over.
+    (() => {
+      const el = document.getElementById('stream');
+      const tokens = [
+        ['你好', .9], ['，', .95], ['这里', .6], ['是', .8], [' hs', .4], ['-black', .7],
+        ['的', .9], ['博客', .85], ['。', .9], ['最近', .5], ['在', .7], ['折腾', .3],
+        ['大', .8], ['模型', .95], ['，', .6], ['顺便', .35], ['把', .5], ['想法', .55],
+        ['写', .6], ['下来', .8], ['。', .95],
+      ];
+      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const caret = document.createElement('span');
+      caret.className = 'caret';
+
+      function chip([text, p]) {
+        const s = document.createElement('span');
+        s.className = 'tok';
+        s.textContent = text;
+        s.style.setProperty('--p', p);
+        s.title = 'p ≈ ' + p.toFixed(2);
+        return s;
+      }
+
+      if (reduce) { tokens.forEach((t) => el.appendChild(chip(t))); return; }
+
+      let i = 0;
+      function tick() {
+        if (i === 0) { el.replaceChildren(caret); }
+        if (i < tokens.length) {
+          el.insertBefore(chip(tokens[i++]), caret);
+          setTimeout(tick, 120 + Math.random() * 220);
+        } else {
+          i = 0;
+          setTimeout(tick, 4000);
+        }
+      }
+      tick();
+    })();
+  </script>
+</body>
+</html>

@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>hs-black</title>
+    <link>https://hs-black.github.io/</link>
+    <atom:link href="https://hs-black.github.io/feed.xml" rel="self" type="application/rss+xml"/>
+    <description>hs-black 的博客：大模型、实验与想法。</description>
+    <language>zh-CN</language>
+    <item>
+      <title>一次只猜一个 token</title>
+      <link>https://hs-black.github.io/posts/next-token/</link>
+      <guid>https://hs-black.github.io/posts/next-token/</guid>
+      <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
+      <description>用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。</description>
+    </item>
+    <item>
+      <title>新博客，从零开始</title>
+      <link>https://hs-black.github.io/posts/hello-world/</link>
+      <guid>https://hs-black.github.io/posts/hello-world/</guid>
+      <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
+      <description>这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。</description>
+    </item>
+  </channel>
+</rss>
