@@ -133,14 +133,13 @@
 
     <!-- 3 -->
     <section class="slide">
-      <div class="kicker">路线图</div>
-      <h2>这套幻灯片分三部分</h2>
+      <div class="kicker">三个部分</div>
+      <h2>目录</h2>
       <div class="cols" style="grid-template-columns: repeat(3, 1fr); gap: 24px;">
         <div class="box rise" style="--d: 1"><h3>I · 原语</h3><p class="small muted">Broadcast、Reduce / AllReduce、Gather / AllGather、Scatter / ReduceScatter、AllToAll、Barrier，以及 NCCL。</p></div>
         <div class="box rise" style="--d: 2"><h3>II · 代价</h3><p class="small muted">α-β 模型、环形算法、\(2(N-1)/N\) 从哪来、双向环与环面、GPU 的 NVLink / InfiniBand 层级、真实带宽算例。</p></div>
-        <div class="box rise" style="--d: 3"><h3>III · 分片矩阵乘法</h3><p class="small muted">设备网格、分片记号 \(A[I_X, J]\)、四种情形各需要什么通信、AllGather 与 ReduceScatter 互为转置。</p></div>
+        <div class="box rise" style="--d: 3"><h3>III · 分片矩阵乘法</h3><p class="small muted">Device mesh、分片记号 \(A[I_X, J]\)、四种情形各需要什么通信、AllGather 与 ReduceScatter 互为转置。</p></div>
       </div>
-      <p class="small muted rise" style="--d: 4">素材主要来自 Ultra-Scale Playbook 附录 A0 和 Scaling Book 第 3 章（TPU）与第 12 章（GPU），链接在最后一页。</p>
     </section>
 
     <!-- 4 -->
@@ -223,13 +222,14 @@ dist.gather(t, out if rank == 0 else None,
       <svg class="dia prim" data-kind="reducescatter" viewBox="0 0 1000 250"></svg>
       <div class="cols">
         <p class="small"><b>Scatter</b> 是 Gather 的反向：root 把张量切成 N 块，第 r 块发给 rank r（不同于 Broadcast 发整份）。<b>ReduceScatter</b>：每个 rank 都有一个分成 N 块的张量，先逐块求和，再把第 r 块的和只交给 rank r。图里画的是 ReduceScatter。</p>
-        <pre><code>inp = [c0, c1, c2]   # 每个 rank 各有 3 块
-out = torch.zeros_like(c0)
-dist.reduce_scatter(out, inp,
-                    op=dist.ReduceOp.SUM)
-# rank r 得到所有 rank 的第 r 块之和
-# Playbook 的例子：rank0 [6, 12],
-#   rank1 [14, 56], rank2 [36, 288]</code></pre>
+        <pre><code># 3 个 rank，rank r 的第 j 块是
+#   [r+1, 2(r+1)] 的 j+1 次方
+inp = [torch.tensor([rank+1., 2*(rank+1)]).cuda()
+       ** (j + 1) for j in range(3)]
+out = torch.zeros(2).cuda()
+dist.reduce_scatter(out, inp, op=dist.ReduceOp.SUM)
+# rank 0: [1+2+3, 2+4+6] = [6, 12]
+# rank 1: [14, 56]    rank 2: [36, 288]</code></pre>
       </div>
     </section>
 
@@ -240,7 +240,7 @@ dist.reduce_scatter(out, inp,
       <svg class="dia prim" data-kind="alltoall" viewBox="0 0 1000 250"></svg>
       <div class="cols">
         <p class="small">每个 rank 有 N 块，第 j 块要送给 rank j；收完以后 rank j 拿着"所有人的第 j 块"。把 rank 当行、块当列，这就是一次矩阵转置。不做运算，也不复制数据。</p>
-        <p class="small">它不会自然出现在分片矩阵乘里，但在 MoE 里随处可见：每个 token 要送到它所选专家所在的卡上（第 8 篇）。分片记号里它表示"把下标从一个维度挪到另一个维度"。</p>
+        <p class="small">它不会自然出现在分片矩阵乘里，但在 MoE 里随处可见：每个 token 要送到它选中的 expert 所在的卡上（第 8 篇）。分片记号里它表示"把下标从一个维度挪到另一个维度"。</p>
       </div>
     </section>
 
@@ -314,7 +314,7 @@ dist.barrier()
           <p>把一次消息传递的时间拆成两部分：</p>
           $$T_\text{msg}(n) = \alpha + \frac{n}{W}$$
           <ul class="small">
-            <li>\(\alpha\)：每一跳的固定开销（启动、同步、链路延迟），与数据量无关。TPU ICI 每跳大约 1 µs。</li>
+            <li>\(\alpha\)：每一跳的固定开销（启动、同步、链路延迟），与数据量无关。TPU ICI 和 H100 NVLink 上都在 1 µs 左右。</li>
             <li>\(W\)：链路带宽（字节/秒），\(n\)：这一跳发的字节数。</li>
             <li>一个集合操作 = 若干步，每步所有链路<b>并行</b>发送。总时间 ≈ 步数 × α + 每条链路上最多的字节数 / W。</li>
           </ul>
@@ -322,7 +322,8 @@ dist.barrier()
         <div class="box fragment">
           <h3>单向 vs 双向</h3>
           <p class="small">一条全双工链路两个方向互不干扰，各有 \(W_\text{uni}\)。所谓"双向带宽" \(W_\text{bi} = 2W_\text{uni}\)。</p>
-          <p class="small" style="margin-top: 8px">H100 每张卡 NVLink：18 条 × 25 GB/s = <b>450 GB/s</b> 每个方向。Scaling Book 的 TPU 公式里 \(W_\text{ici}\) 用的是双向带宽，GPU 公式里用的是单向出口带宽，读的时候要分清。</p>
+          <p class="small" style="margin-top: 8px">H100 每张卡 NVLink：18 条 × 25 GB/s = <b>450 GB/s</b> 每个方向。</p>
+          <p class="small" style="margin-top: 8px">后面 TPU 的公式用双向带宽 \(W_\text{bi}\)（环面上两个方向同时用），GPU 的公式用单向出口带宽 \(W\)，两者差 2 倍。</p>
         </div>
       </div>
     </section>
@@ -440,7 +441,7 @@ dist.barrier()
           <h3>和笨办法比</h3>
           <p class="small">每个 rank 收发约 \(2V\)，<b>不随 N 增长</b>；笨办法的 root 要收发 \(2(N-1)V\)。</p>
           <p class="small" style="margin-top: 8px">代价：步数从 2 变成 \(2(N-1)\)，延迟项随 N 线性增长。消息大时带宽项占主导，环形算法好；消息很小、N 很大时，延迟项会反过来占主导。</p>
-          <p class="small muted" style="margin-top: 8px">这也是 Playbook 说的：AllReduce 通信量约 \(2K\)，拆成的两半各约 \(K\)（\(K\) 为元素数）。</p>
+          <p class="small muted" style="margin-top: 8px">按元素数 \(K\) 记：AllReduce 每卡收发约 \(2K\) 个元素，ReduceScatter 和 AllGather 各约 \(K\)。</p>
         </div>
       </div>
     </section>
@@ -451,11 +452,11 @@ dist.barrier()
       <h2>为什么不可能更快（只考虑点对点算法）</h2>
       <ul class="small">
         <li>AllReduce 的每个输出元素都是 \(N\) 个输入之和，而且最后要出现在 \(N\) 个 rank 上。</li>
-        <li class="fragment">每个元素至少需要 \(N-1\) 次"加法所需的搬运"和 \(N-1\) 次"把结果送到别处"的搬运，合计 \(2(N-1)\) 次跨 rank 传输。（NCCL-tests 文档的论证。）</li>
+        <li class="fragment">每个元素至少需要 \(N-1\) 次"加法所需的搬运"和 \(N-1\) 次"把结果送到别处"的搬运，合计 \(2(N-1)\) 次跨 rank 传输。</li>
         <li class="fragment">总共 \(V\) 字节的元素 × \(2(N-1)\) 次传输，由 \(N\) 个 rank 的出口（每个带宽 \(W\)）分担：</li>
       </ul>
       $$t \;\ge\; \frac{V \cdot 2(N-1)}{N \cdot W}$$
-      <p class="small fragment">环形算法正好达到这个下界，所以它是<span class="accent">带宽最优</span>的。ReduceScatter / AllGather 只需要其中一半：\(V(N-1)/(NW)\)。<br>唯一的例外是让<b>交换机自己做加法</b>（NVIDIA SHARP，in-network reduction），理论上可以把 AllReduce 降到 \(V/W\)；Scaling Book 引用的实测只提升约 30%。</p>
+      <p class="small fragment">环形算法正好达到这个下界，所以它是<span class="accent">带宽最优</span>的。ReduceScatter / AllGather 只需要其中一半：\(V(N-1)/(NW)\)。<br>唯一的例外是让<b>交换机自己做加法</b>（NVIDIA SHARP，in-network reduction），理论上可以把 AllReduce 降到 \(V/W\)；在 8×H100 节点内实测只提升约 30%（总线带宽约 370 → 480 GB/s）。</p>
     </section>
 
     <!-- 20 -->
@@ -464,10 +465,11 @@ dist.barrier()
       <h2>小消息：延迟项说了算</h2>
       <div class="cols">
         <div>
-          <p>把每跳写成取最大值的形式（Scaling Book 的写法）：</p>
+          <p>每一跳至少要花一个固定的时间 \(T_\text{min}\)，数据再少也省不掉：</p>
           $$T_\text{hop} = \max\!\left[T_\text{min},\ \frac{\text{每跳字节}}{W}\right]$$
           <p>当每跳的数据量小到传输时间不足 \(T_\text{min}\) 时，带宽再高也没用，总时间 ≈ 跳数 × \(T_\text{min}\)，这时<b>与 N 有关</b>。</p>
           <p class="fragment">例：TPU v5e 单向 ICI 带宽 4.5e10 B/s，每跳 ~1 µs ⇒ 小于 \(4.5\text{e}10 \times 10^{-6} = 45\) kB 的消息是延迟受限的。</p>
+          <p class="fragment small">GPU 上：8×H100 节点内 AllReduce 一个 128 B 的张量，实测约 16 µs（环形 14 跳，约 1 µs/跳）；跨 2 个、4 个节点约 25、35 µs。</p>
         </div>
         <div class="box fragment">
           <h3>树形算法</h3>
@@ -492,9 +494,9 @@ dist.barrier()
           $$T_\text{AG} = \max\!\left[\frac{T_\text{min}\cdot N}{2},\ \frac{V}{W_\text{bi}}\right]$$
         </div>
         <div>
-          <p class="fragment">在 \(k\) 个网格轴上同时做（例如 \(\text{AllGather}_{XY}\)），可用链路翻 \(k\) 倍：</p>
+          <p class="fragment">在 \(k\) 个 mesh 轴上同时做（例如 \(\text{AllGather}_{XY}\)），可用链路翻 \(k\) 倍：</p>
           <div class="fragment">$$T = \max\!\left[\frac{T_\text{min}\sum_i |X_i|}{2},\ \frac{V}{W_\text{bi}\, N_\text{axes}}\right]$$</div>
-          <p class="fragment">AllReduce 仍是 2 倍，ReduceScatter 与 AllGather 相同。<b>只要是带宽受限，耗时只取决于数组大小和链路带宽，与分片数无关</b>。这是 Scaling Book 第 3 章最重要的一条结论。</p>
+          <p class="fragment">AllReduce 仍是 2 倍，ReduceScatter 与 AllGather 相同。<b>只要是带宽受限，耗时只取决于数组大小和链路带宽，与分片数无关</b>。这是这一部分最重要的结论。</p>
           <p class="small muted fragment">注意：v5e 只有某个轴长为 16 时才有回绕链路；没有回绕就只能单向走满 N−1 跳。</p>
         </div>
       </div>
@@ -554,7 +556,7 @@ dist.barrier()
           <ul class="small" style="margin-top: 12px">
             <li>跨节点时先在节点内归约，再在节点间做环，节点内带宽更高、几乎不会成为瓶颈：\(T=\max[V/W_\text{GPU},\,V/W_\text{node}]\)。</li>
             <li>胖树保证任意二分都有满带宽，所以可以把任意多节点串成环，跨节点的集合带宽约为常数。</li>
-            <li>实测：8×H100 的 AllReduce 总线带宽大约到 370 GB/s，而且要 GB 级的大消息才能接近。</li>
+            <li>实测：8×H100 节点内 AllReduce 的总线带宽，不用交换机内归约（NVLink SHARP）时约 370 GB/s，用时约 480 GB/s，而且都要 GB 级的大消息才能接近。</li>
           </ul>
         </div>
       </div>
@@ -580,7 +582,7 @@ dist.barrier()
           <tr><td>Reduce</td><td>1</td><td>\(S/B\)</td></tr>
         </table>
       </div>
-      <p class="small muted">注：nccl-tests 的 AllToAll 中 \(S\) 指每个 rank 发出的总量，和上一页用整个数组记 \(V\) 的写法差一个 N 倍，换算后一致。</p>
+      <p class="small muted">nccl-tests 的 AllToAll 里 \(S\) 是每个 rank 发出的总量，前面用的 \(V\) 是整个数组，两者差 N 倍，换算后一致。</p>
     </section>
 
     <!-- 25 W2 -->
@@ -600,7 +602,7 @@ dist.barrier()
               <span>数组大小 V</span><input type="range" id="calc-v" min="3" max="11" step="0.05" value="9"><output id="calc-v-out"></output>
               <span>rank 数 N</span><input type="range" id="calc-n" min="1" max="10" step="1" value="3"><output id="calc-n-out"></output>
               <span>单向链路带宽</span><input type="range" id="calc-w" min="0" max="5" step="1" value="0"><output id="calc-w-out"></output>
-              <span>每跳延迟 α</span><input type="range" id="calc-a" min="0" max="20" step="0.5" value="5"><output id="calc-a-out"></output>
+              <span>每跳延迟 α</span><input type="range" id="calc-a" min="0" max="10" step="0.25" value="1"><output id="calc-a-out"></output>
             </div>
             <p class="hint" id="calc-w-note"></p>
           </div>
@@ -618,7 +620,7 @@ dist.barrier()
           </div>
         </div>
       </div>
-      <p class="hint">带宽项按前几页的公式计算；α 默认 5 µs 只是示意值（TPU ICI 约 1 µs/跳，GPU 上随算法、协议和规模变化很大），延迟项用的是环形算法的跳数。</p>
+      <p class="hint">带宽项按前几页的公式计算，延迟项 = 环形算法的跳数 × α。α 默认 1 µs：TPU ICI 每跳约 1 µs；8×H100 节点内小消息 AllReduce 实测约 16 µs，摊到 14 跳也是约 1 µs。</p>
     </section>
 
     <!-- 26 -->
@@ -630,7 +632,7 @@ dist.barrier()
           <h3>① 8×H100 节点内 AllGather</h3>
           <p class="small">\(\text{bf16}[4096, 65536]\)：\(V = 4096 \times 65536 \times 2 \approx 537\) MB。</p>
           $$T = \frac{537\text{e}6 \times 7}{8 \times 450\text{e}9} \approx 1.04\ \text{ms}$$
-          <p class="small muted">Scaling Book 报告实测约 1.5 ms：带宽达不到标称值，还有延迟。</p>
+          <p class="small muted">实测约 1.5 ms：带宽跑不到标称值，还有延迟。</p>
         </div>
         <div class="box fragment">
           <h3>② 8B 模型的 bf16 梯度 AllReduce</h3>
@@ -652,7 +654,7 @@ dist.barrier()
       <div class="cols">
         <div class="box">
           <h3>① TPU v5e，\(\text{AllGather}_Y([E_Y, F]) \to [E, F]\)</h3>
-          <p class="small">网格 {X: 8, Y: 4}，\(E=2048,\ F=8192\)，bf16。整个数组 \(2048\times8192\times2 \approx 34\) MB，每卡 8.4 MB。</p>
+          <p class="small">mesh {X: 8, Y: 4}，\(E=2048,\ F=8192\)，bf16。整个数组 \(2048\times8192\times2 \approx 34\) MB，每卡 8.4 MB。</p>
           <p class="small">理想双向环：\(34\text{e}6 / 9\text{e}10 \approx 377\) µs。但长 4 的轴没有回绕链路，只能单向走 3 跳：\(3 \times 8.4\text{e}6 / 4.5\text{e}10 \approx 560\) µs。实测约 680 µs。</p>
         </div>
         <div class="box fragment">
@@ -667,14 +669,14 @@ dist.barrier()
     <!-- 28 -->
     <section class="slide">
       <div class="kicker">III · 分片矩阵乘法</div>
-      <h2>设备网格（device mesh）</h2>
+      <h2>Device mesh：给卡排个阵</h2>
       <div class="cols">
         <div>
-          <p class="small">把所有加速器排成一个 2D 或 3D 的网格，每个轴起一个名字，叫<span class="accent">网格轴</span>（mesh axis），比如 X、Y、Z。</p>
+          <p class="small">把所有加速器排成一个 2D 或 3D 的阵列，每个轴起一个名字（比如 X、Y、Z），叫 <span class="accent">mesh 轴</span>（mesh axis）。</p>
           <pre style="margin-top: 12px"><code>Mesh(devices=((0, 1), (2, 3)),
      axis_names=('X', 'Y'))
 # 4 块卡排成 2×2，|X| = 2, |Y| = 2</code></pre>
-          <p class="small" style="margin-top: 12px">网格轴不一定对应物理链路：{X: 16, Y: 4} 也可以描述一个 4×4×4 的 TPU 立方体，其中 X 占两个物理轴。GPU 上常见的是"节点内一个轴、节点间一个轴"。</p>
+          <p class="small" style="margin-top: 12px">mesh 轴不一定对应物理链路：{X: 16, Y: 4} 也可以描述一个 4×4×4 的 TPU 立方体，其中 X 占两个物理轴。GPU 上常见的是"节点内一个轴、节点间一个轴"。</p>
         </div>
         <svg class="dia" viewBox="0 0 400 330">
           <g font-size="18">
@@ -698,23 +700,23 @@ dist.barrier()
     <!-- 29 -->
     <section class="slide dense">
       <div class="kicker">III · 分片记号</div>
-      <h2>\(A[I_X, J_Y]\)：下标写"沿哪个网格轴切"</h2>
+      <h2>\(A[I_X, J_Y]\)：下标写"沿哪个 mesh 轴切"</h2>
       <div class="cols">
         <div>
           <ul>
-            <li>数组的每个维度有名字（I、J、…）。维度下标是网格轴名，表示<b>这个维度沿该网格轴均匀切开</b>。</li>
+            <li>数组的每个维度有名字（I、J、…）。维度下标是 mesh 轴名，表示<b>这个维度沿该 mesh 轴均匀切开</b>。</li>
             <li class="fragment">\(A[I, J]\)：完全复制，每卡一份完整的。</li>
             <li class="fragment">\(A[I_X, J]\)：I 沿 X 切，沿 Y <b>部分复制</b>（同一行的两张卡拿相同的块）。</li>
             <li class="fragment">\(A[I_X, J_Y]\)：两维都切，每卡 \(1/(|X||Y|)\)。</li>
             <li class="fragment">\(A[I_{XY}, J]\)：把 X、Y 合成一个大轴来切 I；下标顺序决定遍历顺序。</li>
-            <li class="fragment"><span class="warn">\(A[I_X, J_X]\) 非法</span>：一个网格轴只能用一次，用过就"花掉了"。</li>
+            <li class="fragment"><span class="warn">\(A[I_X, J_X]\) 非法</span>：一个 mesh 轴只能用一次，用过就"花掉了"。</li>
           </ul>
         </div>
         <div class="box fragment hl">
           <h3>全局形状 vs 本地形状</h3>
           <p class="small">分片后的数组<b>逻辑上</b>形状不变（全局形状），每张卡实际存的是本地形状：</p>
           $$A[I_X, J_Y]:\ \left(\tfrac{|I|}{|X|},\ \tfrac{|J|}{|Y|}\right)$$
-          <p class="small">本地形状 × 每元素字节 = 每卡占用的显存。没用到的网格轴上数据是复制的，所以总占用 = 单份大小 × 未使用轴长度之积。</p>
+          <p class="small">本地形状 × 每元素字节 = 每卡占用的显存。没用到的 mesh 轴上数据是复制的，所以总占用 = 单份大小 × 未使用轴长度之积。</p>
           <p class="small muted">JAX 里写作 <code>PartitionSpec('X', 'Y')</code>，<code>None</code> 表示不切。</p>
         </div>
       </div>
@@ -723,7 +725,7 @@ dist.barrier()
     <!-- 30 W0 -->
     <section class="slide dense" id="shard-slide">
       <div class="kicker">III · 分片记号 · <span class="tag">交互</span></div>
-      <h2 style="font-size: 36px">在 2×2 网格上摆一个 4×4 分块的 A</h2>
+      <h2 style="font-size: 36px">在 2×2 mesh 上摆一个 4×4 分块的 A</h2>
       <div class="widget" data-interactive>
         <div class="w-grid" style="grid-template-columns: 1fr 1.1fr">
           <div style="display: grid; gap: 14px; align-content: start">
@@ -745,16 +747,16 @@ dist.barrier()
       <div class="cols">
         <div class="box">
           <h3>题 1</h3>
-          <p class="small">\(\text{fp32}[1024, 4096]\)，分片 \(A[I_{XY}, J]\)，网格 {X: 8, Y: 2}。每卡多少字节？H100 从 HBM（3.4e12 B/s）读一遍要多久？</p>
+          <p class="small">\(\text{fp32}[1024, 4096]\)，分片 \(A[I_{XY}, J]\)，mesh {X: 8, Y: 2}。每卡多少字节？H100 从 HBM（3.4e12 B/s）读一遍要多久？</p>
           <p class="small fragment">本地形状 \([1024/16, 4096] = [64, 4096]\)，\(4 \times 64 \times 4096 = 1\) MiB；\(1\text{e}6/3.4\text{e}12 \approx 294\) ns（这么小的数组实际会被各种开销淹没）。</p>
         </div>
         <div class="box">
           <h3>题 2</h3>
-          <p class="small">\(\text{int8}[128, 2048]\)，分片 \(A[I_{XY}, J]\)，网格 {X: 2, Y: 8, Z: 2}（32 卡）。每卡多少？总共多少？</p>
+          <p class="small">\(\text{int8}[128, 2048]\)，分片 \(A[I_{XY}, J]\)，mesh {X: 2, Y: 8, Z: 2}（32 卡）。每卡多少？总共多少？</p>
           <p class="small fragment">每卡 \([128/16, 2048] = [8, 2048]\) = 16,384 字节。Z 轴上复制 2 份，所以总量 = \(128\times2048\times2 = 512\) KiB = 32 × 16 KiB。</p>
         </div>
       </div>
-      <div class="box fragment"><p class="small"><b>题 3：</b>\(A[I_X, J, K, \ldots]\)，网格 {X: 4, Y: 8, Z: 2}。所有卡上的总字节 / 单份大小 = ？ <span class="fragment">答：每卡 1/4 份，共 64 卡 ⇒ 16 倍，正好是没用到的 \(|Y|\cdot|Z|\)。</span></p></div>
+      <div class="box fragment"><p class="small"><b>题 3：</b>\(A[I_X, J, K, \ldots]\)，mesh {X: 4, Y: 8, Z: 2}。所有卡上的总字节 / 单份大小 = ？ <span class="fragment">答：每卡 1/4 份，共 64 卡 ⇒ 16 倍，正好是没用到的 \(|Y|\cdot|Z|\)。</span></p></div>
     </section>
 
     <!-- 32 -->
@@ -788,7 +790,7 @@ dist.barrier()
           $$\begin{aligned} A[I, J]\cdot B[J, K] &\to C[I, K] \\ A[I_X, J]\cdot B[J, K] &\to C[I_X, K] \\ A[I, J]\cdot B[J, K_Y] &\to C[I, K_Y] \\ A[I_X, J]\cdot B[J, K_Y] &\to C[I_X, K_Y] \end{aligned}$$
         </div>
       </div>
-      <p class="small muted">前提：两个输入的非收缩维度没有用同一个网格轴（那是情形 4）。</p>
+      <p class="small muted">前提：两个输入的非收缩维度没有用同一个 mesh 轴（那是情形 4）。</p>
     </section>
 
     <!-- 34 -->
@@ -958,13 +960,13 @@ dist.barrier()
       <h2>把通信藏在矩阵乘法后面</h2>
       <div class="cols c43">
         <div>
-          <p>上面所有估计都默认：只要通信时间不超过计算时间，就能完全重叠。实现上用的是 <span class="accent">collective matmul</span>（Wang et al.）：</p>
+          <p>上面所有估计都默认：只要通信时间不超过计算时间，就能完全重叠。实现上用的是 <span class="accent">collective matmul</span>：</p>
           <ul>
             <li>把矩阵乘按块拆开；</li>
             <li>算第 k 块的同时，第 k−1 块的部分结果已经在环上传递（或下一块输入正在被 gather）；</li>
             <li>最后只剩一小块通信露在外面。</li>
           </ul>
-          <p class="small muted">这件事不简单：需要两个 stream、正确的依赖和足够大的块，Scaling Book 第 10 章有 JAX 实现。</p>
+          <p class="small muted">实现并不简单：需要两个 stream、正确的依赖和足够大的块。</p>
         </div>
         <svg class="dia" viewBox="0 0 460 260">
           <text x="10" y="40" class="soft" font-size="15">计算</text>
@@ -1008,12 +1010,13 @@ dist.barrier()
 
     <!-- 45 -->
     <section class="slide dense pager-slide">
-      <div class="kicker">参考与延伸</div>
-      <h2>参考</h2>
+      <div class="kicker">收尾</div>
+      <h2>参考与延伸阅读</h2>
       <ul class="small">
-        <li>Ultra-Scale Playbook，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">附录 A0: Parallel Programming Crash Course</a>（Broadcast、Reduce/AllReduce、Gather/AllGather、Scatter/ReduceScatter、Ring AllReduce、Barrier、NCCL）。</li>
-        <li>Austin et al., How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/sharding/">Part 3 · Sharded Matrices and How to Multiply Them</a>（<a href="https://jax-ml.github.io/scaling-book/sharding/#a-unified-notation-for-sharding">记号</a>、<a href="https://jax-ml.github.io/scaling-book/sharding/#computation-with-sharded-arrays">四种情形</a>、<a href="https://jax-ml.github.io/scaling-book/sharding/#our-final-communication-primitive-the-alltoall">AllToAll</a>、<a href="https://jax-ml.github.io/scaling-book/sharding/#more-about-the-reducescatter">ReduceScatter</a>）；<a href="https://jax-ml.github.io/scaling-book/gpus/#how-do-collectives-work-on-gpus">Part 12 · GPU 上的集合通信</a>。</li>
-        <li>NVIDIA nccl-tests，<a href="https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md">PERFORMANCE.md</a>（algbw / busbw 与 2(n−1)/n 的推导）。</li>
+        <li>Ultra-Scale Playbook，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">附录 A0: Parallel Programming Crash Course</a>：第 I 部分各个原语的 PyTorch 例子（包括 ReduceScatter 的那个算例）、Ring AllReduce 和 NCCL 的介绍。</li>
+        <li>Austin et al., How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/sharding/">Part 3 · Sharded Matrices and How to Multiply Them</a>（<a href="https://jax-ml.github.io/scaling-book/sharding/#a-unified-notation-for-sharding">分片记号</a>、<a href="https://jax-ml.github.io/scaling-book/sharding/#computation-with-sharded-arrays">四种情形</a>、<a href="https://jax-ml.github.io/scaling-book/sharding/#our-final-communication-primitive-the-alltoall">AllToAll</a>、<a href="https://jax-ml.github.io/scaling-book/sharding/#more-about-the-reducescatter">ReduceScatter</a>，以及 TPU 算例）；<a href="https://jax-ml.github.io/scaling-book/gpus/#how-do-collectives-work-on-gpus">Part 12 · GPU 上的集合通信</a>（H100 网络、SHARP、8×H100 实测带宽）；<a href="https://jax-ml.github.io/scaling-book/jax-stuff/">Part 10 · Programming TPUs in JAX</a> 有 collective matmul 的实现。</li>
+        <li>Wang et al., <a href="https://dl.acm.org/doi/10.1145/3567955.3567959">Overlap Communication with Dependent Computation via Decomposition in Large Deep Learning Models</a>（ASPLOS 2023），collective matmul 的原始论文。</li>
+        <li>NVIDIA nccl-tests，<a href="https://github.com/NVIDIA/nccl-tests/blob/master/doc/PERFORMANCE.md">PERFORMANCE.md</a>：algbw / busbw 的定义和 2(n−1)/n 下界的推导。小消息延迟的数字来自公开的 nccl-tests 结果：<a href="https://github.com/NVIDIA/nccl/issues/1259">单节点 8×H100</a>、<a href="https://github.com/NVIDIA/nccl-tests/issues/309">2 / 4 节点 H100</a>。</li>
       </ul>
       <nav class="series-pager" data-series="scaling"></nav>
       <p class="small"><a href="/blog/">← 回到博客</a></p>
@@ -1223,7 +1226,7 @@ dist.barrier()
       document.getElementById('calc-v-out').textContent = fmtB(V);
       document.getElementById('calc-n-out').textContent = N;
       document.getElementById('calc-w-out').textContent = fmtBW(W);
-      document.getElementById('calc-a-out').textContent = (+calc.a.value).toFixed(1) + ' µs';
+      document.getElementById('calc-a-out').textContent = (+calc.a.value) + ' µs';
       document.getElementById('calc-w-note').textContent = '预设：' + BW[+calc.w.value][1] + '。';
       let tb, steps, f;
       const h = Math.floor(N / 2);
@@ -1279,7 +1282,7 @@ dist.barrier()
       const vis = document.getElementById('sh-vis');
       const info = document.getElementById('sh-info');
       if (bad) {
-        vis.innerHTML = '<div class="err" style="grid-column: 1 / -1; font-size: 22px; max-width: 420px">非法分片：同一个网格轴被用了两次。用过的轴已经"花掉了"。</div>';
+        vis.innerHTML = '<div class="err" style="grid-column: 1 / -1; font-size: 22px; max-width: 420px">非法分片：同一个 mesh 轴被用了两次。用过的轴已经"花掉了"。</div>';
         info.innerHTML = '';
         return;
       }
@@ -1340,7 +1343,7 @@ dist.barrier()
         document.getElementById('mm-tt').textContent = fmtT(Math.max(tc, tf)) + (tc > tf ? '（通信受限）' : '（计算受限）');
       };
       if ((s.aI && s.aI === s.aJ) || (s.bJ && s.bJ === s.bK)) {
-        caseEl.innerHTML = '<span class="err">非法输入：同一数组里一个网格轴只能用一次</span>';
+        caseEl.innerHTML = '<span class="err">非法输入：同一数组里一个 mesh 轴只能用一次</span>';
         ['mm-tc', 'mm-tf', 'mm-tt'].forEach((id) => { document.getElementById(id).textContent = '—'; });
         return;
       }

@@ -95,7 +95,6 @@
 
     <article class="prose">
       <p>前面几篇把每一种并行单独拆开讲过了：数据并行和 ZeRO、张量并行和序列并行、上下文并行、流水线并行、专家并行。真正训练一个大模型时，没有人只用其中一种。Llama 3 405B 用了四种，DeepSeek-V3 用了三种，而且偏偏没用张量并行。这一篇回答两个问题：这五个轴（加上 ZeRO 的三个等级）放在一起时<strong>各自负责什么、互相怎么摆</strong>；给定模型、序列长度、batch 和一堆 GPU，<strong>怎么挑出一个好配置</strong>。</p>
-      <p>主要材料是 Hugging Face 的 <a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#5d_parallelism_in_a_nutshell">Ultra-Scale Playbook</a> 里「5D Parallelism in a Nutshell」和「Finding the Best Training Configuration」两节，以及 Google DeepMind 的 <a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>（下文简称 Scaling Book）第 5、6 章。前者从 GPU 集群和工程经验出发，后者从 TPU 和 roofline 算术出发，两边对照着看正好。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -112,7 +111,7 @@
           <li><a href="#planner">配置规划器（演示）</a></li>
           <li><a href="#real">真实系统怎么组合</a></li>
           <li><a href="#summary">小结</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -210,19 +209,19 @@
             <rect x="240" y="0" width="14" height="14" class="dn"/><text x="260" y="12" font-size="12" class="soft">两卡都有完整一份</text>
           </g>
         </svg>
-        <figcaption>图 1　五种并行各自沿哪一维切，以两张卡为例。自绘示意。</figcaption>
+        <figcaption>图 1　五种并行各自沿哪一维切，以两张卡为例。</figcaption>
       </figure>
 
       <p>切的维度不同，带来三件不同的事：<strong>省下哪部分显存</strong>、<strong>引入哪种通信</strong>、<strong>这次通信能不能藏在计算后面</strong>。选型就是在这三件事之间做交换。下面先把记号定下来，再一个轴一个轴地算。</p>
 
       <h2 id="notation">记号和一层的账本</h2>
-      <p>沿用 Playbook 的记号：隐藏维 \(h\)，层数 \(L\)，序列长度 \(s\)，micro-batch 大小（每张卡一次前向处理的序列数）\(b\)，注意力头数 \(a\)，词表 \(V\)，模型参数量 \(\Psi\)。并行度写作 \(t\)（TP）、\(c\)（CP）、\(p\)（PP）、\(d\)（DP）、\(e\)（EP），总卡数</p>
+      <p>先约定记号：隐藏维 \(h\)，层数 \(L\)，序列长度 \(s\)，micro-batch 大小（每张卡一次前向处理的序列数）\(b\)，注意力头数 \(a\)，词表 \(V\)，模型参数量 \(\Psi\)。并行度写作 \(t\)（TP）、\(c\)（CP）、\(p\)（PP）、\(d\)（DP）、\(e\)（EP），总卡数</p>
       $$N = t \cdot c \cdot p \cdot d.$$
       <p>EP 一般不单独占一个因子，而是借用 DP（或 DP×CP）那一维的卡：在 MoE 层里，这些卡不再各自持有全部专家，而是分摊专家（后面细说）。</p>
       <p>一步训练的全局 batch（global batch size，GBS）按 token 计是</p>
       $$\text{GBS} = d \cdot b \cdot m \cdot s,$$
       <p>其中 \(m\) 是梯度累积步数，对流水线来说也就是一步里的 micro-batch 个数。这个等式在后面会反复出现：<strong>GBS 通常由收敛性（scaling law、临界 batch size）事先定好，不能随便改</strong>，所以加大 \(d\) 就得减小 \(b\) 或 \(m\)；当 \(b \cdot m\) 已经是 1，DP 就不能再加了。</p>
-      <p>显存方面，混合精度 + Adam 下每个参数大约要 16 字节：bf16 参数 2、bf16 梯度 2、fp32 主权重 4、Adam 两个矩 8（如果梯度也用 fp32 累加，还要再加 4）。激活值方面，Playbook 给出（不做重算、用 FlashAttention 时去掉注意力分数那一项）每层约</p>
+      <p>显存方面，混合精度 + Adam 下每个参数大约要 16 字节：bf16 参数 2、bf16 梯度 2、fp32 主权重 4、Adam 两个矩 8（如果梯度也用 fp32 累加，还要再加 4）。激活方面，在不做重算、用 FlashAttention（不存 \(s\times s\) 的注意力分数矩阵）的情况下，每层大约要存</p>
       $$m_\text{act} \approx 34\, s\, b\, h \ \text{字节}.$$
       <p>算力方面，一个 token 前向 + 反向约 \(6\Psi\) FLOPs，加上注意力的 \(12 L h s^2\)（每条序列）。这些在本系列第一篇《训练的账本》里推过，这里直接用。</p>
 
@@ -230,7 +229,7 @@
 
       <h3>数据并行与 ZeRO</h3>
       <p>DP 把 batch 分到 \(d\) 张卡，每张卡跑完整的前向和反向，得到的是「自己那份数据」上的梯度。为了让所有副本做同样的更新，反向结束时要把梯度做一次 <strong>all-reduce</strong> 求平均。用 ring 算法时，每张卡发送和接收的数据量约为 \(2\cdot\frac{d-1}{d}\) 倍梯度大小。</p>
-      <p>DP 的通信有两个好性质。第一，前向没有通信；第二，梯度的 all-reduce <strong>不在关键路径上</strong>：最后一层的梯度一算出来就可以开始同步，同时继续算前面层的反向（PyTorch DDP 用 hook + 分桶实现）。只要反向的计算时间比通信长，通信就被完全藏住了。坏处是它不省参数和优化器的显存：每张卡仍然是 \(16\Psi\) 字节。按 Scaling Book 的估算，96 GB HBM 的 TPU v5p 上，纯 DP + Adam 能放下的模型上限约是 \(96\text{GB}/10 \approx 9\text{B}\)（它算的是 bf16 参数 + fp32 优化器 10 字节/参数，还没算激活）。</p>
+      <p>DP 的通信有两个好性质。第一，前向没有通信；第二，梯度的 all-reduce <strong>不在关键路径上</strong>：最后一层的梯度一算出来就可以开始同步，同时继续算前面层的反向（PyTorch DDP 用 hook + 分桶实现）。只要反向的计算时间比通信长，通信就被完全藏住了。坏处是它不省参数和优化器的显存：每张卡仍然是 \(16\Psi\) 字节。算一下量级：80 GB 的 H100 按每参数 16 字节，纯 DP 最多放下约 5B 参数，这还没算激活。就算按最省的算法（bf16 参数 2 字节 + fp32 的 Adam 两个矩 8 字节，共 10 字节），96 GB 的 TPU v5p 也只能放约 9B。</p>
       <p>ZeRO 去掉这份冗余。ZeRO-1 只切优化器状态：梯度 all-reduce 换成 reduce-scatter，每张卡只更新自己那 \(1/d\) 的参数，再 all-gather 回完整参数。reduce-scatter + all-gather 的总通信量和一次 all-reduce 相同，所以 ZeRO-1、ZeRO-2 几乎是白送的。ZeRO-3 / FSDP 连参数也只存 \(1/d\)，每层用之前临时 all-gather，前向一次、反向一次，再加上梯度的 reduce-scatter，通信量约为 DP 的 1.5 倍。但这些 all-gather 可以<strong>预取</strong>：算第 \(i\) 层时拉第 \(i+1\) 层的参数。所以 FSDP 的计算/通信比和纯 DP 一样，只是多了一份对「每层计算够不够长」的要求。</p>
 
       <h3>张量并行（+ 序列并行）</h3>
@@ -239,7 +238,7 @@
 
       <h3>上下文并行</h3>
       <p>CP 沿序列维切 token。MLP、LayerNorm 这些逐 token 的计算完全不需要通信，只有注意力需要别的段的 K、V。常见实现是 <strong>Ring Attention</strong>：\(c\) 张卡排成环，每一步把自己手上的 K/V 块传给下一张卡，同时用收到的块算一部分注意力，\(c-1\) 步后每段 Q 都见过了全部 K/V。为了因果掩码下负载均衡，序列切成 \(2c\) 块，第 \(i\) 张卡拿第 \(i\) 块和第 \(2c-1-i\) 块（zig-zag）。CP 省的是激活显存，这在 128k 这种长度下是决定性的；代价是注意力里多出的通信，好在它能和注意力计算重叠。另外别忘了，CP 组内每张卡的权重是一样的，各自只看到一部分 token 的梯度，所以梯度同步（以及 ZeRO 的切分）要在 DP×CP 这一整组卡上做，在这一点上 CP 和 DP 是一回事。</p>
-      <p>另一种实现是先 all-gather 全部 K/V 再算，Llama 3 就是这么做的。论文给的理由：这样更容易支持文档掩码之类的各种掩码；而且用了 GQA 以后 K/V 比 Q 小得多，all-gather 的时间（\(O(S)\)）比注意力计算（\(O(S^2)\)）小一个量级，暴露出来也不要紧。</p>
+      <p>另一种实现是先 all-gather 全部 K/V 再算，Llama 3 就是这么做的。理由有两条：这样更容易支持文档掩码之类的各种掩码；而且用了 GQA 以后 K/V 比 Q 小得多，all-gather 的时间（\(O(S)\)）比注意力计算（\(O(S^2)\)）小一个量级，暴露出来也不要紧。</p>
 
       <h3>流水线并行</h3>
       <p>PP 把 \(L\) 层分成 \(p\) 段，每张卡只存自己那段的参数。通信只是相邻两段之间的点对点传输（前向传激活，反向传激活的梯度），量很小：每个 micro-batch 每个边界只有一份 \(s\cdot b\cdot h\)。所以 PP 能跨慢网络。问题在 <strong>bubble</strong>：流水线填满之前和排空之后，有些段在闲着。1F1B 调度下 bubble 占比是</p>
@@ -265,13 +264,12 @@
           </tbody>
         </table>
       </div>
-      <p>这张表大体对应 Playbook「Summarizing it all」里的总结，我按自己的理解补了通信和关键路径两列。</p>
 
       <h2 id="combine">谁和谁能组合</h2>
       <p><strong>PP 和 ZeRO-3 是同一个问题的两种解法。</strong>它们都把模型参数沿深度方向分摊，每张卡都以「整层」为单位计算（TP、EP 则是在层内部切）。区别在于搬什么：ZeRO-3 搬权重，每张卡存每层的一小片，用的时候拉齐；PP 搬激活，每张卡存几层完整的参数，把激活往下传。由此推出它们各自偏好的条件：ZeRO-3 喜欢大的 \(b\cdot s\)，这样每层计算够长、能藏住参数的 all-gather；PP 喜欢大的 \(m\)，这样 bubble 小。</p>
       <p>两者能同时用，但很少这么做：PP 下每个 micro-batch 都要过一遍每层，ZeRO-3 如果每个 micro-batch 都重新 all-gather 参数，通信量会乘上 \(m\)。要组合的话，得让 ZeRO-3 在一轮 micro-batch 期间把参数留在显存里，那又把 ZeRO-3 省下的显存吐回去一部分。相反，<strong>ZeRO-1、ZeRO-2 和 PP 天然互补</strong>：它们只动优化器状态和梯度，这些每步只同步一次，和 micro-batch 个数无关。DeepSeek-V3 用的就是 PP + ZeRO-1。</p>
       <p><strong>TP（+SP）和 PP、ZeRO-3 都能组合。</strong>它依赖的是矩阵乘法的可分配性，和外面怎么切层、怎么切副本无关。但 TP 不适合单独扛大规模：一是它的通信在关键路径上，规模一大通信就压过计算；二是它要求对模型结构了解得很细（哪里按隐藏维切、哪里按序列维切），不像 ZeRO 和 PP 那样与模型无关。</p>
-      <p><strong>CP 和 EP 都是在切激活，和 TP 互补。</strong>CP 主要影响注意力，EP 只影响 MoE 层，彼此不冲突。Playbook 还给了每种并行「作用在模型哪部分」的对照：</p>
+      <p><strong>CP 和 EP 都是在切激活，和 TP 互补。</strong>CP 主要影响注意力，EP 只影响 MoE 层，彼此不冲突。换个角度，按「作用在模型哪部分」再对照一遍：</p>
       <ul>
         <li>TP + SP 作用于整个模型（每个线性层、每个 LayerNorm）；需要针对模型写切分规则。</li>
         <li>CP 主要作用于注意力，其它层在切开的序列上各算各的；除注意力外与模型无关。</li>
@@ -280,7 +278,7 @@
       </ul>
 
       <h2 id="network">每个轴该放在网络的哪一层</h2>
-      <p>GPU 集群的网络是分层的。以 H100 为例：一台服务器 8 张卡，通过 NVLink/NVSwitch 互联，每张卡对外的 NVLink 带宽是 900 GB/s（双向合计，单向约 450 GB/s）；服务器之间走 InfiniBand 或 RoCE，每张卡配一块 400 Gb/s 的网卡，单向约 50 GB/s。节点内外差了将近一个数量级，延迟差得更多。DeepSeek-V3 论文里给的自家 H800 集群数字是 NVLink 160 GB/s、IB 50 GB/s，约 3.2 倍。</p>
+      <p>GPU 集群的网络是分层的。以 H100 为例：一台服务器 8 张卡，通过 NVLink/NVSwitch 互联，每张卡对外的 NVLink 带宽是 900 GB/s（双向合计，单向约 450 GB/s）；服务器之间走 InfiniBand 或 RoCE，每张卡配一块 400 Gb/s 的网卡，单向约 50 GB/s。节点内外差了将近一个数量级，延迟差得更多。不同集群的差距不一样：DeepSeek-V3 训练用的 H800 集群上，NVLink 是 160 GB/s、IB 是 50 GB/s，只差约 3.2 倍。</p>
 
       <figure class="fig">
         <svg viewBox="0 0 480 420" role="img" aria-label="节点内 NVLink 与节点间 InfiniBand 的层级，以及各并行轴放置的位置">
@@ -318,24 +316,24 @@
             <text x="12" y="104" font-size="11" class="soft">计算重叠（DP、预取）</text>
           </g>
         </svg>
-        <figcaption>图 2　网络层级和每个并行轴的典型位置。带宽为 H100 + 400 Gb/s 网卡的标称值，自绘示意。</figcaption>
+        <figcaption>图 2　网络层级和每个并行轴的典型位置。带宽取 H100 SXM（NVLink 900 GB/s 双向）加每卡一块 400 Gb/s 网卡的标称值。</figcaption>
       </figure>
 
       <p>放置原则一句话：<strong>越在关键路径上、通信越频繁的轴，越要放在内层（带宽高、延迟低的那一层）</strong>。具体来说：</p>
       <ul>
-        <li>TP 每层通信 8 次、无法与计算重叠，必须在 NVLink 里。Playbook 的建议是 TP 组「应该保持在节点内」。</li>
+        <li>TP 每层通信 8 次、默认实现里无法与计算重叠，必须在 NVLink 里。实践中 TP 组几乎总是限制在一台机器之内（\(t \le 8\)）。</li>
         <li>CP 的 K/V 交换能和注意力重叠，但量随序列线性增长，通常也放在节点内或紧挨着 TP。</li>
         <li>EP 的 all-to-all 量不小，最好在节点内；跨节点时要靠路由约束和通信重叠（下文 DeepSeek-V3 的做法）。</li>
         <li>PP 只在边界传激活，量小，可以跨节点。</li>
         <li>DP / FSDP 在最外层：它的通信可以异步预取参数、异步规约梯度，最能容忍延迟。</li>
       </ul>
-      <p>Llama 3 的论文把这个原则写得很直白：并行维度按 [TP, CP, PP, DP] 的顺序从内到外排列，「最内层的并行需要最高的带宽和最低的延迟，因此通常限制在同一台服务器内；最外层可能跨越多跳网络，应能容忍更高的延迟」。DP（他们用的是 FSDP）在最外层，因为它能异步预取权重、异步规约梯度。</p>
+      <p>Llama 3 405B 的训练就是按这个原则排的：并行维度按 [TP, CP, PP, DP] 的顺序从内到外排列。最内层的并行需要最高的带宽和最低的延迟，所以限制在同一台服务器内；最外层可能跨越多跳网络，要能容忍更高的延迟。DP（他们用的是 FSDP）放在最外层，因为它能异步预取权重、异步规约梯度。</p>
 
       <h2 id="mesh">设备网格：rank 怎么编号</h2>
       <p>把 \(N\) 张卡看成一个 4 维数组，形状是 \([d, p, c, t]\)（外到内），每张卡的全局编号 rank 就是它在这个数组里的展平下标。按 [TP, CP, PP, DP] 由内到外的顺序：</p>
       $$\text{rank} = i_t + t\,\big(i_c + c\,(i_p + p\, i_d)\big).$$
       <p>同一个 TP 组就是其它三个下标相同、只有 \(i_t\) 不同的那 \(t\) 张卡，它们的 rank 连续（步长 1）；同一个 CP 组的 rank 步长是 \(t\)；PP 组步长 \(tc\)；DP 组步长 \(tcp\)。如果每台机器 8 张卡、rank 按机器连续分配，那么「步长 × 组大小 \(\le 8\)」的组就整个落在一台机器里。这就是「内层」在实现上的含义：<strong>内层轴 = 编号里变化最快的轴</strong>。</p>
-      <p>Llama 3 论文里的例子：16 张卡，TP=CP=PP=DP=2。GPU0 的坐标是 [TP0, CP0, PP0, DP0]，GPU1 是 [TP1, CP0, PP0, DP0]，所以 GPU0 和 GPU1 在同一个 TP 组；GPU0 和 GPU2 同一个 CP 组；GPU0 和 GPU4 同一个 PP 组；GPU0 和 GPU8 同一个 DP 组。代入上面的公式正好对得上。</p>
+      <p>举个 16 张卡的例子，TP=CP=PP=DP=2。GPU0 的坐标是 [TP0, CP0, PP0, DP0]，GPU1 是 [TP1, CP0, PP0, DP0]，所以 GPU0 和 GPU1 在同一个 TP 组；GPU0 和 GPU2 同一个 CP 组；GPU0 和 GPU4 同一个 PP 组；GPU0 和 GPU8 同一个 DP 组。代入上面的公式可以验证：GPU2 的 \(i_c=1\)，rank \(=0+2\cdot1=2\)；GPU4 的 \(i_p=1\)，rank \(=2\cdot2\cdot1=4\)；GPU8 的 \(i_d=1\)，rank \(=2\cdot2\cdot2\cdot1=8\)。</p>
       <p>在 PyTorch 里，这个网格就是 <code>DeviceMesh</code>：</p>
       <pre><code>from torch.distributed.device_mesh import init_device_mesh
 
@@ -377,34 +375,39 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
       <p>换几种顺序试试：默认的 [TP, CP, PP, DP] 下，TP 组整组在一台机器内；把 DP 挪到最内层，TP 组就被拆到好几台机器上，原本走 NVLink 的每层通信全都要走网卡。这正是「顺序」这个超参数存在的原因。</p>
 
       <h2 id="thresholds">什么时候被通信卡住：每设备 batch 的门槛</h2>
-      <p>「放得下」只是第一关。卡多了以后，每张卡分到的计算变少，而通信量往往不变甚至变多，迟早会出现通信时间超过计算时间、卡在空等的情况。Scaling Book 第 5 章把这件事算成了几个很好记的门槛。它把 Transformer 简化成一摞 MLP 块（每块两个矩阵 \(W_\text{in}\in\mathbb{R}^{D\times F}\)、\(W_\text{out}\in\mathbb{R}^{F\times D}\)），\(B\) 是全局 batch 的 token 数，\(C\) 是每芯片算力，\(W\) 是互联带宽（双向），\(X\)、\(Y\) 分别是 FSDP 和 TP 的并行度。</p>
+      <p>「放得下」只是第一关。卡多了以后，每张卡分到的计算变少，而通信量往往不变甚至变多，迟早会出现通信时间超过计算时间、卡在空等的情况。这一节把「什么时候开始空等」算成几个好记的门槛。</p>
+      <p>为了让算术干净，我们把 Transformer 简化成一摞 MLP 块（每块两个矩阵 \(W_\text{in}\in\mathbb{R}^{D\times F}\)、\(W_\text{out}\in\mathbb{R}^{F\times D}\)），因为 MLP 的矩阵占了绝大部分参数和 FLOPs。记号：\(B\) 是全局 batch 的 token 数，\(C\) 是每块芯片的 bf16 算力（FLOP/s），\(W\) 是互联带宽（字节/秒，双向合计），\(X\)、\(Y\) 分别是 FSDP 和 TP 的并行度。例子用 TPU v5p 的数字：它的芯片排成 3 维 torus，每个轴的带宽一样，算起来最干净；GPU 的版本放在下一节。</p>
 
       <h3>DP / FSDP：每设备 batch 要大于 \(C/W\)</h3>
-      <p>纯 DP 的反向里每层有两个矩阵要 all-reduce，每个 \(2DF\) 字节（bf16），all-reduce 的时间约为 \(2\times\)字节数\(/W\)：</p>
+      <p>纯 DP 的前向没有通信，只看反向。每层有两个权重矩阵的梯度要 all-reduce，每个 \(DF\) 个参数、\(2DF\) 字节（bf16）。ring all-reduce 等于一次 reduce-scatter 加一次 all-gather，每一半都要让整份数据在链路上过一遍，所以时间约为 \(2\times\)字节数\(/W\)。于是：</p>
       $$T_\text{comms} = \frac{2\cdot 2\cdot 2\, DF}{W}, \qquad T_\text{math} = \frac{2\cdot 2\cdot 2\, B D F}{X\, C}.$$
-      <p>后者是反向的 4 个矩阵乘，每个 \(2(B/X)DF\) FLOPs。两者相除，计算比通信长的条件是</p>
+      <p>后者是反向的 4 个矩阵乘（每个权重矩阵要算输入梯度和权重梯度各一次），每个 \(2(B/X)DF\) FLOPs。两式相除得 \(T_\text{math}/T_\text{comms} = (B/X)\cdot W/C\)，所以计算比通信长的条件是</p>
       $$\frac{B}{X} > \frac{C}{W}.$$
-      <p>右边叫这张网络的「算术强度」。TPU v5p 上 \(C = 4.59\times10^{14}\)，单轴 ICI 双向带宽 \(W = 1.8\times 10^{11}\) 字节/秒，比值约 2550：<strong>每张卡至少要分到 2550 个 token</strong>，DP 才是计算受限的。注意这个结论和模型大小无关，因为通信量和计算量都正比于 \(DF\)。FSDP 把 all-reduce 换成 all-gather + reduce-scatter，比值不变，所以「DP 能跑」就意味着「FSDP 也能跑」，而且白白省下大量显存。DP 用了几个网格轴（\(M_X\)），带宽就乘几，门槛变成 \(2550/M_X\)；3 维 torus 全给 DP，门槛约 850。</p>
+      <p>右边叫这张网络的「算术强度」：每传一个字节的时间里能做多少 FLOPs。TPU v5p 上 \(C = 4.59\times10^{14}\)，单轴 ICI 双向带宽 \(W = 1.8\times 10^{11}\) 字节/秒，比值约 2550：<strong>每张卡至少要分到 2550 个 token</strong>，DP 才是计算受限的。注意这个结论和模型大小无关，因为通信量和计算量都正比于 \(DF\)。FSDP 把 all-reduce 换成 all-gather + reduce-scatter，比值不变，所以「DP 能跑」就意味着「FSDP 也能跑」，而且白白省下大量显存。DP 用了几个网格轴（\(M_X\)），带宽就乘几，门槛变成 \(2550/M_X\)；3 维 torus 全给 DP，门槛约 850。</p>
 
       <h3>TP：并行度上限约 \(F/2550\)</h3>
-      <p>TP 搬的是激活：前向在 \(W_\text{in}\) 前 all-gather、\(W_\text{out}\) 后 reduce-scatter，每次 \(2BD\) 字节。</p>
+      <p>TP 切的是 \(F\) 维，每张卡持有 \(W_\text{in}\) 的 \(F/Y\) 列和 \(W_\text{out}\) 的 \(F/Y\) 行。它搬的是激活：前向在 \(W_\text{in}\) 前把输入 all-gather 完整，\(W_\text{out}\) 后把部分和 reduce-scatter 回去，每次涉及 \(2BD\) 字节。只看前向（反向是对称的）：</p>
       $$T_\text{comms} = \frac{2\cdot 2\, BD}{W}, \qquad T_\text{math} = \frac{4\, BDF}{Y\, C} \;\Rightarrow\; Y \lt \frac{F\, W}{C} \approx \frac{F}{2550}.$$
-      <p>这个门槛和 batch 无关，只和 FFN 宽度有关。LLaMA 3-70B 的 \(F = 28672\)，8 路 TP 舒服，16 路就通信受限了；大多数模型落在 8 到 16 路之间。</p>
+      <p>中间一步是：两边约掉 \(4BD\)，得到 \(F/(YC) > 1/W\)。这个门槛和 batch 无关，只和 FFN 宽度有关。LLaMA 3-70B 的 \(F = 28672\)，8 路 TP 舒服，16 路就通信受限了；大多数模型落在 8 到 16 路之间。</p>
 
       <h3>FSDP + TP 混合：门槛降到 \(\alpha^2/(2F)\)</h3>
       <p>一句口诀：<strong>FSDP 搬权重，TP 搬激活</strong>。混在一起时，FSDP 的 all-gather 对象是已经被 TP 切过的 \([D_X, F_Y]\)，随 \(Y\) 变小；TP 的 all-gather 对象是已经被 FSDP 切过的 \([B_X, D_Y]\)，随 \(X\) 变小。设 \(N = XY\)，\(\alpha = C/W\)：</p>
       $$T_\text{FSDP} = \frac{4DF}{Y\,W\,M_X},\quad T_\text{TP} = \frac{4BD}{X\,W\,M_Y},\quad T_\text{math}=\frac{4BDF}{N C}.$$
-      <p>假设两种通信能互相重叠，总通信时间是两者的最大值。一个随 \(X\) 增、一个随 \(X\) 减，最大值在两者相等时最小：</p>
+      <p>这里 \(M_X\)、\(M_Y\) 是分给 FSDP 和 TP 的网格轴数，多一个轴就多一份带宽。假设两种通信能互相重叠，总通信时间是两者的最大值。把 \(Y = N/X\) 代进去：</p>
+      $$T_\text{comms}(X) = \frac{4D}{W}\max\!\left(\frac{F X}{N M_X},\ \frac{B}{X M_Y}\right).$$
+      <p>第一项随 \(X\) 增大，第二项随 \(X\) 减小，所以最大值在两者相等时最小。令 \(FX/(NM_X) = B/(XM_Y)\)，解出</p>
       $$X_\text{opt} = \sqrt{\frac{B}{F}\cdot\frac{M_X}{M_Y}\cdot N}.$$
-      <p>代回去，计算受限的条件变成</p>
+      <p>把 \(X_\text{opt}\) 代回任一项，通信时间正比于 \(\sqrt{BF/(M_XM_YN)}\)，而计算时间正比于 \(BF/N\)。要求后者大于前者，整理得到</p>
       $$\frac{B}{N} \gt \frac{\alpha^2}{M_X M_Y F}.$$
       <p>3 维 torus 上 \(M_X M_Y = 2\)，\(F\approx 32768\) 时门槛约 100，比纯 FSDP 的 850 低了约 8 倍。直觉是：计算时间随 \(B\) 线性增长，而最优混合下的通信时间只随 \(\sqrt{B}\) 增长。</p>
 
       <h3>跨 pod：每个 pod 的 batch 要大于约 7 万</h3>
-      <p>一个 TPU v5p pod 最多 8960 片，再往外要走数据中心网络（DCN），每片只有约 6.25 GB/s。通常的做法是 pod 内用 FSDP + TP，pod 之间只做纯 DP。DCN 的总带宽随 pod 内芯片数线性增长（每台主机都有网卡），推出来的条件是<strong>每个 pod</strong>的 batch 大于 \(C/W_\text{dcn} \approx 4.59\times10^{14}/6.25\times10^9 \approx 73{,}440\) 个 token。这是很容易满足的。</p>
+      <p>一个 TPU v5p pod 最多 8960 片，再往外要走数据中心网络（DCN），每片只分到约 6.25 GB/s。通常的做法是 pod 内用 FSDP + TP，pod 之间只做纯 DP。设每个 pod 有 \(M\) 片、总共 \(N\) 片。pod 之间的梯度 all-reduce 可以由 pod 里每台主机的网卡一起分担，总带宽是 \(M\cdot W_\text{dcn}\)：</p>
+      $$T_\text{comms} = \frac{8DF}{M\, W_\text{dcn}},\qquad T_\text{math} = \frac{8BDF}{N\, C}.$$
+      <p>计算受限要求 \(B\cdot M/N > C/W_\text{dcn}\)。左边正是<strong>每个 pod</strong>分到的 batch，右边是 \(4.59\times10^{14}/6.25\times10^9 \approx 73{,}440\) 个 token。这很容易满足。</p>
 
       <div class="demo" id="thr-demo">
-        <div class="demo-label">每设备 batch 门槛计算器（Scaling Book 第 5、6 章的公式）</div>
+        <div class="demo-label">每设备 batch 门槛计算器</div>
         <div style="margin-top:10px" class="seg" id="thr-preset">
           <button data-p="0" aria-pressed="true">LLaMA 3-70B · v5p 整 pod · 4M token</button>
           <button data-p="1" aria-pressed="false">LLaMA-2 13B · v5p 4096 片 · 3M token</button>
@@ -415,7 +418,7 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
           <label>单轴互联带宽 W（GB/s，双向）<span class="row"><input type="range" id="thr-w" min="20" max="1000" step="1"><output id="thr-w-o"></output></span></label>
           <label>FFN 宽度 F<span class="row"><input type="range" id="thr-f" min="4096" max="65536" step="256"><output id="thr-f-o"></output></span></label>
           <label>全局 batch B（token，log）<span class="row"><input type="range" id="thr-b" min="17" max="25" step="0.01"><output id="thr-b-o"></output></span></label>
-          <label>芯片数 N（log）<span class="row"><input type="range" id="thr-n" min="4" max="15" step="0.01"><output id="thr-n-o"></output></span></label>
+          <label>芯片数 N（log）<span class="row"><input type="range" id="thr-n" min="4" max="15" step="1"><output id="thr-n-o"></output></span></label>
           <label>网格轴数（FSDP 轴 / TP 轴）<span class="row"><select id="thr-m"><option value="2,1" selected>3 维：2 / 1</option><option value="1,1">2 维：1 / 1</option><option value="1,2">3 维：1 / 2</option></select></span></label>
         </div>
         <div class="readout" id="thr-out"></div>
@@ -423,29 +426,29 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
         <p class="note">纯 FSDP 的门槛按「所有轴都给 FSDP」计算（\(M = M_X + M_Y\)）；混合门槛和 \(X_\text{opt}\) 用上面的公式。这是只看 MLP 矩阵乘、假设通信和计算完美重叠的 roofline 估计，真实系统会差一些。</p>
       </div>
 
-      <h3>书里的例子：在一个 v5p pod 上训练 LLaMA 3-70B</h3>
-      <p>Scaling Book 第 6 章把上面的公式套到 LLaMA 3-70B 上（\(L=80, D=8192, F=28672\)，约 70B 参数），设定是 4M token 的 batch（1024 条 4096 长的序列），一整个 8960 片的 v5p pod。我把它的推理顺一遍：</p>
+      <h3>例子：在一个 v5p pod 上训练 LLaMA 3-70B</h3>
+      <p>把上面的公式套到一个具体问题上：LLaMA 3-70B（\(L=80, D=8192, F=28672\)，约 70B 参数），batch 4M token（1024 条 4096 长的序列），用一整个 8960 片的 v5p pod，该怎么切？</p>
       <ol>
         <li><strong>总算力和时间。</strong>每 token 约 \(6\times 70\text{B} = 4.2\times10^{11}\) FLOPs，15T token 共约 \(6.3\times10^{24}\) FLOPs。8960 片、40% MFU 下约 \(3.8\times10^6\) 秒，约 44 天。</li>
-        <li><strong>显存不是约束。</strong>bf16 参数 140 GB，fp32 优化器 560 GB，每层存 2 个检查点的激活约 10.5 TB，合计约 11.2 TB。按每片 96 GB，最少 117 片就放得下，但那样要训近 10 年。用整个 pod 是为了算力，不是为了显存；摊到 8960 片上每片只用约 1.3 GB。</li>
-        <li><strong>纯 FSDP 行不行？</strong>只沿 batch 切最多 1024 路（1024 条序列）。允许同时沿序列切以后，每片 \(4\cdot1024\cdot1024/8960 \approx 468\) token，低于 3 轴 FSDP 的门槛 850，通信受限。</li>
-        <li><strong>FSDP + TP。</strong>门槛 \(2550^2/(2F) \approx 113\)，468 在它之上。\(X_\text{opt} = \sqrt{2\cdot 4.19\times10^6 \cdot 8960 / 28672} \approx 1618\)，取整到约 2048 路 FSDP、4 路 TP。书里的结论是：1024 路数据并行 × 2 路序列并行 × 4 路张量并行，就能保持计算受限。</li>
+        <li><strong>显存不是约束。</strong>bf16 参数 140 GB，fp32 优化器状态 560 GB；激活每层只存 2 个 checkpoint（层的入口和注意力之后），每个是 \(D\times\)batch 的 bf16 张量，共 \(2\cdot 8192\cdot 4\text{M}\cdot 2\cdot 80 \approx 10.5\) TB；合计约 11.2 TB。按每片 96 GB，最少 117 片就放得下，但那样要训近 10 年。用整个 pod 是为了算力，不是为了显存；摊到 8960 片上每片只用约 1.3 GB。</li>
+        <li><strong>纯 FSDP 行不行？</strong>只沿 batch 切最多 1024 路（一共只有 1024 条序列）。允许同时沿序列切以后，每片 \(4\cdot1024\cdot1024/8960 \approx 468\) token，低于 3 轴 FSDP 的门槛 850，通信受限。</li>
+        <li><strong>FSDP + TP。</strong>门槛 \(2550^2/(2F) \approx 113\)，468 在它之上。\(X_\text{opt} = \sqrt{2\cdot 4.19\times10^6 \cdot 8960 / 28672} \approx 1618\)，取 2 的幂，约 2048 路 FSDP、4 路 TP。2048 路 FSDP 由沿 batch 的 1024 路和沿序列的 2 路组成。结论：1024 路数据并行 × 2 路序列并行 × 4 路张量并行，就能保持计算受限；纯 FSDP，或者 FSDP 加序列切分，都是通信受限。</li>
       </ol>
-      <p>上面计算器的第一个预设就是这个例子。第三个预设对应书中「跨 pod」的讨论：batch 降到 2M 时，FSDP + TP 的门槛约 108，允许约 1.8 万片，超过一个 pod，所以要跨 DCN；两个 pod 时每 pod 的 batch 是 1M，远超 73k，每片约 111 个 token，「有点紧，但理论上可行」。</p>
+      <p>上面计算器的第一个预设就是这个例子。第三个预设看另一个问题：batch 降到 2M、想用更多芯片时会怎样。FSDP + TP 的门槛和 batch 无关，仍是约 113，所以 2M token 最多能撑约 1.8 万片，超过一个 pod，要跨 DCN。用两个 pod 时，每个 pod 分到 1M token，远超 73k 的 DCN 门槛；pod 内每片约 117 个 token，刚好高于 113，有点紧，但仍是计算受限。</p>
 
       <h2 id="gpu">同一套算术放到 GPU 上</h2>
-      <p>Playbook 的附录 A3 对 GPU 做了同样的事，用的是「通信时间 / 计算时间」这个比值，小于 1 就能重叠。我把字节数显式写出来（bf16，2 字节），推一遍，结论和 TPU 版是同一个形状。记 \(\text{peak}\) 为单卡算力，\(\text{bw}\) 为单向带宽，\(\alpha = \text{peak}/\text{bw}\)。</p>
+      <p>GPU 上可以用同样的思路：对每一种通信，算出它的时间和能藏在它后面的那段计算的时间，看比值「通信时间 / 计算时间」。比值小于 1，通信就有机会完全藏在计算后面。字节数按 bf16（每个数 2 字节）计，记 \(\text{peak}\) 为单卡算力，\(\text{bw}\) 为单向带宽，\(\alpha = \text{peak}/\text{bw}\)。</p>
       <ul>
-        <li><strong>ZeRO-3 预取。</strong>每层 all-gather 参数 \(2P_\text{layer}\cdot\frac{d-1}{d}\) 字节，同层前向计算 \(2\,T\,P_\text{layer}\) FLOPs（\(T = s\cdot b\) 是这张卡一个 micro-batch 的 token 数），比值约 \(\frac{\alpha}{T}\)。要藏住，每张卡每个 micro-batch 的 token 数要大于 \(\alpha\)。</li>
-        <li><strong>DP 梯度同步。</strong>开了梯度累积时，all-reduce 只能和<em>最后一个</em> micro-batch 的反向重叠（前面的 micro-batch 用 <code>no_sync</code> 跳过同步）。所以条件同样是每个 micro-batch 的 token 数大于 \(\alpha\) 量级；藏不住的部分每步只出现一次，会被 \(m\) 个 micro-batch 摊薄。</li>
-        <li><strong>TP。</strong>Playbook 推出的比值是 \(\frac{t-1}{2h}\cdot\alpha\)，与 \(s\)、\(b\) 都无关，只看隐藏维和 TP 度数。</li>
-        <li><strong>PP。</strong>比值是 \(\frac{\alpha}{32\, h\, L_\text{next}}\)（\(L_\text{next}\) 是下一段的层数），几乎总是远小于 1。</li>
+        <li><strong>ZeRO-3 预取。</strong>一层有 \(P_\text{layer}\) 个参数，all-gather 时每张卡要收 \(2P_\text{layer}\cdot\frac{d-1}{d}\) 字节；这段时间要藏在当前层的前向后面（算第 \(i\) 层时预取第 \(i+1\) 层），一层前向约 \(2\,T\,P_\text{layer}\) FLOPs（\(T = s\cdot b\) 是这张卡一个 micro-batch 的 token 数）。比值约 \(\frac{\alpha}{T}\)：每张卡每个 micro-batch 的 token 数要大于 \(\alpha\)。</li>
+        <li><strong>DP 梯度同步。</strong>梯度 all-reduce 每张卡收发约 \(2\cdot 2\Psi\) 字节，反向约 \(4T\Psi\) FLOPs，比值同样约 \(\frac{\alpha}{T}\)。开了梯度累积时，all-reduce 只能和<em>最后一个</em> micro-batch 的反向重叠（前面的 micro-batch 用 <code>no_sync</code> 跳过同步）。所以条件同样是每个 micro-batch 的 token 数大于 \(\alpha\) 量级；藏不住的部分每步只出现一次，会被 \(m\) 个 micro-batch 摊薄。</li>
+        <li><strong>TP。</strong>默认实现里 TP 的通信是暴露的；但如果把矩阵乘拆成块、边传边算（下一篇的「集合矩阵乘法」），就要看它能不能藏在下一个线性层后面。带 SP 时，线性层前要 all-gather 一份 \(s\,b\,h\) 的激活，每张卡收 \(2sbh\cdot\frac{t-1}{t}\) 字节；下一个线性层如果有 \(k h^2\) 个参数，每张卡的计算是 \(2sb\cdot kh^2/t\) FLOPs。比值是 \(\frac{(t-1)\,\alpha}{k\,h}\)，和 \(s\)、\(b\) 都无关，只看隐藏维、TP 度数和这个线性层有多「宽」（MLP 的上投影 \(k\approx 4\)，注意力的输出投影 \(k=1\)）。</li>
+        <li><strong>PP。</strong>每个 micro-batch 在段边界传一份 \(2sbh\) 字节的激活，下一段有 \(L_\text{next}\) 层，每层约 \(12h^2\) 个参数，前向约 \(24\,sbh^2 L_\text{next}\) FLOPs。比值是 \(\frac{\alpha}{12\, h\, L_\text{next}}\)，几乎总是远小于 1。</li>
       </ul>
-      <p>代入 H100（bf16 稠密约 989 TFLOP/s）：节点内 NVLink 单向 450 GB/s，\(\alpha \approx 2200\)；节点间 50 GB/s，\(\alpha \approx 19800\)。于是 \(h = 8192\)、\(t = 8\) 的 TP，节点内比值约 \(7/16384\times2200\approx 0.94\)，勉强能藏；挪到节点间约 8.5，通信是计算的 8 倍多。这就是「TP 不出节点」的定量版本。ZeRO-3 跨节点时要求每卡每个 micro-batch 约 2 万 token，4096 长的序列需要 \(b\ge 5\)，否则会有一部分 all-gather 暴露出来。</p>
-      <p>还要提醒一句：这些比值都假设「通信和计算重叠时互不影响」。Playbook 在 5D 一节的结尾专门指出这不完全成立：NCCL 的通信 kernel 也要占用 SM，和计算 kernel 抢资源，重叠时计算会变慢。DeepSeek-V3 专门把通信限制在 20 个 SM 上，也是为了这个。</p>
+      <p>代入 H100 SXM（bf16 稠密 989 TFLOP/s）：节点内 NVLink 单向 450 GB/s，\(\alpha \approx 2200\)；节点间 50 GB/s，\(\alpha \approx 19800\)。于是 \(h = 8192\)、\(t = 8\) 的 TP：节点内，MLP 上投影的比值约 \(7\times2200/(4\times8192)\approx 0.47\)，藏得住，输出投影约 1.9，藏不全；挪到节点间，两者分别约 4.2 和 17，通信是计算的好几倍。这就是「TP 不出节点」的定量版本。PP 跨节点时，比如每段 10 层，比值约 \(19800/(12\cdot8192\cdot10)\approx 0.02\)，完全不是问题。ZeRO-3 跨节点时要求每卡每个 micro-batch 约 2 万 token，4096 长的序列需要 \(b\ge 5\)，否则会有一部分 all-gather 暴露出来。</p>
+      <p>还有一个前提要说清楚：这些比值都假设通信和计算重叠时互不影响。在 GPU 上这不完全成立：NCCL 的通信 kernel 也要占用 SM，和计算 kernel 抢资源，重叠时计算会变慢。DeepSeek-V3 专门把通信限制在 20 个 SM 上，就是为了少抢计算的资源。</p>
 
       <h2 id="procedure">选配置的三步流程</h2>
-      <p>Playbook 给的流程分三步。它不是算法，而是一个起点，最后总要在自己的集群上跑实验确认。</p>
+      <p>有了上面这些代价和门槛，选配置可以按三步走。这不是算法，而是一个起点，最后总要在自己的集群上跑实验确认。</p>
       <ol class="flow">
         <li>
           <strong>先放得下一份模型。</strong>卡多的情况：
@@ -465,11 +468,11 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
           <strong>优化吞吐。</strong>在显存和通信都不是瓶颈的前提下：把 TP 加到接近节点大小（用快的节点内带宽），从而减少其它并行；在保持 GBS 的前提下用 ZeRO-3 加 DP；DP 通信成为瓶颈时换成 PP；逐个轴往上调试；调 micro-batch 大小，在 GBS、模型大小、计算和通信之间找平衡。
         </li>
       </ol>
-      <p>Playbook 的作者们在 1 到 64 个 8×H100 节点上跑了几千个配置（序列 4096，GBS 1M token），把每个模型大小、节点数下最好的配置画成热力图。他们读出的几条规律：</p>
+      <p>这套流程在真实集群上表现如何？Hugging Face 的 nanotron 团队在 1 到 64 个 8×H100 节点上跑了几千个配置（序列 4096，GBS 1M token），把每个模型大小、节点数下最好的配置画成热力图，能读出几条规律：</p>
       <ul>
         <li>节点越多，效率（MFU）越低，小模型尤其明显。小模型的「计算 / 模型大小」比低，本来可以加大 batch 来补，但 GBS 被固定在 1M。</li>
         <li>大模型在节点少时要么放不下，要么贴着显存上限跑、效率很差（例子是 80B 模型跑在 4 个节点上）。</li>
-        <li>结果非常依赖实现质量。一开始他们的 TP 比 PP 快；优化了 PP 代码后 PP 反超；他们预期改进 TP 的通信重叠以后 TP 会再领先。</li>
+        <li>结果非常依赖实现质量。一开始他们的 TP 比 PP 快；优化了 PP 代码后 PP 反超；改进 TP 的通信重叠以后，TP 可能再领先。</li>
       </ul>
       <p>工程上的教训也值得记下来：PyTorch 进程有时清理不干净；Slurm 强杀作业会导致节点故障；几分钟的基准测试拖成几小时；有的作业直接卡死。他们花了大量时间在缩短集群重启和空闲时间、读 NCCL 调试日志、理解 CUDA 显存分配器的行为、改进多节点 PP 的性能上。理论上的配置空间很好写，把它在真实集群上扫一遍是另一回事。</p>
 
@@ -512,7 +515,7 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
           </table>
         </div>
         <div class="detail" id="pl-detail"></div>
-        <p class="note">所有数字都是本模型的估算，不是实测；不同框架、不同集群可能差很多。点一行看时间和显存拆分。</p>
+        <p class="note">点一行看时间和显存的拆分。</p>
       </div>
 
       <details>
@@ -528,19 +531,19 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
         </ul>
       </details>
 
-      <p>几个可以动手看的现象（数字都来自这个简化模型）：</p>
+      <p>几个可以动手看的现象：</p>
       <ul>
         <li>默认设置（70B、4096 序列、4M token、512 张 H100、全量重算）下，排在前面的配置几乎都是计算受限，MFU 估计在 40% 左右，用的是 2 到 4 路 TP、几路 CP 和较深的 PP，DP 反而不大。PP 在这里很便宜，因为 4M token 拆成了上百个 micro-batch，bubble 只占百分之几。</li>
         <li>把 GBS 降到 1M：micro-batch 数一下子变少，深 PP 的 bubble 变大，前几名变成 TP=8、不用 PP 的配置，瓶颈变成 TP 通信，MFU 跟着掉。这就是「GBS 固定、卡多以后越来越难」的样子。</li>
         <li>关掉重算：放得下的配置变少，但最快配置的 MFU 明显上升，因为少了约 1/3 的重复前向。显存和算力之间的交换在这里一目了然。</li>
         <li>序列拉到 131072：CP 成了必需品（不切序列，一条序列的激活就放不下），而全局只有 128 条序列，micro-batch 不够多，PP bubble 变成主要损耗。</li>
         <li>Mixtral 8x7B、512 卡时 EP 组能留在节点内，all-to-all 不是问题；加到 4096 卡，TP 和 EP 抢节点内的 8 个位置，EP 组被挤到节点外，前几名的瓶颈就变成了 all-to-all。</li>
-        <li>这个模型在 4096 长度下也经常选 CP。原因是它把 CP 的 K/V 传递当作能被注意力计算完全藏住，CP 在这里就相当于「沿序列做数据并行」，正好绕开了 GBS 对 DP 的限制，这和 Scaling Book 把序列切分看成另一种数据并行是一致的。真实实现里段越短效率越差，所以别把这当成推荐。</li>
+        <li>这个模型在 4096 长度下也经常选 CP。原因是它把 CP 的 K/V 传递当作能被注意力计算完全藏住，CP 在这里就相当于「沿序列做数据并行」，正好绕开了 GBS 对 DP 的限制（前面 LLaMA 3-70B 例子里的 2 路序列切分也是这个思路）。真实实现里段越短效率越差，所以别把这当成推荐。</li>
       </ul>
 
       <h2 id="real">真实系统怎么组合</h2>
       <h3>Llama 3 405B：4D 并行</h3>
-      <p>Llama 3 405B 在最多 16K 张 H100（80 GB HBM3，每台服务器 8 卡 NVLink，服务器间 400 Gb/s 的 RoCE）上训练，用的是 TP + CP + PP + DP（FSDP）四种。论文表 4 给了三个阶段的配置：</p>
+      <p>Llama 3 405B 在最多 16K 张 H100（80 GB HBM3，每台服务器 8 卡 NVLink，服务器间 400 Gb/s 的 RoCE）上训练，用的是 TP + CP + PP + DP（FSDP）四种。三个训练阶段的配置如下：</p>
       <div class="table-wrap">
         <table class="wide">
           <thead><tr><th class="num">GPU</th><th class="num">TP</th><th class="num">CP</th><th class="num">PP</th><th class="num">DP</th><th class="num">序列长度</th><th class="num">每 DP 组 batch</th><th class="num">每步 token</th><th class="num">TFLOP/s/GPU</th><th class="num">BF16 MFU</th></tr></thead>
@@ -554,24 +557,24 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
       <p>几点可以对上前面的理论：</p>
       <ul>
         <li>TP = 8 正好一台服务器，顺序 [TP, CP, PP, DP] 由内到外。</li>
-        <li>从 8K 卡到 16K 卡，GBS 保持 16M token 不变，DP 翻倍，每个 DP 组的 batch 从 32 降到 16。论文把 MFU 从 43% 掉到 41% 归因于此：每组 batch 变小，PP 的 bubble 占比和 DP 通信占比都上升。这正是「GBS 固定、加卡变难」的实例。</li>
+        <li>从 8K 卡到 16K 卡，GBS 保持 16M token 不变，DP 翻倍，每个 DP 组的 batch 从 32 降到 16。MFU 从 43% 掉到 41%，原因就是每组 batch 变小：micro-batch 数变少，PP 的 bubble 占比上升，DP 通信能藏的计算也变少了。这正是「GBS 固定、加卡变难」的实例。</li>
         <li>长上下文阶段把序列拉到 128K，用 CP=16 切序列，DP 相应降到 8。乘一下：8 × 16 × 16 × 8 = 16384。</li>
         <li>他们的 FSDP 切优化器状态和梯度，但前向之后不重新切分参数，以免反向时再 all-gather 一次（介于 ZeRO-2 和 ZeRO-3 之间）。</li>
         <li>CP 用的是先 all-gather K/V 的实现（见上文），序列切成 2×CP 块做负载均衡。</li>
-        <li>他们专门做了显存估算器和性能预测工具来探索配置空间，这也是本文规划器想做的事的真实版本。</li>
+        <li>他们专门做了显存估算器和性能预测工具来探索配置空间，也就是上面那个规划器的「正式版」。</li>
       </ul>
 
       <h3>DeepSeek-V3：PP + EP + ZeRO-1，没有 TP</h3>
-      <p>DeepSeek-V3 是 671B 总参数、每 token 激活 37B 的 MoE，每个 MoE 层有 1 个共享专家和 256 个路由专家，每个 token 激活 8 个路由专家。训练集群是 2048 张 H800，每节点 8 卡 NVLink/NVSwitch，节点间 IB。论文写的并行方案是 <strong>16 路 PP、跨 8 个节点的 64 路 EP、以及 ZeRO-1 DP</strong>，并且明确说通过仔细的显存优化，<strong>不用代价高昂的 TP</strong> 也能训练。</p>
-      <p>按论文给的数字推一下（这是我的推算，论文没有逐项写出）：2048 / 16 = 128，即每个流水段 128 张卡；这 128 张卡在注意力部分是 128 路数据并行，在 MoE 层里分成两个 64 卡（8 节点）的 EP 组，每组分摊 256 个专家，每卡 4 个；两组之间对专家参数再做 2 路数据并行。</p>
+      <p>DeepSeek-V3 是 671B 总参数、每 token 激活 37B 的 MoE，每个 MoE 层有 1 个共享专家和 256 个路由专家，每个 token 激活 8 个路由专家。训练集群是 2048 张 H800，每节点 8 卡 NVLink/NVSwitch，节点间 IB。并行方案是 <strong>16 路 PP、跨 8 个节点的 64 路 EP、以及 ZeRO-1 DP</strong>；靠仔细的显存优化，<strong>完全没用代价高昂的 TP</strong>。</p>
+      <p>把这几个数乘一下：2048 / 16 = 128，即每个流水段 128 张卡；这 128 张卡在注意力部分是 128 路数据并行，在 MoE 层里分成两个 64 卡（8 节点）的 EP 组，每组分摊 256 个专家，每卡 4 个；两组之间对专家参数再做 2 路数据并行。</p>
       <p>不用 TP 能成立，是因为他们在别的地方把账补了回来：</p>
       <ul>
         <li><strong>DualPipe</strong>：把一对前向和反向 chunk 内部的计算和通信重叠起来，并从流水线两端同时喂 micro-batch，减少 bubble。代价是存两份参数，但因为 EP 很大，每卡参数本来就少，这份冗余不贵。</li>
-        <li><strong>受网络拓扑约束的路由</strong>：每个 token 最多发往 4 个节点。token 先走 IB 发到目标节点上「同一卡位」的 GPU，再走 NVLink 转发给持有专家的卡，IB 和 NVLink 的传输重叠。论文说这样每个 token 平均可以在每个节点选 3.2 个专家而不增加 NVLink 开销。</li>
+        <li><strong>受网络拓扑约束的路由</strong>：每个 token 最多发往 4 个节点。token 先走 IB 发到目标节点上「同一卡位」的 GPU，再走 NVLink 转发给持有专家的卡，IB 和 NVLink 的传输重叠。因为 NVLink 比 IB 快约 3.2 倍，一份数据走 IB 到达目标节点后，在节点内再转发给 3.2 张卡也不会让 NVLink 成为瓶颈：平均每个 token 在每个节点可以选 3.2 个专家而不增加开销。也就是说，在同样的通信代价下，每个 token 最多可以选 4 × 3.2 ≈ 13 个专家（实际只用 8 个）。</li>
         <li><strong>只用 20 个 SM 做通信</strong>：分成 10 个通信通道，用 warp specialization 分别负责 IB 发送、IB 到 NVLink 转发、NVLink 接收，减少对计算 SM 的挤占。</li>
         <li><strong>省显存</strong>：反向时重算所有 RMSNorm 和 MLA 的上投影；参数的 EMA 放在 CPU 内存里异步更新；MTP 模块和主模型共享 embedding 和输出头，且 DualPipe 让最浅层和最深层落在同一个 PP rank 上，物理上共享这份参数和梯度。</li>
       </ul>
-      <p>Playbook 也提到过这个组合：ZeRO-1 和 PP 互补，DeepSeek-V3 正是 PP + ZeRO-1。对比两家：Llama 3 是稠密模型，TP 在节点内吃满 NVLink；DeepSeek-V3 是细粒度 MoE，节点内带宽留给了 EP 的 all-to-all 转发，于是放弃 TP，用 PP 切深度，用 ZeRO-1 切优化器。<strong>同一套原则，模型结构不同，答案就不同。</strong></p>
+      <p>这也印证了前面说的「ZeRO-1 和 PP 天然互补」。对比两家：Llama 3 是稠密模型，TP 在节点内吃满 NVLink；DeepSeek-V3 是细粒度 MoE，节点内带宽留给了 EP 的 all-to-all 转发，于是放弃 TP，用 PP 切深度，用 ZeRO-1 切优化器。<strong>同一套原则，模型结构不同，答案就不同。</strong></p>
 
       <h2 id="summary">小结</h2>
       <ul>
@@ -584,13 +587,15 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
       </ul>
       <p>下一篇转到工具：用 JAX 写分片程序（mesh、PartitionSpec、shard_map），以及怎么读 profile，在时间线上分出计算、通信和空闲。</p>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Nouamane Tazi 等，<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook: Training LLMs on GPU Clusters</a>，Hugging Face，2025。本文主要用到：<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#5d_parallelism_in_a_nutshell">5D Parallelism in a Nutshell</a>、<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#finding_the_best_training_configuration">Finding the Best Training Configuration</a>、附录 A2（Typical Scales）和 A3（Math for Compute/Communication Overlap），以及前文的显存公式。</li>
-        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>，Google DeepMind，2025：<a href="https://jax-ml.github.io/scaling-book/training/">Part 5: How to Parallelize a Transformer for Training</a>（DP / FSDP / TP / 混合的门槛、跨 pod、Takeaways）和 <a href="https://jax-ml.github.io/scaling-book/applied-training/">Part 6: Training LLaMA 3 on TPUs</a>（LLaMA 3-70B 的例子）。</li>
+        <li>Nouamane Tazi 等，<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook: Training LLMs on GPU Clusters</a>，Hugging Face，2025。从 GPU 集群和工程经验出发讲并行，本文相关的是：<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#5d_parallelism_in_a_nutshell">5D Parallelism in a Nutshell</a>、<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html#finding_the_best_training_configuration">Finding the Best Training Configuration</a>、附录 A2（Typical Scales）和 A3（Math for Compute/Communication Overlap）。想看几千个配置的完整热力图和实验细节，推荐读这本。</li>
+        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>，Google DeepMind，2025。从 TPU 和 roofline 算术出发，和上一本对照着读正好：<a href="https://jax-ml.github.io/scaling-book/training/">Part 5: How to Parallelize a Transformer for Training</a>（DP / FSDP / TP / 混合的门槛、跨 pod、Takeaways）和 <a href="https://jax-ml.github.io/scaling-book/applied-training/">Part 6: Training LLaMA 3 on TPUs</a>（LLaMA 3-70B 的例子）。</li>
         <li>Llama Team, AI @ Meta，<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>，2024：§3.3（训练基础设施、4D 并行、表 4、网络感知的并行顺序、CP 实现）。</li>
         <li>DeepSeek-AI，<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>，2024：§3.2（DualPipe、跨节点 all-to-all、显存优化）和 §4.2 的 MoE 超参。</li>
-        <li>Shoeybi 等，<a href="https://arxiv.org/abs/1909.08053">Megatron-LM</a>；Korthikanti 等，<a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（序列并行和激活公式的来源）。</li>
+        <li>Shoeybi 等，<a href="https://arxiv.org/abs/1909.08053">Megatron-LM</a>；Korthikanti 等，<a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（序列并行和每层激活 \(34sbh\) 公式的来源）。</li>
+        <li>NVIDIA <a href="https://www.nvidia.com/en-us/data-center/h100/">H100</a>、<a href="https://www.nvidia.com/en-us/data-center/h200/">H200</a>、<a href="https://www.nvidia.com/en-us/data-center/a100/">A100</a> 规格页（算力、显存、NVLink 带宽；表中 bf16 算力标的是稀疏值，稠密值减半）。</li>
+        <li>PyTorch 文档：<a href="https://docs.pytorch.org/docs/stable/distributed.html">torch.distributed</a>（<code>init_device_mesh</code>、<code>DeviceMesh</code>）。</li>
       </ul>
     </article>
     <nav class="series-pager" data-series="scaling"></nav>
@@ -770,8 +775,13 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
       const tpMax = (MY * F) / a;
       const mixTh = (a * a) / (MX * MY * F);
       const xopt = Math.sqrt((B / F) * (MX / MY) * N);
-      const xr = 2 ** Math.round(Math.log2(Math.min(Math.max(xopt, 1), N)));
-      const yr = Math.max(1, Math.round(N / xr));
+      // TP degree: the power of two dividing N that is closest to N / x_opt, so FSDP × TP = N exactly.
+      const yopt = N / Math.min(Math.max(xopt, 1), N);
+      let yr = 1;
+      for (let d = 2; N % d === 0; d *= 2) {
+        if (Math.abs(Math.log(d / yopt)) < Math.abs(Math.log(yr / yopt))) yr = d;
+      }
+      const xr = N / yr;
       document.getElementById('thr-out').innerHTML =
         '<div><span class="k">α = C/W</span><span class="v">' + fmt(a) + '</span></div>' +
         '<div><span class="k">每芯片 batch B/N</span><span class="v">' + fmt(bpn) + '</span></div>' +
@@ -781,7 +791,7 @@ dp_mesh  = mesh["dp"]               # 交给 FSDP 的 1 维子网格</code></pre
         '<div><span class="k">X<sub>opt</sub></span><span class="v">' + fmt(xopt) + '</span></div>';
       let v;
       if (bpn > fsdpTh) v = '每芯片 batch ' + fmt(bpn) + ' 高于纯 FSDP 门槛 ' + fmt(fsdpTh) + '：<b>纯 FSDP（所有轴都给数据并行）就能计算受限</b>，最简单。';
-      else if (bpn > mixTh) v = '低于纯 FSDP 门槛，但高于混合门槛 ' + fmt(mixTh) + '：<b>用 FSDP + TP</b>。最优 FSDP 度数约 ' + fmt(xopt) + '，取 2 的幂约为 FSDP ' + xr + ' × TP ' + yr + '。' + (yr > tpMax ? '（注意这个 TP 度数已超过单独 TP 的上限 ' + fmt(tpMax) + '，混合时只要总通信低于计算即可。）' : '');
+      else if (bpn > mixTh) v = '低于纯 FSDP 门槛，但高于混合门槛 ' + fmt(mixTh) + '：<b>用 FSDP + TP</b>。最优 FSDP 度数约 ' + fmt(xopt) + '，取能整除芯片数的最近值：FSDP ' + xr + ' × TP ' + yr + '。' + (yr > tpMax ? '（注意这个 TP 度数已超过单独 TP 的上限 ' + fmt(tpMax) + '，混合时只要总通信低于计算即可。）' : '');
       else v = '每芯片 batch 低于混合门槛 ' + fmt(mixTh) + '：<b>即使 FSDP + TP 也是通信受限</b>。办法：加大全局 batch、减少芯片数，或者接受较低的 MFU / 引入流水线并行。';
       document.getElementById('thr-verdict').innerHTML = v;
     }

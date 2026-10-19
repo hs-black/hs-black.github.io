@@ -71,7 +71,7 @@
 
     <article class="prose">
       <p>数据并行（data parallelism，DP）是多卡训练里最先学到、也最常用的一维并行：每张卡放一份完整模型，各自吃不同的数据，反向之后把梯度平均一下。听起来一句话就讲完了，但真要把它用好，有一串问题要回答：梯度同步能不能和反向计算同时进行？同步应该按参数一个个发还是攒成一批？梯度累积的时候要不要每次都同步？卡多到什么程度会被网络卡住？每张卡都存一份完整的优化器状态是不是太浪费？</p>
-      <p>这篇按 Ultra-Scale Playbook 的数据并行一章和 Scaling Book 训练一章里 DP / FSDP 的部分，从头推一遍。前置知识是上一篇幻灯片 <a href="/posts/scaling-collectives/">集合通信与分片矩阵乘法</a> 里的 AllReduce、ReduceScatter、AllGather 及其代价公式，用到时我会再简单回顾。</p>
+      <p>这篇从朴素的数据并行出发，依次回答这些问题，最后讲到 ZeRO 和 FSDP：它们怎样在不增加多少通信的前提下，把每张卡上的冗余状态去掉。会用到上一篇幻灯片 <a href="/posts/scaling-collectives/">集合通信与分片矩阵乘法</a> 里的 AllReduce、ReduceScatter、AllGather 及其代价公式，用到时我会再简单回顾。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -87,7 +87,7 @@
           <li><a href="#zero">ZeRO-1 / 2 / 3</a>（交互：ZeRO 显存计算器）</li>
           <li><a href="#fsdp">用分片记号看 FSDP</a></li>
           <li><a href="#summary">小结与局限</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -98,7 +98,7 @@
         <li><b>反向</b>：从最后一层往前，逐层算出 loss 对激活和对参数的梯度；</li>
         <li><b>优化器步</b>：用梯度更新参数，例如 Adam 要先更新一阶、二阶动量，再更新参数。</li>
       </ol>
-      <p>记模型参数量为 \(\Psi\)（沿用 ZeRO 论文的记号）。在常见的 bf16 混合精度 + Adam 训练里，每个参数要存：bf16 参数 2 字节、bf16 梯度 2 字节、fp32 主参数 4 字节、fp32 一阶动量 4 字节、fp32 二阶动量 4 字节，一共 16 字节；如果梯度也在 fp32 里累积，再加 4 字节。这些和激活一起就是训练时的显存大头，细节在本系列第一篇 <a href="/posts/scaling-memory/">训练的账本</a>。</p>
+      <p>记模型参数量为 \(\Psi\)。在常见的 bf16 混合精度 + Adam 训练里，每个参数要存：bf16 参数 2 字节、bf16 梯度 2 字节、fp32 主参数 4 字节、fp32 一阶动量 4 字节、fp32 二阶动量 4 字节，一共 16 字节；如果梯度也在 fp32 里累积，再加 4 字节。这些和激活一起就是训练时的显存大头，细节在本系列第一篇 <a href="/posts/scaling-memory/">训练的账本</a>。</p>
       <p>另一个要用到的概念是<b>梯度累积</b>（gradient accumulation）。一次前向+反向处理的样本数叫 micro-batch size（mbs），两次优化器步之间总共处理的样本数叫 global batch size（gbs）。如果一张卡一次只能放下 mbs 个样本，但我们想要更大的 gbs，就连续做 grad_acc 次前向+反向，把梯度累加起来（实践中取平均，好让结果与累积步数无关），再做一次优化器步：</p>
       $$\text{gbs} = \text{mbs} \times \text{grad\_acc}$$
       <p>梯度累积用时间换显存：激活只需要放一个 micro-batch 的量，但要多跑几次前向反向，而且需要一块在整个训练步内常驻的梯度累加缓冲。注意这几次前向反向之间<b>互不依赖</b>，只是输入样本不同——既然如此，为什么不把它们放到不同的卡上同时算？这就是数据并行。</p>
@@ -132,7 +132,7 @@
       <p>每张卡算自己的 \(\nabla L_r\)，平均一下，就精确等于大 batch 的梯度。这里假设每张卡上的样本数相同；如果 loss 按 token 平均而各卡 token 数不同，需要按 token 数加权，否则会有偏差。所以数据并行在数学上就是"并行版的梯度累积"，不改变优化过程，只改变墙钟时间。</p>
 
       <h3>2.3 用分片记号写出来</h3>
-      <p>Scaling Book 把 Transformer 近似成一串 MLP 块（大模型里注意力只占 FLOPs 的一小部分，且忽略门控矩阵），每层两个矩阵 \(W_\text{in}[D, F]\) 和 \(W_\text{out}[F, D]\)，输入 \(\text{In}[B, D]\)，这里 \(B\) 是这一步的<b>总 token 数</b>。数据并行就是沿网格轴 X 切 batch 维、权重完全复制：</p>
+      <p>为了把通信算清楚，我们把 Transformer 近似成一串 MLP 块（大模型里注意力只占 FLOPs 的一小部分；门控矩阵的行为和 \(W_\text{in}\) 一样，先忽略），每层两个矩阵 \(W_\text{in}[D, F]\) 和 \(W_\text{out}[F, D]\)，输入 \(\text{In}[B, D]\)，这里 \(B\) 是这一步的<b>总 token 数</b>。数据并行就是沿 mesh 轴 X（参与数据并行的那组卡）切 batch 维、权重完全复制：</p>
       $$\text{In}[B_X, D] \cdot_D W_\text{in}[D, F] \cdot_F W_\text{out}[F, D] \rightarrow \text{Out}[B_X, D]$$
       <p>前向里收缩维 \(D\)、\(F\) 都没被切，是上一篇里的"情形 1"，完全不需要通信。反向时：</p>
       <pre><code>dOut[B_X, D]      = ...
@@ -150,7 +150,7 @@ dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]     # 传给前一层</code></p
       <p>其中 \(W\) 是每张卡（或每个节点）的单向出口带宽。H100 节点内 NVLink 是每卡 450 GB/s，跨节点每个节点出口是 8×400 Gbps = 400 GB/s。拿一个 8B 参数的模型来说，bf16 梯度 \(V = 16\) GB：节点内 8 卡约 \(2 \times \frac78 \times 16\text{e}9 / 450\text{e}9 \approx 62\) ms，跨节点约 \(2 \times 16\text{e}9/400\text{e}9 = 80\) ms（实际带宽通常只能跑到标称值的七八成）。这个时间要和反向计算的时间比，比的结果在第 7 节。</p>
 
       <h3>2.5 朴素实现的问题</h3>
-      <p>最朴素的写法是等反向全部结束，拿到所有梯度，再发起一次 AllReduce，结束后做优化器步。这样计算和通信是<b>串行</b>的：AllReduce 的那几十毫秒里 GPU 完全闲着。Playbook 的原话是这种"先算后传"的串行安排是 A BIG NO-NO。下面三个优化都在解决这件事。</p>
+      <p>最朴素的写法是等反向全部结束，拿到所有梯度，再发起一次 AllReduce，结束后做优化器步。这样计算和通信是<b>串行</b>的：AllReduce 的那几十毫秒里 GPU 的计算单元完全闲着，而且每一步都要白等这么久。下面三个优化都在解决这件事。</p>
 
       <h2 id="overlap">3. 优化一：梯度同步与反向重叠</h2>
       <p>反向是从最后一层往前算的。最后一层的梯度一算完，它就已经是最终值了，后面再怎么算前面的层也不会改变它。所以没必要等所有层算完：<b>某一层的梯度一就绪，就可以立刻开始对它做 AllReduce</b>，同时 GPU 继续算更前面的层。</p>
@@ -177,12 +177,12 @@ dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]     # 传给前一层</code></p
 
 # hook 里对 p.grad 发起异步 AllReduce（async_op=True），
 # 把返回的 work handle 存起来；优化器步之前统一 wait()。</code></pre>
-      <p>通信 kernel 跑在单独的 CUDA stream 上，与计算 kernel 并发执行。这是"计算与通信重叠"这个思路第一次出现，后面的张量并行、流水线并行、上下文并行都会反复用到它。Playbook 的 Picotron 仓库里有一个带重叠的朴素 DP 实现可以对照着看。</p>
+      <p>通信 kernel 跑在单独的 CUDA stream 上，与计算 kernel 并发执行。这是"计算与通信重叠"这个思路第一次出现，后面的张量并行、流水线并行、上下文并行都会反复用到它。</p>
 
       <h2 id="bucket">4. 优化二：梯度分桶</h2>
       <p>按参数逐个 AllReduce 有个问题：一个模型有成百上千个参数张量，很多很小（LayerNorm 的权重、偏置），每次集合通信都有固定开销——kernel 启动、同步、环上每一跳的延迟。上一篇的 α-β 模型里，环形 AllReduce 的时间是</p>
       $$T = 2(N-1)\,\alpha + \frac{2(N-1)}{N}\cdot\frac{V}{W}.$$
-      <p>消息越小，延迟项占比越大；交叉点大约在 \(V^\ast \approx N\alpha W\)。再加上 GPU 上无论计算还是通信，大张量都比很多小张量高效。所以做法是：把若干个参数的梯度<b>攒到一个"桶"（bucket）里</b>，桶满了才发起一次 AllReduce。就像寄东西，几个大箱子比一堆小包裹省事。PyTorch DDP 默认的桶大小是 25 MB（<code>bucket_cap_mb</code>）。</p>
+      <p>消息越小，延迟项占比越大；两项相等时 \(V^\ast = N\alpha W\)。量级上，8×H100 节点内 AllReduce 一个很小的张量，实测要 16 µs 左右；这段时间够 NVLink 传 7 MB 的数据。一个 4 kB 的 LayerNorm 权重单独发一次，几乎全是固定开销。再加上 GPU 上无论计算还是通信，大张量都比很多小张量高效。所以做法是：把若干个参数的梯度<b>攒到一个"桶"（bucket）里</b>，桶满了才发起一次 AllReduce。就像寄东西，几个大箱子比一堆小包裹省事。PyTorch DDP 默认的桶大小是 25 MB（<code>bucket_cap_mb</code>）。</p>
       <p>桶也不是越大越好：桶越大，第一个桶要等越久才凑满，而且最后一个桶是在反向完全结束后才凑满的，它的通信<b>一定</b>露在外面。极端情况下桶 = 整个模型，就退化成了朴素的串行实现。下面的演示把这件事算出来。</p>
 
       <div class="demo" id="bucket-demo">
@@ -191,7 +191,7 @@ dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]     # 传给前一层</code></p
           <label class="ctrl"><span>桶大小</span><input type="range" id="bk-size" min="2.5" max="18.5" step="0.25" value="11"><output id="bk-size-out"></output></label>
           <label class="ctrl"><span>每卡 token 数</span><input type="range" id="bk-tok" min="8" max="16" step="1" value="12"><output id="bk-tok-out"></output></label>
           <label class="ctrl"><span>DP 卡数 N</span><input type="range" id="bk-n" min="1" max="10" step="1" value="3"><output id="bk-n-out"></output></label>
-          <label class="ctrl"><span>每次通信固定开销 α′</span><input type="range" id="bk-alpha" min="0" max="500" step="10" value="50"><output id="bk-alpha-out"></output></label>
+          <label class="ctrl"><span>每次通信固定开销 α′</span><input type="range" id="bk-alpha" min="0" max="100" step="1" value="16"><output id="bk-alpha-out"></output></label>
         </div>
         <div class="row2">
           <span>模型：</span>
@@ -208,7 +208,7 @@ dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]     # 传给前一层</code></p
           <div><span class="k">暴露的通信</span><span class="v" id="bk-exp"></span></div>
         </div>
         <div class="verdict" id="bk-verdict"></div>
-        <p class="note-s">模型规模按 Playbook 附录 A2 的估算：每层 \(16h^2\) 个参数（含 GLU MLP，忽略 embedding 和 GQA），bf16 梯度每参数 2 字节。反向 FLOPs = \(4 \times \text{tokens} \times \text{参数量}\)，按 H100 稠密 bf16 峰值 989 TFLOP/s、50% 利用率换算。假设梯度在反向过程中匀速产生。每次 AllReduce 的固定开销 α′ 是示意值，不是测量值；带宽项用环形公式 \(2\frac{N-1}{N}\frac{V}{W}\)。</p>
+        <p class="note-s">每层 \(16h^2\) 个参数（注意力 \(4h^2\) + 中间维 \(4h\) 的 GLU MLP \(12h^2\)，忽略 embedding 和 GQA），bf16 梯度每参数 2 字节。反向 FLOPs = \(4 \times \text{tokens} \times \text{参数量}\)，按 H100 稠密 bf16 峰值 989 TFLOP/s、50% 利用率换算，并假设梯度在反向过程中匀速产生。每个桶的通信时间 = α′ + \(2\frac{N-1}{N}\frac{V}{W}\)。α′ 默认 16 µs，是 8×H100 节点内小消息 AllReduce 的实测耗时（NCCL ring / LL 协议）；跨 2 个、4 个节点时实测约 25、35 µs。</p>
       </div>
 
       <p>拖一拖可以看到几种状态：桶很小时（几十 kB），桶的个数成千上万，固定开销累积起来让通信总时长远超带宽项；桶很大时（几 GB），只有一两个桶，最后一个桶整个露在外面；中间有一段宽的"甜区"，通信几乎全部藏进反向里，只剩最后一个小桶的尾巴。再把每卡 token 数调小，反向计算变短而通信量不变（梯度大小只取决于参数量），无论桶怎么分都藏不住了——这就是第 7 节要推导的通信瓶颈。</p>
@@ -235,22 +235,22 @@ optimizer.zero_grad()</code></pre>
       <p>在 LLM 里我们更常用 token 数来计 batch：\(\text{gbs}_\text{tokens} = \text{gbs} \times \text{seq\_len}\)。给定一个目标 gbs，grad_acc 和 dp 可以互换：dp 翻倍、grad_acc 减半，gbs 不变。两者的区别在于数据并行是真并行，梯度累积是串行的，所以实践中<b>尽量把 dp 开大</b>，只有在卡不够用、dp 达不到目标 gbs 时才用梯度累积补齐。</p>
 
       <h3>6.1 一个配置流程</h3>
-      <p>Playbook 给了一个搭建一维数据并行训练的草稿流程：</p>
+      <p>实际搭一个只用数据并行的训练，可以按这个顺序定参数：</p>
       <ol>
         <li>先确定最优的全局 batch size（以 token 计）：查文献，或者跑实验看收敛；</li>
-        <li>再确定训练序列长度：同样查文献或做实验。2k–8k token 对现在的评测基准比较可靠，主预训练阶段 DeepSeek 和 Llama 用的都是 4k，长上下文通常在训练末期再扩；网上比这更长的文档本来就很少；</li>
+        <li>再确定训练序列长度：同样查文献或做实验。主预训练阶段一般取 4k–8k token（DeepSeek-V3 用 4K，Llama 3 405B 绝大部分时间用 8K），长上下文通常在训练末期再扩：网上比这更长的文档本来就很少，而注意力的开销随序列长度增长；</li>
         <li>于是知道了 gbs（样本数）。在单卡上不断增大 mbs 直到显存放不下，得到最大 mbs；</li>
         <li>根据可用卡数确定 dp，剩下的用 \(\text{grad\_acc} = \text{gbs}/(\text{mbs}\times\text{dp})\) 补齐。</li>
       </ol>
-      <p>Playbook 的算例：想要 gbs = 4M token、序列长度 4k，那么 gbs ≈ 1024 个样本（取最近的 2 的幂）。假设单卡只放得下 mbs = 2，手上有 128 张卡，那么 \(\text{grad\_acc} = 1024 / (2 \times 128) = 4\)。如果突然有了 512 张卡，就可以 mbs = 2、grad_acc = 1，同样的 gbs，一步快 4 倍。</p>
+      <p>举个例子：想要 gbs = 4M token、序列长度 4k，那么 gbs ≈ 1024 个样本（取最近的 2 的幂）。假设单卡只放得下 mbs = 2，手上有 128 张卡，那么 \(\text{grad\_acc} = 1024 / (2 \times 128) = 4\)。如果突然有了 512 张卡，就可以 mbs = 2、grad_acc = 1，同样的 gbs，一步快 4 倍。</p>
       <p>如果算出来 grad_acc 小于 1，说明卡太多了（GPU-rich）：可以不用完所有卡、试更大的 gbs，或者调小 mbs——后者以单卡效率为代价换总吞吐。</p>
 
       <h3>6.2 数据并行的天花板</h3>
-      <p>Playbook 提醒：到了 512 卡以上的规模，取决于网络，环形通信开始受环延迟（信号绕环一圈所需的时间）限制，DP 通信不能再被完全重叠，吞吐会下降。他们的基准测试也显示：超过某个规模后，再加 DP rank，吞吐明显下降，而每卡显存一点不变。显存不变是因为每张卡仍然存着完整的模型、梯度和优化器状态——这是第 8 节和第 9 节的话题。通信什么时候开始藏不住，是下一节的话题。</p>
+      <p>dp 也不能无限加。环形 AllReduce 的延迟项随卡数线性增长，到了几百张卡（视网络而定，常见的量级是 512 张左右），信号绕环一圈的时间已经不可忽略，DP 通信不再能被完全重叠，吞吐开始下降。实测也是这样：超过某个规模后，再加 DP rank，每卡吞吐明显下降，而每卡显存一点不变。显存不变是因为每张卡仍然存着完整的模型、梯度和优化器状态——这是第 8 节和第 9 节的话题。通信什么时候开始藏不住，是下一节的话题。</p>
 
       <h2 id="bound">7. 什么时候被通信卡住</h2>
       <h3>7.1 推导</h3>
-      <p>沿用 2.3 节的 MLP 模型。设每张卡算力 \(C\)（FLOP/s），集合通信带宽 \(W\)，DP 轴上 \(X\) 张卡，这一步全局 \(B\) 个 token。只看反向（前向没有通信）。</p>
+      <p>继续用 2.3 节的 MLP 模型。设每张卡算力 \(C\)（FLOP/s），集合通信带宽 \(W\)，DP 轴上 \(X\) 张卡，这一步全局 \(B\) 个 token。只看反向（前向没有通信）。</p>
       <p><b>计算时间</b>：每层反向有 4 个矩阵乘（每个矩阵的权重梯度和输入梯度各一个），每个 \(2 \cdot \frac{B}{X} \cdot D \cdot F\) FLOPs：</p>
       $$T_\text{math} = \frac{4 \cdot 2BDF}{X\,C} = \frac{8BDF}{XC}.$$
       <p><b>通信时间</b>：每层两个权重矩阵，各 \(DF\) 个参数、bf16 下 \(2DF\) 字节，各做一次 AllReduce（代价是 2 × 字节数 / 带宽）：</p>
@@ -267,26 +267,26 @@ optimizer.zero_grad()</code></pre>
           <tr><td>TPU v5p，三个轴都做 DP</td><td class="num">4.59e14</td><td class="num">3 × 1.8e11</td><td class="num">≈ 850</td></tr>
           <tr><td>H100，节点内（NVLink）</td><td class="num">9.9e14</td><td class="num">4.5e11</td><td class="num">≈ 2200</td></tr>
           <tr><td>H100，跨节点（IB，每节点出口）</td><td class="num">9.9e14</td><td class="num">4.0e11</td><td class="num">≈ 2475</td></tr>
-          <tr><td>H800（Scaling Book 按 300 GB/s 算）</td><td class="num">9.9e14</td><td class="num">3.0e11</td><td class="num">≈ 3300</td></tr>
+          <tr><td>H800，跨节点（瓶颈在节点内 NVLink）</td><td class="num">9.9e14</td><td class="num">2.3e11</td><td class="num">≈ 4300</td></tr>
         </table>
       </div>
-      <p>这些数都来自 Scaling Book。几个推论：</p>
+      <p>跨节点时，AllReduce 分两段：先在节点内走 NVLink，再在节点间走网卡，耗时取两段中慢的那段。H100 节点内每卡 450 GB/s，节点间每节点 400 GB/s，瓶颈在节点间。H800 的 NVLink 只有每卡单向 200 GB/s，节点内那段（\(V\cdot\frac78 / 200\text{e}9 = V/229\text{e}9\)）反而比节点间（\(V/400\text{e}9\)）慢，所以表里用 229 GB/s。拿几次公开的训练来对照：</p>
       <ul>
-        <li>LLaMA-3 用了约 16000 张 H100，按 2475 token/卡，batch 至少要 40M token 才不被 DP 通信卡住，而它实际用的是 16M——只靠纯数据并行，在这么多卡上是做不到计算受限的。</li>
-        <li>DeepSeek-V3 在 2048 张 H800 上训练，按 3300 token/卡需要约 6.7M token，实际用了 4M。</li>
-        <li>纯 DP 被卡住的门槛其实不高：TPU v5p 三个轴全做 DP，每卡 850 token，一个 8960 芯片的 pod 只要 7.6M token 的 batch。</li>
+        <li>Llama 3 405B 用了约 16K 张 H100，按 2475 token/卡，batch 至少要 40M token 才不被 DP 通信卡住，而它最大的 batch 是 16M——在这么多卡上只靠纯数据并行，做不到计算受限。</li>
+        <li>DeepSeek-V3 在 2048 张 H800 上训练，batch 从 3072 条 4K 序列逐步加到 15360 条（约 12.6M → 63M token）。按 4300 token/卡算，2048 张卡需要约 8.8M token；如果它是稠密模型，这个 batch 已经够大。但它是 MoE，门槛还要再乘一个因子，见 7.3 节。</li>
+        <li>TPU 上的门槛更低：TPU v5p 三个轴全做 DP，每卡 850 token，一个 8960 芯片的 pod 只要 7.6M token 的 batch。</li>
       </ul>
 
       <h3>7.3 两个修正</h3>
-      <p><b>DP 很小时</b>：环形 AllReduce 的精确代价带一个 \(\frac{X-1}{X}\) 因子，\(X=2\) 时只有一半。把它带进去，门槛变成 \(\frac{B}{X} \gt \frac{C}{W}\cdot\frac{X-1}{X}\)。只做 2 个节点的数据并行时，H100 的门槛降到约 1237 token/卡。这也是为什么经常看到 2 路数据并行。</p>
-      <p><b>MoE</b>：每个 token 只激活 \(E\) 个专家里的 \(k\) 个，计算按 \(k\) 算，但每层要同步全部 \(E\) 个专家的梯度：</p>
+      <p><b>DP 很小时</b>：环形 AllReduce 的精确代价带一个 \(\frac{X-1}{X}\) 因子，\(X=2\) 时只有一半。把它带进去，门槛变成 \(\frac{B}{X} \gt \frac{C}{W}\cdot\frac{X-1}{X}\)。跨节点时这个因子按节点数算：只跨 2 个节点，节点间那段只要 \(V/800\text{e}9\)，瓶颈变回节点内的 NVLink（\(V\cdot\frac78/450\text{e}9 = V/514\text{e}9\)），H100 的门槛从 2475 降到约 \(9.9\text{e}14/5.14\text{e}11 \approx 1900\) token/卡。</p>
+      <p><b>MoE</b>：每个 token 只激活 \(E\) 个 expert 里的 \(k\) 个，计算按 \(k\) 算，但每层要同步全部 \(E\) 个 expert 的梯度：</p>
       $$T_\text{math} = \frac{8kBDF}{XC},\quad T_\text{comms} = \frac{8EDF}{W}\ \Rightarrow\ \frac{B}{X} \gt \frac{E}{k}\cdot\frac{C}{W}.$$
-      <p>门槛放大 \(E/k\) 倍。Scaling Book 举的例子是 \(E=128,\ k=4\) 时跨节点需要 \(32 \times 2475 = 79{,}200\) token/卡。这是 MoE 必须配合专家并行的原因之一（第 8 篇）。</p>
+      <p>门槛放大 \(E/k\) 倍。gpt-oss-120b 是 \(E=128,\ k=4\)，在 H100 上跨节点需要 \(32 \times 2475 \approx 79{,}000\) token/卡；DeepSeek-V3 是 256 个 routed expert 选 8 个，同样是 32 倍，在 H800 上要 \(32 \times 4300 \approx 138{,}000\) token/卡，而它实际每卡只有约 31K token。所以 MoE 不能只靠数据并行同步 expert 的梯度，这是它要配合专家并行的原因之一（第 8 篇）。</p>
 
-      <h3>7.4 Playbook 的写法</h3>
-      <p>Playbook 附录 A3 用整个模型来写同一件事：梯度总量 ≈ 参数量，反向计算 \(t_\text{compute} = 4\cdot\text{tokens}\cdot\Psi / \text{peak\_flops}\)，按 bf16 每参数 2 字节，AllReduce 全部梯度 \(t_\text{comm} = 2\Psi \cdot 2\frac{N_d-1}{N_d} / \text{peak\_bw}\)，于是</p>
+      <h3>7.4 换成整个模型来算</h3>
+      <p>同一件事也可以不拆到每层，直接用整个模型来写：梯度总量 ≈ 参数量，反向计算 \(t_\text{compute} = 4\cdot\text{tokens}\cdot\Psi / \text{peak\_flops}\)，按 bf16 每参数 2 字节，AllReduce 全部梯度 \(t_\text{comm} = 2\Psi \cdot 2\frac{N_d-1}{N_d} / \text{peak\_bw}\)，于是</p>
       $$\frac{t_\text{comm}}{t_\text{compute}} = \frac{N_d-1}{N_d}\cdot\frac{\text{peak\_flops}}{\text{tokens}\cdot\text{peak\_bw}} \le 1 .$$
-      <p>和 7.1 节完全一致（tokens 指每卡的 token 数）。Playbook 原文的式子里多一个 \(\frac12\)，是因为它把参数个数直接当成字节数，没有乘 bf16 的 2；按字节算就是上面的形式。</p>
+      <p>这里 tokens 指每卡的 token 数，和 7.1 节（带上 7.3 节的 \(\frac{N_d-1}{N_d}\) 修正）完全一致：参数量约掉了，只剩"每卡 token 数要大于 \(C/W\)"。</p>
 
       <div class="demo" id="bound-demo">
         <div class="demo-label">交互演示 · 数据并行 / FSDP 通信瓶颈计算器</div>
@@ -295,7 +295,7 @@ optimizer.zero_grad()</code></pre>
           <select id="bd-hw">
             <option value="989e12,450e9,1">H100 节点内（NVLink 450 GB/s）</option>
             <option value="989e12,400e9,1" selected>H100 跨节点（400 GB/s / 节点）</option>
-            <option value="989e12,300e9,1">H800（300 GB/s）</option>
+            <option value="989e12,229e9,1">H800 跨节点（≈229 GB/s，瓶颈在 NVLink）</option>
             <option value="2.3e15,900e9,1">B200 节点内（900 GB/s）</option>
             <option value="459e12,180e9,1">TPU v5p，1 个 ICI 轴</option>
             <option value="459e12,180e9,3">TPU v5p，3 个 ICI 轴</option>
@@ -320,13 +320,13 @@ optimizer.zero_grad()</code></pre>
 
       <h3>7.5 这和"临界 batch size"有什么关系</h3>
       <p>上面的条件有一个反直觉的推论：卡数固定时，<b>总 batch 越小，越容易被通信卡住</b>。反过来，只要能不断加大 batch，DP / FSDP 就能扩到任意多的卡。问题在于 batch 不能无限加大：batch 大到一定程度，梯度噪声已经很小，再加大收益递减（这个拐点常被称为临界 batch size），有时还会不稳定。</p>
-      <p>所以在算力充足时，真实的问题往往是反过来的：batch size 由 scaling law 定死了，卡数也定了（很多），要找一种切分方式，让这么"小"的 batch 也能铺满这么多卡。Scaling Book 的两个例子：DeepSeek-V2 公开的 batch 约 40M token，按 TPU v5p 的 2550 token/卡，大约能扩到 47,000 张芯片；LLaMA-3 70B 的 16M token batch，按三个轴做 DP 的 850 token/卡，可以铺到约 18,800 张芯片。再往上就需要换一种并行维度（张量并行、流水线并行），它们不靠 batch 维来分摊。</p>
+      <p>所以在算力充足时，真实的问题往往是反过来的：batch size 由 scaling law 定死了，卡数也定了（很多），要找一种切分方式，让这么"小"的 batch 也能铺满这么多卡。举两个例子：DeepSeek-V2 的 batch 最大是 9216 条 4K 序列，约 38M token，在 TPU v5p 上三个轴都做 DP（850 token/卡），大约能铺到 44,000 张芯片；一个 16M token 的 batch（Llama 3 405B 最后阶段的大小）可以铺到约 18,800 张。再往上就需要换一种并行维度（张量并行、流水线并行），它们不靠 batch 维来分摊。</p>
 
       <h2 id="memory">8. 数据并行的显存账</h2>
       <p>数据并行把激活按 batch 分摊到了各卡（每卡只存自己 micro-batch 的激活），这对激活占大头的训练很有帮助。但它对参数、梯度、优化器状态<b>完全没有帮助</b>：每张卡都存一整份。按第 1 节的计数，bf16 混合精度 + Adam，每参数 16 字节（不算 fp32 梯度累积）：</p>
       $$\underbrace{2\Psi}_{\text{bf16 参数}} + \underbrace{2\Psi}_{\text{bf16 梯度}} + \underbrace{4\Psi + (4\Psi + 4\Psi)}_{\text{fp32 主参数 + Adam 动量}} = 16\Psi .$$
-      <p>记优化器相关的那部分为 \(k\Psi\)，Adam 下 \(k = 12\)。一个 7.5B 的模型就是 \(16 \times 7.5 = 120\) GB，单张 80 GB 的卡放不下，这还没算任何激活。Playbook 给了一个速算：只看 bf16 参数就是参数量 × 2，70B → 140 GB。</p>
-      <p>Scaling Book 用的是另一种计数：bf16 参数 + fp32 的 Adam 一阶、二阶动量，每参数 10 字节（不单独存 fp32 主参数，也不算梯度），于是纯数据并行能训练的最大模型约是 HBM / 10，96 GB 的 TPU v5p 大约 9B。这是 batch 只有 1 个 token、不存任何激活时的绝对上界，实际用不上。两种计数的差别只在于有没有 fp32 主参数和梯度缓冲，结论一样：<b>纯数据并行只适合几 B 以下的模型</b>。要训更大的模型，至少要把参数或优化器状态切开。</p>
+      <p>记优化器相关的那部分为 \(k\Psi\)，Adam 下 \(k = 12\)。一个 7.5B 的模型就是 \(16 \times 7.5 = 120\) GB，单张 80 GB 的卡放不下，这还没算任何激活。一个好记的速算：光是 bf16 参数就是参数量 × 2 字节，70B → 140 GB。</p>
+      <p>就算省掉 fp32 主参数和梯度缓冲，只存 bf16 参数加 fp32 的 Adam 一阶、二阶动量（每参数 10 字节），纯数据并行能训练的最大模型也只有 HBM / 10：96 GB 的 TPU v5p 大约 9B。而这还是 batch 只有 1 个 token、不存任何激活时的绝对上界，实际远到不了。结论是：<b>纯数据并行只适合几 B 以下的模型</b>。要训更大的模型，至少要把参数或优化器状态切开。</p>
       <p>切开有两条正交的路：一是"并行"——张量、上下文、流水线并行，把计算本身拆开；二是"分片"（sharding）——DeepSpeed ZeRO 或 PyTorch FSDP，计算仍按数据并行做，只是把各种状态分片存放、用时再取。两者可以组合。分片和 DP 关系最近，先讲它。</p>
 
       <h2 id="zero">9. ZeRO：把冗余去掉</h2>
@@ -355,7 +355,7 @@ optimizer.zero_grad()</code></pre>
           <tr><td>ZeRO-3 / FSDP</td><td>\(\frac{(2+2+k)\Psi}{N_d}\)</td><td>\(3\Psi\)</td><td>前向 AG + 反向 AG + 梯度 RS</td></tr>
         </table>
       </div>
-      <p>如果在 ZeRO-2 / ZeRO-3 里用 fp32 做梯度累积，梯度项再加 \(\frac{4\Psi}{N_d}\)（在 DP 和 ZeRO-1 里是完整的 \(4\Psi\)）。通信量这一列沿用 ZeRO 论文的口径：一次 ReduceScatter 或 AllGather 算 \(\Psi\)，一次 AllReduce 算 \(2\Psi\)（都是 \(\frac{N-1}{N}\) 取极限后的近似）。</p>
+      <p>如果在 ZeRO-2 / ZeRO-3 里用 fp32 做梯度累积，梯度项再加 \(\frac{4\Psi}{N_d}\)（在 DP 和 ZeRO-1 里是完整的 \(4\Psi\)）。通信量这一列按每卡收发的元素数计：一次 ReduceScatter 或 AllGather 算 \(\Psi\)，一次 AllReduce 算 \(2\Psi\)（都省略了 \(\frac{N-1}{N}\) 因子）。</p>
 
       <h3 id="zero1">9.1 ZeRO-1：切优化器状态</h3>
       <p>普通 DP 里，所有 rank 在梯度 AllReduce 之后拿着相同的梯度，各自做一模一样的优化器步——同样的计算做了 \(N_d\) 遍。ZeRO-1 让第 \(r\) 个 rank 只负责 \(1/N_d\) 的参数：只存这部分参数的 fp32 主参数和 Adam 动量，也只更新这部分。一个训练步变成：</p>
@@ -372,12 +372,12 @@ optimizer.zero_grad()</code></pre>
         <li><b>在优化器步里重叠</b>：第一片参数一更新完就开始 AllGather，同时更新后面的片；</li>
         <li><b>在前向里重叠</b>：下一步前向用到第 \(\ell\) 层时才需要它的完整参数，所以每层的 AllGather 可以和前面层的前向计算重叠。</li>
       </ul>
-      <p>这两种都需要精细地使用 hook 和分桶，实现起来不容易。Playbook 的建议是：实践中直接用 PyTorch 原生的 ZeRO-3 / FSDP，并把 FSDP 单元设成整个模型，就能得到类似的效果。</p>
+      <p>这两种都需要精细地使用 hook 和分桶，自己实现不容易。实践中更省事的做法是直接用 PyTorch 原生的 FSDP，把 FSDP 单元设成整个模型（见 10.3 节），就能得到类似的效果。</p>
 
       <h3 id="zero2">9.2 ZeRO-2：再切梯度</h3>
       <p>ZeRO-1 里每个 rank 只用自己那 \(1/N_d\) 的梯度去更新，其他部分的梯度存着也没用。那就别存：反向时不做 AllReduce，直接对梯度做 <b>ReduceScatter</b>，每个 rank 只保留自己那份，其余的发出去后立刻释放。</p>
       <p>显存变成 \(2\Psi + \frac{(2+k)\Psi}{N_d}\)。\(N_d\) 很大时趋于 \(2\Psi\)，相对基线 \(16\Psi\) 最多省 8 倍。通信和 ZeRO-1 完全一样（梯度 RS + 参数 AG），也就和普通 DP 一样，区别只是边通信边释放内存。如果用 fp32 做梯度累积，只需要为自己那 \(1/N_d\) 保留 fp32 梯度，用来累加 ReduceScatter 送来的 bf16 梯度。</p>
-      <p>ZeRO-2 相对 ZeRO-1 基本没有额外开销，只是实现更复杂一些，所以 Playbook 的结论是 ZeRO-2 通常是更好的选择。</p>
+      <p>ZeRO-2 相对 ZeRO-1 基本没有额外开销，只是实现更复杂一些，所以通常 ZeRO-2 是更好的选择。</p>
 
       <h3 id="zero3">9.3 ZeRO-3 / FSDP：连参数也切</h3>
       <p>最后一步是把 bf16 参数也切了，每个 rank 只常驻 \(1/N_d\) 的参数。前向和反向需要某一层的完整参数时，<b>临时 AllGather</b> 过来，用完立刻丢掉：</p>
@@ -393,8 +393,8 @@ optimizer.zero_grad()</code></pre>
         <figcaption>ZeRO-3 一个训练步里每层的通信：前向一次 AllGather，反向一次 AllGather 加一次 ReduceScatter。预取（prefetch）让下一层的 AllGather 与当前层计算重叠。</figcaption>
       </figure>
 
-      <p><b>通信量</b>：前向 AllGather 全部参数一遍，\(\Psi\)；反向再 AllGather 一遍，\(\Psi\)；梯度 ReduceScatter，\(\Psi\)。合计 \(3\Psi\)，是 DP / ZeRO-2 的 \(2\Psi\) 的 1.5 倍——这正是 ZeRO 论文给出的数字。和 ZeRO-2 相比，一个训练步里多了 \(2\cdot\text{num\_layers} - 1\) 次 AllGather（Playbook 的数）：前向每层一次，反向每层一次，但反向最先用到的最后一层参数刚在前向里用过，可以不释放直接用，省掉一次（这是我对这个数的理解，Playbook 没有展开）。每次 AllGather 都带一点固定延迟。</p>
-      <p><b>预取</b>：多出来的通信听起来很多，但它可以藏起来。前向算第 \(n\) 层时，就开始 AllGather 第 \(n+1\) 层的参数；反向算第 \(n\) 层时，AllGather 第 \(n-1\) 层。只要单层的计算时间大于单层参数的 AllGather 时间，就藏得住。Playbook 的经验是 DP 不要超过 512 左右，否则重叠会失效。</p>
+      <p><b>通信量</b>：前向 AllGather 全部参数一遍，\(\Psi\)；反向再 AllGather 一遍，\(\Psi\)；梯度 ReduceScatter，\(\Psi\)。合计 \(3\Psi\)，是 DP / ZeRO-2 的 \(2\Psi\) 的 1.5 倍。次数上，ZeRO-3 每一步要做 \(2L - 1\) 次逐层的 AllGather（\(L\) 为层数）：前向每层一次；反向本来也是每层一次，但反向最先用到的是最后一层，它的参数刚在前向里用完，实现上会留着不释放、直接复用，于是反向只需 \(L-1\) 次。每次 AllGather 都带一段固定延迟，层数多、每层小的时候这笔开销不能忽略。</p>
+      <p><b>预取</b>：多出来的通信听起来很多，但它可以藏起来。前向算第 \(n\) 层时，就开始 AllGather 第 \(n+1\) 层的参数；反向算第 \(n\) 层时，AllGather 第 \(n-1\) 层。只要单层的计算时间大于单层参数的 AllGather 时间，就藏得住（10.2 节会算这个条件）。和普通 DP 一样，DP 规模到 512 左右以后，延迟开始让重叠失效。</p>
       <p><b>显存</b>：\(\frac{(2+2+k)\Psi}{N_d}\)，原则上 \(N_d\) 越大越省，可以无限降下去——但只限于模型相关的状态。外加两层临时的完整参数（正在用的和正在预取的）。激活一点没减少，那要靠激活重计算和梯度累积。</p>
 
       <h3>9.4 用计算器验证</h3>
@@ -425,7 +425,7 @@ optimizer.zero_grad()</code></pre>
       <p>拖动时注意几件事：ZeRO-1、ZeRO-2 在 \(N_d\) 增大时很快饱和在 \(4\Psi\)、\(2\Psi\)，因为它们没切的部分不随 \(N_d\) 下降；只有 ZeRO-3 一直按 \(1/N_d\) 下降。70B 模型在 64 卡上 ZeRO-2 也要 140 GB 以上，必须上 ZeRO-3 或者别的并行。</p>
 
       <h2 id="fsdp">10. 用分片记号看 FSDP</h2>
-      <p>Scaling Book 用上一篇的记号把 FSDP 写成：权重沿<b>同一个</b> DP 轴 X 切开（切的是 \(D\) 维），激活照旧沿 batch 维切开：</p>
+      <p>用上一篇的分片记号，FSDP 就是：权重沿<b>同一个</b> DP 轴 X 切开（切的是 \(D\) 维），激活照旧沿 batch 维切开：</p>
       $$\text{In}[B_X, D] \cdot_D W_\text{in}[D_X, F] \cdot_F W_\text{out}[F, D_X] \rightarrow \text{Out}[B_X, D]$$
       <p>这时 \(\text{In}[B_X, D]\cdot W_\text{in}[D_X, F]\) 是"一边的收缩维被切"（情形 2），而且 \(B_X\) 和 \(D_X\) 用的是同一个轴，所以必须先把权重 AllGather 回来。完整算法：</p>
       <pre><code># 前向
@@ -449,15 +449,15 @@ dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]         # 传给前一层</code
       <h3>10.1 FSDP 的通信瓶颈和 DP 一样</h3>
       <p>前向和反向的计算 / 通信比例相同，看前向即可（前向 2 个矩阵乘，各一次 AllGather，AllGather 代价是 AllReduce 的一半）：</p>
       $$T_\text{math} = \frac{2\cdot 2BDF}{XC},\qquad T_\text{comms} = \frac{2\cdot 2DF}{W}\ \Rightarrow\ \text{计算受限当且仅当}\ \frac{B}{X} \gt \frac{C}{W}.$$
-      <p>门槛与纯 DP <b>完全相同</b>。也就是说，只要每卡 batch 大到纯 DP 能计算受限，就可以无代价地升级到 FSDP，省下大量参数和优化器状态的显存。前向确实多了通信，但它与前向的计算按同样比例增长，不改变 roofline。Scaling Book 的结论：DP 和 FSDP 在每卡 batch 小于 \(C/W\)（TPU v5p 单轴 2550，除以使用的网格轴数）时变成带宽受限。</p>
+      <p>门槛与纯 DP <b>完全相同</b>。也就是说，只要每卡 batch 大到纯 DP 能计算受限，就可以无代价地升级到 FSDP，省下大量参数和优化器状态的显存。前向确实多了通信，但它与前向的计算按同样比例增长，不改变 roofline。总结一句：DP 和 FSDP 都在每卡 batch 小于 \(C/W\) 时变成带宽受限（TPU v5p 单轴 2550，用几个 mesh 轴做 DP 就除以几；H100 跨节点约 2475）。</p>
 
-      <h3>10.2 Playbook 对 ZeRO-3 单层重叠的分析</h3>
-      <p>Playbook 附录 A3 从"一层"的角度检查预取能不能藏住：每层 \(16h^2\) 个参数（bf16 下 \(32h^2\) 字节），AllGather 一层参数需要 \(t_\text{comm} = 32h^2\cdot\frac{N_d-1}{N_d}/\text{peak\_bw}\)；这一层前向计算 \(t_\text{compute} = 2\cdot\text{seq}\cdot\text{mbs}\cdot 16h^2/\text{peak\_flops}\)。比值：</p>
+      <h3>10.2 逐层看预取藏不藏得住</h3>
+      <p>9.3 节说预取能把 AllGather 藏起来，条件是单层计算比单层通信长。现在把它算出来：每层 \(16h^2\) 个参数（bf16 下 \(32h^2\) 字节），AllGather 一层参数需要 \(t_\text{comm} = 32h^2\cdot\frac{N_d-1}{N_d}/\text{peak\_bw}\)；这一层前向计算 \(t_\text{compute} = 2\cdot\text{seq}\cdot\text{mbs}\cdot 16h^2/\text{peak\_flops}\)。比值：</p>
       $$\frac{t_\text{comm}}{t_\text{compute}} = \frac{N_d - 1}{N_d}\cdot\frac{\text{peak\_flops}}{\text{seq}\cdot\text{mbs}\cdot\text{peak\_bw}} \le 1 .$$
-      <p>\(\text{seq}\cdot\text{mbs}\) 就是每卡 token 数，结论还是"每卡 token 数要大于 \(C/W\)"。（同 7.4 节，Playbook 原式按每参数 1 字节计，多一个 \(\frac12\)。）H100 节点内 \(C/W \approx 2200\)：seq = 4096、mbs = 1 就够；但如果为了省激活把 mbs 压到很小、序列又短，FSDP 的预取就藏不住了。</p>
+      <p>\(\text{seq}\cdot\text{mbs}\) 就是每卡 token 数，结论还是"每卡 token 数要大于 \(C/W\)"。H100 节点内 \(C/W \approx 2200\)：seq = 4096、mbs = 1 就够；但如果为了省激活把 mbs 压到很小、序列又短，FSDP 的预取就藏不住了。</p>
 
       <h3>10.3 FSDP 单元</h3>
-      <p>FSDP 不是逐个参数做 AllGather 的，而是把模型分成若干"单元"（通常一个 Transformer 块一个单元），以单元为粒度 gather、计算、释放、预取——和第 4 节的分桶是同一个权衡：单元太小，通信次数多、固定开销大；单元太大，临时的完整参数占显存多，而且第一个单元的 gather 无法与计算重叠。把单元设成整个模型，就退化成在前向开始前一次性 gather 全部参数，显存上相当于 ZeRO-2 / ZeRO-1，这就是 9.1 节说的"用 FSDP 实现 ZeRO-1"。FSDP1 和 FSDP2 的实现差异 Playbook 没有展开，它推荐了一篇外部博客，我这里也不展开。</p>
+      <p>FSDP 不是逐个参数做 AllGather 的，而是把模型分成若干"单元"（通常一个 Transformer 块一个单元），以单元为粒度 gather、计算、释放、预取——和第 4 节的分桶是同一个权衡：单元太小，通信次数多、固定开销大；单元太大，临时的完整参数占显存多，而且第一个单元的 gather 无法与计算重叠。把单元设成整个模型，就退化成在前向开始前一次性 gather 全部参数，参数在前向之前整份 gather 回来、一直用到反向结束，梯度在反向结束后一次性 ReduceScatter；常驻显存的只有分片后的梯度和优化器状态，效果上就是 ZeRO-1 / 2。这就是 9.1 节说的"用 FSDP 得到 ZeRO-1 / 2 的效果"。</p>
 
       <h2 id="summary">11. 小结与局限</h2>
       <div class="table-wrap">
@@ -485,12 +485,15 @@ dIn[B_X, D]       = dTmp[B_X, F] ·_F W_in[D, F]         # 传给前一层</code
       </ol>
       <p>下一篇的张量并行换了一个方向：沿模型的隐藏维切矩阵乘本身，参数、梯度、优化器状态<b>和激活</b>都被切开，而且完全不需要在卡之间传参数。</p>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Nanotron, <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>：Data Parallelism（含三个优化、Revisiting global batch size、Our journey up to now）、Zero Redundancy Optimizer（ZeRO-1/2/3）、附录 A2 Typical Scales、附录 A3 Math for Compute/Communication Overlap。</li>
-        <li>Austin et al., How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/training/#data-parallelism">Part 5 · Data Parallelism</a>、<a href="https://jax-ml.github.io/scaling-book/training/#fully-sharded-data-parallelism-fsdp">FSDP</a>、<a href="https://jax-ml.github.io/scaling-book/training/#takeaways-from-llm-training-on-tpus">Takeaways</a>；<a href="https://jax-ml.github.io/scaling-book/gpus/#data-parallelism">Part 12 · GPU 上的数据并行 roofline</a>。</li>
-        <li>Rajbhandari et al., <a href="https://arxiv.org/abs/1910.02054">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</a>（显存表与 3Ψ 通信量）。</li>
-        <li>Simon Boehm, <a href="https://siboehm.com/articles/22/data-parallel-training">Data-Parallel Distributed Training of Deep Learning Models</a>（Playbook 推荐的延伸阅读）。</li>
+        <li>Nanotron, <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>：Data Parallelism（三个优化、Revisiting global batch size、Our journey up to now）和 Zero Redundancy Optimizer（ZeRO-1/2/3）两节，附录 A2 Typical Scales（每层 \(16h^2\) 的估算）和 A3 Math for Compute/Communication Overlap（7.4、10.2 节的整模型 / 单层写法）。DP 扩展性的基准测试也在这里。配套的 <a href="https://github.com/huggingface/picotron">Picotron</a> 仓库有带重叠和分桶的 DP 实现，适合对照代码读。</li>
+        <li>Austin et al., How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/training/#data-parallelism">Part 5 · Data Parallelism</a>、<a href="https://jax-ml.github.io/scaling-book/training/#fully-sharded-data-parallelism-fsdp">FSDP</a>、<a href="https://jax-ml.github.io/scaling-book/training/#takeaways-from-llm-training-on-tpus">Takeaways</a>（2.3、7.1、10 节的分片记号推导与 TPU 门槛）；<a href="https://jax-ml.github.io/scaling-book/gpus/#data-parallelism">Part 12 · GPU 上的数据并行 roofline</a>（H100 门槛与 MoE 修正）。</li>
+        <li>Rajbhandari et al., <a href="https://arxiv.org/abs/1910.02054">ZeRO: Memory Optimizations Toward Training Trillion Parameter Models</a>：显存表（9.4 节的对照数字）与 3Ψ 通信量。</li>
+        <li>PyTorch 文档：<a href="https://docs.pytorch.org/docs/stable/notes/ddp.html">DDP 设计说明</a>（hook、分桶、<code>no_sync</code>）与 <a href="https://docs.pytorch.org/docs/stable/distributed.fsdp.fully_shard.html">FSDP2 <code>fully_shard</code></a>。</li>
+        <li>训练配置的公开数字：<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>（batch 4M → 8M → 16M token）、<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>（2048 张 H800，batch 3072 → 15360 条 4K 序列）、<a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>（batch 2304 → 9216 条 4K 序列）。</li>
+        <li>小消息 AllReduce 的实测延迟（演示里 α′ 的默认值）：nccl-tests 在 <a href="https://github.com/NVIDIA/nccl/issues/1259">单节点 8×H100</a> 和 <a href="https://github.com/NVIDIA/nccl-tests/issues/309">2 / 4 节点 H100</a> 上的公开结果。</li>
+        <li>想再看一遍 DP 的工程细节，推荐 Simon Boehm 的 <a href="https://siboehm.com/articles/22/data-parallel-training">Data-Parallel Distributed Training of Deep Learning Models</a>。</li>
       </ul>
     </article>
     <nav class="series-pager" data-series="scaling"></nav>

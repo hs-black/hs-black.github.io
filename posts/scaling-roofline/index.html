@@ -87,7 +87,7 @@
 
     <article class="prose">
       <p><a href="/posts/scaling-memory/">上一篇</a>算了一步训练要多少 FLOPs。但知道 FLOPs 还不够：同样是 \(10^{12}\) 次运算，一个矩阵乘法在 H100 上可能 1 毫秒就做完，一串逐元素运算却可能慢几十倍。差别在于数据要搬多少、从哪里搬。这一篇讲的 <strong>roofline 分析</strong>就是回答「一个运算的时间到底花在计算上，还是花在搬数据上」的工具，它是后面所有并行策略分析的地基。</p>
-      <p>后半篇讲硬件本身：TPU 和 GPU 的计算单元、存储层次和网络长什么样，规格数字是多少。这些数字是做 roofline 估算的原材料。主要材料是 <a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a> 的第 1、2、12 章（Roofline、TPU、GPU），以及 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a> 里关于 GPU 的部分。芯片规格我对过 NVIDIA 和 Google Cloud 的官方页面。</p>
+      <p>后半篇讲硬件本身：TPU 和 GPU 的计算单元、存储层次和网络长什么样，规格数字是多少。这些数字是做 roofline 估算的原材料：知道了每条通道有多快，才能判断一个运算会卡在哪里。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -105,19 +105,19 @@
           <li><a href="#s-gpunet">GPU 的网络：NVLink、NVSwitch 与 InfiniBand</a></li>
           <li><a href="#s-compare">对比与规格表</a></li>
           <li><a href="#s-summary">小结</a></li>
-          <li><a href="#s-ref">参考</a></li>
+          <li><a href="#s-ref">参考与延伸阅读</a></li>
         </ol>
       </nav>
 
       <!-- ============================================================ -->
       <h2 id="s-time">1. 时间花在哪：计算、搬数据、通信</h2>
-      <p>Scaling book 用一个朴素的问题开头：为什么一个算法要 50 ms，而不是 50 s 或 5 ms？时间只可能花在两类事情上。</p>
+      <p>先问一个朴素的问题：为什么一个算法要 50 ms，而不是 50 s 或 5 ms？时间只可能花在两类事情上。</p>
       <p><strong>计算</strong>。深度学习模型基本就是一堆矩阵乘法，每个由浮点乘和加组成。硬件每秒能做的浮点运算数（FLOP/s）是固定的，于是：</p>
       $$T_\text{math} = \frac{\text{计算的 FLOPs}}{\text{硬件 FLOP/s}}$$
-      <p>例如 H100 的 BF16 稠密峰值约 \(9.89\times 10^{14}\) FLOP/s，TPU v6e 约 \(9.1\times10^{14}\)。做 \(10^{12}\) 次运算在 H100 上大约 1.01 ms。（实际能达到的比例不同：scaling book 说 H100/B200 通常只能达到标称峰值的 80–85%，TPU 正常使用时可以接近 95%。）</p>
+      <p>例如 H100 的 BF16 稠密峰值约 \(9.89\times 10^{14}\) FLOP/s，TPU v6e 约 \(9.2\times10^{14}\)。做 \(10^{12}\) 次运算在 H100 上大约 1.01 ms。这是按标称峰值算的理想值：H100、B200 上的矩阵乘法通常只能达到标称峰值的 80–85%，TPU 正常使用时可以接近 95%。</p>
       <p><strong>通信</strong>，分两种：</p>
       <ul>
-        <li><strong>芯片内</strong>：张量要在显存（HBM，high bandwidth memory）和计算核心之间搬运，这条路的带宽叫 HBM 带宽（NVIDIA 也叫 memory bandwidth）。H100 约 3.35 TB/s，TPU v6e 约 1.6 TB/s。</li>
+        <li><strong>芯片内</strong>：张量要在显存（HBM，high bandwidth memory）和计算核心之间搬运，这条路的带宽叫 HBM 带宽（NVIDIA 也叫 memory bandwidth）。H100 约 3.35 TB/s，TPU v6e 约 1.64 TB/s。</li>
         <li><strong>芯片间</strong>：模型分布在多块芯片上时，张量要在芯片之间传，走 NVLink、ICI、InfiniBand、DCN、PCIe 等不同的链路，带宽各不相同。</li>
       </ul>
       <p>两种都按同一个式子估算：</p>
@@ -142,7 +142,7 @@
         </svg>
       </figure>
       <p>因为 \(T_\text{math} + T_\text{comms} \le 2\max(T_\text{math}, T_\text{comms})\)，上下界最多差 2 倍。实际估算时按 \(\max\) 来，因为代数简单，而且好的实现确实能接近它；之后再根据 profiling 补上重叠不完美的部分。</p>
-      <p>假设完全重叠：\(T_\text{math} > T_\text{comms}\) 时硬件算力被用满，叫<strong>计算受限</strong>（compute-bound）；反之叫<strong>通信受限</strong>（communication-bound，书里和 memory-bound、bandwidth-bound 混用），一部分算力在等数据。</p>
+      <p>假设完全重叠：\(T_\text{math} > T_\text{comms}\) 时硬件算力被用满，叫<strong>计算受限</strong>（compute-bound）；反之叫<strong>通信受限</strong>（communication-bound；瓶颈在 HBM 时也常叫 memory-bound 或 bandwidth-bound），一部分算力在等数据。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-ai">2. 算术强度与临界强度</h2>
@@ -160,12 +160,12 @@
             <tr><td>NVIDIA H200</td><td class="num">9.89e14</td><td class="num">4.8e12</td><td class="num">≈ 206</td></tr>
             <tr><td>NVIDIA B200</td><td class="num">2.25e15</td><td class="num">8.0e12</td><td class="num">≈ 281</td></tr>
             <tr><td>TPU v5e</td><td class="num">1.97e14</td><td class="num">8.2e11</td><td class="num">≈ 240</td></tr>
-            <tr><td>TPU v5p</td><td class="num">4.59e14</td><td class="num">2.8e12</td><td class="num">≈ 164</td></tr>
-            <tr><td>TPU v6e</td><td class="num">9.2e14</td><td class="num">1.6e12</td><td class="num">≈ 575</td></tr>
+            <tr><td>TPU v5p</td><td class="num">4.59e14</td><td class="num">2.77e12</td><td class="num">≈ 166</td></tr>
+            <tr><td>TPU v6e</td><td class="num">9.18e14</td><td class="num">1.64e12</td><td class="num">≈ 560</td></tr>
           </tbody>
         </table>
       </div>
-      <p>数字来源：GPU 取自 scaling book 第 12 章的表和 NVIDIA 规格页（H100 SXM 规格表上 BF16 写 1,979 TFLOPS 但带星号，是结构化稀疏的数字，稠密值减半为 989；DGX B200 是 8 卡 72 PFLOPS FP8 稀疏、64 TB/s HBM，折合每卡 BF16 稠密 2.25 PFLOPS、8 TB/s）；TPU 取自 scaling book 第 2 章的表，与 Google Cloud 文档一致（v5e 197 TFLOPs，v5p 459 TFLOPs、2,765 GB/s，v6e 918 TFLOPs、1,638 GB/s；按官方 v6e 数字算临界强度约 560）。</p>
+      <p>表里都是稠密值。读 NVIDIA 规格表时要小心：Tensor Core 的数字通常是带结构化稀疏的，正好是稠密值的 2 倍。例如 H100 SXM 规格表上 BF16 写的是 1,979 TFLOPS（带星号），稠密值是 989；HGX B200 写 8 卡 BF16 36 PFLOPS（稀疏），折合每卡稠密 2.25 PFLOPS，HBM 带宽每卡 8 TB/s。</p>
       <p>可以看到，主流加速器的临界强度大多在 150–600 之间，而且有意思的是，几代硬件之间它变化不大：算力和带宽大体同步增长。</p>
 
       <!-- ============================================================ -->
@@ -209,12 +209,12 @@
       <h3>点积</h3>
       <p>计算 BF16 向量的点积 \(x\cdot y\)：\(x, y\) 各 \(N\) 个元素，读 \(2N + 2N\) 字节，写回 2 字节；做 \(N\) 次乘、\(N-1\) 次加：</p>
       $$\text{Intensity}(\text{dot}) = \frac{2N-1}{4N+2} \xrightarrow{N\to\infty} \frac{1}{2}$$
-      <p>每读一个字节只做半次运算。拿它和矩阵单元的临界强度（几百）比没有意义，因为点积本来就不在矩阵单元上跑，而在向量单元上（TPU 的 VPU、GPU 的 CUDA core）。但向量单元的算力低得多，它们的临界强度也低：scaling book 估算 TPU v5p 的 VPU 每核约 \(7\times10^{12}\) FLOP/s，临界强度约 3；H100 的 CUDA core 不算 FMA 时约 33.5 TFLOP/s，除以 3.35 TB/s，临界强度约 10。即便如此，1/2 依然远低于它们，所以点积是带宽受限的。</p>
+      <p>每读一个字节只做半次运算。拿它和矩阵单元的临界强度（几百）比没有意义，因为点积本来就不在矩阵单元上跑，而在向量单元上（TPU 的 VPU、GPU 的 CUDA core）。但向量单元的算力低得多，它们的临界强度也低：TPU v5p 的 VPU 每核约 \(7\times10^{12}\) FLOP/s，整芯片两个核约 \(1.4\times10^{13}\)，临界强度约 5；H100 的 CUDA core 不算 FMA 时约 33.5 TFLOP/s，除以 3.35 TB/s，临界强度约 10。即便如此，1/2 依然远低于它们，所以点积是带宽受限的。</p>
       <h3>逐元素运算</h3>
       <p>两个 FP32 向量相加：读 \(2\times 4N\)、写 \(4N\) 字节，做 \(N\) 次加法，强度 \(N/12N = 1/12\)，糟糕至极。在 H100 上：</p>
       $$T \approx \frac{12N}{3.35\times10^{12}}$$
-      <p>scaling book 实测：\(N = 1024^3\) 时 roofline 预测约 3.84 ms，JAX 实测 4.1 ms，很接近；但 \(N=65{,}536\) 时预测 0.23 μs，实测约 1.5 μs——数据太小时，内核启动和延迟才是主要成本。</p>
-      <p>这个结论的实际意义很大：LayerNorm、激活函数、残差加、dropout、softmax……这些逐元素或归约运算的 FLOPs 在总账里可以忽略，但每一个都要把整个张量从 HBM 读一遍、写一遍。所以要么把它们<strong>融合</strong>（fuse）进相邻的矩阵乘法内核里（读进来顺手算掉，不单独写回），要么至少把几个逐元素运算融合成一个内核。Playbook 讲 GPU 内核时的「fused kernels」、FlashAttention 不把注意力矩阵写回 HBM，背后都是这一张图。</p>
+      <p>在 H100 上用 JAX 实测一下：\(N = 1024^3\) 时 roofline 预测约 3.84 ms，实测 4.1 ms，很接近；但 \(N=65{,}536\) 时预测 0.23 μs，实测约 1.5 μs——数据太小时，内核启动和延迟才是主要成本。</p>
+      <p>这个结论的实际意义很大：LayerNorm、激活函数、残差加、dropout、softmax……这些逐元素或归约运算的 FLOPs 在总账里可以忽略，但每一个都要把整个张量从 HBM 读一遍、写一遍。所以要么把它们<strong>融合</strong>（fuse）进相邻的矩阵乘法内核里（读进来顺手算掉，不单独写回），要么至少把几个逐元素运算融合成一个内核。融合内核（fused kernel）的价值、FlashAttention 不把注意力矩阵写回 HBM 的原因，背后都是这一张图。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-matmul">5. 矩阵乘法：为什么 batch 要过 ~240 个 token</h2>
@@ -232,11 +232,11 @@
       <p>这就是训练和推理里一系列选择的来源：</p>
       <ul>
         <li><strong>训练</strong>：每个副本的本地 token batch 通常 \(\gt 1024\)，而 \(D, F\gt 8000\)，矩阵乘法舒服地计算受限。但如果数据并行开得太大，本地 batch 掉到几百以下，就开始浪费算力。</li>
-        <li><strong>推理的生成阶段</strong>：每步每条序列只出一个 token，\(B\) 就是并发的序列数。batch 小时，每一步都要把全部权重从 HBM 读一遍，而计算只用到一点点。这时 roofline 给出一个延迟下界：<em>权重字节数 / HBM 带宽</em>。scaling book 的例子：200B 参数、BF16，切到 32 张 TPU v4p 上，每张约 12.5 GB，以约 1.2 TB/s 读完需要约 10 ms，所以单步采样不可能快于 10 ms。</li>
+        <li><strong>推理的生成阶段</strong>：每步每条序列只出一个 token，\(B\) 就是并发的序列数。batch 小时，每一步都要把全部权重从 HBM 读一遍，而计算只用到一点点。这时 roofline 给出一个延迟下界：<em>权重字节数 / HBM 带宽</em>。举个例子：200B 参数的 BF16 模型切到 32 块 TPU v4 上，每块约 12.5 GB，以约 1.2 TB/s 读完需要约 10 ms，所以单步采样不可能快于 10 ms。</li>
       </ul>
 
       <h3>精确的临界值与形状的影响</h3>
-      <p>\(B \ll D, F\) 是近似。不做近似，直接解 \(2BDF/P = (2BD + 2DF + 2BF)/W\)：H100 上，\(D=F=8192\) 时需要 \(B \ge 319\)，\(D=F=4096\) 时 \(B \ge 345\)，\(D=F=1024\) 时要 \(B\ge 698\)，几乎翻倍。scaling book 的另一个例题：int8 的 \([B, 4096]\times[4096, 16384]\) 在 v5e 上，精确算出 \(B \gt 267\)，略大于 240，因为把 \(D, F\) 的有限大小也算进去了。矩阵越小，越难吃饱。</p>
+      <p>\(B \ll D, F\) 是近似。不做近似，直接解 \(2BDF/P = (2BD + 2DF + 2BF)/W\)：H100 上，\(D=F=8192\) 时需要 \(B \ge 319\)，\(D=F=4096\) 时 \(B \ge 345\)，\(D=F=1024\) 时要 \(B\ge 698\)，几乎翻倍。再如 int8 的 \([B, 4096]\times[4096, 16384]\) 在 v5e 上（int8 峰值 3.94e14），精确解出 \(B \gt 259\)，略大于 240，因为把 \(D, F\) 的有限大小也算进去了。矩阵越小，越难吃饱。</p>
       <h3>分块（tiling）</h3>
       <p>大矩阵乘法在硬件里会被拆成小块，放进片上的高速存储（TPU 的 VMEM、GPU 的 SMEM/TMEM），块会被重复读取，所以并不严格是只读 \(O(N^2)\) 字节。设 \((m,k)\cdot(k,n)\) 的矩阵乘法用块大小 \(b_m, b_k, b_n\)，块数 \(t_m = m/b_m\) 等，总 FLOPs 是 \(2\,t_m t_n t_k\, b_m b_n b_k\)，总字节约 \(2\,t_m t_n\big(t_k(b_m b_k + b_k b_n) + b_m b_n\big)\)。忽略最后一项，强度约为 \(\frac{b_m b_n}{b_m + b_n}\)，形式和整体的式子一样。这说明块要足够大，片上存储的容量因此很重要。</p>
       <h3>量化</h3>
@@ -248,10 +248,10 @@
       <h3>强度永远很低的两种情况</h3>
       <ul>
         <li><strong>每个样本一套权重</strong>：\(\text{int8}[B, D]\cdot\text{int8}[B, D, F]\)。FLOPs 不变（\(2BDF\)），但要读 \(BDF\) 字节的权重，强度约为 2，与 \(B\) 无关。没有权重复用，就永远带宽受限。</li>
-        <li><strong>生成阶段的注意力</strong>：每条序列有自己的 KV cache，本质上同上。GQA 下（\(N\) 个 Q 头、\(K\) 个 KV 头、每组 \(G = N/K\)），scaling book 给出 FLOPs \(4BTSKGH\)、字节 \(4BHK(TG + S)\)，强度为 \(\frac{TSG}{TG + S}\)。训练/prefill 时 \(T = S\)，强度 \(\frac{SG}{G+1}=O(T)\)，序列稍长就计算受限；生成时 \(T = 1\)，强度 \(\frac{SG}{G+S}\to G\)，永远带宽受限。增大 \(G\)（更少的 KV 头）会让它更接近屋顶，这是 GQA/MQA 在推理上的意义之一。</li>
+        <li><strong>生成阶段的注意力</strong>：每条序列有自己的 KV cache，本质上同上。GQA 下（\(N\) 个 Q 头、\(K\) 个 KV 头、每组 \(G = N/K\)，\(T\) 个 query、\(S\) 个 key），\(QK^\top\) 和乘 V 各 \(2BTSKGH\) FLOPs，共 \(4BTSKGH\)；要读写 Q 和输出各 \(2BTKGH\) 字节、K 和 V 各 \(2BSKH\) 字节，共 \(4BHK(TG + S)\)。强度为 \(\frac{TSG}{TG + S}\)。训练/prefill 时 \(T = S\)，强度 \(\frac{SG}{G+1}=O(T)\)，序列稍长就计算受限；生成时 \(T = 1\)，强度 \(\frac{SG}{G+S}\to G\)，永远带宽受限。增大 \(G\)（更少的 KV 头）会让它更接近屋顶，这是 GQA/MQA 在推理上的意义之一。</li>
       </ul>
       <h3>MoE</h3>
-      <p>MoE 有 \(E\) 个专家，每个 token 选 \(k\) 个。每个权重矩阵要读 \(E\cdot DF\) 个数，但 FLOPs 只有 \(2k\cdot BDF\)。scaling book 的例题：INT8 权重、BF16 计算、v5e（临界 240），计算受限需要 \(2kBDF/(EDF) > 240\)，即 \(B > 120\,E/k\)。DeepSeek-V3（\(E=256, k=8\)）得到 \(B > 3840\) 个 token——在生成阶段这是很大的 batch。换句话说：要让每个专家都吃饱，平均每个专家分到的 token 数要过临界值。</p>
+      <p>MoE 有 \(E\) 个专家，每个 token 选 \(k\) 个。每个权重矩阵要读 \(E\cdot DF\) 个数，但 FLOPs 只有 \(2k\cdot BDF\)。以 INT8 权重、BF16 计算、v5e（临界 240）为例，计算受限需要 \(2kBDF/(EDF) > 240\)，即 \(B > 120\,E/k\)。DeepSeek-V3（\(E=256, k=8\)）得到 \(B > 3840\) 个 token——在生成阶段这是很大的 batch。换句话说：要让每个专家都吃饱，平均每个专家分到的 token 数要过临界值。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-calc">6. 交互：矩阵乘法耗时计算器</h2>
@@ -290,13 +290,13 @@
         <div class="tbars" id="mm-bars"></div>
         <div class="verdict" id="mm-verdict"></div>
         <div class="readout" id="mm-readout"></div>
-        <p class="note">计算时间按每块芯片的 \(2BDF/n\) 除以峰值；HBM 时间按每块芯片要读的输入、权重和要写的输出字节数除以 HBM 带宽；沿 \(D\) 切时，部分和 \([B,F]\) 用环形 AllReduce 汇总，按每块芯片发送约 \(2\cdot\tfrac{n-1}{n}\cdot\) 部分和字节数估算（\(n=2\) 时就是把自己的一份发给对方，即 scaling book 的两芯片例子；AllReduce 的推导放在<a href="/posts/scaling-collectives/">下一篇</a>）。链路带宽：GPU 用每卡 NVLink 单向带宽（A100 300、H100/H200 450、B200 900 GB/s），TPU 用一条 ICI 链路的单向带宽（v5e 45、v5p/v6e 90 GB/s），都是理想值。部分和的加法（\(O(BF)\)）忽略不计。</p>
+        <p class="note">计算时间按每块芯片的 \(2BDF/n\) 除以峰值；HBM 时间按每块芯片要读的输入、权重和要写的输出字节数除以 HBM 带宽；沿 \(D\) 切时，部分和 \([B,F]\) 用环形 AllReduce 汇总，按每块芯片发送约 \(2\cdot\tfrac{n-1}{n}\cdot\) 部分和字节数估算（\(n=2\) 时就是把自己的一份发给对方，即第 7 节的两芯片例子；AllReduce 的推导放在<a href="/posts/scaling-collectives/">下一篇</a>）。链路带宽：GPU 用每卡 NVLink 单向带宽（A100 300、H100/H200 450、B200 900 GB/s），TPU 用一条 ICI 链路的单向带宽（v5e 45、v5p/v6e 90 GB/s），都是理想值。部分和的加法（\(O(BF)\)）忽略不计。</p>
       </div>
 
       <!-- ============================================================ -->
       <h2 id="s-net">7. 网络的 roofline</h2>
       <p>前面的屋顶都是芯片内的：分母是 HBM 带宽。但同样的推理对芯片间的通信完全适用，而且后面分析并行策略时，我们关心的几乎都是这一种。</p>
-      <p>Scaling book 的例子：\(X\sim\text{bf16}[B,D]\)、\(Y\sim\text{bf16}[D,F]\)，沿 \(D\) 均分到 2 块 TPU 上。每块芯片算一半：\(Z_0 = X[:, :D/2]\,Y[:D/2, :]\)，\(Z_1\) 同理，然后把部分和发给对方相加。设每个方向能传 \(4.5\times10^{10}\) 字节/秒，每块芯片算力 \(1.97\times10^{14}\)：</p>
+      <p>看一个最简单的例子：\(X\sim\text{bf16}[B,D]\)、\(Y\sim\text{bf16}[D,F]\)，沿 \(D\) 均分到 2 块 TPU 上。每块芯片算一半：\(Z_0 = X[:, :D/2]\,Y[:D/2, :]\)，\(Z_1\) 同理，然后把部分和发给对方相加。设每个方向能传 \(4.5\times10^{10}\) 字节/秒，每块芯片算力 \(1.97\times10^{14}\)：</p>
       $$T_\text{math} = \frac{2BDF}{2\times 1.97\times10^{14}} = \frac{BDF}{1.97\times10^{14}},\qquad T_\text{comms} = \frac{2BF}{4.5\times10^{10}}$$
       <p>计算受限的条件是</p>
       $$\frac{BDF}{2BF} = \frac{D}{2} > \frac{1.97\times10^{14}}{4.5\times10^{10}} \approx 4377 \quad\Longrightarrow\quad D > 8755$$
@@ -309,14 +309,14 @@
             <tr><td rowspan="3">H100</td><td>HBM</td><td class="num">3.35 TB/s</td><td class="num">≈ 295</td></tr>
             <tr><td>NVLink（每卡单向）</td><td class="num">450 GB/s</td><td class="num">≈ 2,200</td></tr>
             <tr><td>InfiniBand（每节点 400 GB/s，摊到每卡）</td><td class="num">50 GB/s</td><td class="num">≈ 19,800</td></tr>
-            <tr><td rowspan="4">TPU v5p</td><td>HBM</td><td class="num">2.8 TB/s</td><td class="num">≈ 164</td></tr>
+            <tr><td rowspan="4">TPU v5p</td><td>HBM</td><td class="num">2.77 TB/s</td><td class="num">≈ 166</td></tr>
             <tr><td>ICI（每轴双向）</td><td class="num">180 GB/s</td><td class="num">≈ 2,550</td></tr>
             <tr><td>PCIe（每芯片）</td><td class="num">16 GB/s</td><td class="num">≈ 28,700</td></tr>
             <tr><td>DCN（每芯片）</td><td class="num">6.25 GB/s</td><td class="num">≈ 73,000</td></tr>
           </tbody>
         </table>
       </div>
-      <p>同一个道理也适用于 PCIe：scaling book 的例题是把 \(\text{bf16}[D, F]\) 的权重和 \(\text{bf16}[B, D]\) 的激活都放在主机内存里，在一块 TPU v6e 上做矩阵乘法（\(F = 4D\)，\(B\ll D\)），要不被 PCIe（1.6e10 B/s）卡住，需要 \(B > 9.2\times10^{14}/1.6\times10^{10}\approx 57{,}500\)。这就是为什么权重卸载（offload）到 CPU 内存只在 batch 极大时才划算。</p>
+      <p>同一个道理也适用于 PCIe。假设把 \(\text{bf16}[D, F]\) 的权重和 \(\text{bf16}[B, D]\) 的激活都放在主机内存里，在一块 TPU v6e 上做矩阵乘法（\(F = 4D\)，\(B\ll D\)），要不被 PCIe（1.6e10 B/s）卡住，需要 \(B > 9.18\times10^{14}/1.6\times10^{10}\approx 57{,}000\)。这就是为什么权重卸载（offload）到 CPU 内存只在 batch 极大时才划算。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-tpu">8. TPU 是什么样的</h2>
@@ -347,23 +347,23 @@
           <rect class="box-acc" x="540" y="90" width="170" height="120" rx="10"/>
           <text x="625" y="135" font-size="15" text-anchor="middle">HBM</text>
           <text x="625" y="157" font-size="12" text-anchor="middle" class="soft">v5e 16 GB / 8.2e11 B/s</text>
-          <text x="625" y="175" font-size="12" text-anchor="middle" class="soft">v5p 95 GiB / 2.8e12 B/s</text>
+          <text x="625" y="175" font-size="12" text-anchor="middle" class="soft">v5p 95 GiB / 2.77e12 B/s</text>
           <path class="link" d="M480 202 H 540"/>
           <text x="510" y="194" font-size="11" text-anchor="middle" class="soft">HBM 带宽</text>
         </svg>
-        <figcaption>TPU 芯片的组成（按 scaling book 第 2 章的描述重画）。数据流：HBM → VMEM → 寄存器 → MXU/VPU → VMEM → HBM。</figcaption>
+        <figcaption>TPU 芯片的组成。数据流：HBM → VMEM → 寄存器 → MXU/VPU → VMEM → HBM。</figcaption>
       </figure>
-      <p>Scaling book 的概括是：TPU 基本就是一个专门做矩阵乘法的计算核心（<strong>TensorCore</strong>），挂在一堆高速显存（HBM）上。TensorCore 里有三个关键单元：</p>
+      <p>概括地说，TPU 基本就是一个专门做矩阵乘法的计算核心（<strong>TensorCore</strong>），挂在一堆高速显存（HBM）上。TensorCore 里有三个关键单元：</p>
       <ul>
-        <li><strong>MXU</strong>（Matrix Multiply Unit）：TensorCore 的核心。大多数代际里，它每 8 个周期完成一次 \(\text{bf16}[8,128]\,@\,\text{bf16}[128,128]\to\text{f32}[8,128]\) 的矩阵乘法，用的是<strong>脉动阵列</strong>（systolic array，下面细讲）。TPU v6e（Trillium）的 MXU 是 256×256，之前各代都是 128×128。v5e 上每个 MXU 在 1.5 GHz 下约 \(5\times10^{13}\) BF16 FLOP/s，大多数 TensorCore 有 2 或 4 个 MXU，所以 v5e 总共约 \(2\times10^{14}\)。低精度更快：v5e 的 INT8 是 \(4\times10^{14}\) OP/s。</li>
-        <li><strong>VPU</strong>（Vector Processing Unit）：做 ReLU、逐元素加乘、归约等一般数学运算。它是一个形状为 (8, 128) 的二维 SIMD 机器：128 那一维叫 lane，8 那一维叫 sublane，每个 (lane, sublane) 位置在 v5 上有 4 个独立的 ALU。scaling book 算出 v5p 每核 VPU 约 \(8\times128\times4\times1.75\text{e}9 \approx 7\times10^{12}\) FLOP/s，大约是 MXU 的 1/30。沿 sublane 的归约便宜（有一个周期左右的 shuffle），跨 lane 的归约要经过专门的 XLU（cross-lane unit），又慢又贵。</li>
+        <li><strong>MXU</strong>（Matrix Multiply Unit）：TensorCore 的核心。大多数代际里，它每 8 个周期完成一次 \(\text{bf16}[8,128]\,@\,\text{bf16}[128,128]\to\text{f32}[8,128]\) 的矩阵乘法，用的是<strong>脉动阵列</strong>（systolic array，下面细讲）。TPU v6e（Trillium）的 MXU 是 256×256，之前各代都是 128×128。一个 128×128 的 MXU 每周期做 16,384 次乘加，即 32,768 FLOPs；v5e 的 TensorCore 有 4 个 MXU，频率 1.5 GHz，合计 \(4\times 32768\times 1.5\times10^9\approx 2\times10^{14}\) BF16 FLOP/s。低精度更快：v5e 的 INT8 是 \(4\times10^{14}\) OP/s。</li>
+        <li><strong>VPU</strong>（Vector Processing Unit）：做 ReLU、逐元素加乘、归约等一般数学运算。它是一个形状为 (8, 128) 的二维 SIMD 机器：128 那一维叫 lane，8 那一维叫 sublane，每个 (lane, sublane) 位置在 v5 上有 4 个独立的 ALU。于是 v5p 每核 VPU 约 \(8\times128\times4\times1.75\text{e}9 \approx 7\times10^{12}\) FLOP/s，大约是 MXU 的 1/30。沿 sublane 的归约便宜（有一个周期左右的 shuffle），跨 lane 的归约要经过专门的 XLU（cross-lane unit），又慢又贵。</li>
         <li><strong>VMEM</strong>（Vector Memory）：TensorCore 里的片上暂存，比 HBM 小得多（v5e 上 128 MiB），但到 MXU 的带宽高得多。它像 CPU 的 L1/L2 缓存，但大得多，而且由程序员/编译器显式管理。HBM 里的数据必须先拷到 VMEM 才能参与计算。</li>
       </ul>
       <p>此外还有标量单元（scalar core）：它取指、发射所有指令、执行 HBM 到 VMEM 的传输。它是单线程的，所以每个 TensorCore 每周期只能发起一个 DMA 请求；一个标量核控制着 4,096 个 VPU ALU、4 个 MXU、2 个 XLU 和多个 DMA 引擎。「控制很少、计算很多」是 TPU 硬件效率的来源，也限制了它做依赖数据的灵活计算。</p>
 
       <h3>流水线与 VMEM 的强度</h3>
       <p>TPU 上所有操作都是流水线化、相互重叠的。做 \(X\cdot A\to Y\) 时，先把 \(A\) 和 \(X\) 的块从 HBM 拷到 VMEM，再送进 MXU 按 8×128（\(X\)）和 128×128（\(A\)）的块相乘，结果逐块写回 HBM；拷贝和 MXU 的工作是重叠的，所以 MXU 不必等数据——只要整体是计算受限的。如果 HBM→VMEM 比 MXU 慢，就是带宽受限：MXU 在「挨饿」。</p>
-      <p>VMEM 的带宽约为 HBM 的 22 倍，这意味着如果输入输出都能放在 VMEM 里，强度只要 10–20 就能吃满 MXU。scaling book 的例题：\(\text{int8}[B, 4096]\times\text{int8}[4096,16384]\) 在 v5e 上，权重从 HBM 读时需要 \(B > 267\)；如果从 VMEM 读，只需 \(B > 11\)（实际上 VMEM 带宽不能全用来读权重，更接近 20）。这就是 <strong>VMEM 预取</strong>的价值：例如在算注意力的时候，把下一个 FFN 的权重提前搬进 VMEM，就能把权重加载的成本藏起来——前提是一层的权重切得足够小，放得进 VMEM。可惜 VMEM 很小，这往往是个挑战。</p>
+      <p>VMEM 的带宽约为 HBM 的 22 倍，这意味着如果输入输出都能放在 VMEM 里，强度只要 10–20 就能吃满 MXU。还是上面那个 \(\text{int8}[B, 4096]\times\text{int8}[4096,16384]\) 的例子：在 v5e 上权重从 HBM 读时需要 \(B > 259\)；如果从 VMEM 读（带宽按 HBM 的 22 倍算），只需 \(B > 11\)（实际上 VMEM 带宽不能全用来读权重，更接近 20）。这就是 <strong>VMEM 预取</strong>的价值：例如在算注意力的时候，把下一个 FFN 的权重提前搬进 VMEM，就能把权重加载的成本藏起来——前提是一层的权重切得足够小，放得进 VMEM。可惜 VMEM 很小，这往往是个挑战。</p>
 
       <h3>脉动阵列是怎么工作的</h3>
       <p>MXU 的核心是一个 128×128（=16,384 个）乘加单元组成的二维网格。权重（RHS，128×128）从上方预先装入，每个单元固定持有一个权重；输入（LHS，8×128）从左边斜着送进来，每个周期往右移一格；部分和从上往下流，每经过一个单元就加上「输入 × 该单元的权重」，从底部流出的就是结果。开始有一个装载权重和输入的流水线气泡，之后新输入可以连续送入，没有额外气泡。所以张量的维度至少要和 MXU 的边长一样大（128，v6e 上 256），否则要补零浪费算力；有多个 MXU 时，切块的维度要大于 128 × MXU 个数。</p>
@@ -383,7 +383,7 @@
       </div>
 
       <h3>芯片、托盘与主机</h3>
-      <p>一块 TPU 芯片通常有两个 TensorCore，共享显存，可以当成一个算力加倍的大加速器（叫 megacore）——v4、v5p、v6 都是这样（TPU v7 去掉了 megacore，改成两个核之间的高带宽连接）。v3 及更早的芯片两个核显存独立，被当作两个加速器；面向推理的 v5e 每芯片只有一个核。芯片 4 个一组装在一个托盘（tray）上，经 PCIe 连到 CPU 主机；v5e 每台主机挂 2 个托盘、8 块芯片。PCIe 带宽有限，例如 v4 是每个方向 16 GB/s，比 HBM 慢约 100 倍：可以把数据放到主机内存，但搬得不快。</p>
+      <p>一块 TPU 芯片通常有两个 TensorCore，共享显存，可以当成一个算力加倍的大加速器（叫 megacore），v4、v5p 都是这样（TPU v7 去掉了 megacore，改成两个核之间的高带宽连接）。v3 及更早的芯片两个核显存独立，被当作两个加速器；面向推理的 v5e 和 v6e 每芯片只有一个核（v6e 的核里是 2 个 256×256 的 MXU）。芯片 4 个一组装在一个托盘（tray）上，经 PCIe 连到 CPU 主机；v5e 每台主机挂 2 个托盘、8 块芯片。PCIe 带宽有限，例如 v4 是每个方向 16 GB/s，比 HBM 慢约 100 倍：可以把数据放到主机内存，但搬得不快。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-tpunet">9. TPU 的网络：ICI、torus、pod 与 DCN</h2>
@@ -406,12 +406,12 @@
       </figure>
       <ul>
         <li><strong>Torus 与回绕</strong>：环形回绕把任意两点的最大距离从 \(N\) 降到 \(N/2\)；还有「扭曲 torus」（twisted torus），像莫比乌斯带一样回绕，进一步缩短平均距离。</li>
-        <li><strong>Pod 和 superpod</strong>：v4 最大 16×16×16，v5p 最大 16×20×28（8,960 块芯片，Google Cloud 文档说单个切片最大可调度 6,144 块）。大 pod 由 4×4×4 的立方体组成，立方体之间用可重构的光交换（optical switch）连起来，它带宽和 ICI 一样，只是让连接可以重配并保留回绕。</li>
+        <li><strong>Pod 和 superpod</strong>：v4 最大 16×16×16，v5p 最大 16×20×28（8,960 块芯片；单个切片最多 6,144 块，更大的规模用 multislice 跨切片拼起来）。大 pod 由 4×4×4 的立方体组成，立方体之间用可重构的光交换（optical switch）连起来，它带宽和 ICI 一样，只是让连接可以重配并保留回绕。</li>
         <li><strong>小切片没有回绕</strong>：申请 2×2×1、2×2×4 之类小于一个整立方体的拓扑，没有回绕链路，大多数通信的时间会翻倍；整立方体的倍数（4×4×4、4×4×8）才有。v5e 和 v6e 的 pod 是单个 16×16 的二维 torus，长度为 16 的轴才有回绕（所以 8×16 在长轴上有回绕）。</li>
         <li><strong>切片（slice）与 DCN</strong>：一组由 ICI 连起来的 TPU 叫一个切片。切片之间通过数据中心网络（DCN）相连，例如跨 pod 训练（multislice）。DCN 是主机到主机的：数据要先过 PCIe 到主机，出网卡，到对端主机，再过 PCIe 进 HBM。</li>
       </ul>
-      <p>带宽的量级（v5p）：HBM 每芯片 2.8e12 B/s；ICI 每轴 9e10 B/s（单向，每芯片 3 个轴）；DCN 每芯片约 6.25e9 B/s（v5e 是 3.125e9，v6e 和 TPU7x 是 12.5e9）；PCIe 每芯片约 1.6e10。scaling book 给出 ICI 每条链路的单向/双向带宽：v5e 4.5e10/9e10，v5p 和 v6e 9e10/1.8e11。双向带宽是指沿一个轴、两个方向加起来能发出的字节数，只有在有回绕的轴上（能构成环）才能用满，环形集合通信的公式里经常用它。</p>
-      <p>Scaling book 的总结是：<strong>TPU 很简单</strong>。大多数情况下可以把它看成一个矩阵乘法单元，连着显存（超快）、通过 ICI 连着邻居芯片（相当快）、通过 DCN 连着数据中心的其余部分（还算快）。让通信量和各条通道的速度成比例，就不会卡住 MXU。</p>
+      <p>带宽的量级（v5p）：HBM 每芯片 2.77e12 B/s；ICI 每轴 9e10 B/s（单向，每芯片 3 个轴）；DCN 每芯片约 6.25e9 B/s（v5e 是 3.125e9，v6e 和 TPU7x 是 12.5e9）；PCIe 每芯片约 1.6e10。ICI 每条链路的单向/双向带宽：v5e 4.5e10/9e10，v5p 和 v6e 9e10/1.8e11。双向带宽是指沿一个轴、两个方向加起来能发出的字节数，只有在有回绕的轴上（能构成环）才能用满，环形集合通信的公式里经常用它。</p>
+      <p>总结一下：<strong>TPU 很简单</strong>。大多数情况下可以把它看成一个矩阵乘法单元，连着显存（超快）、通过 ICI 连着邻居芯片（相当快）、通过 DCN 连着数据中心的其余部分（还算快）。让通信量和各条通道的速度成比例，就不会卡住 MXU。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-gpu">10. GPU 是什么样的</h2>
@@ -430,24 +430,24 @@
           <text x="595" y="182" font-size="14" text-anchor="middle">HBM 80 GB</text>
           <text x="595" y="204" font-size="12" text-anchor="middle" class="soft">3.35 TB/s</text>
           <path class="link2" d="M450 75 H 480"/><path class="link" d="M595 110 V 150"/>
-          <text x="10" y="290" font-size="12" class="faint">B200 每个 SM 另有 256 KB TMEM，专门给更大的 Tensor Core 喂数据；HBM 180–192 GB、约 8 TB/s，L2 126 MB。</text>
+          <text x="10" y="290" font-size="12" class="faint">B200 每个 SM 另有 256 KB TMEM，专门给更大的 Tensor Core 喂数据；HBM 180 GB、约 8 TB/s，L2 126 MB。</text>
           <text x="10" y="310" font-size="12" class="faint">寄存器：每个子分区 16,384 个 32 位字，每 SM 共 256 KB。</text>
         </svg>
-        <figcaption>H100 一个 SM 的结构（按 scaling book 第 12 章的描述重画）。</figcaption>
+        <figcaption>H100 一个 SM 的结构。</figcaption>
       </figure>
       <h3>SM 内部</h3>
       <p>每个 SM 分成 4 个相同的<strong>子分区</strong>（SM subpartition），每个子分区有：</p>
       <ul>
-        <li><strong>Tensor Core</strong>：专用的矩阵乘法单元，相当于 TPU 的 MXU（注意命名冲突：GPU 的 Tensor Core 是 SM 里的矩阵子单元，TPU 的 TensorCore 是包含 MXU、VPU 等的整个核心）。它提供了绝大部分算力：H100 上 Tensor Core 是 990 TFLOP/s BF16，CUDA core 只有 66 TFLOP/s。按 132 个 SM、1.76 GHz 推算，每个 H100 Tensor Core 每周期约 1,024 BF16 FLOPs，大约是一次 8×8×8 的矩阵乘法；V100 是 256、A100 是 512，B200 估计是 2,048（NVIDIA 没公布细节，这是 scaling book 的推算）。</li>
+        <li><strong>Tensor Core</strong>：专用的矩阵乘法单元，相当于 TPU 的 MXU（注意命名冲突：GPU 的 Tensor Core 是 SM 里的矩阵子单元，TPU 的 TensorCore 是包含 MXU、VPU 等的整个核心）。它提供了绝大部分算力：H100 上 Tensor Core 是 989 TFLOP/s BF16，CUDA core 只有 67 TFLOP/s FP32。按 132 个 SM、约 1.83 GHz 的频率反推，每个子分区的 Tensor Core 每周期做 1,024 次 BF16 FLOPs，相当于一次 8×8×8 的矩阵乘法；同样的口径下 A100 是 512，B200 约 2,048，每代翻一倍。</li>
         <li><strong>CUDA core 与 Warp Scheduler</strong>：32 个 FP32 的 ALU（就是 NVIDIA 说的 CUDA core）加上调度它们的单元，做 SIMD/SIMT 的向量运算，相当于 TPU 的 VPU：ReLU、逐元素运算、归约都在这里。每个 ALU 每周期做一次运算；FMA（乘加融合）算两次，NVIDIA 的规格数字就是按 FMA 算的。</li>
         <li><strong>寄存器堆</strong>：16,384 个 32 位字。</li>
       </ul>
-      <p>按 scaling book 的估算，H100 共有 \(132\times4\times32 = 16{,}896\) 个 FP32 CUDA core，B200 有 18,944 个；而 TPU v5p 一块芯片有 \(2\times4\times8\times128 = 8{,}192\) 个独立 ALU。</p>
+      <p>算下来，H100 共有 \(132\times4\times32 = 16{,}896\) 个 FP32 CUDA core，B200（148 个 SM）有 18,944 个；而 TPU v5p 一块芯片有 \(2\times4\times8\times128 = 8{,}192\) 个独立 ALU。</p>
 
       <h3>SIMT、warp 与调度</h3>
       <p>GPU 的线程以 32 个为一组，叫 <strong>warp</strong>，同一 warp 的线程同时执行同一条指令，处理不同的数据。warp 再组成更大的线程块（block，例如 512 或 1,024 个线程），每个块分配给一个 SM。一个 SM 可以同时驻留多个块和最多 64 个 warp，但每个 warp scheduler 每个周期只执行一个 warp 的指令；它在活跃的 warp 之间切换，以此掩盖访存延迟。相比之下 TPU 基本是单线程的。</p>
       <p>CUDA core 比 TPU 的 VPU 灵活：它用 <strong>SIMT</strong>（single instruction, multiple threads）模型，每个线程有自己的指令指针，可以独立编程；而 VPU 是纯 SIMD。代价是：如果同一个 warp 里的线程走了不同的分支（<strong>warp divergence</strong>），硬件会把两条分支都执行一遍，把不该执行的线程屏蔽掉，性能悄悄下降。</p>
-      <p>在 GPU 上运行的程序叫<strong>内核</strong>（kernel），可以用 CUDA 或 Triton 写，编译成 PTX。Playbook 总结了写内核的几条路：纯 PyTorch（简单但慢）、<code>torch.compile</code>（简单、快、不够灵活）、Triton（更难、更快、更灵活）、CUDA（最难、最快、最灵活）。它还讲了几种典型优化：<strong>访存合并</strong>（memory coalescing，让一个 warp 的 32 个线程访问连续地址，从而合并成一次 DRAM 突发读取）、<strong>分块</strong>（tiling，把数据搬进共享内存反复使用）、线程粗化和减少分支分歧。这些都是在给定内核里提高实际达到的带宽或算力，对应 roofline 上「离屋顶有多远」。内核细节放在系列后面的 <a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a>。</p>
+      <p>在 GPU 上运行的程序叫<strong>内核</strong>（kernel），可以用 CUDA 或 Triton 写，编译成 PTX。写内核大致有四条路：纯 PyTorch（简单但慢）、<code>torch.compile</code>（简单、快、不够灵活）、Triton（更难、更快、更灵活）、CUDA（最难、最快、最灵活）。常见的优化有：<strong>访存合并</strong>（memory coalescing，让一个 warp 的 32 个线程访问连续地址，从而合并成一次 DRAM 突发读取）、<strong>分块</strong>（tiling，把数据搬进共享内存反复使用）、线程粗化和减少分支分歧。这些都是在给定内核里提高实际达到的带宽或算力，对应 roofline 上「离屋顶有多远」。内核细节放在系列后面的 <a href="/posts/scaling-gpu-kernels/">GPU 内核与 FlashAttention</a>。</p>
 
       <h3>存储层次</h3>
       <ul>
@@ -457,7 +457,7 @@
         <li><strong>L2</strong>：所有 SM 共享约 50 MB（H100；实际分成两半，各 25 MB），带宽 NVIDIA 没公布，实测约 5.5 TB/s。它不由程序员控制，所以要靠调整访存模式间接用好它；所有 SM 共享 L2 也迫使各 SM 以相当协调的方式运行。</li>
         <li><strong>HBM</strong>：主显存，存权重、梯度、激活。容量从 Volta 的 32 GB 涨到 Blackwell 的 192 GB；带宽 H100 3.35 TB/s，B200 约 8 TB/s。</li>
       </ul>
-      <p>scaling book 的看法：GPU 起源于图形渲染，设计目标是通用，新任务上更容易「直接能跑」，对编译器的依赖小；但正因为硬件管得多，也更难推理和逼近 roofline——一个内核可能因为打爆 L2、访存没合并而性能很差，而你很难看出来。TPU 把更多负担交给编译器（单线程控制、只能做整个 VPU 宽度的指令，所有搬运要编译器排好流水线），反过来更容易接近峰值。另一个差异是 TPU 的快速片上存储（VMEM）多得多，如果能把权重放进或预取进 VMEM，LLM 推理可以更快。</p>
+      <p>比较一下两种设计思路。GPU 起源于图形渲染，设计目标是通用，新任务上更容易「直接能跑」，对编译器的依赖小；但正因为硬件管得多，也更难推理和逼近 roofline——一个内核可能因为打爆 L2、访存没合并而性能很差，而你很难看出来。TPU 把更多负担交给编译器（单线程控制、只能做整个 VPU 宽度的指令，所有搬运要编译器排好流水线），反过来更容易接近峰值。另一个差异是 TPU 的快速片上存储（VMEM）多得多，如果能把权重放进或预取进 VMEM，LLM 推理可以更快。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-gpunet">11. GPU 的网络：NVLink、NVSwitch 与 InfiniBand</h2>
@@ -487,7 +487,7 @@
         </table>
       </div>
       <p>一个 8×H100 节点：NVSwitch 一侧理论上能处理 \(4\times64\times25\) GB/s = 6.4 TB/s，但每块 GPU 最多 450 GB/s，所以节点的峰值是 \(8\times450\) GB/s = 3.6 TB/s，这也是它的对分带宽（把 8 块卡分成两半，两半之间能流过的总带宽）。</p>
-      <p>理论值和实测有差距：scaling book 测 8×H100 节点内的 AllReduce，总线带宽最多接近 370 GB/s，而且要 10 GB 级别的大消息才能达到；像 Llama 3 70B 一个 MLP 权重那么大的数组（8 路切分后约 58 MB），只能跑到约 150 GB/s。Hopper 开始的 NVSwitch 支持 SHARP（交换机内归约），理论上能让 AllReduce 的成本减半，实测提升约 30%。</p>
+      <p>理论值和实测有差距：在 8×H100 节点内实测 AllReduce，总线带宽最多接近 370 GB/s，而且要 10 GB 级别的大消息才能达到；像 Llama 3 70B 一个 MLP 权重那么大的数组（8 路切分后约 58 MB），只能跑到约 150 GB/s。Hopper 开始的 NVSwitch 支持 SHARP（交换机内归约），理论上能让 AllReduce 的成本减半，实测提升约 30%。</p>
 
       <h3>节点间（scale-out）：InfiniBand 胖树</h3>
       <p>节点之间用带宽低一些的 <strong>InfiniBand</strong>（IB）或以太网相连，每块 GPU 配一张网卡。NVIDIA 的参考设计 DGX SuperPod（1,024 块 H100）是这样搭的：</p>
@@ -497,10 +497,10 @@
         <li>4 个 SU 再由 16 台脊（spine）交换机连起来，共 1,024 块 GPU。</li>
       </ul>
       <p>整个 IB 网络是一棵<strong>胖树</strong>（fat tree），线缆和交换机的带宽经过设计，保证节点之上有完整的对分带宽：任意把节点分成两半，每个节点都能以 400 GB/s 向另一半发送。这意味着跨节点的 AllGather/ReduceScatter 有大致恒定的带宽，无论跨多少节点。这只是参考设计，不同客户和云厂商会改；例如 Meta 训练 Llama 3 用的是以太网、三层交换和顶层超额订阅（oversubscribed）的网络。</p>
-      <p>Scaling book 的经验值：节点内每卡 450 GB/s，跨节点每节点 400 GB/s，后者在 AllToAll 这种「每卡对每卡」的通信里会退化得很厉害（跨 2 个节点时相比节点内慢 4 倍以上）。<strong>GB200 NVL72</strong> 把 72 块 GPU 放进一个 NVLink 域，每卡 900 GB/s，节点出口带宽也同比提高到 3.6 TB/s，这显著改变了 GPU 上的通信 roofline。</p>
+      <p>做估算时可以记：节点内每卡 450 GB/s，跨节点每节点 400 GB/s，后者在 AllToAll 这种「每卡对每卡」的通信里会退化得很厉害（跨 2 个节点时相比节点内慢 4 倍以上）。<strong>GB200 NVL72</strong> 把 72 块 GPU 放进一个 NVLink 域，每卡 900 GB/s，节点出口带宽也同比提高到 3.6 TB/s，这显著改变了 GPU 上的通信 roofline。</p>
 
       <h3>Scale-up 与 scale-out</h3>
-      <p>这两个词描述的正是上面两层：<strong>scale-up</strong> 网络（NVLink 域）是少量芯片之间的高带宽、低延迟全互联，不为大规模和容错设计（scaling book 引用的一个说法是「加强版的 PCIe」）；<strong>scale-out</strong> 网络（IB/以太网）可以连成千上万个节点，带宽每卡低一个数量级，更像传统的数据中心网络。TPU 的 ICI 介于两者之间：它在整个 pod（数千芯片）范围内提供每芯片恒定的带宽（v5p 每链路 90 GB/s、三个轴共 540 GB/s 出口），但只能用于规整的通信模式。并行策略的核心约束就在这里：通信量最大的并行方式（例如张量并行）要放在快的那一层里。</p>
+      <p>这两个词描述的正是上面两层：<strong>scale-up</strong> 网络（NVLink 域）是少量芯片之间的高带宽、低延迟全互联，不为大规模和容错设计（有人形容它是「加强版的 PCIe」）；<strong>scale-out</strong> 网络（IB/以太网）可以连成千上万个节点，带宽每卡低一个数量级，更像传统的数据中心网络。TPU 的 ICI 介于两者之间：它在整个 pod（数千芯片）范围内提供每芯片恒定的带宽（v5p 每链路 90 GB/s、三个轴共 540 GB/s 出口），但只能用于规整的通信模式。并行策略的核心约束就在这里：通信量最大的并行方式（例如张量并行）要放在快的那一层里。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-compare">12. 对比与规格表</h2>
@@ -521,7 +521,6 @@
           </tbody>
         </table>
       </div>
-      <p>（前几行取自 scaling book 第 12 章的对照表；后两行是我加的。）</p>
       <h3>芯片规格</h3>
       <div class="table-wrap">
         <table>
@@ -530,14 +529,14 @@
             <tr><td>A100</td><td class="num">3.1e14</td><td class="num">6.2e14</td><td class="num">80 GB</td><td class="num">2.0e12</td><td class="num">156</td><td class="num">NVLink 300 GB/s</td></tr>
             <tr><td>H100 SXM</td><td class="num">9.9e14</td><td class="num">2.0e15</td><td class="num">80 GB</td><td class="num">3.35e12</td><td class="num">295</td><td class="num">NVLink 450 GB/s</td></tr>
             <tr><td>H200</td><td class="num">9.9e14</td><td class="num">2.0e15</td><td class="num">141 GB</td><td class="num">4.8e12</td><td class="num">206</td><td class="num">NVLink 450 GB/s</td></tr>
-            <tr><td>B200</td><td class="num">2.25e15</td><td class="num">4.5e15</td><td class="num">180–192 GB</td><td class="num">8.0e12</td><td class="num">281</td><td class="num">NVLink 900 GB/s</td></tr>
+            <tr><td>B200</td><td class="num">2.25e15</td><td class="num">4.5e15</td><td class="num">180 GB</td><td class="num">8.0e12</td><td class="num">281</td><td class="num">NVLink 900 GB/s</td></tr>
             <tr><td>TPU v5e</td><td class="num">1.97e14</td><td class="num">3.94e14</td><td class="num">16 GB</td><td class="num">8.2e11</td><td class="num">240</td><td class="num">ICI 4 链路 × 45 GB/s</td></tr>
-            <tr><td>TPU v5p</td><td class="num">4.59e14</td><td class="num">9.18e14</td><td class="num">95 GiB</td><td class="num">2.8e12</td><td class="num">164</td><td class="num">ICI 6 链路 × 90 GB/s</td></tr>
-            <tr><td>TPU v6e</td><td class="num">9.2e14</td><td class="num">1.84e15</td><td class="num">32 GB</td><td class="num">1.6e12</td><td class="num">575</td><td class="num">ICI 4 链路 × 90 GB/s</td></tr>
+            <tr><td>TPU v5p</td><td class="num">4.59e14</td><td class="num">9.18e14</td><td class="num">95 GiB</td><td class="num">2.77e12</td><td class="num">166</td><td class="num">ICI 6 链路 × 90 GB/s</td></tr>
+            <tr><td>TPU v6e</td><td class="num">9.18e14</td><td class="num">1.84e15</td><td class="num">32 GB</td><td class="num">1.64e12</td><td class="num">560</td><td class="num">ICI 4 链路 × 90 GB/s</td></tr>
           </tbody>
         </table>
       </div>
-      <p>GPU 的互联是每卡单向；TPU 是每链路单向。B200 的显存 scaling book 写 192 GB，NVIDIA DGX B200 页面是 8 卡共 1,440 GB（每卡 180 GB），两个数我都列上。价格方面 scaling book 提到 Google Cloud 上 H200 约每小时 10 美元、TPU v5p 约 4 美元，单块 H200 的算力接近 v5p 的 2 倍、显存 1.5 倍——GPU 单卡更强，TPU 更依赖把很多芯片连起来。</p>
+      <p>GPU 的互联是每卡单向；TPU 是每链路单向。B200 芯片上有 192 GB HBM3e，HGX/DGX B200 里每卡可用 180 GB（8 卡共 1,440 GB）。价格方面，Google Cloud 上 H200 的标价约每小时 10 美元、TPU v5p 约 4 美元，单块 H200 的算力接近 v5p 的 2 倍、显存 1.5 倍——GPU 单卡更强，TPU 更依赖把很多芯片连起来。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-summary">13. 小结</h2>
@@ -551,12 +550,14 @@
       </ul>
       <p>有了每条链路的带宽，下一步就是算具体的通信操作（AllGather、ReduceScatter、AllReduce、AllToAll）各要多少时间，以及矩阵乘法被切分后需要哪些通信。这是<a href="/posts/scaling-collectives/">下一篇：集合通信与分片矩阵乘法</a>的内容。</p>
 
-      <h2 id="s-ref">参考</h2>
+      <h2 id="s-ref">参考与延伸阅读</h2>
+      <p>这一篇的 roofline 和硬件部分主要整理自 How to Scale Your Model 的第 1、2、12 章，GPU 内核优化的部分来自 Ultra-Scale Playbook。想动手练习，推荐把第 1 章和第 12 章末尾的习题做一遍；芯片规格以 NVIDIA 和 Google Cloud 的官方页面为准。</p>
       <ul>
         <li>Jacob Austin 等，How to Scale Your Model：<a href="https://jax-ml.github.io/scaling-book/roofline/">Part 1: A Brief Intro to Roofline Analysis</a>（Where Does the Time Go、Visualizing rooflines、Matrix multiplication、Network communication rooflines 及习题）；<a href="https://jax-ml.github.io/scaling-book/tpus/">Part 2: How to Think About TPUs</a>（What Is a TPU、TPU Networking、TPU specs、附录 A/B）；<a href="https://jax-ml.github.io/scaling-book/gpus/">Part 12: How to Think About GPUs</a>（What Is a GPU、Memory、GPUs vs. TPUs、Networking 及习题）；<a href="https://jax-ml.github.io/scaling-book/transformers/">Part 4</a> 的习题 4、8（注意力与 MoE 的强度）。</li>
         <li>Nouamane Tazi 等，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook</a>：A primer on GPUs、Improving performance with kernels（memory coalescing、tiling、thread coarsening、control divergence）、Fused kernels。</li>
         <li>NVIDIA 规格页：<a href="https://www.nvidia.com/en-us/data-center/h100/">H100</a>、<a href="https://www.nvidia.com/en-us/data-center/hgx/">HGX</a>、<a href="https://www.nvidia.com/en-us/data-center/dgx-b200/">DGX B200</a>。</li>
         <li>Google Cloud TPU 文档：<a href="https://cloud.google.com/tpu/docs/v5e">v5e</a>、<a href="https://cloud.google.com/tpu/docs/v5p">v5p</a>、<a href="https://cloud.google.com/tpu/docs/v6e">v6e</a>。</li>
+        <li>Llama Team, Meta，<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>（2024）：第 3.3 节的训练集群网络（RoCE、三层 Clos、顶层超额订阅）。</li>
         <li>Samuel Williams、Andrew Waterman、David Patterson，<a href="https://doi.org/10.1145/1498765.1498785">Roofline: An Insightful Visual Performance Model for Multicore Architectures</a>（CACM 2009），roofline 模型的原始论文。</li>
       </ul>
     </article>
@@ -599,11 +600,11 @@
     const CHIPS = {
       h100: { name: 'H100', P: 9.89e14, BW: 3.35e12, vec: 3.35e13, vecName: 'CUDA core FP32（不计 FMA）', net: 4.5e11, netName: 'NVLink 每卡单向 450 GB/s', on: 5.5e12, onName: 'L2（实测约 5.5 TB/s）', gpu: true },
       h200: { name: 'H200', P: 9.89e14, BW: 4.8e12, vec: 3.35e13, vecName: 'CUDA core FP32（不计 FMA）', net: 4.5e11, netName: 'NVLink 每卡单向 450 GB/s', gpu: true },
-      b200: { name: 'B200', P: 2.25e15, BW: 8.0e12, vec: 4.0e13, vecName: 'CUDA core FP32（80 TFLOP/s 含 FMA，折半）', net: 9e11, netName: 'NVLink 每卡单向 900 GB/s', gpu: true },
+      b200: { name: 'B200', P: 2.25e15, BW: 8.0e12, vec: 3.75e13, vecName: 'CUDA core FP32（75 TFLOP/s 含 FMA，折半）', net: 9e11, netName: 'NVLink 每卡单向 900 GB/s', gpu: true },
       a100: { name: 'A100', P: 3.1e14, BW: 2.0e12, net: 3e11, netName: 'NVLink 每卡单向 300 GB/s', gpu: true },
       v5e: { name: 'TPU v5e', P: 1.97e14, BW: 8.2e11, net: 4.5e10, netName: 'ICI 单链路单向 45 GB/s', on: 8.2e11 * 22, onName: 'VMEM（按约 22× HBM 估）' },
-      v5p: { name: 'TPU v5p', P: 4.59e14, BW: 2.8e12, vec: 7e12, vecName: 'VPU（单核 7e12，书中数字）', net: 9e10, netName: 'ICI 单链路单向 90 GB/s' },
-      v6e: { name: 'TPU v6e', P: 9.2e14, BW: 1.6e12, net: 9e10, netName: 'ICI 单链路单向 90 GB/s' },
+      v5p: { name: 'TPU v5p', P: 4.59e14, BW: 2.77e12, vec: 1.43e13, vecName: 'VPU（两个核合计约 1.4e13）', net: 9e10, netName: 'ICI 单链路单向 90 GB/s' },
+      v6e: { name: 'TPU v6e', P: 9.18e14, BW: 1.64e12, net: 9e10, netName: 'ICI 单链路单向 90 GB/s' },
     };
     const chipButtons = (el, def) => {
       el.innerHTML = Object.entries(CHIPS).map(([k, c]) => '<button data-v="' + k + '" aria-pressed="' + (k === def) + '">' + c.name + '</button>').join('');

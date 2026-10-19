@@ -102,7 +102,6 @@
         <li><strong>计算账</strong>：一次前向和反向到底做了多少次浮点运算（FLOPs），著名的 \(6ND\) 从哪来，注意力的二次项什么时候才重要；</li>
         <li><strong>效率账</strong>：MFU 和 HFU 怎么定义，怎么用它们估算训练要多少天。</li>
       </ul>
-      <p>主要材料是 Hugging Face 的 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">Ultra-Scale Playbook</a> 前两章，以及 Google DeepMind 的 <a href="https://jax-ml.github.io/scaling-book/transformers/">How to Scale Your Model 第 4 章</a>。文中所有 Llama 3 的配置和数字都对过论文或官方 config。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -122,13 +121,13 @@
           <li><a href="#s-mfu">MFU 与 HFU</a></li>
           <li><a href="#s-time">交互：训练要多少天</a></li>
           <li><a href="#s-summary">小结：一张速查表</a></li>
-          <li><a href="#s-ref">参考</a></li>
+          <li><a href="#s-ref">参考与延伸阅读</a></li>
         </ol>
       </nav>
 
       <!-- ============================================================ -->
       <h2 id="s-overview">1. 三个约束：显存、计算、通信</h2>
-      <p>Playbook 一开头就把所有规模化技术归到三个约束上，我觉得这个框架值得先记住：</p>
+      <p>在动手算之前，先给后面所有的规模化技术一个统一的框架。训练一个大模型，始终在和三个约束打交道：</p>
       <ol>
         <li><strong>显存</strong>是硬约束。一步训练放不进显存，就根本跑不起来（OOM，out of memory）。</li>
         <li><strong>计算效率</strong>：希望硬件绝大部分时间在做计算，而不是在搬数据、等别的卡。</li>
@@ -144,10 +143,10 @@
         <li><strong>反向</strong>（backward）：从 loss 出发用链式法则算出每个参数的梯度；</li>
         <li><strong>优化器更新</strong>（optimizer step）：用梯度更新参数，例如 Adam。</li>
       </ol>
-      <p><strong>Batch size</strong>（记作 \(bs\)）是一步里用多少条样本估计梯度。它同时影响收敛和吞吐：太小，梯度噪声大；太大，每个 token 被利用得不充分，同样的 token 数换来的 loss 下降变少。好在最终效果对 batch size 在最优值附近并不敏感，所以工程上有不少调整余地。有的训练会逐步增大 batch：Playbook 提到 DeepSeek-V3 在前 469B token 里把 batch 从 3,072 条序列逐渐增大到 15,360 条，之后保持不变；Llama 3 405B 的论文写的是先用 4M token 的 batch（序列长 4,096），训练 252M token 后翻倍到 8M（序列长 8,192），训练到 2.87T token 时再翻倍到 16M。</p>
+      <p><strong>Batch size</strong>（记作 \(bs\)）是一步里用多少条样本估计梯度。它同时影响收敛和吞吐：太小，梯度噪声大；太大，每个 token 被利用得不充分，同样的 token 数换来的 loss 下降变少。好在最终效果对 batch size 在最优值附近并不敏感，所以工程上有不少调整余地。有的训练还会在过程中逐步增大 batch：DeepSeek-V3 在前 469B token 里把 batch 从 3,072 条序列逐渐增大到 15,360 条，之后保持不变；Llama 3 405B 先用 4M token 的 batch（序列长 4,096），训练 252M token 后翻倍到 8M（序列长 8,192），训练到 2.87T token 时再翻倍到 16M。</p>
       <p>预训练圈子里习惯用 <strong>token 数</strong> 报告 batch size，因为它和序列长度无关：</p>
       $$bst = bs \times seq$$
-      <p>这里 \(seq\) 是序列长度。Playbook 给的经验区间是近来的 LLM 预训练每步大约 4M 到 60M token：Llama 1 用约 4M token 的 batch 训练 1.4T token，DeepSeek 用约 60M token 的 batch 训练 14T token。问题马上就来了：一张 80 GB 的 H100 显然装不下 4M token 的激活值。为了搞清楚怎么办，先看显存到底花在哪。</p>
+      <p>这里 \(seq\) 是序列长度。近年 LLM 预训练的 batch 大致在每步 4M 到 60M token 之间：Llama 1 用约 4M token 的 batch 训练了 1.4T token，DeepSeek-V3 最终用约 63M token（15,360 条 × 4,096）的 batch 训练了 14.8T token。问题马上就来了：一张 80 GB 的 H100 显然装不下 4M token 的激活值。为了搞清楚怎么办，先看显存到底花在哪。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-memory">3. 显存里住着什么</h2>
@@ -158,11 +157,11 @@
         <li><strong>优化器状态</strong>（optimizer states），例如 Adam 的一阶矩 \(m\) 和二阶矩 \(v\)，也和权重形状相同；</li>
         <li><strong>激活值</strong>（activations）：前向时产生、反向时要用到的中间张量。</li>
       </ol>
-      <p>前三样只和模型大小有关，是「静态」的；激活值和输入有关，随 batch size 和序列长度变化。此外还有一些难以精确计算的杂项：CUDA 上下文和内核本身要占 1–2 GB（Playbook 建议用 <code>torch.ones((1, 1)).to("cuda")</code> 再看 <code>nvidia-smi</code> 自己验证）；中间缓冲区和显存碎片也会吃掉一些。下面的估算都忽略这些常数项。</p>
+      <p>前三样只和模型大小有关，是「静态」的；激活值和输入有关，随 batch size 和序列长度变化。此外还有一些难以精确计算的杂项：CUDA 上下文和内核本身要占 1–2 GB（可以执行一句 <code>torch.ones((1, 1)).to("cuda")</code>，再用 <code>nvidia-smi</code> 看看占了多少）；中间缓冲区和显存碎片也会吃掉一些。下面的估算都忽略这些常数项。</p>
 
       <h3>一步之内显存怎么变化</h3>
       <p>显存占用并不是一个静态数字，在一步之内起伏很大。用 PyTorch profiler 看一步训练，形状通常是：前向时激活值快速堆高；反向开始后，梯度一层层生成，同时用过的激活值一层层释放；最后优化器用全部梯度更新参数和优化器状态，然后进入下一步。</p>
-      <p>还有一个容易踩的坑：<strong>第一步能跑，第二步才 OOM</strong>。原因是 Adam 的状态在第一次调用 <code>optimizer.step()</code> 时才分配（PyTorch 是惰性创建的），所以第二步开始，优化器状态和第二步的激活值同时在显存里，峰值更高。（Playbook 还提到第一步的曲线形状和后面不同，因为 PyTorch 的缓存分配器在第一步里做了很多预分配，后面的步就不用再找空闲块了。）下面这个示意动画把这个过程画了出来。</p>
+      <p>还有一个容易踩的坑：<strong>第一步能跑，第二步才 OOM</strong>。原因是 Adam 的状态在第一次调用 <code>optimizer.step()</code> 时才分配（PyTorch 是惰性创建的），所以从第二步开始，优化器状态和激活值同时在显存里，峰值更高。另外，第一步的显存曲线形状也和后面不同：PyTorch 的缓存分配器在第一步里做了大量预分配，之后的步就不用再找空闲块了。下面的动画把前两步画了出来。</p>
 
       <div class="demo" id="tl-demo">
         <div class="demo-label">交互演示 · 一步训练的显存时间线（示意）</div>
@@ -175,7 +174,7 @@
           <input type="range" id="tl-t" min="0" max="10" value="0" aria-label="时间">
         </div>
         <div class="legend" id="tl-legend"></div>
-        <p class="note">示意图：一个 4 层的模型，每层参数量相同，按 BF16 混合精度 + Adam 计（每个参数：权重 2 + FP32 主权重 4 = 6 份、梯度 2 份、优化器状态 8 份）；每层激活值的大小是随手设的。数值只为说明形状，虚线是一个假想的显存上限。</p>
+        <p class="note">一个 4 层的模型，每层参数量相同，按 BF16 混合精度 + Adam 计（每个参数：权重 2 + FP32 主权重 4 = 6 份、梯度 2 份、优化器状态 8 份）；每层激活值的大小和虚线表示的显存上限都是示意值。</p>
       </div>
 
       <!-- ============================================================ -->
@@ -183,7 +182,7 @@
       <p>静态显存 = 参数量 × 每个参数的字节数。先数参数。记号：隐藏维度 \(h\)，层数 \(L\)，词表大小 \(V\)，注意力头数 \(a\)，每头维度 \(d_h = h/a\)，MLP 中间维度 \(F\)。</p>
 
       <h3>经典 GPT 结构</h3>
-      <p>Playbook 给的公式是（不含位置嵌入）：</p>
+      <p>先看最经典的 GPT 结构：线性层带偏置，用 LayerNorm，MLP 中间维度是 \(4h\)，输出层和输入嵌入共享权重。参数量（不算位置嵌入）是：</p>
       $$N = h\,V + L\,(12h^2 + 13h) + 2h$$
       <p>逐项拆开就是：</p>
       <ul>
@@ -198,7 +197,7 @@
       <h3>Llama 结构：GQA + SwiGLU + RMSNorm</h3>
       <p>现代模型有三个变化：（1）注意力用 GQA（grouped-query attention），K、V 只有 \(n_{kv}\) 个头，于是 \(W_K, W_V\) 是 \(h \times n_{kv} d_h\)；（2）MLP 用带门控的 SwiGLU，有三个矩阵 \(W_\text{gate}, W_\text{up}\in\mathbb{R}^{h\times F}\)、\(W_\text{down}\in\mathbb{R}^{F\times h}\)；（3）RMSNorm 只有缩放参数，没有偏置，线性层也不带偏置。于是每层：</p>
       $$N_\text{layer} = \underbrace{2h\cdot a d_h + 2h\cdot n_{kv} d_h}_{\text{注意力}} + \underbrace{3hF}_{\text{MLP}} + \underbrace{2h}_{\text{RMSNorm}}$$
-      <p>整个模型再加上输入嵌入 \(Vh\)、不共享的输出层 \(Vh\)、最后一个 RMSNorm \(h\)。拿 Llama 3 三个尺寸代进去（配置取自 Llama 3 论文表 3 和 Hugging Face 上的 config：词表 128,256，都是 \(n_{kv}=8\)、\(d_h = 128\)、不共享输出层）：</p>
+      <p>整个模型再加上输入嵌入 \(Vh\)、不共享的输出层 \(Vh\)、最后一个 RMSNorm \(h\)。拿 Llama 3 的三个尺寸代进去（三者的词表都是 128,256，都是 \(n_{kv}=8\)、\(d_h = 128\)，输出层都不与嵌入共享）：</p>
 
       <div class="table-wrap">
         <table>
@@ -227,7 +226,7 @@
       <h3>BF16 混合精度 + FP32 主权重</h3>
       <p>现在默认的做法是「混合精度」：前向和反向的矩阵乘法用 BF16 算，权重和梯度也以 BF16 存一份；但为了数值稳定，另存一份 FP32 的权重拷贝，叫<strong>主权重</strong>（master weights），优化器在这份 FP32 拷贝上更新，然后再转成 BF16 给下一步用。Adam 的 \(m, v\) 也用 FP32 存：</p>
       $$m_\text{params} = 2N,\quad m_\text{grad} = 2N,\quad m_\text{params,fp32} = 4N,\quad m_\text{opt} = (4+4)N \;\Rightarrow\; 16N$$
-      <p>有些框架（Playbook 提到 Nanotron）还会把梯度以 FP32 累加，因为 BF16 对很小的数值会丢精度，这样再加 \(4N\)，总共 <strong>20 字节/参数</strong>。</p>
+      <p>有些框架（例如 Nanotron）还会额外保留一份 FP32 的梯度用来累加，因为 BF16 只有 7 位尾数，把很多个小梯度加在一起时会丢精度。这样再加 \(4N\)，总共 <strong>20 字节/参数</strong>。</p>
       <p>一个反直觉的事实：<strong>混合精度本身并不省权重相关的显存</strong>，只是把 16 字节重新分配了一下，带 FP32 梯度累加时甚至更多。它的好处在别处：（1）BF16 矩阵乘法在 GPU 上快得多（H100 上 BF16 Tensor Core 的峰值是 TF32 的 2 倍、FP32 CUDA core 的约 15 倍）；（2）激活值用 BF16 存，激活显存减半——而激活值往往是大头。</p>
 
       <div class="table-wrap">
@@ -243,7 +242,7 @@
         </table>
       </div>
       <p>后两行是为了对照：优化器状态的大小取决于优化器本身（带动量的 SGD 只存一个状态），而推理只需要权重。用 FP8 训练能进一步压低，但稳定性更难保证，系列后面的<a href="/posts/scaling-mixed-precision/">混合精度与 FP8</a> 一篇再细讲。</p>
-      <p>按 16/20 字节算，Playbook 列了一张表；我把 Llama 3 的实际参数量也算进来：</p>
+      <p>按 16 和 20 字节/参数，几个常见规模的静态显存是：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>参数量</th><th class="num">16 字节/参数</th><th class="num">20 字节/参数</th></tr></thead>
@@ -265,8 +264,8 @@
       $$\frac{\partial \mathcal{L}}{\partial W} = X^\top \frac{\partial \mathcal{L}}{\partial Y}, \qquad \frac{\partial \mathcal{L}}{\partial X} = \frac{\partial \mathcal{L}}{\partial Y} W^\top$$
       <p>第一个式子需要<strong>前向时的输入</strong> \(X\)。所以每个矩阵乘法都要把自己的输入留到反向。逐元素的非线性函数也一样：\(y = \sigma(x)\) 的反向 \(\partial\mathcal{L}/\partial x = \sigma'(x)\cdot \partial\mathcal{L}/\partial y\) 需要 \(x\)（或者 \(y\)，看函数）。这些在前向时产生、留到反向才用的张量，就是激活值。</p>
 
-      <h3>论文里的公式：\(sbh(34 + 5as/h)\)</h3>
-      <p>Playbook 引用了 NVIDIA 关于重计算的论文（Korthikanti 等，2022），对 GPT 结构的一层逐项记账。设序列长 \(s\)、micro-batch 大小 \(b\)，激活值用 2 字节存，dropout 的掩码用 1 字节存：</p>
+      <h3>GPT 结构的账：\(sbh(34 + 5as/h)\)</h3>
+      <p>知道了「每个矩阵乘法要留输入」这条规则，就可以对一层逐项记账。先算经典的 GPT 结构（带 dropout、朴素注意力），这也是 Korthikanti 等人（2022）给出的经典结果。设序列长 \(s\)、micro-batch 大小 \(b\)（一次前向里的样本数，下面第 9 节细讲），激活值用 2 字节存，dropout 的掩码用 1 字节存：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>位置</th><th>要存的张量</th><th class="num">字节</th></tr></thead>
@@ -286,10 +285,10 @@
       </div>
       <p>注意力块合计 \(11sbh + 5as^2b\)，MLP \(19sbh\)，LayerNorm \(4sbh\)，加起来：</p>
       $$m_\text{act/layer} = sbh\left(34 + \frac{5as}{h}\right)\ \text{字节},\qquad m_\text{act} = L\cdot sbh\left(34 + \frac{5as}{h}\right)$$
-      <p>两点要看清楚：（1）激活显存<strong>和 \(b\) 成线性、和 \(s\) 有二次项</strong>，来源是 \(s\times s\) 的注意力矩阵，每个头一份；（2）和权重不同，它跟着输入涨。Playbook 用这个公式画了 Llama 各尺寸在 \(bs=1\) 时显存随序列长度的变化：短序列时激活值几乎可以忽略，从 2k–4k token 开始变得显著，长序列时远远超过权重相关的部分。</p>
+      <p>两点要看清楚：（1）激活显存<strong>和 \(b\) 成线性、和 \(s\) 有二次项</strong>，来源是 \(s\times s\) 的注意力矩阵，每个头一份；（2）和权重不同，它跟着输入涨。把具体模型代进去就会发现：\(b=1\) 时，短序列的激活值几乎可以忽略，从 2k–4k token 开始变得显著，长序列时远远超过权重相关的部分（第 7 节计算器里的曲线图可以直接看到）。</p>
 
       <h3>换成现代模型：没有 dropout，有 FlashAttention、GQA 和 SwiGLU</h3>
-      <p>上面的公式是 2022 年 GPT-3 风格模型的账。今天的 Llama 类模型有几处不同，我按同样的方法重新记一遍账（这部分是我自己的推导，不同框架的实现细节会让数字有出入）：</p>
+      <p>上面是 2022 年 GPT-3 风格模型的账。今天的 Llama 类模型有几处不同，我们按同样的方法重新记一遍：</p>
       <ul>
         <li><strong>没有 dropout</strong>：预训练大模型基本不用 dropout，掩码项全部消失。</li>
         <li><strong>FlashAttention</strong>：不把 \(s\times s\) 的注意力矩阵写回显存，反向时分块重算。它只需要存 Q、K、V、输出 O，以及每行 softmax 的 log-sum-exp（FP32，每个头每个位置一个数，\(4abs\) 字节，可忽略）。整个 \(as^2\) 项消失了。</li>
@@ -333,7 +332,7 @@
       </figure>
       <p>加起来，每层（BF16，激活每个数 2 字节）：</p>
       $$m_\text{act/layer} \approx 2sb\,\big(\underbrace{2h}_{\text{两个 norm 输入}} + \underbrace{h}_{\text{QKV 输入}} + \underbrace{h + 2h_{kv}}_{Q,K,V} + \underbrace{h}_{O} + \underbrace{h}_{\text{MLP 输入}} + \underbrace{4F}_{\text{SwiGLU}}\big) = 2sb\,(6h + 2h_{kv} + 4F)$$
-      <p>验算一下：把它套回 GPT 结构（\(h_{kv}=h\)，GeLU 只有输入和输出两个 \(4h\) 张量，即把 \(4F\) 换成 \(2\cdot 4h\)），得到 \(2sb\cdot 16h = 32sbh\)，正好是论文的 34 减去两个 dropout 掩码（\(sbh\) 各一个）。如果用朴素注意力（不用 FlashAttention），还要加上 softmax 的输出 \(2as^2b\)。</p>
+      <p>验算一下：把它套回 GPT 结构（\(h_{kv}=h\)，GeLU 只有输入和输出两个 \(4h\) 张量，即把 \(4F\) 换成 \(2\cdot 4h\)），得到 \(2sb\cdot 16h = 32sbh\)，正好是前面的 34 减去两个 dropout 掩码（\(sbh\) 各一个）。如果用朴素注意力（不用 FlashAttention），还要加上 softmax 的输出 \(2as^2b\)。这本账按不融合内核的 PyTorch 写法来记；把 SwiGLU 写成融合内核的框架，还能再少存一两个 \([s,b,F]\) 张量。</p>
       <p>对 Llama 3 8B（\(h=4096, h_{kv}=1024, F=14336\)），括号里是 83,968，每个 token 每层约 168 KB。序列长 8,192、\(b=1\) 时，32 层合计约 <strong>44 GB</strong>；如果用朴素注意力，光 softmax 矩阵就有 \(32\times 2 \times 32 \times 8192^2\) 字节 ≈ <strong>137 GB</strong>。FlashAttention 的意义一目了然。</p>
       <p>还有一个容易忽略的大张量：<strong>输出层的 logits</strong>。它的形状是 \([s, b, V]\)，Llama 3 的 \(V = 128{,}256\)，如果按 FP32 算交叉熵，一条 8k 序列就要 \(4 \times 8192 \times 128256\) ≈ 4.2 GB。这也是为什么很多框架会把交叉熵分块算或者和输出层融合。</p>
 
@@ -393,12 +392,12 @@
         <div class="status" id="mem-status"></div>
         <div class="readout" id="mem-readout"></div>
         <div class="chart" id="mem-chart" style="margin-top:16px"></div>
-        <p class="note">激活值按上一节的 Llama 式推导：\(2sb(6h+2h_{kv}+4F)\) 字节/层（BF16；FP32 模式下按 4 字节），朴素注意力另加 softmax 输出 \(2as^2b\)；完全重算时每层只存输入 \(2sbh\)，再加反向重算一层时的工作集。logits 按 FP32 的 \(4sbV\) 计；「杂项」固定记 1.5 GB，代表 CUDA 上下文等（Playbook 说 1–2 GB），碎片未计。这些都是估算，真实框架会因内核融合、缓冲区、碎片而有出入。</p>
+        <p class="note">激活值按上一节的 Llama 式推导：\(2sb(6h+2h_{kv}+4F)\) 字节/层（BF16；FP32 模式下按 4 字节），朴素注意力另加 softmax 输出 \(2as^2b\)；完全重算时每层只存输入 \(2sbh\)，再加反向重算一层时的工作集。logits 按 FP32 的 \(4sbV\) 计；「杂项」固定记 1.5 GB，代表 CUDA 上下文等。显存碎片和临时缓冲区没有计入：真实框架里，内核融合会让激活更少，碎片和缓冲区会让总占用更多。</p>
       </div>
 
       <p>拖一拖就能看到几件事：</p>
       <ul>
-        <li>Llama 3 8B 在 BF16 混合精度下，静态部分就要约 128 GB，单张 H100 怎么调都放不下——这和 Playbook 的结论一致：7B 以上必须开始切分状态。</li>
+        <li>Llama 3 8B 在 BF16 混合精度下，静态部分就要约 128 GB，单张 H100 怎么调都放不下：7B 以上的模型必须把这些状态切到多张卡上。</li>
         <li>把序列长度从 4k 拉到 32k，朴素注意力下激活值会爆炸（二次项），FlashAttention 下是线性增长。</li>
         <li>micro-batch 加倍，激活值严格加倍；权重相关的部分不动。</li>
         <li>完全重算把激活值压到只剩每层一个 \([s,b,h]\) 张量，代价是多算一遍前向（下一节）。</li>
@@ -443,19 +442,19 @@
       </figure>
 
       <h3>完全重算（full）</h3>
-      <p>在每个 Transformer 层的边界设检查点，即只存每层的输入。反向到某层时，先用这个输入把该层前向重跑一遍，再做反向。等于在反向里多做一次完整的前向。Scaling book 的说法是：训练 FLOPs 从 \(6 \cdot N \cdot D\) 变成大约 \(8 \cdot N \cdot D\)（前向 2、重算 2、反向 4）。Playbook 给的经验是计算量和时间增加最多 30–40%。显存方面，激活值从每层几十个 \(sbh\) 降到每层一个 \(2sbh\)，再加上反向时一层的工作集。</p>
+      <p>在每个 Transformer 层的边界设检查点，即只存每层的输入。反向到某层时，先用这个输入把该层前向重跑一遍，再做反向。等于在反向里多做一次完整的前向。按每个参数、每个 token 计，前向 2 FLOPs、重算 2、反向 4，训练 FLOPs 从 \(6ND\) 变成约 \(8ND\)（第 10 节会推导这个 2 : 4），多出三分之一；实际一步的耗时通常也会增加 30–40%。显存方面，激活值从每层几十个 \(sbh\) 降到每层一个 \(2sbh\)，再加上反向时一层的工作集。</p>
 
       <h3>选择性重算（selective）</h3>
-      <p>Korthikanti 等人的观察：注意力里 \(QK^\top\)、softmax、乘 V 这几步，激活值很大（带 \(as^2\) 项）但计算量相对小（每个元素只做很少的运算）；而线性层的激活值小、重算却贵。所以只丢掉注意力核心部分，保留其余。公式里的 \(5as/h\) 项正是来自这部分：对 GPT-3（\(a=96, s=2048, h=12288\)）\(5as/h = 80\)，比 34 还大。论文的结果是 GPT-3 上省 70% 的激活显存，只多 2.7% 的 FLOPs。选择性重算后每层的激活值变成 \(34\,sbh\)，和序列长度呈线性。</p>
-      <p>用论文附录的记法，模型 FLOPs 和选择性重算后的硬件 FLOPs 分别是：</p>
+      <p>完全重算有点浪费：并不是所有激活都同样「贵」。关键的观察是：注意力里 \(QK^\top\)、softmax、乘 V 这几步，激活值很大（带 \(as^2\) 项）但计算量相对小（每个元素只做很少的运算）；而线性层的激活值小、重算却贵。所以只丢掉注意力核心部分，保留其余。公式里的 \(5as/h\) 项正是来自这部分：对 GPT-3（\(a=96, s=2048, h=12288\)）\(5as/h = 80\)，比 34 还大。Korthikanti 等人在 GPT-3 上测得，这样能省 70% 的激活显存，只多 2.7% 的 FLOPs。选择性重算后每层的激活值变成 \(34\,sbh\)，和序列长度呈线性。</p>
+      <p>如果把一次迭代的 FLOPs 精确写出来（包括注意力和输出层），模型本身的 FLOPs 和选择性重算后硬件实际做的 FLOPs 分别是：</p>
       $$\text{model FLOPs} = 72BLsh^2\left(1 + \frac{s}{6h} + \frac{V}{12hL}\right),\qquad \text{hardware FLOPs} = 72BLsh^2\left(1 + \frac{s}{3h} + \frac{V}{12hL}\right)$$
       <p>（这里 \(B\) 是 batch 大小。）多出来的就是注意力的两个 \(s^2\) 矩阵乘法在前向里再做一遍，二者之比约为 \(1 + s/(6h)\)。</p>
 
       <h3>FlashAttention 已经是选择性重算</h3>
-      <p>Playbook 特别指出：FlashAttention 在反向里本来就重算注意力分数和概率矩阵，而不是存下来。所以用 FlashAttention 的人，其实已经在做选择性重算了。另外，重算虽然增加了 FLOPs，却减少了对显存的读写；在显存带宽紧张的 GPU 上，总体常常反而更快——这一点下一篇讲 roofline 时会更清楚。DeepSeek-V3 也做了选择性检查点，并且用 MLA（多头潜在注意力）让需要存的注意力激活更小。</p>
+      <p>FlashAttention 在反向里本来就重算注意力分数和概率矩阵，而不是存下来。所以用 FlashAttention 的人，其实已经在做选择性重算了。另外，重算虽然增加了 FLOPs，却减少了对显存的读写；在显存带宽紧张的 GPU 上，总体常常反而更快——这一点下一篇讲 roofline 时会更清楚。DeepSeek-V3 走得更远：反向时重算所有的 RMSNorm 和 MLA（多头潜在注意力）的上投影，这些输出一律不存。</p>
 
       <h3>其他策略</h3>
-      <p>Scaling book 从另一个角度描述这件事。如果什么都不重算，一层要存的中间节点大约有 20 个 \([B,T,D]\) 大小的张量（例如 \(f(x) = \exp(g(x))\) 的反向既要 \(g(x)\) 又要 \(\exp(g(x))\)）。它举的例子：\(B\cdot T = 4\text{M}\) token、\(L=64\)、\(D=8192\)，BF16 下要存约 \(2\times 20\times BTDL\) ≈ 84 TB 的激活值。两种常用策略：</p>
+      <p>也可以从计算图的角度看这件事。如果什么都不重算，一层要存的中间节点大约有 20 个 \([B,T,D]\) 大小的张量（例如 \(f(x) = \exp(g(x))\) 的反向既要 \(g(x)\) 又要 \(\exp(g(x))\)）。举个例子：\(B\cdot T = 4\text{M}\) token、\(L=64\)、\(D=8192\)，BF16 下要存约 \(2\times 20\times BTDL\) ≈ 84 TB 的激活值。两种常用策略：</p>
       <ul>
         <li><strong>Block remat</strong>：每层只存输入（即上面的完全重算），上例降到约 4.2 TB，FLOPs 从 \(6ND\) 变成约 \(8ND\)；</li>
         <li><strong>只存大矩阵乘法的输出</strong>：反向时不用重算任何大矩阵乘法，但要重算激活函数和注意力的一部分，每层从约 20 个降到约 7 个。</li>
@@ -482,11 +481,11 @@ optimizer.step()</code></pre>
       <p>要点：</p>
       <ul>
         <li><strong>显存</strong>：激活值只需容纳一个 micro-batch，与 \(gbs\) 无关。代价是要有一块在整步里一直存在的梯度缓冲区。不做累积时，梯度可以边算边被优化器消费、激活边算边释放，峰值反而可以更低。</li>
-        <li><strong>时间</strong>：micro-batch 是串行执行的，所以累积本身不加速，只是让大 batch 放得下。Playbook 的说法是「no free lunch」。</li>
+        <li><strong>时间</strong>：micro-batch 是串行执行的，所以累积本身不加速，只是让大 batch 放得下：用时间换显存。</li>
         <li><strong>结果等价</strong>：数学上，取平均后累积的梯度等于整个 batch 的梯度。一个小坑：如果 loss 是按「每个 micro-batch 内 token 的平均」算的，而不同 micro-batch 有效 token 数不同（比如有 padding 或按文档打包），简单地再除以 \(grad\_acc\) 就不等于全局按 token 平均。正确做法是累加 token 级 loss 之和，最后除以整个 batch 的有效 token 数。</li>
         <li>它和重计算可以叠加使用。</li>
       </ul>
-      <p>最后，Playbook 指出一个关键观察：各个 micro-batch 的前向和反向是彼此独立的，只差输入不同——那为什么不放到多张卡上并行做？这就是<a href="/posts/scaling-data-parallel/">数据并行</a>：它就是并行版本的梯度累积。</p>
+      <p>最后还有一个关键观察：各个 micro-batch 的前向和反向是彼此独立的，只差输入不同——那为什么不放到多张卡上并行做？这就是<a href="/posts/scaling-data-parallel/">数据并行</a>：它就是并行版本的梯度累积。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-flops">10. 数 FLOPs：从 \(2mnk\) 开始</h2>
@@ -498,7 +497,7 @@ optimizer.step()</code></pre>
         <li>矩阵 \(A[N,P]\) 乘向量 \(x[P]\)：\(N\) 个点积，<strong>\(2NP\)</strong>。</li>
         <li>\(A[N,P]\) 乘 \(B[P,M]\)：对 \(B\) 的每一列做一次矩阵向量积，<strong>\(2NPM\)</strong>。</li>
       </ul>
-      <p>通用规则（scaling book 的写法）：两个高维数组做缩并（einsum）时，FLOPs = 2 × 所有出现维度的乘积，其中<strong>缩并维</strong>（两边都有、输出里没有，被求和掉的）和<strong>批维</strong>（两边都有、输出里也有）只算一次。例如 \(C[G,H,I,J,K,L]\cdot D[G,H,M,N,K,L]\to[G,H,I,J,M,N]\)，\(G,H\) 是批维，\(K,L\) 是缩并维，FLOPs 为 \(2GHIJMNKL\)。没有缩并维时（纯逐元素乘）就没有那个 2。</p>
+      <p>推广到一般情形：两个高维数组做缩并（einsum）时，FLOPs = 2 × 所有出现维度的乘积，其中<strong>缩并维</strong>（两边都有、输出里没有，被求和掉的）和<strong>批维</strong>（两边都有、输出里也有）只算一次。例如 \(C[G,H,I,J,K,L]\cdot D[G,H,M,N,K,L]\to[G,H,I,J,M,N]\)，\(G,H\) 是批维，\(K,L\) 是缩并维，FLOPs 为 \(2GHIJMNKL\)。没有缩并维时（纯逐元素乘）就没有那个 2。</p>
       <p>值得记住的一点：矩阵乘法的计算量是 \(O(N^3)\)，而数据量只有 \(O(N^2)\)。矩阵越大，越容易让计算单元「吃饱」。这正是深度学习架构由矩阵乘法主导的原因，下一篇 roofline 会把这句话量化。</p>
 
       <h3>反向是前向的两倍</h3>
@@ -541,7 +540,7 @@ optimizer.step()</code></pre>
 
       <!-- ============================================================ -->
       <h2 id="s-6nd">11. Transformer 的总账：\(6ND\) 与注意力项</h2>
-      <p>换成 scaling book 的记号：batch \(B\)、序列长 \(T\)、模型维度 \(D\)、MLP 维度 \(F\)、Q 头数 \(N\)、KV 头数 \(K\)、头维 \(H\)、词表 \(V\)。下表都是<strong>训练</strong> FLOPs（前向 + 反向，已乘 3），除以 3 就是只做前向的量。</p>
+      <p>现在把整个 Transformer 的 FLOPs 加起来。为了让 einsum 的维度一目了然，换一套更紧凑的记号：batch \(B\)、序列长 \(T\)、模型维度 \(D\)（即前面的 \(h\)）、MLP 维度 \(F\)、Q 头数 \(N\)（即 \(a\)）、KV 头数 \(K\)、头维 \(H\)（即 \(d_h\)）、词表 \(V\)。下表都是<strong>训练</strong> FLOPs（前向 + 反向，已乘 3），除以 3 就是只做前向的量。</p>
       <h3>MLP（门控）</h3>
       <div class="table-wrap">
         <table>
@@ -584,14 +583,14 @@ optimizer.step()</code></pre>
       <h3>注意力项什么时候重要</h3>
       <p>假设典型配置 \(F = 4D\)、\(D = NH\)、\(N=K\)（MHA），注意力核心与所有矩阵乘法（含投影）之比是：</p>
       $$\frac{12BT^2NH}{18BTDF + 24BTDNH} = \frac{12BT^2D}{72BTD^2 + 24BTD^2} = \frac{T}{8D}$$
-      <p>所以只有 \(T > 8D\) 时注意力 FLOPs 才占主导。对 \(D \approx 8\text{k}\) 的模型，要到约 64k token；scaling book 还提到 Gemma-27B（\(D = 4608\)）大约在 37k 时注意力开始占主导。这说明对大模型来说，注意力的二次方代价并不像直觉中那么可怕：模型越宽，MLP 越贵，注意力越不显眼。（另一个相关的结论：注意力核心 FLOPs 等于 QKVO 投影 FLOPs 的条件是 \(24BTDNH = 12BT^2NH\)，即 \(T = 2D\)。）</p>
+      <p>所以只有 \(T > 8D\) 时注意力 FLOPs 才占主导。对 \(D \approx 8\text{k}\) 的模型，要到约 64k token；Gemma 2 27B（\(D = 4608\)）按这个估算大约在 37k token 时注意力开始占主导。这说明对大模型来说，注意力的二次方代价并不像直觉中那么可怕：模型越宽，MLP 越贵，注意力越不显眼。（另一个相关的结论：注意力核心 FLOPs 等于 QKVO 投影 FLOPs 的条件是 \(24BTDNH = 12BT^2NH\)，即 \(T = 2D\)。）</p>
       <p>拿 Llama 3 8B 在 8k 序列上具体算：\(6N\) ≈ 48.2 GFLOPs/token；注意力核心按因果减半是 \(6\cdot T\cdot NH\cdot L = 6 \times 8192 \times 4096 \times 32\) ≈ 6.4 GFLOPs/token，大约是 \(6N\) 的 13%。405B 在同样长度下只有约 4%。</p>
       <p>也有人把每 token 的训练 FLOPs 写成 \(6N + 12\,L\,T\,d_\text{attn}\)（\(d_\text{attn} = NH\)）的形式（不考虑因果减半），和上面是同一件事。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-moe">12. MoE 与 KV cache 的账</h2>
       <h3>MoE</h3>
-      <p>混合专家（Mixture of Experts）把每层的一个稠密 MLP 换成 \(E\) 个独立的 MLP（专家），每个 token 只路由到其中 \(k\) 个，通常 \(k \ll E\)；\(E/k\) 叫稀疏度，常见在 8 到 64 之间（scaling book 举 DeepSeek-V3：实际上 \(k=8\)、\(E=256\)）。参数量按 \(E\) 增长，每个 token 实际经过的参数（<strong>激活参数</strong>）只按 \(k\) 增长。所以算 FLOPs 时要用激活参数：</p>
+      <p>混合专家（Mixture of Experts）把每层的一个稠密 MLP 换成 \(E\) 个独立的 MLP（专家），每个 token 只路由到其中 \(k\) 个，通常 \(k \ll E\)；\(E/k\) 叫稀疏度，常见在 8 到 64 之间（例如 DeepSeek-V3 每层有 256 个路由专家，每个 token 选 8 个，另有 1 个所有 token 都经过的共享专家）。参数量按 \(E\) 增长，每个 token 实际经过的参数（<strong>激活参数</strong>）只按 \(k\) 增长。所以算 FLOPs 时要用激活参数：</p>
       $$C_\text{train}^\text{MoE} \approx 6\,N_\text{active}\,D_\text{tokens}$$
       <p>而显存账要按<strong>总参数</strong>算——所有专家的权重、梯度和优化器状态都得存着。这就是 MoE「算得少、存得多」的特点，也是后面<a href="/posts/scaling-moe/">专家并行</a>要解决的问题。MoE 还引入新的通信：每个 MoE 层前后各一次 AllToAll，把 token 发到专家所在的卡上再收回来。</p>
       <h3>KV cache（推理时的显存账）</h3>
@@ -607,12 +606,12 @@ optimizer.step()</code></pre>
         <li><strong>硬件 FLOPs</strong>（hardware FLOPs）：硬件实际执行的运算，<em>包含</em>重计算。由它得到的利用率叫 HFU（hardware FLOPs utilization）。</li>
         <li><strong>模型 FLOPs</strong>（model FLOPs）：模型前向加反向本身所需的运算，<em>不含</em>重计算。由它得到的叫 MFU（model FLOPs utilization），这个概念来自 PaLM 论文。</li>
       </ul>
-      <p>为什么更看重 MFU？Playbook 的解释很好：最终关心的是在给定数据上训完要多久。如果一种硬件显存足够大、不需要重算，总 FLOPs 更少却训得更快，它应该被奖励而不是被惩罚。HFU 会奖励「多做无用功」，MFU 不会，所以 MFU 更多反映模型和训练方案本身，便于跨实现比较。</p>
+      <p>为什么更看重 MFU？因为最终关心的是在给定数据上训完要多久。如果一种硬件显存足够大、不需要重算，总 FLOPs 更少却训得更快，它应该被奖励而不是被惩罚。HFU 会奖励「多做无用功」，MFU 不会，所以 MFU 更多反映模型和训练方案本身，便于跨实现比较。</p>
       <p>两者的关系：完全重算下，硬件 FLOPs ≈ \(8ND\)，模型 FLOPs = \(6ND\)，于是 \(\text{HFU} \approx \tfrac{4}{3}\,\text{MFU}\)；选择性重算下，比值约为 \(1 + s/(6h)\)。</p>
       <h3>几个真实数字</h3>
       <ul>
-        <li><strong>Llama 3 405B</strong>：论文表 4 给出三种配置的 BF16 MFU：8,192 张 H100 上 430 TFLOPs/GPU、MFU 43%；16,384 张卡上 400 TFLOPs/GPU、41%；128k 长上下文阶段 380 TFLOPs/GPU、38%。用 H100 SXM 的 BF16 稠密峰值 989 TFLOP/s 去除：430/989 ≈ 43.5%，对得上。论文解释了 16k 卡时下降到 41% 的原因：为了保持全局 16M token 的 batch，每个数据并行组的 batch 变小了。</li>
-        <li><strong>DeepSeek-V3</strong>（scaling book 的例题）：报告说用了 2.79M H800 GPU 小时训练 14.8T token，激活参数 37B。FP8 稠密峰值约 1.513e15 FLOP/s（规格表上带稀疏的数字要除以 2），总可用算力 \(2.79\text{e}6 \times 3600 \times 1.513\text{e}15 \approx 1.52\text{e}25\)；需要的是 \(6 \times 37\text{e}9 \times 14.8\text{e}12 \approx 3.3\text{e}24\)，利用率约 21.7%（以 FP8 峰值为分母）。</li>
+        <li><strong>Llama 3 405B</strong> 的三种训练配置：8,192 张 H100 上每卡 430 TFLOP/s、MFU 43%；16,384 张卡上 400 TFLOP/s、41%；128k 长上下文阶段 380 TFLOP/s、38%。MFU 的分母是 H100 SXM 的 BF16 稠密峰值 989 TFLOP/s（430/989 ≈ 43.5%）。卡数翻倍后 MFU 下降，是因为全局 batch 保持 16M token 不变，每个数据并行组分到的 batch 变小了。</li>
+        <li><strong>DeepSeek-V3</strong>：预训练 14.8T token 用了 2.664M H800 GPU 小时（加上长上下文扩展和后训练共 2.788M），激活参数 37B。H800 的计算单元和 H100 SXM 相同（被削减的是 NVLink 带宽），FP8 稠密峰值约 1,979 TFLOP/s。预训练的总可用算力是 \(2.664\text{e}6 \times 3600 \times 1.979\text{e}15 \approx 1.90\text{e}25\) FLOPs，需要的是 \(6 \times 37\text{e}9 \times 14.8\text{e}12 \approx 3.3\text{e}24\)，以 FP8 峰值为分母的利用率约 17%。分母用 FP8 是因为主要的矩阵乘法都用 FP8 做；而注意力等仍用 BF16 的部分既没算进 \(6ND\)，峰值也只有 FP8 的一半，所以硬件的实际繁忙程度比 17% 高。</li>
       </ul>
       <div class="callout warn">
         <p><strong>小心规格表上的数字。</strong>NVIDIA 规格表里 Tensor Core 的数字通常是「带结构化稀疏」的，是稠密值的 2 倍。H100 SXM 规格表写 BF16 1,979 TFLOPS 并标了星号，稠密值是 989。算 MFU 时要用稠密峰值，否则 MFU 会被低估一半。</p>
@@ -626,7 +625,7 @@ optimizer.step()</code></pre>
       <h2 id="s-time">14. 交互：训练要多少天</h2>
       <p>把上面的东西串起来：</p>
       $$t_\text{train} = \frac{C_\text{train}}{n \cdot P_\text{peak} \cdot \text{MFU}}$$
-      <p>下面的估算器用 \(6ND\) 加上注意力项（按因果减半），也给出完全重算时的 HFU。峰值都取 BF16 稠密值：H100/H200 989、B200 2,250（NVIDIA HGX B200 规格是 8 卡稀疏 36 PFLOPS，稠密减半后每卡 2.25 PFLOPS）、A100 312、TPU v5p 459、TPU v5e 197 TFLOP/s。</p>
+      <p>下面的估算器用 \(6ND\) 加上注意力项（按因果减半），也给出完全重算时的 HFU。峰值都取 BF16 稠密值：H100/H200 989、B200 2,250（HGX B200 的规格写的是 8 卡 36 PFLOPS，这是稀疏值，稠密减半后每卡 2.25 PFLOPS）、A100 312、TPU v5p 459、TPU v5e 197 TFLOP/s。</p>
 
       <div class="demo" id="ttt-demo">
         <div class="demo-label">交互演示 · 训练时长估算器</div>
@@ -656,9 +655,9 @@ optimizer.step()</code></pre>
         <div class="readout" id="t-out"></div>
         <div style="margin-top:12px;font-size:14px;color:var(--text-soft)">FLOPs 构成：<span id="t-share-txt"></span></div>
         <div class="share" id="t-share"></div>
-        <p class="note">注意力项按 \(6\cdot T\cdot (a\,d_h)\cdot L\) FLOPs/token 估算（训练、因果减半），其中层数和注意力宽度由参数量按 Llama 3 的形状粗略插值；自定义参数量时这一项只是近似。HFU 一栏假设完全重算（多一遍前向）。</p>
+        <p class="note">注意力项按 \(6\cdot T\cdot (a\,d_h)\cdot L\) FLOPs/token 估算（训练、因果减半），其中层数和注意力宽度由参数量按 Llama 3 的形状插值得到。HFU 一栏假设完全重算（多一遍前向）。</p>
       </div>
-      <p>默认是 Llama 3 405B 的配置：15.6T token、16,384 张 H100、MFU 41%，只算 \(6ND\) 是约 66 天，加上 8k 序列的注意力项约 69 天。作为对照，Llama 3.1 的模型卡写 405B 用了 30.84M H100 GPU 小时；如果全部按 16,384 张卡均摊，是约 1,880 小时、78 天。反过来算，\(3.8\text{e}25 / (30.84\text{e}6 \times 3600 \times 989\text{e}12) \approx 35\%\)，比表 4 的 38–43% 低一些。这并不矛盾：GPU 小时数的统计口径里很可能还包括故障重启、调试、长上下文和退火等阶段的开销（模型卡没有拆分，我也没查到细分数字），而表 4 的 MFU 是正常运行时的稳态值。</p>
+      <p>默认是 Llama 3 405B 的配置：15.6T token、16,384 张 H100、MFU 41%，只算 \(6ND\) 是约 66 天，加上 8k 序列的注意力项约 69 天。作为对照，Llama 3.1 的模型卡记录 405B 一共用了 30.84M H100 GPU 小时，按 16,384 张卡均摊是约 1,880 小时、78 天。反过来算平均利用率：\(3.8\text{e}25 / (30.84\text{e}6 \times 3600 \times 989\text{e}12) \approx 35\%\)，比上一节稳态运行时的 38–43% 低。差距来自稳态之外的时间：GPU 小时是整个训练的总账，包括 MFU 本来就更低的长上下文阶段，也包括故障带来的中断和重启。Llama 3 预训练期间，54 天里发生了 466 次作业中断，有效训练时间约占 90%。</p>
 
       <!-- ============================================================ -->
       <h2 id="s-summary">15. 小结：一张速查表</h2>
@@ -668,8 +667,8 @@ optimizer.step()</code></pre>
           <tbody>
             <tr><td>参数量（Llama 式）</td><td>\(L(2h\,ad_h + 2h\,h_{kv} + 3hF + 2h) + 2Vh\)</td><td>粗略 \(\approx 12Lh^2\)（GPT 式）</td></tr>
             <tr><td>静态显存</td><td>\(16N\)（或 \(20N\)）字节</td><td>BF16 混合 + FP32 主权重 + Adam</td></tr>
-            <tr><td>激活（GPT，论文）</td><td>\(L\,sbh(34 + 5as/h)\) 字节</td><td>含 dropout 掩码、朴素注意力</td></tr>
-            <tr><td>激活（Llama 式，估算）</td><td>\(L\cdot 2sb(6h + 2h_{kv} + 4F)\) 字节</td><td>FlashAttention、无 dropout</td></tr>
+            <tr><td>激活（GPT 结构）</td><td>\(L\,sbh(34 + 5as/h)\) 字节</td><td>含 dropout 掩码、朴素注意力</td></tr>
+            <tr><td>激活（Llama 式）</td><td>\(L\cdot 2sb(6h + 2h_{kv} + 4F)\) 字节</td><td>FlashAttention、无 dropout</td></tr>
             <tr><td>完全重算后</td><td>\(L\cdot 2sbh\) + 一层工作集</td><td>FLOPs \(6ND\to 8ND\)</td></tr>
             <tr><td>全局 batch</td><td>\(gbs = mbs \times grad\_acc\)</td><td>数据并行后再乘 \(dp\)</td></tr>
             <tr><td>矩阵乘法</td><td>\(2mnk\)；训练 \(6mnk\)</td><td>前向 : 反向 = 1 : 2</td></tr>
@@ -682,13 +681,15 @@ optimizer.step()</code></pre>
       </div>
       <p>回到开头的问题：Llama 3 8B 的 16 字节/参数就已经是 128 GB，激活值还会再加几十 GB——单卡装不下，这是必须多卡训练的直接原因。但在开始切模型之前，先要知道一件事：给定的一次运算，瓶颈到底在算力、显存带宽还是网络上。这就是<a href="/posts/scaling-roofline/">下一篇 Roofline</a> 要讲的。</p>
 
-      <h2 id="s-ref">参考</h2>
+      <h2 id="s-ref">参考与延伸阅读</h2>
+      <p>这一篇的显存部分主要整理自 Ultra-Scale Playbook 的前两章，FLOPs 部分主要整理自 How to Scale Your Model 的第 4 章。想看真实的显存 profiling 曲线和更多实验，推荐直接读 Playbook 的「First Steps: Training on One GPU」；第 4 章末尾的习题也很值得做一遍。</p>
       <ul>
         <li>Nouamane Tazi 等，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook">The Ultra-Scale Playbook: Training LLMs on GPU Clusters</a>：High-Level Overview；First Steps: Training on One GPU（Memory usage in transformers、Profiling the memory usage、Memory for weights/grads/optimizer states、Memory for activations、Activation recomputation、Gradient accumulation）；附录 A2 Typical Scales in LLM Training。</li>
         <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/transformers/">How to Scale Your Model, Part 4: All the Transformer Math You Need to Know</a>：Counting Dots、Forward and reverse FLOPs、Global FLOPs and Params Calculation、Sparsity and Mixture-of-Experts、Gradient checkpointing、Key-Value caching 及习题。</li>
         <li>Vijay Korthikanti 等，<a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（2022）：激活显存公式、选择性重算、附录 A 的 FLOPs 公式。</li>
-        <li>Llama Team, Meta，<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>（2024）：表 3（模型配置）、表 4（并行配置与 MFU）、预训练 batch 调度、\(3.8\times10^{25}\) FLOPs。</li>
-        <li><a href="https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md">Llama 3.1 Model Card</a>：各尺寸的 H100 GPU 小时数。</li>
+        <li>Llama Team, Meta，<a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>（2024）：表 3（模型配置）、表 4（并行配置与 MFU）、预训练 batch 调度、\(3.8\times10^{25}\) FLOPs、训练中断统计。</li>
+        <li><a href="https://github.com/meta-llama/llama-models/blob/main/models/llama3_1/MODEL_CARD.md">Llama 3.1 Model Card</a>：各尺寸的 H100 GPU 小时数；Hugging Face 上的 Llama 3 config：模型维度与词表。</li>
+        <li>DeepSeek-AI，<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3 Technical Report</a>（2024）：batch size 调度、RMSNorm 与 MLA 上投影的重算、表 1 的 GPU 小时。</li>
         <li>Tianqi Chen 等，<a href="https://arxiv.org/abs/1604.06174">Training Deep Nets with Sublinear Memory Cost</a>（2016）。</li>
         <li>NVIDIA <a href="https://www.nvidia.com/en-us/data-center/h100/">H100</a> 与 <a href="https://www.nvidia.com/en-us/data-center/hgx/">HGX B200</a> 规格页。</li>
       </ul>
@@ -902,7 +903,7 @@ optimizer.step()</code></pre>
           lower = upper;
         });
         g += '<line x1="' + ml + '" x2="' + (W - mr) + '" y1="' + Y(CAP) + '" y2="' + Y(CAP) + '" style="stroke:var(--text);stroke-dasharray:5 4"/>';
-        g += '<text x="' + (W - mr) + '" y="' + (Y(CAP) - 5) + '" text-anchor="end" style="fill:var(--text)">假想的显存上限</text>';
+        g += '<text x="' + (W - mr) + '" y="' + (Y(CAP) - 5) + '" text-anchor="end" style="fill:var(--text)">显存上限</text>';
         const stepSplit = frames.findIndex((f) => f.txt.startsWith('第 2 步'));
         g += '<line x1="' + X(stepSplit) + '" x2="' + X(stepSplit) + '" y1="' + mt + '" y2="' + (H - mb) + '" class="axis" style="stroke-dasharray:2 3"/>';
         g += '<text x="' + (X(1)) + '" y="' + (H - 8) + '">第 1 步</text><text x="' + (X(stepSplit) + 6) + '" y="' + (H - 8) + '">第 2 步</text>';

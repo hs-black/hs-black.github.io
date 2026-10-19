@@ -79,7 +79,7 @@
 
     <article class="prose">
       <p>这个系列前面都在纸上算：显存账本、roofline、集合通信的耗时、每种并行什么时候被通信卡住。这一篇落到两个动手的问题上：<strong>怎么把一个分片方案写成代码</strong>，以及<strong>跑起来以后怎么知道它是不是按预期在跑</strong>。前者我用 JAX 讲，因为 JAX 把「数组怎么分片」做成了显式的一等概念，写出来几乎就是前几篇的记号；后者讲 profiler，JAX/TPU 和 PyTorch/GPU 两边都讲，最后落到一件事：在一条时间线上把计算、通信、空闲分开。</p>
-      <p>材料主要来自 Scaling Book 的 <a href="https://jax-ml.github.io/scaling-book/jax-stuff/">Programming TPUs in JAX</a> 和 <a href="https://jax-ml.github.io/scaling-book/profiling/">How to Profile TPU Programs</a> 两章，以及 Ultra-Scale Playbook 里讲 profiler 的部分。文中的 JAX 代码我在 JAX 0.11.2 上用 8 个模拟 CPU 设备（<code>jax.config.update("jax_num_cpu_devices", 8)</code>）跑过，正确性没问题，但 CPU 上的时间没有参考意义。JAX 的分片 API 这两年变化很快，下面用的是新写法（<code>jax.make_mesh</code> 带 <code>axis_types</code>、<code>jax.set_mesh</code>、<code>jax.shard_map</code>、<code>jax.P</code>），老代码里常见的 <code>jax.experimental.shard_map</code>、<code>Mesh(mesh_utils.create_device_mesh(...))</code> 是同一套概念。</p>
+      <p>JAX 的分片 API 这两年变化很快，下面用的是新写法（JAX 0.11：<code>jax.make_mesh</code> 带 <code>axis_types</code>、<code>jax.set_mesh</code>、<code>jax.shard_map</code>、<code>jax.P</code>），老代码里常见的 <code>jax.experimental.shard_map</code>、<code>Mesh(mesh_utils.create_device_mesh(...))</code> 是同一套概念。没有 TPU/GPU 也能跟着跑：用 <code>jax.config.update("jax_num_cpu_devices", 8)</code> 模拟 8 个 CPU 设备，分片和通信的语义完全一样，只是 CPU 上的时间没有参考意义。</p>
 
       <div class="toc">
         <strong>目录</strong>
@@ -96,7 +96,7 @@
           <li><a href="#torchprof">PyTorch profiler</a></li>
           <li><a href="#read">怎么读一条 trace：计算、通信、空闲（演示）</a></li>
           <li><a href="#summary">小结</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -115,7 +115,7 @@ compiled = lowered.compile()
 print(compiled.as_text())               # 3. 优化后的 HLO（融合、布局都定了）</code></pre>
       <p>第 1 步打印出来是 <code>dot_general</code> 接一个 <code>tanh</code>，形状都写在类型里（<code>f32[2,3]</code>、<code>f32[2,4]</code>）；第 2 步是一个 MLIR 模块，里面是 <code>stablehlo.dot_general</code> 和 <code>stablehlo.tanh</code>。读 profile 时我们看到的名字来自第 3 步的 HLO，所以这三层的对应关系要心里有数。</p>
       <p>两个由此而来的约束：函数要是「纯」的（副作用只在追踪时发生一次），形状要是静态的（形状一变就重新编译）。这些约束换来的，是编译器能看到整个程序，所以它也能替你决定<strong>每个中间数组怎么分片、在哪里插入通信</strong>。这就是 JAX 多设备编程的出发点。</p>
-      <p>Scaling Book 把 JAX 的多设备编程分成三种模式：</p>
+      <p>按「谁决定分片、谁写通信」来分，JAX 的多设备编程有三种模式：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>模式</th><th>视角</th><th>分片是否显式</th><th>集合通信是否显式</th><th>API</th></tr></thead>
@@ -142,7 +142,7 @@ print(mesh.devices)                              # 4×2 的设备数组</code></
       <ul class="lines">
         <li><code>axis_sizes=(4, 2)</code>：8 个设备排成 4 行 2 列，乘积必须等于设备数。</li>
         <li><code>axis_names=('X', 'Y')</code>：之后只用名字引用轴，代码里不出现设备编号。</li>
-        <li><code>axis_types</code>：每个轴用哪种模式（Auto / Explicit；手动模式在 <code>shard_map</code> 里临时进入）。我用的版本里不写时默认是 Explicit，所以最好显式写出来。</li>
+        <li><code>axis_types</code>：每个轴用哪种模式（Auto / Explicit；手动模式在 <code>shard_map</code> 里临时进入）。目前的版本里不写时默认是 Explicit，为了读代码的人不用猜，最好显式写出来。</li>
         <li><code>jax.set_mesh</code>：设定当前 mesh，于是后面可以直接写 <code>jax.P('X', 'Y')</code> 而不必每次带上 mesh。</li>
       </ul>
       <p>在 TPU 上，<code>make_mesh</code> 会按物理拓扑排列设备，让 mesh 的相邻元素在 ICI 上也相邻；GPU 上同理会尽量让内层轴落在同一台机器里。上一篇讲的「哪个并行轴放内层」在 JAX 里就落实为：<strong>mesh 形状里最后一维变化最快</strong>，比如 <code>jax.make_mesh((dp, pp, tp), ('dp', 'pp', 'tp'))</code> 让 tp 轴在最内层。</p>
@@ -210,7 +210,7 @@ jax.debug.visualize_array_sharding(xs)       # 在终端里画出哪个设备持
       </ol>
 
       <h2 id="auto">自动模式：分片传播和 with_sharding_constraint</h2>
-      <p>自动模式下，你只给输入（可能还有输出）指定分片，中间所有数组的分片由 XLA 的分片传播（现在是 Shardy，之前叫 GSPMD）推断，需要的通信也由它插入。Scaling Book 的例子：</p>
+      <p>自动模式下，你只给输入（可能还有输出）指定分片，中间所有数组的分片由 XLA 的分片传播（现在是 Shardy，之前叫 GSPMD）推断，需要的通信也由它插入。看一个例子：</p>
       <pre><code>Auto = jax.sharding.AxisType.Auto
 mesh = jax.make_mesh(axis_sizes=(4, 2), axis_names=('X', 'Y'), axis_types=(Auto, Auto))
 jax.set_mesh(mesh)
@@ -228,16 +228,16 @@ out = jit_matmul(In, W)</code></pre>
         <li><code>out_shardings=jax.P('X', None)</code>：要求输出沿 batch 切、沿 F 复制。于是编译器必须先算出部分和 \(\text{Out}[B_X, F]\{U_Y\}\)，再沿 Y 做 all-reduce。</li>
         <li><code>.lower(...).compile()</code>：提前编译，可以用 <code>jit_matmul.as_text()</code> 看 HLO。</li>
       </ul>
-      <p>书里给出的（大幅简化的）HLO 是一个 fusion 接一个 AllReduce，fusion 的输入形状是 <code>bf16[2,1024]</code> 和 <code>bf16[8192,1024]</code>，输出 <code>bf16[2,8192]</code>。注意这些都是<strong>每设备的局部形状</strong>：batch 8 被切 4 份是 2，\(d_\text{model}\) 2048 被切 2 份是 1024。我在 CPU 上编译一个同构的小例子，HLO 里同样出现了</p>
+      <p>在 TPU 上编译后，HLO 简化下来就是一个 fusion 接一个 AllReduce：fusion 的输入形状是 <code>bf16[2,1024]</code> 和 <code>bf16[8192,1024]</code>，输出 <code>bf16[2,8192]</code>。注意这些都是<strong>每设备的局部形状</strong>：batch 8 被切 4 份是 2，\(d_\text{model}\) 2048 被切 2 份是 1024。在 CPU 上编译一个同样结构、尺寸更小的例子，HLO 末尾是这样一行：</p>
       <pre><code>ROOT %all-reduce = f32[4,32]{1,0} all-reduce(%ynn_fusion), channel_id=1,
      replica_groups=[4,2]&lt;=[8], use_global_device_ids=true, to_apply=%add.clone</code></pre>
       <p><code>replica_groups=[4,2]&lt;=[8]</code> 是 iota 形式的分组写法：把 0 到 7 排成 4×2，每一行是一组，即 {0,1}、{2,3}、{4,5}、{6,7}，正好是沿 Y 轴的 4 个组。读 profile 时，<strong>从 replica_groups 反推这次通信沿哪个 mesh 轴</strong>是很常用的技巧，后面的例题会用到。</p>
-      <p>自动传播不总是对的。Scaling Book 的说法是：有时你看 profile 会发现一个巨大的 AllGather 占了 80% 的时间，而它本来不需要。这时可以用 <code>jax.lax.with_sharding_constraint</code> 在中间结果上「钉」一个分片，引导编译器：</p>
+      <p>自动传播不总是对的。一个典型的症状是：看 profile 时发现一个巨大的 AllGather 占了 80% 的时间，而换一种分片它本来不需要。这时可以用 <code>jax.lax.with_sharding_constraint</code> 在中间结果上「钉」一个分片，引导编译器：</p>
       <pre><code>def mlp(x, W_in, W_out):
     hidden = jnp.einsum('bd,df->bf', x, W_in)
     hidden = jax.lax.with_sharding_constraint(hidden, jax.P('X', 'Y'))  # 强制隐层沿 (batch→X, F→Y) 切
     return jnp.einsum('bf,fd->bd', hidden, W_out)</code></pre>
-      <p>书里说，在自动分区的世界里，这种控制中间结果分片的写法占了 JAX 并行编程的大约 60%。但它的问题也很明显：你可以给每个中间变量都加约束，还是不确定编译器最终会做什么。书里管这叫 compiler tickling（「挠编译器痒痒」），不是一个愉快的编程模型。</p>
+      <p>在自动模式下，很大一部分并行编程的功夫都花在这种「控制中间结果的分片」上。它的问题也很明显：你可以给每个中间变量都加约束，还是不确定编译器最终会做什么。这种做法常被戏称为 compiler tickling（「挠编译器痒痒」），不是一个愉快的编程模型。下面两种模式就是为了解决这个问题。</p>
 
       <h2 id="explicit">显式模式：把分片写进类型</h2>
       <p>显式模式把分片传播从编译器挪到 JAX 自己：每个 JAX 操作有一条分片规则，从输入分片算出输出分片，结果成为数组<strong>类型</strong>的一部分，追踪时就能看到。</p>
@@ -263,10 +263,10 @@ Got lhs_contracting_spec=('Y',) and rhs_contracting_spec=('Y',)</code></pre>
       <pre><code>@jax.jit
 def matmul_square(In, W):
     return jnp.einsum('bd,df->bf', jnp.square(In), W, out_sharding=jax.P('X', 'Y'))</code></pre>
-      <p>上面两段报错和类型输出是我在本地跑出来的，和书中一致。显式和自动可以混用（<code>jax.sharding.auto_axes</code> / <code>explicit_axes</code>）。我的体会是：显式模式适合「我知道每一步该怎么切」的模型代码，错误在追踪时就暴露；自动模式适合快速把单卡代码铺开。</p>
+      <p>显式和自动可以混用（<code>jax.sharding.auto_axes</code> / <code>explicit_axes</code>）。大致的分工是：显式模式适合「我知道每一步该怎么切」的模型代码，错误在追踪时就暴露；自动模式适合快速把单卡代码铺开。</p>
 
       <h2 id="shmap">shard_map：每设备视角和显式集合通信</h2>
-      <p><code>jit</code> 给的是全局视角：你写的是对整个数组的操作。<code>shard_map</code> 给的是<strong>每设备视角</strong>：函数体在每个设备上运行一次，看到的是本设备那一块，跨设备的事情全部由你用集合通信原语写出来。Scaling Book 的第一个例子：</p>
+      <p><code>jit</code> 给的是全局视角：你写的是对整个数组的操作。<code>shard_map</code> 给的是<strong>每设备视角</strong>：函数体在每个设备上运行一次，看到的是本设备那一块，跨设备的事情全部由你用集合通信原语写出来。先看一个简单的例子：</p>
       <pre><code>mesh = jax.make_mesh((2, 4), ('x', 'y'), (Explicit, Explicit))
 jax.set_mesh(mesh)
 x = jnp.arange(0, 512, dtype=jnp.int32, out_sharding=jax.P(('x', 'y')))
@@ -299,7 +299,7 @@ assert out.shape == (4,)</code></pre>
       </div>
 
       <h3>手写三种并行</h3>
-      <p>有了这些原语，前几篇讲的并行都能直接写出来。下面三段我都和单设备结果对过数值。</p>
+      <p>有了这些原语，前几篇讲的并行都能直接写出来，每一种只需要几行。</p>
       <p><strong>张量并行的 MLP</strong>：\(\text{In}[B_X, D]\cdot W_\text{in}[D, F_Y]\cdot W_\text{out}[F_Y, D]\)。第一个矩阵按列切、第二个按行切，中间不通信，最后一次 all-reduce：</p>
       <pre><code>import functools
 
@@ -332,7 +332,7 @@ def dp_step(w, x, y):
     g = jax.grad(loss)(w_local, x, y)                      # 只含本设备数据的梯度
     g = jax.lax.pmean(g, ('X', 'Y'))                       # 显式 all-reduce 求平均
     return w - 0.1 * g</code></pre>
-      <p>新版 shard_map 会跟踪每个值是「在轴上各不相同」（varying）还是「在轴上相同」（invariant）。<code>w</code> 按 <code>P()</code> 传入，是 invariant 的。如果直接对它求梯度，JAX 会在反向自动插入一次 psum（因为前向里隐含了一次从 invariant 到 varying 的广播，它的转置就是求和），得到的已经是<strong>所有设备梯度之和</strong>。我实测这个值正好是单设备平均梯度的 8 倍（8 个设备）；如果再 <code>pmean</code> 一次，就会把学习率放大 8 倍而不报错。先 <code>pcast</code> 成 varying 再求导，梯度就是纯本地的，通信完全由自己写出来，语义清楚。Scaling Book 的集合矩阵乘法例子里也用了 <code>pcast(..., to='varying')</code> 来初始化累加器，原因相同。</p>
+      <p>新版 shard_map 会跟踪每个值是「在轴上各不相同」（varying）还是「在轴上相同」（invariant）。<code>w</code> 按 <code>P()</code> 传入，是 invariant 的。如果直接对它求梯度，JAX 会在反向自动插入一次 psum（因为前向里隐含了一次从 invariant 到 varying 的广播，它的转置就是求和），得到的已经是<strong>所有设备梯度之和</strong>。在 8 个设备上，它正好是单设备平均梯度的 8 倍；如果再 <code>pmean</code> 一次，就会把学习率放大 8 倍而不报错。先 <code>pcast</code> 成 varying 再求导，梯度就是纯本地的，通信完全由自己写出来，语义清楚。下一节的集合矩阵乘法里，初始化累加器也用了 <code>pcast(..., to='varying')</code>，原因相同。</p>
 
       <h2 id="cmm">例子：集合矩阵乘法</h2>
       <p>来看一个 shard_map 真正赚到性能的例子。要算 \(A[B_X, D_Y]\cdot_D W[D, F_Y]\to \text{Out}[B_X, F_Y]\)：激活沿 \(D\) 切（比如上一层用了 reduce-scatter 的 TP），权重沿 \(F\) 切。朴素做法是情形 2：</p>
@@ -340,16 +340,16 @@ def dp_step(w, x, y):
         <li>\(A[B_X, D] = \text{AllGather}_Y(A[B_X, D_Y])\)</li>
         <li>\(\text{Out}[B_X, F_Y] = A[B_X, D]\cdot_D W[D, F_Y]\)</li>
       </ol>
-      <p>问题在第 1 步：all-gather 结束前矩阵乘一点也做不了，通信完全暴露。<strong>集合矩阵乘法</strong>（collective matmul，Wang 等 2023）的思路是把 all-gather 拆成 \(|Y|-1\) 次环形的 <code>ppermute</code>：每一步先用手上现有的那块 \(A\)（\(D\) 方向的一段）乘上 \(W\) 里对应的那几行，同时把这块 \(A\) 传给邻居；下一步用收到的新块再乘、再传。\(|Y|\) 步之后，每个设备都用遍了 \(A\) 的全部 \(D\) 段，累加起来就是完整结果，而每一步的通信都和那一步的矩阵乘同时进行。</p>
+      <p>问题在第 1 步：all-gather 结束前矩阵乘一点也做不了，通信完全暴露。<strong>集合矩阵乘法</strong>（collective matmul）的思路是把 all-gather 拆成 \(|Y|-1\) 次环形的 <code>ppermute</code>：每一步先用手上现有的那块 \(A\)（\(D\) 方向的一段）乘上 \(W\) 里对应的那几行，同时把这块 \(A\) 传给邻居；下一步用收到的新块再乘、再传。\(|Y|\) 步之后，每个设备都用遍了 \(A\) 的全部 \(D\) 段，累加起来就是完整结果，而每一步的通信都和那一步的矩阵乘同时进行。</p>
 
       <figure class="fig">
         <svg viewBox="0 0 640 300" role="img" aria-label="集合矩阵乘法：4 个设备沿环传递 A 的块，同时计算局部矩阵乘">
           <g id="cmm-svg"></g>
         </svg>
-        <figcaption>图 1　集合矩阵乘法，|Y| = 4。每一列是一个设备，每一行是一步。方块里的数字是该设备此刻手上 A 的哪一段（沿 D），它乘上 W 中同一段对应的行；箭头是同时进行的 ppermute（向左循环移位）。自绘示意。</figcaption>
+        <figcaption>图 1　集合矩阵乘法，|Y| = 4。每一列是一个设备，每一行是一步。方块里的数字是该设备此刻手上 A 的哪一段（沿 D），它乘上 W 中同一段对应的行；箭头是同时进行的 ppermute（向左循环移位）。</figcaption>
       </figure>
 
-      <p>书里的实现（我原样跑过，结果和普通 jit 矩阵乘逐元素相等）：</p>
+      <p>代码如下：</p>
       <pre><code>def collective_matmul_allgather_lhs_contracting(lhs, rhs):
     # lhs：本地 A 块 [B/X, D/Y]，会在环上流动；rhs：本地 W 块 [D, F/Y]，不动
     axis_size = jax.lax.axis_size('Y')        # 例子里是 4
@@ -383,16 +383,16 @@ jit_sharded_f = jax.jit(jax.shard_map(
         <li><code>unroll=True</code>：把循环展开，XLA 才能把第 \(i\) 步的 <code>ppermute</code> 和同一步的矩阵乘排在一起并行执行。</li>
         <li>循环只跑 \(|Y|-1\) 次，最后一块单独算，避免一次多余的传输。</li>
       </ul>
-      <p>书中在 TPU 上的 profile：默认 jit 版本 311 µs，开头有一个阻塞的大 AllGather；集合矩阵乘法版本 244 µs，profile 里看不到 AllGather 了，全是有用的计算；作为参照，收缩维不切时的纯矩阵乘是 224 µs，已经很接近。同样的思路可以做 reduce-scatter 一侧（对应 MLP 的下投影，边累加边把部分结果往下传），书里把它和双向通信版本留作了练习。</p>
+      <p>效果如何？在 TPU 上 profile 这个例子：默认 jit 版本 311 µs，开头有一个阻塞的大 AllGather；集合矩阵乘法版本 244 µs，profile 里看不到 AllGather 了，全是有用的计算；作为参照，收缩维不切时的纯矩阵乘是 224 µs，已经很接近。同样的思路可以做 reduce-scatter 一侧（对应 MLP 的下投影，边累加边把部分结果往下传），也可以让数据同时向两个方向传，把每一步的通信再减半，都适合拿来练手。</p>
 
       <h2 id="xla">Profiling 之前：XLA 编译栈</h2>
-      <p>读 profile 前先要知道 profile 里的名字从哪来。Scaling Book 的 Profiling 一章从软件栈讲起：</p>
+      <p>读 profile 前先要知道 profile 里的名字从哪来，所以先把软件栈从上到下过一遍：</p>
 
       <figure class="fig">
         <svg viewBox="0 0 640 200" role="img" aria-label="JAX 到 TPU 的编译栈">
           <g id="stack-svg"></g>
         </svg>
-        <figcaption>图 2　从 JAX 代码到设备上执行的各层。profile 里的 op 名来自 HLO 这一层。自绘示意。</figcaption>
+        <figcaption>图 2　从 JAX 代码到设备上执行的各层。profile 里的 op 名来自 HLO 这一层。</figcaption>
       </figure>
 
       <ul>
@@ -427,7 +427,7 @@ with jax.profiler.trace("/tmp/tensorboard"):        # 这个 with 块里的执�
       </ul>
 
       <h3>怎么读一个 XLA op</h3>
-      <p>书里的例子：</p>
+      <p>看一行 TPU profile 里的真实 op：</p>
       <pre><code>%fusion.3 = bf16[32,32,4096]{2,1,0:T(8,128)(2,1)S(1)} fusion(bf16[32,32,8192]{2,1,0:T(8,128)(2,1)S(1)} %fusion.32), kind=kCustom, calls=%all-reduce-scatter.3</code></pre>
       <ul>
         <li><strong>名字</strong> <code>fusion.3</code>：一个 dot 或 fusion 最多包含一次矩阵乘，加上一些相关的逐元素（VPU）操作。</li>
@@ -440,26 +440,26 @@ with jax.profiler.trace("/tmp/tensorboard"):        # 这个 with 块里的执�
       <p>布局里的 tiling 稍微展开一下。<code>f32[3,5]{1,0:T(2,2)}</code>：<code>1,0</code> 从右往左读，表示维度 0 最主要、维度 1 最次要，即物理上还是 [3, 5] 的行优先；<code>T(2,2)</code> 表示按 2×2 的小块存放，块内行优先。因为要凑整块，数组被填充成 [4, 6]，内存是原来的 24/15 = 1.6 倍。大数组上常见的 <code>T(8,128)(2,1)</code> 是两级分块：外层 (8, 128)，内层 (2, 1)，后者是给 bf16 用的，保证每次读取是 4 字节的倍数。分块会影响数据进出 VMEM 的效率，XLA 有时会在程序中间插入「重新分块 / 重新布局」的 copy，开销不一定小。</p>
 
       <h3>Graph Viewer</h3>
-      <p>复杂的 fusion 在 Graph Viewer 里画成图，鼠标悬停往往能看到定义它的代码行。书里的建议是多盯着 HLO 图看，练习把 HLO op 对应回自己的代码。</p>
+      <p>复杂的 fusion 在 Graph Viewer 里画成图，鼠标悬停往往能看到定义它的代码行。多盯着 HLO 图看，练习把 HLO op 对应回自己的代码，是熟悉 profile 最快的办法。</p>
 
       <h3>一个（近似）真实的例子</h3>
-      <p>书里给了一个假 Transformer 的 profile，在 8 核 TPU v2 上，4 路数据并行、2 路模型并行。放大 FFW 块，上投影是一个 fusion，输入 <code>bf16[8, 1024, 8192]</code> 和 <code>bf16[8192, 16384]</code>，输出 <code>bf16[8, 1024, 16384]</code>。这是局部形状，还原成全局就是</p>
+      <p>来看一个简化 Transformer 的 profile，跑在 8 核 TPU v2 上，4 路数据并行、2 路模型并行。放大 FFW 块，上投影是一个 fusion，输入 <code>bf16[8, 1024, 8192]</code> 和 <code>bf16[8192, 16384]</code>，输出 <code>bf16[8, 1024, 16384]</code>。这是局部形状，还原成全局就是</p>
       $$X\colon \text{bf16}[32, 1024, 8192]\ \cdot\ W_\text{in}\colon \text{bf16}[8192, 32768] \to \text{bf16}[32, 1024, 32768].$$
       <p>它该花多久？每个数据并行分片的 batch 是 \(8\times1024 = 8192\) 个 token，稳稳是计算受限。8 个 v2 核，每核 \(2.3\times10^{13}\) FLOP/s：</p>
       $$\frac{2\cdot 32\cdot 1024\cdot 8192\cdot 32768}{2.3\times10^{13}\times 8}\approx 95.6\ \text{ms},$$
       <p>profile 里实测 96 ms，几乎就是满算力。第二个矩阵乘末尾藏着一个小 fusion，点开是 <code>calls=%all-reduce-scatter.1</code>，即一次 reduce-scatter。估算：v2 4×2 上只需一跳，双向带宽 \(1.2\times10^{11}\) 字节/秒；数组沿 batch 切 4 份后每份 \(2\cdot8\cdot1024\cdot8192\) 字节 = 128 MB，约 1.1 ms；实测 1.13 ms。<strong>先用 roofline 算出「应该多久」，再和 profile 里的「实际多久」比</strong>，这是读 profile 最核心的动作：两者接近就说明这一块已经没什么可挖，差得远的地方才是该看的。</p>
 
       <h3>显存</h3>
-      <p>Memory Profile 画出程序显存随时间的变化，用来查 OOM。书里的例子里能看到约 7.5 GB 分配给了参数，还有约 8.5 GB 空闲，说明还能放下更多东西。</p>
+      <p>Memory Profile 画出程序显存随时间的变化，用来查 OOM。在上面这个例子里，能看到约 7.5 GB 分配给了参数，还有约 8.5 GB 空闲，说明还能放下更多东西。</p>
 
-      <h3>书里的两道题</h3>
+      <h3>两道练习</h3>
       <p><strong>题 1</strong>：只看 profile，猜出程序在算什么。profile 里有一个 reduce、两个大 fusion 和一个 all-reduce。第一个大 fusion 是</p>
       <pre><code>%fusion.1 = bf16[4096]{0:T(1024)(128)(2,1)} fusion(bf16[4096,8192]{1,0:T(8,128)(2,1)} %param.1, bf16[8192]{0:T(1024)(128)(2,1)} %reduce.6), kind=kLoop, calls=%fused_computation.1</code></pre>
       <p>即每个分片上 <code>bf16[8192] * bf16[4096, 8192] -> bf16[4096]</code>。末尾 all-reduce 的 <code>replica_groups={{0,16,32,48,64,80,96,112}, ...}</code> 每组 8 个设备，说明是 8 路模型并行，于是真实形状是 <code>bf16[8, 8192] * bf16[32768, 8192] -> bf16[8, 32768]</code>。答案是两次矩阵乘：<code>einsum('wf,bf->bw', w2, einsum('fw,bw->bf', w1, x))</code>。</p>
-      <p><strong>题 2</strong>：一个用 GSPMD 自动分区的朴素 Transformer，用 <code>with_sharding_constraint</code> 修正分片。书里记录最初每层约 184 ms，优化后 67 ms；后来 XLA 改进了，朴素版本已经降到约 90 ms，优化版本只快约 10 ms（80 ms）。这个注脚本身就说明：自动分区的质量随编译器版本变化，profile 要在自己的版本上重新看。</p>
+      <p><strong>题 2</strong>：一个用 GSPMD 自动分区的朴素 Transformer，用 <code>with_sharding_constraint</code> 修正分片。参考数字：最初每层约 184 ms，优化后 67 ms；后来 XLA 改进了，朴素版本已经降到约 90 ms，优化版本只快约 10 ms（80 ms）。这件事本身就说明：自动分区的质量随编译器版本变化，profile 要在自己的版本上重新看。</p>
 
       <h2 id="torchprof">PyTorch profiler</h2>
-      <p>GPU 上用 PyTorch 时，对应的工具是 <code>torch.profiler</code>。Playbook 给的用法，我加了注释和几个常用参数：</p>
+      <p>GPU 上用 PyTorch 时，对应的工具是 <code>torch.profiler</code>。一个典型的用法：</p>
       <pre><code>import torch
 from torch.profiler import profile, schedule, ProfilerActivity, record_function, tensorboard_trace_handler
 
@@ -481,10 +481,10 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
       <ul class="lines">
         <li><code>schedule</code>：profiler 本身有开销，头几步还有编译、缓存分配器热身等干扰，所以只录中间稳态的几步。</li>
         <li><code>prof.step()</code>：必须每步调一次，schedule 靠它计数。</li>
-        <li><code>key_averages().table(...)</code>：按算子聚合的表，按 GPU 总时间排序，快速看最贵的是什么（新版本里这一列也叫 device time）。</li>
-        <li>生成的 trace 可以在 TensorBoard 里看，也可以导出 JSON 后用 <code>chrome://tracing</code> 或 Perfetto 打开。</li>
+        <li><code>key_averages().table(...)</code>：按算子聚合的表，按 GPU 总时间排序，快速看最贵的是什么。新版本把这一列改名为 device time，<code>"cuda_time_total"</code> 会被自动换成 <code>"device_time_total"</code>，两种写法都能用。</li>
+        <li><code>tensorboard_trace_handler</code> 写出的是 Chrome trace 格式的 JSON（<code>*.pt.trace.json</code>），拖进 Perfetto（ui.perfetto.dev）或 <code>chrome://tracing</code> 就能看；不用 schedule 时也可以直接 <code>prof.export_chrome_trace("trace.json")</code>。</li>
       </ul>
-      <p>trace 的结构：上面是 CPU 线程，能看到 Python 层的 <code>aten::</code> 算子一层层往下调，最后是 <code>cudaLaunchKernel</code>；下面是 GPU 上的若干 CUDA 流，计算 kernel 在一条流上，NCCL 通信 kernel 通常在另一条（名字形如 <code>ncclDevKernel_AllReduce_…</code>，旧版本是 <code>ncclKernel_…</code>）。CPU 是异步发 kernel 的，所以 CPU 上的启动和 GPU 上的执行之间有时间差；trace 里会用箭头把一次启动和对应的 kernel 连起来。Playbook 列出的、trace 能帮你发现的问题：</p>
+      <p>trace 的结构：上面是 CPU 线程，能看到 Python 层的 <code>aten::</code> 算子一层层往下调，最后是 <code>cudaLaunchKernel</code>；下面是 GPU 上的若干 CUDA 流，计算 kernel 在一条流上，NCCL 通信 kernel 通常在另一条（名字形如 <code>ncclDevKernel_AllReduce_…</code>，旧版本是 <code>ncclKernel_…</code>）。CPU 是异步发 kernel 的，所以 CPU 上的启动和 GPU 上的执行之间有时间差；trace 里会用箭头把一次启动和对应的 kernel 连起来。在这样的 trace 上，能直接看出这些问题：</p>
       <ul>
         <li>本可以重叠却串行执行的计算和通信；</li>
         <li>GPU 在等数据传输时的空闲；</li>
@@ -495,7 +495,7 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
       <ul>
         <li><strong>计时要用 CUDA event</strong>。CUDA 操作是异步的，用 <code>time.time()</code> 测到的只是 Python 发起 kernel 的开销。正确做法是 <code>torch.cuda.Event(enable_timing=True)</code> 在前后各 <code>record()</code> 一次，<code>torch.cuda.synchronize()</code> 之后用 <code>start.elapsed_time(end)</code> 读毫秒数，测之前先跑几次预热。</li>
         <li><strong>单个 kernel 的细节用 Nsight Compute</strong>：<code>ncu --set full -o output python layer_norm.py</code>，打开 <code>output.ncu-rep</code> 能看到显存吞吐、合并访存、占用率等，并附带改进建议。</li>
-        <li><strong>显存</strong>：除了 <code>profile_memory=True</code>，PyTorch 还有显存快照：<code>torch.cuda.memory._record_memory_history()</code> 开始记录，<code>torch.cuda.memory._dump_snapshot("snap.pickle")</code> 导出，拖进 pytorch.org/memory_viz 查看每块显存是哪行代码分配的。Playbook 用这类图说明了一步训练里显存怎么随前向上升、随反向下降。</li>
+        <li><strong>显存</strong>：除了 <code>profile_memory=True</code>，PyTorch 还有显存快照：<code>torch.cuda.memory._record_memory_history()</code> 开始记录，<code>torch.cuda.memory._dump_snapshot("snap.pickle")</code> 导出，拖进 pytorch.org/memory_viz 查看每块显存是哪行代码分配的。在这张图上能清楚看到一步训练里显存怎么随前向上升、随反向下降，峰值出现在哪里。</li>
       </ul>
 
       <h2 id="read">怎么读一条 trace：计算、通信、空闲</h2>
@@ -514,14 +514,14 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
             <li>计算 kernel 之间有很多小空隙，CPU 那一行却很忙：启动受限，kernel 太碎，考虑融合或 CUDA Graph。</li>
             <li>中间某处 GPU 全停，CPU 上有一次同步：比如 <code>loss.item()</code>、打印、把张量拷回 CPU。</li>
             <li>某个通信 kernel 特别长：未必是带宽不够，集合通信要等所有 rank 到齐，长的那段可能是在等一个慢的 rank。要对比不同 rank 的 trace 才能分清。</li>
-            <li>重叠了，但计算 kernel 在重叠时变慢：通信 kernel 也占 SM，和计算抢资源。Playbook 专门提到了这种隐藏的争用。</li>
+            <li>重叠了，但计算 kernel 在重叠时变慢：通信 kernel 也占 SM，和计算抢资源。这种争用在 trace 上不显眼，要对比同一个 kernel 在重叠和不重叠时的耗时才看得出来。</li>
           </ul>
         </li>
       </ol>
-      <p>下面的演示是一条<strong>虚构的</strong> trace（数字是我编的，单位只是示意的「毫秒」），用 4 层的小模型演示三种重叠：DDP 的梯度 all-reduce 与反向重叠、FSDP 的参数 all-gather 预取、TP 的集合矩阵乘法。可以开关重叠，调节「通信占 SM 导致的计算变慢」，或者在前向结束后插一次 CPU 同步，看步时和三类时间怎么变。</p>
+      <p>下面的演示用一个 4 层的小模型画出三种重叠：DDP 的梯度 all-reduce 与反向重叠、FSDP 的参数 all-gather 预取、TP 的集合矩阵乘法。可以开关重叠，调节「通信占 SM 导致的计算变慢」，或者在前向结束后插一次 CPU 同步，看步时和三类时间怎么变。</p>
 
       <div class="demo" id="tl-demo">
-        <div class="demo-label">示意 trace 查看器（虚构数据，仅示意）</div>
+        <div class="demo-label">trace 查看器（数据为示意）</div>
         <div class="row2">
           <div class="seg" id="tl-scn">
             <button data-s="ddp" aria-pressed="true">DDP 梯度同步</button>
@@ -555,16 +555,16 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
         <li>Mesh 给设备命名；PartitionSpec 为数组每一维写「沿哪些 mesh 轴切」，没提到的轴就是复制；每设备块形状 = 维度大小 / 对应轴大小之积。</li>
         <li>三种模式：自动（编译器推断，用 <code>with_sharding_constraint</code> 纠偏）、显式（分片进类型，歧义时报错要求 <code>out_sharding</code>）、手动 shard_map（每设备视角，<code>psum</code> / <code>all_gather</code> / <code>psum_scatter</code> / <code>ppermute</code> / <code>all_to_all</code> 自己写）。</li>
         <li>shard_map 里注意 varying / invariant：对复制的输入求梯度会自动带上 psum。</li>
-        <li>集合矩阵乘法把 all-gather 拆成 ppermute 环，和分块矩阵乘重叠；书中例子从 311 µs 降到 244 µs，接近无通信的 224 µs。</li>
+        <li>集合矩阵乘法把 all-gather 拆成 ppermute 环，和分块矩阵乘重叠；TPU 上的例子从 311 µs 降到 244 µs，接近无通信的 224 µs。</li>
         <li>读 profile：认 HLO op（名字、形状、布局、存储空间、replica_groups），先用 roofline 估算再对照实测；在时间线上把步时拆成计算、暴露的通信、空闲三部分，按模式找原因。</li>
       </ul>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>，Google DeepMind，2025：<a href="https://jax-ml.github.io/scaling-book/jax-stuff/">Part 10: Programming TPUs in JAX</a>（三种模式、Auto / Explicit / shard_map、集合矩阵乘法、习题）和 <a href="https://jax-ml.github.io/scaling-book/profiling/">Part 9: How to Profile TPU Programs</a>（软件栈、Trace Viewer、HLO op 的读法、Graph Viewer、示例 profile、显存、习题）。</li>
-        <li>Nouamane Tazi 等，<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook</a>，Hugging Face，2025：「Profiling GPU compute and communication」一节、附录 A1（Distributed Training Profiling）、数据并行一节里的重叠与分桶，以及 5D 一节末尾关于计算与通信争用的讨论。</li>
+        <li>Jacob Austin 等，<a href="https://jax-ml.github.io/scaling-book/">How to Scale Your Model</a>，Google DeepMind，2025。本文 JAX 和 TPU profiling 部分的例子都来自这两章，推荐带着代码读一遍：<a href="https://jax-ml.github.io/scaling-book/jax-stuff/">Part 10: Programming TPUs in JAX</a>（三种模式、Auto / Explicit / shard_map、集合矩阵乘法、习题）和 <a href="https://jax-ml.github.io/scaling-book/profiling/">Part 9: How to Profile TPU Programs</a>（软件栈、Trace Viewer、HLO op 的读法、Graph Viewer、示例 profile、显存、习题）。</li>
+        <li>Nouamane Tazi 等，<a href="https://nanotron-ultrascale-playbook.static.hf.space/index.html">The Ultra-Scale Playbook</a>，Hugging Face，2025：「Profiling GPU compute and communication」一节、附录 A1（Distributed Training Profiling）、数据并行一节里的重叠与分桶，以及 5D 一节末尾关于计算与通信争用的讨论。PyTorch profiler 的用法和 trace 示例在这里。</li>
         <li>JAX 文档：<a href="https://docs.jax.dev/en/latest/notebooks/explicit-sharding.html">Explicit sharding</a>、<a href="https://docs.jax.dev/en/latest/notebooks/shard_map.html">shard_map</a>、<a href="https://docs.jax.dev/en/latest/profiling.html">Profiling</a>。</li>
-        <li>PyTorch 文档：<a href="https://pytorch.org/docs/stable/profiler.html">torch.profiler</a>、<a href="https://pytorch.org/docs/stable/torch_cuda_memory.html">Understanding CUDA Memory Usage</a>。</li>
+        <li>PyTorch 文档：<a href="https://docs.pytorch.org/docs/stable/profiler.html">torch.profiler</a>、<a href="https://docs.pytorch.org/docs/stable/torch_cuda_memory.html">Understanding CUDA Memory Usage</a>。</li>
         <li>Shibo Wang 等，<a href="https://dl.acm.org/doi/10.1145/3567955.3567959">Overlap Communication with Dependent Computation via Decomposition in Large Deep Learning Models</a>，ASPLOS 2023（集合矩阵乘法）。</li>
       </ul>
     </article>
