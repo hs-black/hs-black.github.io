@@ -443,3 +443,129 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 0.01ms !important; transition-duration: 0.01ms !important; }
 }
+
+/* ---------- long-form helpers (tables, controls, series nav) ---------- */
+
+.prose table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 15px;
+  line-height: 1.55;
+}
+.prose th, .prose td {
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.prose th { font-weight: 600; color: var(--text-soft); border-bottom-color: var(--text-faint); }
+.prose td.num, .prose th.num { text-align: right; font-variant-numeric: tabular-nums; }
+/* Wide tables scroll inside this box instead of the page. */
+.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-wrap table { min-width: 480px; }
+
+.prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+
+.prose details {
+  padding: 10px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+.prose details > summary { cursor: pointer; font-weight: 600; }
+.prose details[open] > summary { margin-bottom: 8px; }
+
+.callout.warn { background: color-mix(in srgb, var(--accent-2) 12%, transparent); }
+.callout > :first-child { margin-top: 0; }
+.callout > * + * { margin-top: 0.6em; }
+
+/* Table of contents at the top of long posts. */
+.toc {
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 15px;
+}
+.toc ol { margin: 6px 0 0; padding-left: 1.4em; }
+.toc li + li { margin-top: 2px; }
+
+/* Rows of labelled controls inside a .demo. */
+.ctrls { display: grid; gap: 10px; margin: 12px 0; }
+.ctrl {
+  display: grid;
+  grid-template-columns: minmax(7em, auto) 1fr minmax(4.5em, auto);
+  align-items: center;
+  gap: 12px;
+  font-size: 15px;
+}
+.ctrl input[type="range"] { width: 100%; }
+.ctrl output, .ctrl .val { font-family: var(--font-mono); font-size: 14px; text-align: right; }
+.ctrl select, .demo select, .demo input[type="number"] {
+  font: inherit; font-size: 14px;
+  padding: 4px 8px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--bg-soft);
+  color: var(--text);
+}
+.seg { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.seg button {
+  padding: 3px 12px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: none;
+  color: var(--text-soft);
+  font: inherit; font-size: 14px;
+  cursor: pointer;
+}
+.seg button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+.readout {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 10px;
+  margin-top: 12px;
+}
+.readout > div { padding: 10px 12px; border-radius: 10px; background: var(--bg-soft); }
+.readout .k { display: block; font-size: 12px; color: var(--text-faint); }
+.readout .v { font-family: var(--font-mono); font-size: 18px; font-weight: 600; }
+@media (max-width: 560px) {
+  .ctrl { grid-template-columns: 1fr auto; }
+  .ctrl input[type="range"] { grid-column: 1 / -1; grid-row: 2; }
+}
+
+/* Series navigation, filled in by /assets/series.js. */
+.series {
+  margin: 8px 0 24px;
+  padding: 14px 18px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--accent);
+  border-radius: var(--radius);
+  background: var(--surface);
+  font-size: 15px;
+}
+.series summary { cursor: pointer; color: var(--text-soft); }
+.series summary b { color: var(--text); }
+.series ol { margin: 8px 0 0; padding-left: 1.6em; }
+.series li + li { margin-top: 2px; }
+.series li[aria-current] { font-weight: 600; }
+.series li[aria-current] a { color: var(--text); }
+.series-pager {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+  margin-top: 48px;
+}
+.series-pager a {
+  display: block;
+  padding: 12px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--text);
+  font-size: 15px;
+  line-height: 1.5;
+}
+.series-pager a:hover { border-color: var(--accent); text-decoration: none; }
+.series-pager small { display: block; color: var(--text-faint); font-size: 12px; }
+.series-pager .next { grid-column: 2; text-align: right; }

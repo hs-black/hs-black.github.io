@@ -127,3 +127,20 @@ body.deck-page {
 .deck-bar a:hover { color: var(--text); text-decoration: none; }
 .deck-hint { opacity: 0.8; }
 @media (hover: none) { .deck-hint { display: none; } }
+
+/* ---------- interactive slides ----------
+   Wrap a live widget in .widget[data-interactive]: clicks inside it no
+   longer turn the page, and arrow keys stay with a focused input. */
+.slide .widget {
+  padding: 24px 28px;
+  border: 1px solid var(--border);
+  border-radius: 18px;
+  background: var(--surface);
+  box-shadow: var(--shadow);
+  font-size: 22px;
+}
+.slide .widget input[type="range"] { width: 320px; height: 28px; }
+.slide .widget .btn { font-size: 20px; padding: 8px 18px; }
+.slide .widget .seg button { font-size: 20px; padding: 6px 16px; }
+.slide .widget output, .slide .widget .val { font-family: var(--font-mono); }
+.slide .hint { font-size: 16px; color: var(--text-faint); }

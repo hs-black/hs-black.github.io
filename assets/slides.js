@@ -73,6 +73,8 @@
   document.addEventListener('keydown', (e) => {
     if (e.metaKey || e.ctrlKey || e.altKey) return;
     if (e.target.closest('input, textarea, select, [contenteditable]')) return;
+    // Space / Enter on a focused button inside a widget presses the button.
+    if ((e.key === ' ' || e.key === 'Enter') && e.target.closest('button, a')) return;
     switch (e.key) {
       case 'ArrowRight': case 'ArrowDown': case 'PageDown': case ' ': case 'Enter':
         e.preventDefault(); next(); break;
