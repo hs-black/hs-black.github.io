@@ -26,7 +26,7 @@
         <img class="avatar" src="/assets/img/avatar.jpg" alt="Zunzhe Zhang" width="132" height="132">
         <h1>Zunzhe Zhang</h1>
         <p class="role">B.S. in Computer Science<br><a href="https://iiis.tsinghua.edu.cn/">IIIS, Tsinghua University</a></p>
-        <div class="token-stream" id="stream" aria-hidden="true"></div>
+        <p class="tagline">Pretraining, hyper-connections, and embodied agents</p>
         <ul class="icon-links">
           <li><a href="mailto:zhang-zz22@mails.tsinghua.edu.cn"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6.5A1.5 1.5 0 0 1 4.5 5h15A1.5 1.5 0 0 1 21 6.5v11a1.5 1.5 0 0 1-1.5 1.5h-15A1.5 1.5 0 0 1 3 17.5z"/><path d="m4 6.5 8 6 8-6"/></svg>Email</a></li>
           <li><a href="https://github.com/hs-black"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 19c-4.3 1.4-4.3-2.5-6-3m12 5v-3.5c0-1 .1-1.4-.5-2 2.8-.3 5.5-1.4 5.5-6a4.6 4.6 0 0 0-1.3-3.2 4.2 4.2 0 0 0-.1-3.2s-1.1-.3-3.5 1.3a12.3 12.3 0 0 0-6.2 0C6.5 2.8 5.4 3.1 5.4 3.1a4.2 4.2 0 0 0-.1 3.2A4.6 4.6 0 0 0 4 9.5c0 4.6 2.7 5.7 5.5 6-.6.6-.6 1.2-.5 2V21"/></svg>GitHub</a></li>
@@ -93,10 +93,10 @@
         <!-- Keep in sync with /papers/ (short form: title, authors, venue, links). -->
         <ul class="paper-cards">
           <li>
-            <span class="venue-badge">ICLR 2026 Workshops</span>
+            <span class="venue-badge">NeurIPS 2026</span>
             <h3 class="paper-title">Generative Control as Optimization: Time Unconditional Flow Matching for Adaptive and Robust Robotic Control</h3>
             <div class="paper-authors"><span class="me">Zunzhe Zhang</span>*, Runhan Huang*, Yicheng Liu, Shaoting Zhu, Linzhan Mou, Hang Zhao</div>
-            <div class="paper-venue"><span class="note">LLA and ReALM-GEN · * equal contribution</span></div>
+            <div class="paper-venue"><span class="note">* equal contribution</span></div>
             <div class="paper-links"><a href="https://arxiv.org/abs/2603.17834">arXiv</a><a href="https://hrh6666.github.io/GeCO/">Project</a></div>
           </li>
           <li>
@@ -179,41 +179,5 @@
 
   <footer class="site-footer wrap wide">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
 
-  <script>
-    // Types the tagline out token by token, tinted by a made-up "confidence".
-    (() => {
-      const el = document.getElementById('stream');
-      const tokens = [
-        ['Pre', .6], ['training', .9], [',', .8], [' hyper', .35], ['-connections', .7], [',', .85],
-        [' and', .9], [' embodied', .45], [' agents', .8],
-      ];
-      const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const caret = document.createElement('span');
-      caret.className = 'caret';
-
-      function chip([text, p]) {
-        const s = document.createElement('span');
-        s.className = 'tok';
-        s.textContent = text;
-        s.style.setProperty('--p', p);
-        return s;
-      }
-
-      if (reduce) { tokens.forEach((t) => el.appendChild(chip(t))); return; }
-
-      let i = 0;
-      function tick() {
-        if (i === 0) el.replaceChildren(caret);
-        if (i < tokens.length) {
-          el.insertBefore(chip(tokens[i++]), caret);
-          setTimeout(tick, 140 + Math.random() * 220);
-        } else {
-          i = 0;
-          setTimeout(tick, 5000);
-        }
-      }
-      tick();
-    })();
-  </script>
 </body>
 </html>
