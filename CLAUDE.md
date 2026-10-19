@@ -75,6 +75,16 @@ Kinds, used in both the post header and the home list:
 - Personal / academic pages (home, papers, projects) are in English; posts
   are in Chinese unless the owner asks otherwise. Write in the owner's
   first-person voice, plainly; no filler intros or hype.
+- The point of a post is that the reader understands. Write as a narrator
+  explaining the idea, not as someone annotating sources: no "本文基于 X",
+  "Playbook 给的公式", "书里的例子", "我核对过", "原文有误" in the body. Motivate
+  each concept before defining it and don't skip steps in derivations. When
+  unsure of a fact, research it and state the settled answer plainly. Source
+  chapters and papers go in a final 参考与延伸阅读 section, which is the only
+  place sources are narrated.
+- Use the English term when the Chinese one is uncommon in the ML community
+  (micro-batch, all-reduce, kernel, warp, rollout, KV cache, prefill/decode…).
+  Decks read like a talk: "目录", not "这套幻灯片讲什么".
 - Technical accuracy matters more than flourish. When numbers in a demo are
   made up for illustration, say so on the page. Do not state specific facts
   (token ids, benchmark scores, paper results) that you have not verified.
