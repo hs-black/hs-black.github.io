@@ -73,7 +73,6 @@
         <li><strong>提高 token 效率的数据改写</strong>：高质量 token 不够用时，用改写而不是多轮重复来“放大”数据；</li>
         <li><strong>Agent 能力的后训练</strong>：大规模合成工具调用轨迹，加上可验证奖励与“自我批评 rubric 奖励”结合的 RL。</li>
       </ul>
-      <p>下面按“优化器 → 数据 → 架构 → 基础设施 → 后训练”的顺序，把每个技术从基础讲到细节。讲 Muon 时会先讲 Moonshot 更早的 Moonlight 工作，因为 K2 直接沿用了那里对 Muon 的两处修改。文中有三个交互演示：Muon 与 Adam 的更新谱对比、QK-Clip 模拟器、MoE 稀疏度计算器。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -96,7 +95,7 @@
       </nav>
 
       <h2 id="overview">1. 全貌：K2 有哪些数字</h2>
-      <p>先把关键数字放在一起，和它的“前辈” DeepSeek-V3 对照，后文再逐个解释这些选择从何而来。</p>
+      <p>K2 的骨架和 DeepSeek-V3 几乎一样，差别集中在几个数字上：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>项目</th><th class="num">DeepSeek-V3</th><th class="num">Kimi K2</th></tr></thead>
@@ -114,7 +113,7 @@
         </table>
       </div>
       <p>另外几个常用数字：隐藏维度 7168，每个专家的 FFN 中间维度 2048，注意力用 MLA；预训练 15.5T token、上下文 4K，之后退火并做长上下文激活，用 YaRN 扩到 128K；优化器 MuonClip，QK-Clip 阈值 \(\tau=100\)。</p>
-      <p>MLA（后文第 7 节详细讲）的具体尺寸是：<code>q_lora_rank=1536</code>、<code>kv_lora_rank=512</code>、<code>qk_nope_head_dim=128</code>、<code>qk_rope_head_dim=64</code>、<code>v_head_dim=128</code>，路由打分函数是 sigmoid（<code>scoring_func: sigmoid</code>，<code>topk_method: noaux_tc</code>，即 DeepSeek-V3 式的无辅助损失负载均衡）。后面的计算都用这些值。</p>
+      <p>MLA（见<a href="#arch">第 7 节</a>）的具体尺寸是：<code>q_lora_rank=1536</code>、<code>kv_lora_rank=512</code>、<code>qk_nope_head_dim=128</code>、<code>qk_rope_head_dim=64</code>、<code>v_head_dim=128</code>，路由打分函数是 sigmoid（<code>scoring_func: sigmoid</code>，<code>topk_method: noaux_tc</code>，即 DeepSeek-V3 式的无辅助损失负载均衡）。</p>
 
       <h2 id="muon">2. 从 Adam 到 Muon：正交化动量</h2>
       <h3>2.1 先回忆 SGD 动量和 Adam</h3>
@@ -160,7 +159,7 @@
         <li><strong>缩放律</strong>：在 399M–1.5B 的一组 dense 模型上，对 AdamW 做了网格搜索的强基线；Muon 直接复用 AdamW 的最优超参。拟合出的曲线是 Muon \(2.506\times C^{-0.052}\)、AdamW \(2.608\times C^{-0.054}\)，在算力最优训练下 Muon 只需约 52% 的 FLOPs 就能达到 AdamW 的 loss（“约 2 倍计算效率”）。</li>
         <li><strong>奇异值熵</strong>：对 Moonlight（Muon 训练）和 Moonlight-A（AdamW 训练）的权重矩阵算 SVD 熵 \(H(\sigma) = -\frac{1}{\log n}\sum_i p_i\log p_i,\ p_i = \sigma_i^2/\sum_j\sigma_j^2\)，Muon 训练出来的矩阵在所有 checkpoint、所有矩阵组上熵都更高，超过 90% 的矩阵如此；在 MoE 的 router 矩阵上差距最明显。熵越高，说明奇异值分布越平，矩阵用到的“方向”越多。</li>
       </ul>
-      <p>下面的演示在两种尺度上对比“原始梯度、Adam 式符号更新、Newton–Schulz 正交化”。上半部分是 2×2 矩阵作用在单位圆上的像：病态的梯度把圆压成细长椭圆，正交化后接近一个圆（奇异值都接近 1）。下半部分是一个 32×16 的随机矩阵，奇异值按幂律衰减，柱状图显示三种更新的奇异值（各自除以最大值）。所有数都在页面上实时计算：奇异值由 Jacobi 方法求 \(G^\top G\) 的特征值得到。</p>
+      <p>把“原始梯度、Adam 式符号更新、Newton–Schulz 正交化”放在两种尺度上对比。上半部分是 2×2 矩阵作用在单位圆上的像：病态的梯度把圆压成细长椭圆，正交化后接近一个圆（奇异值都接近 1）。下半部分是一个 32×16 的随机矩阵，奇异值按幂律衰减，柱状图显示三种更新的奇异值（各自除以最大值）。所有数都在页面上实时计算：奇异值由 Jacobi 方法求 \(G^\top G\) 的特征值得到。</p>
 
       <div class="demo" id="muon-demo">
         <div class="demo-label">交互演示 · Muon 与 Adam 的更新谱</div>
@@ -196,7 +195,7 @@
       <h3>3.1 加回权重衰减</h3>
       <p>原始 Muon 没有权重衰减。Moonlight 观察到训练久了权重和层输出的 RMS 一直增长，超出 bf16 的高精度区间。他们加入 AdamW 式的解耦权重衰减：</p>
       $$W_t = W_{t-1} - \eta_t\,(O_t + \lambda W_{t-1}).$$
-      <p>在一个 800M 模型、100B token（约 5 倍算力最优 token 数）的过训练实验里，原始 Muon 早期收敛更快，但后期被带权重衰减的 Muon 反超，后者也优于 AdamW。为什么 Muon 特别需要它，可以从更新的“形状”理解：Muon 每步的更新是满秩、每个方向步长相同的，不像 Adam 那样大多数方向几乎不动，所以权重范数更容易持续增长；权重衰减提供一个平衡点。后面会看到，这个“奇异值容易增长”的性质也正是 logit 爆炸的根源。</p>
+      <p>在一个 800M 模型、100B token（约 5 倍算力最优 token 数）的过训练实验里，原始 Muon 早期收敛更快，但后期被带权重衰减的 Muon 反超，后者也优于 AdamW。为什么 Muon 特别需要它，可以从更新的“形状”理解：Muon 每步的更新是满秩、每个方向步长相同的，不像 Adam 那样大多数方向几乎不动，所以权重范数更容易持续增长；权重衰减提供一个平衡点。这个“奇异值容易增长”的性质，也正是<a href="#explode">注意力 logit 爆炸</a>的根源。</p>
 
       <h3>3.2 更新 RMS 随矩阵形状变化</h3>
       <p>Adam 的更新逐元素大约是 \(\pm1\) 量级，所以它的更新 RMS（均方根）不依赖矩阵形状，实际在 0.2–0.4 左右。Muon 不是这样。<strong>引理</strong>：形状为 \([A,B]\) 的满秩矩阵，Muon 更新 \(O = UV^\top\) 的 RMS 是 \(\sqrt{1/\max(A,B)}\)。</p>
@@ -297,7 +296,7 @@
         <li><strong>K2 本身</strong>（\(\tau=100\)）：最大 logit 一开始很快涨到 100 被卡住，大约训练 30% 的步数之后才自行回落到正常区间，全程没有调整 \(\tau\)。前 70000 步里有 12.7% 的注意力头至少触发过一次 QK-Clip；70000 步以后，所有头的 \(S_{\max}\) 都已降到 100 以下，QK-Clip 不再生效。也就是说它只在早期“临时介入”，训练稳定后自动退出。</li>
         <li><strong>结果</strong>：15.5T token 的逐步训练 loss 曲线（未平滑、未降采样）没有任何 spike。</li>
       </ul>
-      <p>下面的模拟器用一个玩具动力学来体会这些现象。每个头的 \(W_q\)、\(W_k\) 谱范数按“对齐带来的乘性增长 − 权重衰减”演化，增长率随训练衰减（模拟“权重和更新方向对齐”在早期最强）；少数头增长率特别大。logit \(S^h = \kappa_h\sigma_q\sigma_k\)。打开 QK-Clip 时，每步更新后按 5.1 的规则缩放。</p>
+      <p>一个玩具动力学就能复现这些现象：每个头的 \(W_q\)、\(W_k\) 谱范数按“对齐带来的乘性增长 − 权重衰减”演化，增长率随训练衰减（模拟“权重和更新方向对齐”在早期最强）；少数头增长率特别大。logit \(S^h = \kappa_h\sigma_q\sigma_k\)。打开 QK-Clip 时，每步更新后按 5.1 的规则缩放。</p>
 
       <div class="demo" id="qk-demo">
         <div class="demo-label">交互演示 · QK-Clip 模拟器（玩具模型）</div>
@@ -323,7 +322,7 @@
 
       <h2 id="data">6. Token 效率与数据改写</h2>
       <h3>6.1 token 效率是新的瓶颈</h3>
-      <p>前面讲的是优化器，这一节讲数据。出发点是：高质量的人类数据越来越有限，<strong>token 效率</strong>（每个 token 带来的性能提升）成了缩放中的关键系数。提升它有两条路：优化器（Muon 每个 token 学得更多）和数据（让每个 token 携带更多有效信号，即提高 token utility）。最朴素的“多学几遍”（多 epoch 重复）会过拟合、泛化变差。</p>
+      <p>高质量的人类数据越来越有限，<strong>token 效率</strong>（每个 token 带来的性能提升）成了缩放中的关键系数。提升它有两条路：优化器（Muon 每个 token 学得更多）和数据（让每个 token 携带更多有效信号，即提高 token utility）。最朴素的“多学几遍”（多 epoch 重复）会过拟合、泛化变差。</p>
       <h3>6.2 知识类数据的改写</h3>
       <p>知识密集的文本有个两难：只过一遍学不全，重复多遍收益递减还容易过拟合。K2 的改写框架有三个部件：</p>
       <ul>
@@ -387,7 +386,7 @@
       $$4\times 64\times 131072\times 128\times 61 \approx 262\ \text{GFLOPs}.$$
       <p>其余所有矩阵乘按激活参数算，每 token 约 \(2N_{\text{act}}\approx 65\) GFLOPs。头数加倍时，注意力这部分翻倍（+262），注意力投影的参数也多出约 5B（+10 GFLOPs），总增幅约 \((262+10)/(65+262)\approx 83\%\)。也就是说，在 128K 上下文下，注意力计算已经是推理的大头，头数直接决定成本。</p>
       <p>收益这一边，受控实验（头数 = 层数 vs 头数 = 2× 层数，同 token 数）显示加倍头数只让验证 loss 降低 0.5%–1.2%。在 Agent 场景长上下文很关键，这点收益不值得，于是 K2 用 64 头。</p>
-      <p>下面的计算器按 MLA 和 MoE 的尺寸估算参数量和每 token 的 FLOPs。它在 K2 预设下给出的总参数是 1.026T，比 1.04T 少约 17B，差的是一层 MTP（multi-token prediction，预训练时额外预测后面 token 的模块，结构和一个 MoE 层相同，约 17B 参数）。K2 训练时带这一层，但公开权重不含它（<code>num_nextn_predict_layers=0</code>），加上它就是 1.043T。</p>
+      <p>计算器按 MLA 和 MoE 的尺寸估算参数量和每 token 的 FLOPs。K2 预设下它给出的总参数是 1.026T，比 1.04T 少约 17B，差的是一层 MTP（multi-token prediction，预训练时额外预测后面 token 的模块，结构和一个 MoE 层相同，约 17B 参数）。K2 训练时带这一层，但公开权重不含它（<code>num_nextn_predict_layers=0</code>），加上它就是 1.043T。</p>
 
       <div class="demo" id="moe-demo">
         <div class="demo-label">交互演示 · MoE 稀疏度计算器</div>
@@ -417,7 +416,7 @@
 
       <h2 id="infra">8. 训练基础设施与训练配方</h2>
       <h3>8.1 集群</h3>
-      <p>万亿参数的模型怎么在有限的显存里训起来，是这一节的主题。K2 用的是 NVIDIA H800 集群，每节点 8 卡、2 TB 内存，节点内 NVLink/NVSwitch，节点间 8×400 Gbps RoCE。</p>
+      <p>K2 在 NVIDIA H800 集群上训练，每节点 8 卡、2 TB 内存，节点内 NVLink/NVSwitch，节点间 8×400 Gbps RoCE。</p>
       <h3>8.2 并行策略：能在任意 32 的倍数个节点上训练</h3>
       <p>训练资源是动态变化的，所以他们没有为某个固定规模优化，而是设计了一个能在“任意 32 的倍数个节点”上跑的方案：</p>
       <ul>
@@ -559,7 +558,7 @@
         <li><strong>数据层面</strong>：在高质量 token 受限时，“改写多份各看一遍”优于“原始文本看多遍”，K2 给了一个干净的 SimpleQA 对照。</li>
         <li><strong>Agent 层面</strong>：大规模合成（工具库 → agent → 带 rubric 的任务 → 模拟器轨迹 → 评审过滤）配合真实沙箱，再用可验证奖励与自我批评 rubric 奖励统一做 RL，critic 本身也用可验证信号持续校准。</li>
       </ul>
-      <p>系列的下一篇讲 Kimi Linear，它把 K2 之后 Moonshot 的注意力路线（KDA 线性注意力 + MLA 混合）完整摆了出来，也是后来 K3 的骨架。</p>
+      <p>K2 之后，Moonshot 的注意力路线转向 KDA 线性注意力与 MLA 的混合，即 <a href="/posts/kimi-linear/">Kimi Linear</a>，它也是后来 K3 的骨架。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <p>想看更多实验细节，推荐直接读 K2 报告的 §2.1 和附录 E（MuonClip），以及 Moonlight 的 §2–3。</p>

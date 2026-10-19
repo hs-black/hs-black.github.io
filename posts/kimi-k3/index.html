@@ -69,7 +69,6 @@
     <article class="prose">
       <p>Kimi K3 是 Moonshot AI 在 2026 年 7 月发布的旗舰模型，接在 K2 之后：总参数 2.78T（通常说 2.8T），激活 104B，原生视觉，上下文 1M token，权重全部开源。架构、数据和训练配方的改进合起来，相对 K2 带来约 2.5 倍的整体缩放效率。</p>
       <p>和 K2 相比，K3 几乎每个部件都换了：注意力从全 MLA 换成 Kimi Linear 的 KDA–MLA 混合（并对 KDA 做了两处改动）；残差连接换成“注意力残差”（AttnRes）；MoE 换成 896 个专家、每 token 激活 16 个的 Stable LatentMoE，配上新激活函数 SiTU-GLU 和新的负载均衡方法分位数均衡（Quantile Balancing）；优化器变成逐头 Muon。后训练是按领域和推理强度训练 9 个专家再做多教师在线蒸馏，基础设施则围绕“3T 级 MoE + 1M 上下文 Agent RL”重做了一遍。</p>
-      <p>下面先讲架构（注意力、残差、MoE 和负载均衡），再讲训练、后训练和支撑这一切的系统。KDA 的基础（delta 规则、分块算法、3:1 混合、NoPE）在<a href="/posts/kimi-linear/">上一篇</a>里，Muon 和 QK-Clip 在<a href="/posts/kimi-k2/">K2 那篇</a>里，这里只讲 K3 的新东西。文中有四个交互演示：衰减下界与 BF16 范围、SiTU-GLU 曲线、分位数均衡模拟器、LatentMoE 与 MoonEP 计算器。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -94,7 +93,7 @@
       </nav>
 
       <h2 id="overview">1. 全貌：K2 与 K3 对照</h2>
-      <p>先把 K3 和 K2 的架构放在一起看：</p>
+      <p>K3 与 K2 的架构对照：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>项目</th><th class="num">Kimi K2</th><th class="num">Kimi K3</th></tr></thead>
@@ -117,11 +116,11 @@
         </table>
       </div>
       <p>93 层是这样拼出来的：每个 block 是 3 层 KDA + 1 层 Gated MLA，共 23 个 block，得到 69 KDA + 23 MLA；骨干末尾再加一层 Gated MLA，保证最后一层总是全局注意力，合计 24 MLA、93 层。</p>
-      <p>这些改动可以归结为在三个维度上“扩展信息流”：<strong>序列</strong>（KDA + Gated MLA 的混合注意力）、<strong>深度</strong>（注意力残差）、<strong>宽度</strong>（Stable LatentMoE）。下面按这个顺序讲。</p>
+      <p>这些改动可以归结为在三个维度上“扩展信息流”：<strong>序列</strong>（KDA + Gated MLA 的混合注意力）、<strong>深度</strong>（注意力残差）、<strong>宽度</strong>（Stable LatentMoE）。</p>
 
       <h2 id="attn">2. 混合注意力：KDA 的两处改动与 Gated MLA</h2>
       <h3>2.1 KDA 回顾</h3>
-      <p>K3 的大部分层是 KDA（Kimi Delta Attention），一种线性注意力：它不保留所有历史 token 的 KV cache，而是维护一个固定大小的状态矩阵 \(S_t\)，每来一个 token 就更新一次。递推是（单头，\(d_k=d_v\)）</p>
+      <p>K3 的大部分层是 KDA（Kimi Delta Attention），一种线性注意力：它不保留所有历史 token 的 KV cache，而是维护一个固定大小的状态矩阵 \(S_t\)，每来一个 token 就更新一次（delta 规则、分块算法和 3:1 混合的推导见 <a href="/posts/kimi-linear/">Kimi Linear</a>）。递推是（单头，\(d_k=d_v\)）</p>
       $$S_t = \big(I-\beta_tk_tk_t^\top\big)\operatorname{Diag}(\alpha_t)S_{t-1} + \beta_tk_tv_t^\top,\qquad \tilde o_t = S_t^\top q_t ,$$
       <p>\(\alpha_t\in(0,1)^{d_k}\) 是逐通道的一步保留率，\(\beta_t\in(0,1)\) 是 delta 规则的写入强度。\(q,k\) 经过 ShortConv、Swish、L2Norm，\(v\) 经过 ShortConv、Swish，\(\beta_t\) 是 sigmoid。衰减的 logit 由低秩投影加每头的偏置给出：\(z_t^h = W_\alpha^{\uparrow}W_\alpha^{\downarrow}x_t + b_\alpha^h\in\mathbb R^{d_k}\)。训练用分块形式，块内的输出是</p>
       $$O_{[t]} = (\Gamma\odot Q_{[t]})S_{[t]} + \operatorname{Tril}\big[(Q_{[t]}\odot\Gamma)(K_{[t]}/\Gamma)^\top\big]\big(U_{[t]}-W_{[t]}S_{[t]}\big).$$
@@ -201,7 +200,7 @@
         <li>路由分支是 \(W^{\downarrow}\) → 门控多分支的专家 FFN → \(W^{\uparrow}\)，几乎是四个矩阵乘串联。这种病态结构加上 2.8T 的规模，会让路由分支内部的激活爆炸。</li>
         <li>给近 \(10^3\) 个专家做负载均衡，超出了现有无辅助损失偏置更新还能表现良好的范围。</li>
       </ul>
-      <p>Stable LatentMoE 用三个部件对付它们：\(W^{\uparrow}\) 之前的 RMSNorm、SiTU-GLU（压激活爆炸），以及分位数均衡（负载均衡，下一节）。</p>
+      <p>Stable LatentMoE 用三个部件对付它们：\(W^{\uparrow}\) 之前的 RMSNorm、SiTU-GLU（压激活爆炸），以及<a href="#qb">分位数均衡</a>（负载均衡）。</p>
       <h3>4.3 归一化</h3>
       <p>原始 LatentMoE 直接对聚合后的 \(u\) 做 \(W^{\uparrow}\)，而 \(u\) 的尺度随被选中的专家和路由权重变化。K3 在聚合和上投影之间插入 RMSNorm（上面公式里那个），降低路由分支对尺度变化的敏感性，再与全宽的共享分支相加。这不仅稳定了训练，还一致地改善了验证 loss 和下游指标。</p>
       <h3>4.4 SiTU-GLU</h3>
@@ -252,7 +251,7 @@
       <h3>5.4 直方图估计分位数</h3>
       <p>一个全局 batch 有数百万 token，分散在各个 rank 和梯度累积步上，收集全部 margin 求精确分位数不可行。做法是给每个专家维护直方图：对“所需偏置” \(r_{ij}=\alpha_i-s_{ij}\) 计数（它的 \(k/n\) 分位数就是 \(\hat b_j\)）。因为 sigmoid 分数在 \((0,1)\)，截断值 \(\alpha_i\) 在 \((b_{\min},1+b_{\max})\)，所以 \(r_{ij}\in[b_{\min}-1,\ b_{\max}+1]\)，在这个区间上均匀分 \(B\) 个桶，每步重算区间。各 rank 在所有 micro-batch 上本地累加计数，步末一次整数 all-reduce 得到全局直方图，找到累计计数达到 \(\lceil q\rceil\) 的桶，在桶内线性插值。误差不超过一个桶宽；\(B=1000\) 时最多几个 \(10^{-3}\)，没有可测的残余不均衡。通信量只有每层每步 \(nB\) 个整数，与 token 数无关；而且计数可加，结果严格等于全局 batch 的分位数（而不是各 rank 分位数的平均）。再对估计值做 EMA 还能进一步降低批间噪声。</p>
 
-      <p>下面的模拟器在合成的路由分数上实际运行三种方法。每步随机生成一个新 batch（专家有固定的偏好偏差，且随步数缓慢漂移，模拟路由器在学习），按当前偏置路由、统计负载、再更新偏置。纵轴是 MaxVio = 最大负载 / 目标负载。</p>
+      <p>模拟器在合成的路由分数上实际运行三种方法。每步随机生成一个新 batch（专家有固定的偏好偏差，且随步数缓慢漂移，模拟路由器在学习），按当前偏置路由、统计负载、再更新偏置。纵轴是 MaxVio = 最大负载 / 目标负载。</p>
 
       <div class="demo" id="qb-demo">
         <div class="demo-label">交互演示 · 分位数均衡 vs 符号更新</div>
@@ -281,7 +280,7 @@
       <p>和 K2.5 最大的不同是视觉编码器不再用对比学习预训练的模型（如 SigLIP）初始化，而是<strong>从零开始、用下一个 token 预测</strong>训练。主要理由是稳定性：把预训练编码器接到 LLM 上联合优化时，SigLIP 初始化的 MoonViT-3D 梯度范数持续偏高、频繁尖峰；从零训练的 MoonViT-V2 全程稳定。另一个理由是让编码器的表示直接由语言建模目标塑造，而不是由偏好全局语义的对比损失塑造。MoonViT-V2 在各项视觉评测上与 SigLIP 初始化的基线持平，说明在这个规模下对比预训练作为初始化是不必要的。</p>
       <p>结构：27 层 ViT，约 0.4B 参数，用 RMSNorm，去掉线性层和注意力投影的所有 bias（进一步稳定从零训练）；图片和视频共享全部参数，注意力分解为帧内空间和帧间时间两步，并在时间维上池化；投影前做 2×2 的 pixel shuffle，视觉 token 数减为 1/4。按 patch 14 算一下最大输入：\(3584\times3584\) 的图是 \(256\times256=65536\) 个 patch，pixel shuffle 后 16384 个 token，在 1M 上下文里放得下几十张。</p>
       <h3>6.3 逐头 Muon</h3>
-      <p>K3 仍用 Muon（K2 的 QK-Clip 也保留了），但对注意力投影做了逐头化：不对整个 \(Q,K,V\) 投影矩阵做 Newton–Schulz，而是把动量矩阵沿头的维度切开，每个头的块单独正交化。直觉是：整体正交化把所有头当成一个耦合的块，梯度/动量大的头主导共同的更新方向，小的头得不到充分归一化；逐头正交化让每个头的更新尺度一致。这让各头的学习动态更均衡、大规模训练更稳定，而且对细长的每头块做 Newton–Schulz 比对整个矩阵更便宜。</p>
+      <p>K3 仍用 Muon（K2 的 QK-Clip 也保留了，两者见 <a href="/posts/kimi-k2/">Kimi K2</a>），但对注意力投影做了逐头化：不对整个 \(Q,K,V\) 投影矩阵做 Newton–Schulz，而是把动量矩阵沿头的维度切开，每个头的块单独正交化。直觉是：整体正交化把所有头当成一个耦合的块，梯度/动量大的头主导共同的更新方向，小的头得不到充分归一化；逐头正交化让每个头的更新尺度一致。这让各头的学习动态更均衡、大规模训练更稳定，而且对细长的每头块做 Newton–Schulz 比对整个矩阵更便宜。</p>
 
       <h2 id="pretrain">7. 预训练：缩放律、配方与 1M 上下文</h2>
       <h3>7.1 数据</h3>
