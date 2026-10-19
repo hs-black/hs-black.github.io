@@ -122,53 +122,17 @@
     </section>
 
     <!-- 4 -->
-    <section class="slide">
+    <section class="slide" id="s-cut">
       <div class="kicker">切层</div>
       <h2>每一级是一段连续的层</h2>
-      <svg class="fig" viewBox="0 0 1080 300" role="img" aria-label="4 张卡各存放连续的 4 层，前向传激活，反向传梯度">
+      <svg class="fig" viewBox="0 0 1080 318" role="img" aria-label="16 层的模型被切成 4 段放到 4 张卡上；一个 micro-batch 前向时逐层存下激活，反向时逐层释放">
         <defs>
           <marker id="ar1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent)"/></marker>
           <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
         </defs>
-        <g font-size="18" fill="var(--text)">
-          <g transform="translate(20,40)">
-            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
-            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 0 · stage 0</text>
-            <rect x="20" y="44" width="180" height="22" rx="5" fill="var(--bg-soft)"/><text x="110" y="61" text-anchor="middle" font-size="15">embedding</text>
-            <rect x="20" y="72" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="87" text-anchor="middle" font-size="15">layer 1–4</text>
-            <text x="110" y="150" text-anchor="middle" font-size="15" fill="var(--text-soft)">存：这几层的 W、梯度、优化器状态</text>
-          </g>
-          <g transform="translate(290,40)">
-            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
-            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 1 · stage 1</text>
-            <rect x="20" y="58" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="73" text-anchor="middle" font-size="15">layer 5–8</text>
-          </g>
-          <g transform="translate(560,40)">
-            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
-            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 2 · stage 2</text>
-            <rect x="20" y="58" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="73" text-anchor="middle" font-size="15">layer 9–12</text>
-          </g>
-          <g transform="translate(830,40)">
-            <rect width="220" height="170" rx="14" fill="var(--surface)" stroke="var(--border)"/>
-            <text x="110" y="28" text-anchor="middle" font-weight="600">GPU 3 · stage 3</text>
-            <rect x="20" y="58" width="180" height="20" rx="5" fill="var(--accent-soft)"/><text x="110" y="73" text-anchor="middle" font-size="15">layer 13–16</text>
-            <rect x="20" y="86" width="180" height="22" rx="5" fill="var(--bg-soft)"/><text x="110" y="102" text-anchor="middle" font-size="15">LM head + loss</text>
-          </g>
-          <g stroke-width="3" fill="none">
-            <path d="M244 110 H284" stroke="var(--accent)" marker-end="url(#ar1)"/>
-            <path d="M514 110 H554" stroke="var(--accent)" marker-end="url(#ar1)"/>
-            <path d="M784 110 H824" stroke="var(--accent)" marker-end="url(#ar1)"/>
-            <path d="M284 150 H244" stroke="var(--accent-2)" marker-end="url(#ar2)"/>
-            <path d="M554 150 H514" stroke="var(--accent-2)" marker-end="url(#ar2)"/>
-            <path d="M824 150 H784" stroke="var(--accent-2)" marker-end="url(#ar2)"/>
-          </g>
-          <text x="20" y="250" font-size="17" fill="var(--accent)">→ 前向：send 激活 [b, s, h]</text>
-          <text x="20" y="278" font-size="17" fill="var(--accent-2)">← 反向：send 对激活的梯度 [b, s, h]</text>
-          <text x="560" y="250" font-size="17" fill="var(--text-soft)">首尾两级多了 embedding / LM head，</text>
-          <text x="560" y="278" font-size="17" fill="var(--text-soft)">实践中常给它们少分一层来配平</text>
-        </g>
+        <g id="cut-fig" font-size="18" fill="var(--text)"></g>
       </svg>
-      <p class="s22 fragment">通信只发生在级与级的边界，而且是<span class="accent">点对点</span>（send/recv）：一个 micro-batch 过一次边界只传一份 \([b,s,h]\) 张量。对比 TP 每层都要做 all-reduce，PP 对带宽的要求低得多——这正是它适合跨节点的原因。</p>
+      <p class="s22" id="cut-note">通信只发生在级与级的边界，而且是<span class="accent">点对点</span>（send/recv）：一个 micro-batch 过一次边界只传一份 \([b,s,h]\) 张量。对比 TP 每层都要做 all-reduce，PP 对带宽的要求低得多——这正是它适合跨节点的原因。</p>
     </section>
 
     <!-- 5 -->
@@ -318,6 +282,16 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       <p class="s22">右侧小柱是播放光标所在时刻每张卡的<span class="accent">在途激活</span>（前向已做、反向未做的 micro-batch 数），播放结束后显示每卡的峰值。拖大 \(m\)：气泡率下降，而在途激活的峰值始终是 \(p\)。</p>
     </section>
 
+    <!-- 14b -->
+    <section class="slide tight" id="s-cmp">
+      <div class="kicker">AFAB vs 1F1B</div>
+      <h2>同样的气泡，不一样的在途激活</h2>
+      <svg class="fig" viewBox="0 0 1100 392" role="img" aria-label="p=4、m=8 时 AFAB 与 1F1B 的时间线逐格填满，右侧方块是每张卡此刻存着的激活份数">
+        <g id="cmp-fig" fill="var(--text)"></g>
+      </svg>
+      <p class="s22" id="cmp-note">两条时间线一样长：开头 \(p-1\) 步爬坡、结尾 \(p-1\) 步退坡都还在，每卡空闲 \((p-1)(t_f+t_b)\)。差别在右边——AFAB 每张卡都要攒满 \(m=8\) 份激活，1F1B 的第 \(r\) 级最多 \(p-r\) 份。</p>
+    </section>
+
     <!-- 15 -->
     <section class="slide">
       <div class="kicker">1F1B 的账</div>
@@ -369,17 +343,13 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     </section>
 
     <!-- 18 -->
-    <section class="slide">
+    <section class="slide" id="s-ilv">
       <div class="kicker">交错调度</div>
       <h2>每张卡放多段不连续的层</h2>
-      <svg class="fig" viewBox="0 0 1080 250" role="img" aria-label="交错放置：16 层分成 8 段，卡 0 放第 1 和第 5 段">
-        <g font-size="16" fill="var(--text)">
-          <text x="0" y="22" fill="var(--text-soft)">普通（v=1）</text>
-          <text x="0" y="142" fill="var(--text-soft)">交错（v=2）</text>
-        </g>
-        <g id="interleave-fig"></g>
+      <svg class="fig" viewBox="0 0 1080 318" role="img" aria-label="交错放置：16 层分成 8 段，按轮转发给 4 张卡，卡 0 放第 1 和第 5 段；micro-batch 绕流水线转两圈">
+        <g id="interleave-fig" font-size="16" fill="var(--text)"></g>
       </svg>
-      <p class="s22 fragment">把模型切成 \(v\cdot p\) 段（model chunk），第 \(k\) 段放在卡 \(k \bmod p\) 上。一个 micro-batch 的前向会<span class="accent">绕流水线转 \(v\) 圈</span>，所以也叫 looping pipeline。例：16 层、4 卡、\(v=2\)：卡 0 放第 1–2 层和第 9–10 层。</p>
+      <p class="s22" id="ilv-note">把模型切成 \(v\cdot p\) 段（model chunk），第 \(k\) 段放在卡 \(k \bmod p\) 上。一个 micro-batch 的前向会<span class="accent">绕流水线转 \(v\) 圈</span>，所以也叫 looping pipeline。例：16 层、4 卡、\(v=2\)：卡 0 放第 1–2 层和第 9–10 层。</p>
     </section>
 
     <!-- 19 -->
@@ -508,6 +478,16 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       </div>
     </section>
 
+    <!-- 25b -->
+    <section class="slide tight" id="s-zbmove">
+      <div class="kicker">Zero Bubble · 拆开之后</div>
+      <h2>把 W 挪出关键路径</h2>
+      <svg class="fig" viewBox="0 0 1100 250" role="img" aria-label="p=4、m=8：1F1B 的完整反向拆成 B 和 W，W 推迟后，整张时间线左移，W 填进尾部的空洞">
+        <g id="zbm-fig" fill="var(--text)"></g>
+      </svg>
+      <p class="s22" id="zbm-note">B 只等后一级的 B，链条变短，每个 F、B 都能更早开始；W 不在任何人的依赖链上，推迟到尾部原来空等的位置。总工作量没变（每卡 24 个单位），每卡的空闲从 \(3(p-1)=9\) 降到 \(p-1=3\)。这就是下一页的 ZB-H1。</p>
+    </section>
+
     <!-- 26 -->
     <section class="slide tight" id="s-zbh1">
       <div class="kicker">ZB-H1 · 交互</div>
@@ -618,15 +598,15 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     </section>
 
     <!-- 33 -->
-    <section class="slide">
+    <section class="slide" id="s-bidir">
       <div class="kicker">DualPipe · 双向</div>
       <h2>从流水线的两端同时喂数据</h2>
-      <svg class="fig" viewBox="0 0 1100 230" role="img" aria-label="双向流水线：一个方向从卡 0 流向卡 7，另一个方向从卡 7 流向卡 0">
+      <svg class="fig" viewBox="0 0 1100 236" role="img" aria-label="双向流水线：一个方向从卡 0 流向卡 7，另一个方向从卡 7 流向卡 0；稳态时每张卡同时有一个方向的前向和另一个方向的反向">
         <g id="dp-bidir" font-size="16" fill="var(--text)"></g>
       </svg>
       <div class="s22">
-        <p class="fragment">把模型切成 \(PP\) 段。卡 \(r\) 同时存<b>正向流水线的第 \(r\) 段</b>和<b>反向流水线的第 \(PP-1-r\) 段</b>——也就是存两份模型参数（\(2\times\)）。这个代价可以接受：EP 很大时每卡的专家参数本来就很少，多一份不显著。</p>
-        <p class="fragment" style="margin-top:6px">\(m\) 个 micro-batch 对半分给两个方向。中间稳态里，每张卡交替执行「一个方向的前向 + 另一个方向的反向」，这一对正好可以做块内重叠。</p>
+        <p class="bd-p">把模型切成 \(PP\) 段。卡 \(r\) 同时存<b>正向流水线的第 \(r\) 段</b>和<b>反向流水线的第 \(PP-1-r\) 段</b>——也就是存两份模型参数（\(2\times\)）。这个代价可以接受：EP 很大时每卡的专家参数本来就很少，多一份不显著。</p>
+        <p class="bd-p" style="margin-top:6px">\(m\) 个 micro-batch 对半分给两个方向。中间稳态里，每张卡交替执行「一个方向的前向 + 另一个方向的反向」，这一对正好可以做块内重叠。</p>
       </div>
     </section>
 
@@ -779,6 +759,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
   </div></main>
 
   <script src="/assets/slides.js"></script>
+  <script src="/assets/anim.js"></script>
   <script src="/assets/series.js"></script>
   <script>
   (() => {
@@ -1207,24 +1188,6 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     document.querySelectorAll('.gv').forEach((el) => views.push(makeView(el)));
 
     // ---------------- static figures ----------------
-    (function interleaveFig() {
-      const g = document.getElementById('interleave-fig');
-      let s = '';
-      const cols = ['var(--accent)', 'var(--accent-2)', 'var(--pp-w)', 'var(--text-soft)'];
-      for (let L = 0; L < 16; L++) {
-        const x = 130 + L * 58;
-        const gpu1 = Math.floor(L / 4), gpu2 = Math.floor(L / 2) % 4;
-        s += '<rect x="' + x + '" y="34" width="52" height="40" rx="6" fill="' + cols[gpu1] + '" opacity="0.85"/>';
-        s += '<text x="' + (x + 26) + '" y="60" text-anchor="middle" font-size="15" fill="#fff">' + (L + 1) + '</text>';
-        s += '<rect x="' + x + '" y="154" width="52" height="40" rx="6" fill="' + cols[gpu2] + '" opacity="' + (L < 8 ? 0.85 : 0.55) + '"/>';
-        s += '<text x="' + (x + 26) + '" y="180" text-anchor="middle" font-size="15" fill="#fff">' + (L + 1) + '</text>';
-      }
-      for (let k = 0; k < 4; k++) {
-        s += '<rect x="' + (130 + k * 232) + '" y="92" width="14" height="14" rx="3" fill="' + cols[k] + '"/><text x="' + (150 + k * 232) + '" y="104" font-size="15" fill="var(--text-soft)">GPU ' + k + '</text>';
-      }
-      s += '<text x="130" y="226" font-size="15" fill="var(--text-soft)">第 1–8 层构成第一圈（深色），第 9–16 层是第二圈（浅色）：micro-batch 依次经过 GPU 0→1→2→3→0→1→2→3。</text>';
-      g.innerHTML = s;
-    })();
     (function overlapFig() {
       const g = document.getElementById('dp-overlap');
       const comp = [['F: attn', 'var(--accent)', 70], ['B: MLP(B)', 'var(--accent-2)', 70], ['B: MLP(W)', 'var(--pp-w)', 60], ['F: MLP', 'var(--accent)', 70], ['B: attn(B)', 'var(--accent-2)', 70], ['B: attn(W)', 'var(--pp-w)', 60]];
@@ -1235,19 +1198,388 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
       comm.forEach(([t, c, w, x0]) => { const xx = 80 + x0 * k; s += '<rect x="' + xx + '" y="116" width="' + w * k + '" height="40" rx="6" fill="none" stroke="' + c + '" stroke-width="2" stroke-dasharray="6 4"/><text x="' + (xx + w * k / 2) + '" y="141" text-anchor="middle" fill="var(--text)">' + t + '</text>'; });
       g.innerHTML = s;
     })();
-    (function bidirFig() {
-      const g = document.getElementById('dp-bidir');
-      let s = '';
-      for (let r = 0; r < 8; r++) {
-        const x = 40 + r * 130;
-        s += '<rect x="' + x + '" y="60" width="110" height="90" rx="10" fill="var(--surface)" stroke="var(--border)"/>';
-        s += '<text x="' + (x + 55) + '" y="50" text-anchor="middle" fill="var(--text-soft)">GPU ' + r + '</text>';
-        s += '<rect x="' + (x + 10) + '" y="72" width="90" height="28" rx="6" fill="var(--accent)" opacity="0.85"/><text x="' + (x + 55) + '" y="92" text-anchor="middle" fill="#fff" font-size="15">→ 段 ' + r + '</text>';
-        s += '<rect x="' + (x + 10) + '" y="110" width="90" height="28" rx="6" fill="var(--accent)" opacity="0.5"/><text x="' + (x + 55) + '" y="130" text-anchor="middle" fill="#fff" font-size="15">← 段 ' + (7 - r) + '</text>';
+    // ---------------- animated scenes (anim.js) ----------------
+    const S = (tag, attrs, parent) => {
+      const e = document.createElementNS(SVGNS, tag);
+      for (const k in attrs) e.setAttribute(k, attrs[k]);
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const Tx = (parent, x, y, str, attrs = {}) => { const e = S('text', Object.assign({ x, y }, attrs), parent); e.textContent = str; return e; };
+    const hide = (...els) => els.flat().forEach((e) => { e.style.opacity = 0; });
+    const bind = (slide, tl) => Anim.slide(slide, tl, { steps: true, controls: true });
+    const GCOL = ['var(--accent)', 'var(--accent-2)', 'var(--pp-w)', 'var(--text-soft)'];
+    const ON = 'var(--surface)'; // text on a coloured block
+    function gaps(row, mk) {
+      const out = [];
+      let t = 0;
+      row.forEach(({ s, e }) => { if (s > t + 1e-9) out.push([t, s]); t = Math.max(t, e); });
+      if (mk > t + 1e-9) out.push([t, mk]);
+      return out;
+    }
+    function bubbleMarks(parent, row, mk, x0, sc, y, h) {
+      return gaps(row, mk).map(([a, b]) => {
+        const gg = S('g', {}, parent);
+        S('rect', { x: x0 + a * sc + 1, y: y + 2, width: (b - a) * sc - 2, height: h - 4, rx: 3, fill: 'none', stroke: 'var(--text-soft)', 'stroke-width': 1.5, 'stroke-dasharray': '4 3' }, gg);
+        if ((b - a) * sc > 46) Tx(gg, x0 + (a + b) / 2 * sc, y + h / 2 + 5, '气泡', { 'text-anchor': 'middle', 'font-size': 13, fill: 'var(--text-soft)' });
+        return gg;
+      });
+    }
+
+    // 4: cut the model into stages; one micro-batch goes forward and back.
+    (function sceneCut() {
+      const slide = document.getElementById('s-cut'), g = document.getElementById('cut-fig');
+      const tl = Anim.timeline();
+      const BX = (k) => 20 + k * 268, BWD = 236, BY = 80, BH = 170, STEP = 42, BK = 38, ROW = 20, LAY = 116, ACT = 166;
+      const groups = [[0, 1, 2, 3, 4], [5, 6, 7, 8], [9, 10, 11, 12], [13, 14, 15, 16, 17]];
+      const name = (i) => (i === 0 ? 'E' : i === 17 ? 'H' : String(i));
+      const x0 = (1080 - (18 * STEP - 4)) / 2;
+      Tx(g, 540, 68, 'E = embedding · 1–16 = Transformer 层 · H = LM head + loss', { 'text-anchor': 'middle', 'font-size': 15, fill: 'var(--text-faint)' });
+      const boxes = S('g', {}, g);
+      groups.forEach((gr, k) => {
+        S('rect', { x: BX(k), y: BY, width: BWD, height: BH, rx: 14, fill: 'var(--surface)', stroke: 'var(--border)' }, boxes);
+        Tx(boxes, BX(k) + BWD / 2, BY + 25, 'GPU ' + k + ' · stage ' + k, { 'text-anchor': 'middle', 'font-weight': 600 });
+        Tx(boxes, BX(k) + BWD / 2, 206, '存下的激活', { 'text-anchor': 'middle', 'font-size': 14, fill: 'var(--text-faint)' });
+        Tx(boxes, BX(k) + BWD / 2, 236, '常驻：这几层的 W、梯度、优化器状态', { 'text-anchor': 'middle', 'font-size': 13, fill: 'var(--text-soft)' });
+      });
+      const fx = [];
+      const grps = groups.map((gr, k) => {
+        const gg = S('g', {}, g);
+        const off = BX(k) + (BWD - (gr.length * STEP - 4)) / 2;
+        gr.forEach((i, j) => {
+          const x = x0 + i * STEP, edge = i === 0 || i === 17;
+          S('rect', { x, y: ROW, width: BK, height: 30, rx: 5, fill: edge ? 'var(--bg-soft)' : 'var(--accent-soft)', stroke: edge ? 'var(--border)' : 'color-mix(in srgb, var(--accent) 45%, transparent)' }, gg);
+          Tx(gg, x + BK / 2, ROW + 21, name(i), { 'text-anchor': 'middle', 'font-size': 15 });
+          fx[i] = off + j * STEP;
+        });
+        return { el: gg, dx: off - (x0 + gr[0] * STEP) };
+      });
+      const cuts = [5, 9, 13].map((i) => S('path', { d: 'M' + (x0 + i * STEP - 2) + ' 8 V 62', stroke: 'var(--accent-2)', 'stroke-width': 2.5, fill: 'none' }, g));
+      const arrows = S('g', { 'stroke-width': 3, fill: 'none' }, g);
+      for (let k = 0; k < 3; k++) {
+        S('path', { d: 'M' + (BX(k) + BWD + 3) + ' 131 H' + (BX(k + 1) - 4), stroke: 'var(--accent)', 'marker-end': 'url(#ar1)' }, arrows);
+        S('path', { d: 'M' + (BX(k + 1) - 3) + ' 176 H' + (BX(k) + BWD + 4), stroke: 'var(--accent-2)', 'marker-end': 'url(#ar2)' }, arrows);
       }
-      s += '<path d="M40 180 H1060" stroke="var(--accent)" stroke-width="3" marker-end="url(#ar1)"/><text x="40" y="205" fill="var(--accent)">正方向 micro-batch：GPU 0 进，GPU 7 算 loss</text>';
-      s += '<path d="M1060 24 H40" stroke="var(--accent)" stroke-width="3" opacity="0.55" marker-end="url(#ar1)"/><text x="1060" y="18" text-anchor="end" fill="var(--text-soft)">反方向 micro-batch：GPU 7 进，GPU 0 算 loss</text>';
-      g.innerHTML = s;
+      const acts = [];
+      for (let i = 1; i <= 16; i++) acts[i] = S('rect', { x: fx[i], y: ACT, width: BK, height: 22, rx: 4, fill: 'var(--accent)' }, g);
+      const tok = S('circle', { cx: fx[0] + BK / 2, cy: LAY, r: 9, fill: 'var(--accent)', stroke: ON, 'stroke-width': 2.5 }, g);
+      const gtok = S('circle', { cx: fx[17] + BK / 2, cy: LAY, r: 9, fill: 'var(--accent-2)', stroke: ON, 'stroke-width': 2.5 }, g);
+      const fwdT = Tx(g, 20, 280, '→ 前向：逐层存下激活，过边界时 send 激活 [b, s, h]', { 'font-size': 17, fill: 'var(--accent)' });
+      const bwdT = Tx(g, 20, 306, '← 反向：逐层用掉并释放激活，过边界时 send 梯度 [b, s, h]', { 'font-size': 17, fill: 'var(--accent-2)' });
+      const edgeT = [Tx(g, 1060, 280, '首尾两级多了 embedding / LM head，', { 'font-size': 17, fill: 'var(--text-soft)', 'text-anchor': 'end' }),
+        Tx(g, 1060, 306, '实践中常给它们少分一层来配平', { 'font-size': 17, fill: 'var(--text-soft)', 'text-anchor': 'end' })];
+      const note = document.getElementById('cut-note');
+      hide(boxes, arrows, acts.filter(Boolean), tok, gtok, fwdT, bwdT, edgeT, note);
+      tl.set(acts.filter(Boolean), { y: LAY - ACT }, { at: 0 });
+
+      tl.wait(0.3);
+      tl.to(cuts, { draw: 1 }, { dur: 0.45, stagger: 0.15 });
+      tl.to(boxes, { opacity: 1 }, { dur: 0.6 });
+      grps.forEach((o, k) => tl.to(o.el, { x: o.dx, y: LAY - ROW }, { at: k ? '<+=0.12' : '<', dur: 1.0 }));
+      tl.to(cuts, { opacity: 0 }, { at: '<', dur: 0.4 });
+      tl.to(arrows, { opacity: 1 }, { dur: 0.4 });
+      tl.label('cut');
+      // forward: activations drop out of each layer into memory
+      tl.to([fwdT, tok], { opacity: 1 }, { dur: 0.35 });
+      let t = tl.duration;
+      for (let i = 1; i <= 17; i++) {
+        const d = groups.some((gr) => gr[0] === i) ? 0.45 : 0.22;
+        tl.to(tok, { x: fx[i] - fx[0] }, { at: t, dur: d });
+        t += d;
+        if (acts[i]) { tl.to(acts[i], { opacity: 0.85, y: 0 }, { at: t - 0.06, dur: 0.35, ease: 'out' }); t += 0.05; }
+      }
+      tl.label('fwd', t + 0.3);
+      // backward: the gradient consumes and frees them, in reverse order
+      tl.to(tok, { opacity: 0 }, { dur: 0.3 });
+      tl.to([gtok, bwdT], { opacity: 1 }, { at: '<', dur: 0.35 });
+      t = tl.duration;
+      for (let i = 16; i >= 0; i--) {
+        const d = groups.some((gr) => gr[0] === i + 1) ? 0.45 : 0.22;
+        tl.to(gtok, { x: fx[i] - fx[17] }, { at: t, dur: d });
+        t += d;
+        if (acts[i]) { tl.to(acts[i], { opacity: 0, y: 14 }, { at: t - 0.06, dur: 0.3 }); t += 0.05; }
+      }
+      tl.to(gtok, { opacity: 0 }, { at: t + 0.2, dur: 0.3 });
+      tl.label('bwd');
+      tl.to(edgeT, { opacity: 1 }, { dur: 0.4 });
+      tl.to(note, { opacity: 1 }, { at: '<+=0.1', dur: 0.5 });
+      bind(slide, tl);
+    })();
+
+    // 14b: AFAB vs 1F1B filling in time order, with in-flight activations per GPU.
+    (function sceneCmp() {
+      const slide = document.getElementById('s-cmp'), g = document.getElementById('cmp-fig');
+      const tl = Anim.timeline();
+      const T = { F: 1, B: 1, W: 1, c: 0 };
+      const L = 70, GW = 730, rh = 30, K = 0.22, T0 = 0.3, MX = 830;
+      const panels = [['AFAB（GPipe）', simulate(afab(4, 8), T), 40], ['1F1B', simulate(ofob(4, 8), T), 228]];
+      const mk = Math.max(...panels.flatMap(([, rows]) => rows.map((row) => row[row.length - 1].e)));
+      const sc = GW / mk;
+      const late = [], counts = [], peaks = [];
+      panels.forEach(([nm, rows, y0]) => {
+        const M = metrics(rows, 1);
+        Tx(g, 0, y0 - 12, nm, { 'font-size': 18, 'font-weight': 600 });
+        late.push(Tx(g, L + GW, y0 - 12, '每卡空闲 ' + fmt(M.mk - M.work) + ' 个 t_f', { 'text-anchor': 'end', 'font-size': 16, fill: 'var(--text-soft)' }));
+        Tx(g, MX, y0 - 12, '在途激活', { 'font-size': 15, fill: 'var(--text-soft)' });
+        rows.forEach((row, r) => {
+          const y = y0 + r * rh;
+          S('rect', { x: L, y: y + 1, width: GW, height: rh - 2, fill: 'var(--pp-idle)' }, g);
+          Tx(g, L - 8, y + rh / 2 + 5, 'GPU ' + r, { 'text-anchor': 'end', 'font-size': 14, fill: 'var(--text-soft)' });
+          row.forEach(({ o, s, e }) => {
+            const x = L + s * sc, w = (e - s) * sc;
+            const rc = S('rect', { x, y: y + 1, width: 0, height: rh - 2, fill: o.t === 'F' ? 'var(--accent)' : 'var(--accent-2)', stroke: ON, 'stroke-width': 1 }, g);
+            const lb = Tx(g, x + w / 2, y + rh / 2 + 5, String(o.mb), { 'text-anchor': 'middle', 'font-size': 13, fill: ON });
+            hide(lb);
+            tl.to(rc, { attr: { width: w } }, { at: T0 + s * K, dur: (e - s) * K, ease: 'linear' });
+            tl.to(lb, { opacity: 1 }, { at: T0 + e * K, dur: 0.15 });
+          });
+          late.push(...bubbleMarks(g, row, mk, L, sc, y, rh));
+          const fills = [];
+          for (let j = 0; j < 8; j++) {
+            S('rect', { x: MX + j * 17, y: y + 4, width: 14, height: rh - 8, rx: 2, fill: 'none', stroke: 'var(--border)' }, g);
+            fills.push(S('rect', { x: MX + j * 17, y: y + 4, width: 14, height: rh - 8, rx: 2, fill: 'var(--accent)' }, g));
+          }
+          hide(fills);
+          const cnt = Tx(g, MX + 8 * 17 + 10, y + rh / 2 + 5, '0', { 'font-size': 15, fill: 'var(--text)', 'font-family': 'var(--font-mono)' });
+          const pk = Tx(g, MX + 8 * 17 + 10, y + rh / 2 + 5, '峰值 ' + fmt(M.pkR[r]), { 'font-size': 15, fill: 'var(--accent)', 'font-weight': 600 });
+          hide(pk); counts.push(cnt); peaks.push(pk);
+          const ev = row.map(({ o, e }) => [e, o.t === 'F' ? 1 : -1]).sort((a, b) => a[0] - b[0]);
+          let n = 0;
+          ev.forEach(([te, d]) => {
+            const at = T0 + te * K;
+            if (d > 0) { tl.to(fills[n], { opacity: 0.85 }, { at, dur: 0.15 }); n++; }
+            else { n--; tl.to(fills[n], { opacity: 0 }, { at, dur: 0.15 }); }
+            tl.set(cnt, { text: n }, { at });
+          });
+        });
+        const cur = S('path', { d: 'M' + L + ' ' + (y0 - 2) + ' V' + (y0 + 4 * rh + 2), stroke: 'var(--text)', 'stroke-width': 1.5, 'stroke-dasharray': '4 3' }, g);
+        tl.to(cur, { x: GW }, { at: T0, dur: mk * K, ease: 'linear' });
+        tl.to(cur, { opacity: 0 }, { at: T0 + mk * K, dur: 0.3 });
+      });
+      Tx(g, L, 382, '时间 →（单位 t_f，反向按 t_b = 2t_f 画；p = 4，m = 8；格子里是 micro-batch 编号）', { 'font-size': 14, fill: 'var(--text-faint)' });
+      hide(late, document.getElementById('cmp-note'));
+      tl.label('fill');
+      tl.to(late, { opacity: 1 }, { dur: 0.5, stagger: 0.02 });
+      tl.to(counts, { opacity: 0 }, { at: '<', dur: 0.3 });
+      tl.to(peaks, { opacity: 1 }, { at: '<+=0.2', dur: 0.4, stagger: 0.06 });
+      tl.label('bub');
+      tl.to(document.getElementById('cmp-note'), { opacity: 1 }, { dur: 0.5 });
+      bind(slide, tl);
+    })();
+
+    // 18: layers re-dealt round-robin into v = 2 chunks per GPU; the micro-batch loops twice.
+    (function sceneInterleave() {
+      const slide = document.getElementById('s-ilv'), g = document.getElementById('interleave-fig');
+      const tl = Anim.timeline();
+      const BX = (k) => 20 + k * 268, BWD = 236, BY = 40, BH = 118, SY = 80, BW = 48, ST = 54, DEALY = 186;
+      const v1x = (L) => BX(Math.floor(L / 4)) + 13 + (L % 4) * ST;
+      const gpu2 = (L) => Math.floor(L / 2) % 4, lap2 = (L) => Math.floor(L / 8);
+      const v2x = (L) => BX(gpu2(L)) + 7 + lap2(L) * 120 + (L % 2) * ST;
+      const dealx = (L) => (1080 - (16 * ST - 6)) / 2 + L * ST;
+      const capA = Tx(g, 20, 24, '普通（v=1）：每卡一段连续的 4 层', { fill: 'var(--text-soft)', 'font-size': 17 });
+      const capB = Tx(g, 20, 24, '交错（v=2）：切成 8 段，第 k 段（从 0 数）放在卡 k mod 4', { fill: 'var(--text-soft)', 'font-size': 17 });
+      for (let k = 0; k < 4; k++) {
+        S('rect', { x: BX(k), y: BY, width: BWD, height: BH, rx: 14, fill: 'var(--surface)', stroke: 'var(--border)' }, g);
+        Tx(g, BX(k) + BWD / 2, BY + 22, 'GPU ' + k, { 'text-anchor': 'middle', 'font-weight': 600, fill: GCOL[k] });
+      }
+      const lapT = [];
+      for (let k = 0; k < 4; k++) for (let lp = 0; lp < 2; lp++) lapT.push(Tx(g, BX(k) + 7 + lp * 120 + 51, 146, lp ? '第二圈' : '第一圈', { 'text-anchor': 'middle', 'font-size': 13, fill: 'var(--text-faint)' }));
+      const blocks = [];
+      for (let L = 0; L < 16; L++) {
+        const gg = S('g', {}, g), x = v1x(L);
+        const a = S('rect', { x, y: SY, width: BW, height: 40, rx: 6, fill: GCOL[Math.floor(L / 4)], opacity: 0.85 }, gg);
+        const bwrap = S('g', {}, gg);
+        S('rect', { x, y: SY, width: BW, height: 40, rx: 6, fill: GCOL[gpu2(L)], opacity: L < 8 ? 0.85 : 0.5 }, bwrap);
+        Tx(gg, x + BW / 2, SY + 26, String(L + 1), { 'text-anchor': 'middle', 'font-size': 15, fill: ON });
+        blocks.push({ gg, a, b: bwrap, x });
+      }
+      const tok = S('circle', { cx: v1x(0) + BW / 2, cy: SY, r: 9, fill: 'var(--text)', stroke: ON, 'stroke-width': 2.5 }, g);
+      const cnt = Tx(g, 1060, 262, '', { 'text-anchor': 'end', 'font-size': 16, fill: 'var(--text)' });
+      const cntF = (v) => '跨卡传输：' + Math.round(v) + ' 次';
+      for (let k = 0; k < 4; k++) {
+        S('rect', { x: 20 + k * 110, y: 250, width: 14, height: 14, rx: 3, fill: GCOL[k] }, g);
+        Tx(g, 40 + k * 110, 262, 'GPU ' + k, { 'font-size': 15, fill: 'var(--text-soft)' });
+      }
+      const sent = Tx(g, 20, 300, '第 1–8 层构成第一圈（实色），第 9–16 层是第二圈（半透明）：micro-batch 依次经过 GPU 0→1→2→3→0→1→2→3。', { 'font-size': 15, fill: 'var(--text-soft)' });
+      const note = document.getElementById('ilv-note');
+      hide(capB, lapT, blocks.map((b) => b.b), tok, sent, note);
+      tl.set(cnt, { text: 0, fmt: cntF }, { at: 0 });
+
+      function run(xOf, gpuOf, t0) {
+        let t = t0, n = 0;
+        tl.set(tok, { x: xOf(0) - v1x(0), y: 0 }, { at: t });
+        tl.set(cnt, { text: 0, fmt: cntF }, { at: t });
+        tl.to(tok, { opacity: 1 }, { at: t, dur: 0.3 });
+        t += 0.3;
+        for (let L = 1; L < 16; L++) {
+          const dx = xOf(L) - v1x(0), cross = gpuOf(L) !== gpuOf(L - 1);
+          if (cross && xOf(L) < xOf(L - 1)) {           // wrap around: go under the boxes
+            tl.to(tok, { y: 96 }, { at: t, dur: 0.25 });
+            tl.to(tok, { x: dx }, { at: t + 0.25, dur: 0.6 });
+            tl.to(tok, { y: 0 }, { at: t + 0.85, dur: 0.25 });
+            t += 1.1;
+          } else { tl.to(tok, { x: dx }, { at: t, dur: cross ? 0.4 : 0.22 }); t += cross ? 0.4 : 0.22; }
+          if (cross) tl.set(cnt, { text: ++n, fmt: cntF }, { at: t - 0.1 });
+        }
+        tl.to(tok, { opacity: 0 }, { at: t + 0.2, dur: 0.3 });
+        return t + 0.5;
+      }
+      tl.wait(0.3);
+      tl.label('v1', run(v1x, (L) => Math.floor(L / 4), tl.duration));
+      // re-deal: gather into one row, then hand out 2-layer chunks round-robin
+      tl.to(capA, { opacity: 0 }, { dur: 0.3 });
+      tl.to(capB, { opacity: 1 }, { dur: 0.4 });
+      blocks.forEach((b, L) => tl.to(b.gg, { x: dealx(L) - b.x, y: DEALY - SY }, { at: L ? '<+=0.03' : '<', dur: 0.7 }));
+      let t = tl.duration + 0.2;
+      for (let c = 0; c < 8; c++) {
+        [2 * c, 2 * c + 1].forEach((L) => {
+          tl.to(blocks[L].gg, { x: v2x(L) - blocks[L].x, y: 0 }, { at: t, dur: 0.6 });
+          tl.to(blocks[L].b, { opacity: 1 }, { at: t + 0.3, dur: 0.3 });
+          tl.to(blocks[L].a, { opacity: 0 }, { at: t + 0.3, dur: 0.3 });
+        });
+        t += 0.3;
+      }
+      tl.to(lapT, { opacity: 1 }, { at: t + 0.3, dur: 0.4 });
+      tl.label('deal');
+      tl.label('v2', run(v2x, gpu2, tl.duration + 0.1));
+      tl.to(sent, { opacity: 1 }, { dur: 0.4 });
+      tl.to(note, { opacity: 1 }, { at: '<+=0.1', dur: 0.5 });
+      bind(slide, tl);
+    })();
+
+    // 25b: split the full backward into B + W, then let the schedule close up (1F1B → ZB-H1).
+    (function sceneZB() {
+      const slide = document.getElementById('s-zbmove'), g = document.getElementById('zbm-fig');
+      const tl = Anim.timeline();
+      const T = { F: 1, B: 1, W: 1, c: 0 };
+      const A = simulate(ofob(4, 8), T), Z = simulate(zbh1(4, 8), T);
+      const mkA = metrics(A, 1).mk, mkZ = metrics(Z, 1).mk, work = metrics(A, 1).work;
+      const L = 70, GW = 1010, rh = 40, Y0 = 46, sc = GW / mkA;
+      const hA = Tx(g, 0, 26, '1F1B：反向是一整块（B 和 W 绑在一起）', { 'font-size': 18, 'font-weight': 600 });
+      const hB = Tx(g, 0, 26, '拆开：B（橙）在关键路径上，W（绿）没人等', { 'font-size': 18, 'font-weight': 600 });
+      const hC = Tx(g, 0, 26, 'ZB-H1：W 推迟，F、B 整体提前', { 'font-size': 18, 'font-weight': 600 });
+      const idle = Tx(g, L + GW, 26, '', { 'text-anchor': 'end', 'font-size': 16, fill: 'var(--text-soft)' });
+      const idleF = (v) => '每卡空闲 ' + Math.round(v) + ' 个单位';
+      const zpos = Z.map((row) => { const m = {}; row.forEach(({ o, s }) => { m[o.t + o.mb] = s; }); return m; });
+      const moversFB = [], moversW = [], overlays = [], wlabels = [];
+      A.forEach((row, r) => {
+        const y = Y0 + r * rh;
+        S('rect', { x: L, y: y + 1, width: GW, height: rh - 2, fill: 'var(--pp-idle)' }, g);
+        Tx(g, L - 8, y + rh / 2 + 5, 'GPU ' + r, { 'text-anchor': 'end', 'font-size': 15, fill: 'var(--text-soft)' });
+      });
+      const oldB = A.flatMap((row, r) => bubbleMarks(g, row, mkA, L, sc, Y0 + r * rh, rh));
+      const newB = Z.flatMap((row, r) => bubbleMarks(g, row, mkZ, L, sc, Y0 + r * rh, rh));
+      const endL = S('path', { d: 'M' + (L + GW) + ' ' + (Y0 - 6) + ' V' + (Y0 + 4 * rh + 6), stroke: 'var(--text)', 'stroke-width': 2, 'stroke-dasharray': '5 3' }, g);
+      A.forEach((row, r) => {
+        const y = Y0 + r * rh;
+        const cell = (t, mb, s, fill) => {
+          const gg = S('g', {}, g), x = L + s * sc;
+          S('rect', { x: x + 1, y: y + 1, width: sc - 2, height: rh - 2, rx: 3, fill }, gg);
+          const lb = Tx(gg, x + sc / 2, y + rh / 2 + 5, String(mb), { 'text-anchor': 'middle', 'font-size': 14, fill: ON });
+          const dx = (zpos[r][t + mb] - s) * sc;
+          (t === 'W' ? moversW : moversFB).push([gg, dx]);
+          return { gg, x, lb };
+        };
+        row.forEach(({ o, s }) => {
+          if (o.t === 'F') { cell('F', o.mb, s, 'var(--accent)'); return; }
+          cell('B', o.mb, s, 'var(--accent-2)');
+          const w = cell('W', o.mb, s + 1, 'var(--pp-w)');
+          overlays.push(S('rect', { x: w.x - 2, y: y + 1, width: sc + 1, height: rh - 2, rx: 3, fill: 'var(--accent-2)' }, w.gg));
+          w.gg.appendChild(w.lb);
+          wlabels.push(w.lb);
+        });
+      });
+      Tx(g, L, 236, '时间 →（单位 T_F = T_B = T_W = 1；p = 4，m = 8；格子里是 micro-batch 编号）', { 'font-size': 14, fill: 'var(--text-faint)' });
+      const note = document.getElementById('zbm-note');
+      hide(hB, hC, oldB, newB, wlabels, note);
+      tl.set(idle, { text: mkA - work, fmt: idleF }, { at: 0 });
+
+      tl.wait(0.3);
+      tl.to(oldB, { opacity: 1 }, { dur: 0.5, stagger: 0.03 });
+      tl.label('bubbles');
+      tl.to(hA, { opacity: 0 }, { dur: 0.3 });
+      tl.to(hB, { opacity: 1 }, { at: '<+=0.2', dur: 0.4 });
+      tl.to(overlays, { opacity: 0 }, { at: '<', dur: 0.6, stagger: 0.015 });
+      tl.to(wlabels, { opacity: 1 }, { at: '<+=0.3', dur: 0.4 });
+      tl.label('split');
+      tl.to(oldB, { opacity: 0 }, { dur: 0.3 });
+      tl.to(hB, { opacity: 0 }, { at: '<', dur: 0.3 });
+      tl.to(hC, { opacity: 1 }, { at: '<+=0.2', dur: 0.4 });
+      const t = tl.duration;
+      moversFB.forEach(([el, dx]) => tl.to(el, { x: dx }, { at: t, dur: 1.2 }));
+      moversW.forEach(([el, dx]) => tl.to(el, { x: dx }, { at: t + 0.35, dur: 1.4 }));
+      tl.to(endL, { x: (mkZ - mkA) * sc }, { at: t + 0.35, dur: 1.4 });
+      tl.to(idle, { text: mkZ - work, fmt: idleF }, { at: t + 0.35, dur: 1.4 });
+      tl.to(newB, { opacity: 1 }, { dur: 0.5, stagger: 0.03 });
+      tl.label('zb');
+      tl.to(note, { opacity: 1 }, { dur: 0.5 });
+      bind(slide, tl);
+    })();
+
+    // 33: DualPipe feeds micro-batches from both ends; in steady state a forward of one
+    // direction and a backward of the other travel together and share a GPU.
+    (function sceneBidir() {
+      const slide = document.getElementById('s-bidir'), g = document.getElementById('dp-bidir');
+      const tl = Anim.timeline();
+      const X = (r) => 40 + r * 130, CX = (r) => X(r) + 55, TOP = 86, BOT = 124;
+      const glows = [], badges = [];
+      for (let r = 0; r < 8; r++) {
+        const x = X(r);
+        S('rect', { x, y: 60, width: 110, height: 90, rx: 10, fill: 'var(--surface)', stroke: 'var(--border)' }, g);
+        Tx(g, x + 55, 50, 'GPU ' + r, { 'text-anchor': 'middle', fill: 'var(--text-soft)' });
+        S('rect', { x: x + 10, y: 72, width: 90, height: 28, rx: 6, fill: 'var(--accent)', opacity: 0.85 }, g);
+        Tx(g, x + 55, 92, '→ 段 ' + r, { 'text-anchor': 'middle', fill: ON, 'font-size': 15 });
+        S('rect', { x: x + 10, y: 110, width: 90, height: 28, rx: 6, fill: 'var(--accent)', opacity: 0.5 }, g);
+        Tx(g, x + 55, 130, '← 段 ' + (7 - r), { 'text-anchor': 'middle', fill: ON, 'font-size': 15 });
+        const bd = S('g', {}, g);
+        S('rect', { x: x + 25, y: 156, width: 60, height: 22, rx: 11, fill: 'var(--accent-soft)' }, bd);
+        Tx(bd, x + 55, 172, 'F + B', { 'text-anchor': 'middle', 'font-size': 14, fill: 'var(--accent)', 'font-weight': 600 });
+        badges.push(bd);
+      }
+      S('path', { d: 'M40 196 H1060', stroke: 'var(--accent)', 'stroke-width': 3, 'marker-end': 'url(#ar1)' }, g);
+      Tx(g, 40, 222, '正方向 micro-batch：GPU 0 进，GPU 7 算 loss', { fill: 'var(--accent)' });
+      S('path', { d: 'M1060 24 H40', stroke: 'var(--accent)', 'stroke-width': 3, opacity: 0.55, 'marker-end': 'url(#ar1)' }, g);
+      Tx(g, 1060, 16, '反方向 micro-batch：GPU 7 进，GPU 0 算 loss', { 'text-anchor': 'end', fill: 'var(--text-soft)' });
+      for (let k = 0; k < 2; k++) glows.push(S('rect', { x: X(k ? 7 : 0) - 4, y: 56, width: 118, height: 98, rx: 13, fill: 'none', stroke: 'var(--text)', 'stroke-width': 2.5 }, g));
+      const pill = (r, y, label, fill, op = 1) => {
+        const gg = S('g', {}, g);
+        S('rect', { x: CX(r) - 22, y: y - 12, width: 44, height: 24, rx: 12, fill, opacity: op, stroke: ON, 'stroke-width': 2 }, gg);
+        Tx(gg, CX(r), y + 5, label, { 'text-anchor': 'middle', 'font-size': 14, 'font-weight': 600, fill: ON });
+        return gg;
+      };
+      const f0 = pill(0, TOP, '0', 'var(--accent)'), f0r = pill(7, BOT, '0′', 'var(--accent)');
+      const g0 = pill(7, TOP, '∂0', 'var(--accent-2)'), g0r = pill(0, BOT, '∂0′', 'var(--accent-2)');
+      const f1 = pill(0, TOP, '1', 'var(--accent)'), f1r = pill(7, BOT, '1′', 'var(--accent)');
+      const ps = Array.from(slide.querySelectorAll('.bd-p'));
+      hide(f0, f0r, g0, g0r, f1, f1r, glows, badges, ps);
+      const HOP = 130, MV = 0.35, PAUSE = 0.18;
+      function travel(pairs, t) {   // pairs: [el, +1 | -1]
+        for (let h = 1; h <= 7; h++) {
+          pairs.forEach(([el, d]) => tl.to(el, { x: d * h * HOP }, { at: t, dur: MV }));
+          t += MV + PAUSE;
+        }
+        return t;
+      }
+      tl.wait(0.3);
+      tl.to([f0, f0r], { opacity: 1 }, { dur: 0.3 });
+      let t = travel([[f0, 1], [f0r, -1]], tl.duration + 0.2);
+      tl.to([f0, f0r], { opacity: 0 }, { at: t, dur: 0.3 });
+      tl.label('fwd', t + 0.3);
+      tl.to(ps[0], { opacity: 1 }, { dur: 0.5 });
+      tl.label('two');
+      // steady state: F of one direction + B of the other ride together
+      tl.to([g0, g0r, f1, f1r, ...glows], { opacity: 1 }, { dur: 0.35 });
+      tl.to([badges[0], badges[7]], { opacity: 1 }, { at: '<+=0.2', dur: 0.3 });
+      t = tl.duration + 0.2;
+      for (let h = 1; h <= 7; h++) {
+        [[f1, 1], [g0r, 1], [glows[0], 1], [f1r, -1], [g0, -1], [glows[1], -1]].forEach(([el, d]) => tl.to(el, { x: d * h * HOP }, { at: t, dur: MV }));
+        t += MV;
+        tl.to([badges[h], badges[7 - h]], { opacity: 1 }, { at: t - 0.05, dur: 0.25 });
+        t += PAUSE;
+      }
+      tl.to([g0, g0r, f1, f1r, ...glows], { opacity: 0 }, { at: t + 0.2, dur: 0.3 });
+      tl.to(ps[1], { opacity: 1 }, { at: t, dur: 0.5 });
+      bind(slide, tl);
     })();
 
     // ---------------- p2p comm calculator ----------------

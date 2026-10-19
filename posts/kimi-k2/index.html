@@ -40,6 +40,9 @@
     @media (max-width: 560px) { .twocol { grid-template-columns: 1fr; } }
     .mini-title { font-size: 13px; color: var(--text-soft); margin: 4px 0 0; }
     .kv { font-family: var(--font-mono); font-size: 14px; }
+    .afig svg { display: block; width: 100%; max-width: 600px; height: auto; margin: 0 auto; }
+    .afig svg text { font-family: var(--font-sans); }
+    .afig .anim-bar { max-width: 600px; margin-left: auto; margin-right: auto; }
     figure { overflow-x: auto; -webkit-overflow-scrolling: touch; }
     @media (max-width: 560px) {
       figure .diagram { min-width: 540px; }
@@ -151,6 +154,12 @@
         B = b * A + c * A @ A
         X = a * X + B @ X
     return X.T if transposed else X</code></pre>
+
+      <figure class="afig" id="af-ns">
+        <svg viewBox="0 0 440 250" role="img" aria-label="Newton–Schulz 迭代把一个病态矩阵的奇异值逐步推向 1：椭圆变圆，奇异值柱变齐"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>Newton–Schulz 的 5 步（系数 3.4445, −4.7750, 2.0315）。右边是一个 8 个奇异值按 0.6 的幂衰减的动量矩阵（示意），左边是它把单位圆在最大、最小两个奇异方向张成的平面里映成的椭圆。每一步都把小奇异值放大 3 倍多、把大的往回压，椭圆一步步变圆，奇异向量（椭圆的朝向）始终不变。</figcaption>
+      </figure>
 
       <h3>2.4 为什么正交化有帮助</h3>
       <p>直观解释：梯度矩阵往往是“低秩、病态”的——少数几个奇异方向占了绝大部分能量。SGD 和 Adam 的更新会主要沿这几个方向走，其它方向几乎不动。正交化之后所有奇异方向的步长相同，那些弱但有用的方向也能被学到。换句话说，正交化让更新矩阵“各向同性”，权重不会只沿少数主导方向学习。</p>
@@ -287,6 +296,12 @@
           <path class="arrow" d="M440,24 L488,92"/><path class="arrow" d="M440,66 L488,98"/><path class="arrow" d="M440,142 L488,108"/><path class="arrow" d="M440,184 L488,116"/>
         </svg>
         <figcaption>QK-Clip 在 MLA 中的作用位置：头专属的三个分量被缩放，共享的 RoPE key 不动，整个 logit 恰好乘 γ<sub>h</sub>。括号里是 K2 的维度。</figcaption>
+      </figure>
+
+      <figure class="afig" id="af-qk">
+        <svg viewBox="0 0 440 262" role="img" aria-label="QK-Clip：头 3 的最大 logit 超过 τ 后，该头的 W_q、W_k 被缩放，logit 回到 τ，其他头不动"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>逐头 QK-Clip 的 5 个训练步（玩具数字）。每步优化器更新让权重谱范数变大，头 3 的最大 logit 越过 τ；更新之后只把这个头的 \(W_q\)、\(W_k\) 各乘 \(\sqrt{\gamma}\)，\(\gamma=\tau/S_{\max}\)，它的 logit 正好回到 τ，其他头不受影响。右边灰色虚线是不裁剪时的走势。</figcaption>
       </figure>
 
       <h3>5.5 实验证据</h3>
@@ -578,6 +593,7 @@
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
   <script src="/assets/series.js"></script>
+  <script src="/assets/anim.js"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -801,6 +817,161 @@
         el('rect', { x: P.x0, y, width: v / 1.8 * P.w, height: 24, rx: 4, class: i === 3 ? 'f-acc2' : 'f-acc' }, svg);
         el('text', { x: P.x0 + v / 1.8 * P.w + 8, y: y + 17 }, svg).textContent = i === 3 ? '基准（K2 选用）' : v.toFixed(2) + '×';
       });
+    })();
+  })();
+  </script>
+  <script>
+  /* ---------- animated figures (assets/anim.js) ---------- */
+  (() => {
+    if (!window.Anim) return;
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) {
+        if (k === 'text') e.textContent = attrs[k];
+        else e.setAttribute(k, attrs[k]);
+      }
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const bind = (fig, tl) => Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.afig-ctl') });
+    const hid = 'opacity:0';
+    // text with subscripts written as _x (e.g. 'W_q')
+    const rich = (attrs, str, parent) => {
+      const t = mk('text', attrs, parent);
+      str.split(/(_\w+)/).forEach((part) => {
+        if (!part) return;
+        if (part[0] === '_') mk('tspan', { 'baseline-shift': 'sub', 'font-size': '75%', text: part.slice(1) }, t);
+        else t.appendChild(document.createTextNode(part));
+      });
+      return t;
+    };
+    const T = { fill: 'fill:var(--text)', soft: 'fill:var(--text-soft)', faint: 'fill:var(--text-faint)' };
+
+    /* ---------- Muon: Newton–Schulz pushes every singular value toward 1 ---------- */
+    (() => {
+      const fig = document.getElementById('af-ns');
+      if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const [a, b, c] = [3.4445, -4.7750, 2.0315];
+      const raw = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => 0.6 ** i);   // a fast-decaying spectrum (illustrative)
+      const fro = Math.hypot(...raw);
+      const steps = [raw.map((s) => s / fro)];
+      for (let k = 0; k < 5; k++) steps.push(steps[k].map((s) => a * s + b * s ** 3 + c * s ** 5));
+      const cx = 105, cy = 132, R = 80;
+      mk('circle', { cx, cy, r: R, style: 'fill:none;stroke:var(--text-faint);stroke-width:1.2;stroke-dasharray:4 4' }, svg);
+      mk('text', { x: cx, y: cy + R + 20, 'text-anchor': 'middle', 'font-size': 13, style: T.soft, text: '虚线：单位圆（σ = 1）' }, svg);
+      const g = mk('g', { transform: 'translate(' + cx + ' ' + cy + ') rotate(-30)' }, svg);
+      const s0 = steps[0];
+      const ell = mk('ellipse', { cx: 0, cy: 0, rx: R * s0[0], ry: R * s0[7], style: 'fill:var(--accent-soft);stroke:var(--accent);stroke-width:2' }, g);
+      const ax1 = mk('line', { x1: 0, y1: 0, x2: R * s0[0], y2: 0, style: 'stroke:var(--accent);stroke-width:1.5' }, g);
+      const ax2 = mk('line', { x1: 0, y1: 0, x2: 0, y2: -R * s0[7], style: 'stroke:var(--accent-2);stroke-width:2' }, g);
+      const bx0 = 228, pitch = 26, bw = 18, base = 214, H = 130;
+      const yOne = base - H;
+      mk('line', { x1: bx0 - 6, x2: bx0 + 8 * pitch, y1: yOne, y2: yOne, style: 'stroke:var(--text-faint);stroke-dasharray:4 3' }, svg);
+      mk('text', { x: bx0 - 10, y: yOne + 4, 'text-anchor': 'end', 'font-size': 13, style: T.soft, text: '1' }, svg);
+      mk('line', { x1: bx0 - 6, x2: bx0 + 8 * pitch, y1: base, y2: base, style: 'stroke:var(--border)' }, svg);
+      mk('text', { x: bx0 + 4 * pitch - 4, y: base + 20, 'text-anchor': 'middle', 'font-size': 13, style: T.soft, text: '8 个奇异值（降序）' }, svg);
+      const bars = s0.map((s, i) => mk('rect', { x: bx0 + i * pitch, y: base - H * s, width: bw, height: H * s, rx: 2, style: i === 0 ? 'fill:var(--accent)' : i === 7 ? 'fill:var(--accent-2)' : 'fill:var(--text-faint)' }, svg));
+      const kT = mk('text', { x: 12, y: 24, 'font-size': 15, style: T.fill, text: '' }, svg);
+      const rT = mk('text', { x: 428, y: 24, 'text-anchor': 'end', 'font-size': 14, style: T.soft, text: '' }, svg);
+      const fmtK = (v) => (v < 0.5 ? '归一化：X₀ = M / ‖M‖' : 'Newton–Schulz 第 ' + Math.round(v) + ' 步');
+      const fmtR = (v) => 'σ_min / σ_max = ' + v.toFixed(2);
+      const tl = Anim.timeline();
+      tl.set(kT, { text: 0, fmt: fmtK }, { at: 0 }).set(rT, { text: s0[7] / s0[0], fmt: fmtR }, { at: 0 });
+      for (let k = 1; k <= 5; k++) {
+        const s = 0.6 + (k - 1) * 1.5, v = steps[k];
+        const mx = Math.max(...v), mn = Math.min(...v);
+        tl.to(kT, { text: k, fmt: fmtK }, { at: s, dur: 0.01 });
+        tl.to(ell, { attr: { rx: R * v[0], ry: R * v[7] } }, { at: s, dur: 1.0 });
+        tl.to(ax1, { attr: { x2: R * v[0] } }, { at: s, dur: 1.0 });
+        tl.to(ax2, { attr: { y2: -R * v[7] } }, { at: s, dur: 1.0 });
+        v.forEach((x, i) => tl.to(bars[i], { attr: { y: base - H * x, height: H * x } }, { at: s + 0.03 * i, dur: 1.0 }));
+        tl.to(rT, { text: mn / mx, fmt: fmtR }, { at: s, dur: 1.0 });
+      }
+      tl.wait(0.3);
+      bind(fig, tl);
+    })();
+
+    /* ---------- QK-Clip: per-head rescaling of W_q / W_k ---------- */
+    (() => {
+      const fig = document.getElementById('af-qk');
+      if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const tau = 100, kap = [40, 55, 70, 30], grow = [1.03, 1.05, 1.12, 1.01];
+      const base = 236, px = 1.0, yS = (v) => base - px * v;
+      const hx = (h) => 30 + 56 * h;
+      // simulate 5 steps: optimizer update, then clip heads with S > tau
+      let q = [1, 1, 1, 1], k = [1, 1, 1, 1];
+      const S = () => kap.map((K, h) => K * q[h] * k[h]);
+      const hist = [{ q: q.slice(), k: k.slice(), S: S(), clip: [] }];
+      for (let t = 1; t <= 5; t++) {
+        q = q.map((v, h) => v * grow[h]); k = k.map((v, h) => v * grow[h]);
+        const upd = { q: q.slice(), k: k.slice(), S: S() };
+        const clip = [];
+        upd.S.forEach((s, h) => { if (s > tau) { const gm = tau / s; q[h] *= Math.sqrt(gm); k[h] *= Math.sqrt(gm); clip.push(h); } });
+        hist.push({ upd, q: q.slice(), k: k.slice(), S: S(), clip });
+      }
+      // threshold line across both panels
+      mk('line', { x1: 14, x2: 432, y1: yS(tau), y2: yS(tau), style: 'stroke:var(--accent-2);stroke-width:1.5;stroke-dasharray:6 4' }, svg);
+      mk('text', { x: 14, y: yS(tau) - 6, 'font-size': 13, style: 'fill:var(--accent-2)', text: 'τ = 100' }, svg);
+      mk('line', { x1: 14, x2: 236, y1: base, y2: base, style: 'stroke:var(--border)' }, svg);
+      const sBar = [], ex = [], qB = [], kB = [];
+      for (let h = 0; h < 4; h++) {
+        const s0 = hist[0].S[h];
+        sBar.push(mk('rect', { x: hx(h) - 4, y: yS(s0), width: 22, height: px * s0, rx: 2, style: 'fill:var(--accent)' }, svg));
+        ex.push(mk('rect', { x: hx(h) - 4, y: yS(tau), width: 22, height: 0, rx: 2, style: 'fill:var(--accent-2)' }, svg));
+        qB.push(mk('rect', { x: hx(h) + 21, y: base - 30, width: 7, height: 30, style: 'fill:var(--text-faint)' }, svg));
+        kB.push(mk('rect', { x: hx(h) + 30, y: base - 30, width: 7, height: 30, style: 'fill:var(--text-soft)' }, svg));
+        mk('text', { x: hx(h) + 16, y: base + 18, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:var(--text-soft)', text: '头 ' + (h + 1) }, svg);
+      }
+      rich({ x: 14, y: 60, 'font-size': 13, style: T.soft }, '每个头的最大 logit（粗）与 ‖W_q‖、‖W_k‖（细）', svg);
+      // right: S_max of head 3 over steps
+      const cx0 = 262, cdx = 32, X = (t) => cx0 + cdx * t;
+      mk('line', { x1: cx0, x2: X(5) + 4, y1: base, y2: base, style: 'stroke:var(--border)' }, svg);
+      mk('text', { x: (cx0 + X(5)) / 2, y: base + 18, 'text-anchor': 'middle', 'font-size': 13, style: T.soft, text: '训练步 →' }, svg);
+      mk('text', { x: cx0, y: 82, 'font-size': 13, style: T.soft, text: '头 3 的最大 logit' }, svg);
+      const clip = mk('clipPath', { id: 'qk-clipR' }, svg);
+      const cr = mk('rect', { x: cx0 - 6, y: 60, width: 8, height: base - 58 }, clip);
+      const free = [hist[0].S[2]];
+      for (let t = 1; t <= 5; t++) free.push(kap[2] * grow[2] ** (2 * t));
+      const top = 90;
+      const cy = (v) => Math.max(top, yS(v));
+      mk('path', { d: free.map((v, t) => (t ? 'L' : 'M') + X(t) + ' ' + cy(v)).join(' '), 'clip-path': 'url(#qk-clipR)', style: 'fill:none;stroke:var(--text-faint);stroke-width:1.6;stroke-dasharray:5 4' }, svg);
+      let d = 'M' + X(0) + ' ' + yS(hist[0].S[2]);
+      for (let t = 1; t <= 5; t++) { d += ' L' + X(t) + ' ' + yS(hist[t].upd.S[2]); if (hist[t].clip.includes(2)) d += ' L' + X(t) + ' ' + yS(hist[t].S[2]); }
+      mk('path', { d, 'clip-path': 'url(#qk-clipR)', style: 'fill:none;stroke:var(--accent);stroke-width:2.2;stroke-linejoin:round' }, svg);
+      const stepT = mk('text', { x: 14, y: 24, 'font-size': 15, style: T.fill, text: '第 0 步' }, svg);
+      const lu = mk('text', { x: 100, y: 24, 'font-size': 14, style: 'fill:var(--accent);opacity:0', text: '优化器更新：权重谱范数变大' }, svg);
+      const lc = rich({ x: 100, y: 24, 'font-size': 14, style: 'fill:var(--accent-2);opacity:0' }, 'QK-Clip：头 3 的 W_q、W_k 各乘 √γ', svg);
+      const tl = Anim.timeline();
+      const setState = (st, at, dur) => {
+        for (let h = 0; h < 4; h++) {
+          const s = st.S[h];
+          tl.to(sBar[h], { attr: { y: yS(s), height: px * s } }, { at, dur });
+          tl.to(ex[h], { attr: { y: yS(Math.max(s, tau)), height: px * Math.max(0, s - tau) } }, { at, dur });
+          tl.to(qB[h], { attr: { y: base - 30 * st.q[h], height: 30 * st.q[h] } }, { at, dur });
+          tl.to(kB[h], { attr: { y: base - 30 * st.k[h], height: 30 * st.k[h] } }, { at, dur });
+        }
+      };
+      let t0 = 0.4;
+      for (let t = 1; t <= 5; t++) {
+        const h = hist[t];
+        tl.to(stepT, { text: t, fmt: (v) => '第 ' + Math.round(v) + ' 步' }, { at: t0, dur: 0.01 });
+        tl.to(lc, { opacity: 0 }, { at: t0, dur: 0.1 }).to(lu, { opacity: 1 }, { at: t0 + 0.1, dur: 0.15 });
+        setState(h.upd, t0, 0.8);
+        tl.to(cr, { attr: { width: X(t) - cx0 + 4 } }, { at: t0, dur: 0.8, ease: 'linear' });
+        t0 += 1.0;
+        if (h.clip.length) {
+          tl.to(lu, { opacity: 0 }, { at: t0, dur: 0.1 }).to(lc, { opacity: 1 }, { at: t0 + 0.1, dur: 0.15 });
+          setState(h, t0 + 0.2, 0.7);
+          tl.to(cr, { attr: { width: X(t) - cx0 + 8 } }, { at: t0 + 0.2, dur: 0.7 });
+          t0 += 1.2;
+        }
+        t0 += 0.2;
+      }
+      tl.wait(0.3);
+      bind(fig, tl);
     })();
   })();
   </script>

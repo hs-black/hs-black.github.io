@@ -50,6 +50,23 @@
     .legend-row { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--text-soft); margin-top: 8px; }
     .legend-row i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
 
+    /* animated figures (assets/anim.js) */
+    .anim-fig svg { max-width: 560px; margin: 0 auto; }
+    .anim-fig .anim-ctl { max-width: 560px; margin: 0 auto; }
+    .anim-fig .tp-t { display: flex; justify-content: center; margin-bottom: 8px; }
+    .anim-fig .tp-t button { font-size: 13px; }
+    .anim-fig svg text { fill: var(--text); font-family: var(--font-sans); }
+    .anim-fig svg .soft { fill: var(--text-soft); }
+    .anim-fig svg .faint { fill: var(--text-faint); }
+    .anim-fig .lbl { font-size: 14px; }
+    .anim-fig .sm { font-size: 13px; }
+    .anim-fig .dash { fill: none; stroke: var(--text-faint); stroke-width: 1.2; stroke-dasharray: 4 3; }
+    .anim-fig .k0 { --c: var(--accent); }
+    .anim-fig .k1 { --c: var(--accent-2); }
+    .anim-fig .w { fill: color-mix(in srgb, var(--c) 16%, transparent); stroke: var(--c); stroke-width: 1.5; }
+    .anim-fig .s { fill: var(--c); fill-opacity: 0.8; stroke: var(--c); stroke-width: 1; }
+    .anim-fig .x { fill: color-mix(in srgb, var(--text-faint) 45%, transparent); stroke: var(--text-faint); stroke-width: 1.2; }
+    .anim-fig .y { fill: var(--text-soft); fill-opacity: 0.75; stroke: var(--text-soft); stroke-width: 1.2; }
     /* calculator */
     .chart-wrap svg { width: 100%; height: auto; display: block; }
     .chart-title { font-size: 14px; font-weight: 600; margin-top: 14px; }
@@ -235,6 +252,13 @@
         <figcaption>两路 TP 的 MLP。f 和 g 是一对共轭算子：一个前向恒等、反向 All-Reduce，另一个反过来。</figcaption>
       </figure>
 
+      <figure class="diagram anim-fig" id="tp-anim" data-mode="tp">
+        <div class="seg tp-t" role="group" aria-label="TP 度"><button type="button" data-t="2" aria-pressed="true">TP = 2</button><button type="button" data-t="4" aria-pressed="false">TP = 4</button></div>
+        <svg role="img" aria-label="TP 下 MLP 前向的数据流：每卡用完整 X 乘自己的 A 列块，再乘 B 行块得到部分和，All-Reduce 求和"></svg>
+        <div class="anim-ctl"></div>
+        <figcaption>同一个 MLP 的前向在各卡上的数据流。方块的竖边是 token 维 \(N\)，横边是特征维；\(A\) 按列切成 \(A_i\)（\([h, F/t]\)），\(B\) 按行切成 \(B_i\)（\([F/t, h]\)），斜线方块是完整形状的部分和，All-Reduce 把它们加起来再发回每张卡。</figcaption>
+      </figure>
+
       <p>反过来「先行后列」行不行？行，但更差：第一个矩阵按行切需要输入沿 \(h\) 切开，输出是部分和，必须在 GeLU 前 All-Reduce；第二个矩阵按列切，输出又是切开的，要拼回完整 \(Y\) 还要 All-Gather。两次通信，而且中间那次 All-Reduce 的张量是 \([N, F]\)，比 \([N, h]\) 大好几倍。</p>
 
       <h2 id="attn">注意力：按头切，以及 GQA 的约束</h2>
@@ -376,6 +400,13 @@ class ReduceFromTP(torch.autograd.Function):    # g
           <text x="360" y="198" text-anchor="middle" class="svg-soft" font-size="12">任何时刻，每张卡上的激活要么沿 s 切，要么沿 h（或 F、头）切：最大激活从 bsh 降到 bsh/t</text>
         </svg>
         <figcaption>TP+SP 下 MLP 子层的数据流（注意力子层同理）。All-Reduce 被拆成了 Reduce-Scatter 和 All-Gather，分别放在出口和下一个入口。</figcaption>
+      </figure>
+
+      <figure class="diagram anim-fig" id="sp-anim" data-mode="sp">
+        <div class="seg tp-t" role="group" aria-label="TP 度"><button type="button" data-t="2" aria-pressed="false">TP = 2</button><button type="button" data-t="4" aria-pressed="true">TP = 4</button></div>
+        <svg role="img" aria-label="TP+SP 下 MLP 前向的数据流：All-Gather 拼回完整序列，列并行、行并行，Reduce-Scatter 把部分和按序列段求和分回各卡"></svg>
+        <div class="anim-ctl"></div>
+        <figcaption>同一个 MLP 在 TP+SP 下的前向。进来时每卡只有一段 token（横条），All-Gather 沿序列维拼回完整的 \(X\)；中间和纯 TP 完全一样；出口的 Reduce-Scatter 把每张卡部分和的第 \(q\) 段都送到 GPU \(q\) 相加，每卡又只剩一段。</figcaption>
       </figure>
 
       <p>按区域把激活形状列成表（\(h\) 列、\(s\) 列分别表示这一维是完整还是被切开）：</p>
@@ -890,6 +921,162 @@ class ReduceFromTP(torch.autograd.Function):    # g
       let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(draw, 150); });
     })();
   })();
+  </script>
+  <script src="/assets/anim.js"></script>
+  <script id="anim-figs">
+(() => {
+  if (!window.Anim) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (tag, attrs, parent, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  const hidden = (e) => { e.style.opacity = '0'; return e; };
+
+  // One MLP forward under TP (mode 'tp') or TP+SP (mode 'sp') with t GPUs.
+  function build(fig, t) {
+    const sp = fig.dataset.mode === 'sp';
+    const svg = fig.querySelector('svg');
+    const ctl = fig.querySelector('.anim-ctl');
+    if (fig._tl) fig._tl.player.pause();
+    svg.innerHTML = '';
+    ctl.innerHTML = '';
+    const U = 28, Fw = (4 * U) / t, LH = t === 2 ? 86 : 54, Y0 = 40;
+    const H = Y0 + t * LH + 34;
+    svg.setAttribute('viewBox', `0 0 440 ${H}`);
+    const cy = (i) => Y0 + i * LH + LH / 2;
+    const k = (i) => 'k' + (i % 2);
+    const defs = mk('defs', {}, svg);
+    ['var(--accent)', 'var(--accent-2)'].forEach((c, j) => {
+      const p = mk('pattern', { id: fig.id + '-h' + j, width: 5, height: 5, patternUnits: 'userSpaceOnUse', patternTransform: 'rotate(45)' }, defs);
+      mk('rect', { width: 2, height: 5, style: 'fill:' + c }, p);
+    });
+    const XS = 50, AX = 92, ZX = 162, BX = 232, PX = 276, MX = 336, OX = 404;
+    const head = [['X', XS + U / 2], ['A_i', AX + Fw / 2], ['Z_i', ZX + Fw / 2], ['B_i', BX + U / 2], ['Z_iB_i', PX + U / 2], ['Y', OX + U / 2]];
+    if (!sp) head.push(['求和', MX + U / 2]);
+    head.forEach(([s, x]) => mk('text', { x, y: 24, 'text-anchor': 'middle', class: 'sm soft' }, svg, s));
+    const Xs = [], Zs = [], Ps = [], own = [], outs = [];
+    for (let i = 0; i < t; i++) {
+      const y = cy(i);
+      if (i) mk('line', { x1: 6, y1: Y0 + i * LH, x2: 434, y2: Y0 + i * LH, stroke: 'var(--border)' }, svg);
+      mk('text', { x: 6, y: y + 5, class: 'sm soft' }, svg, 'GPU ' + i);
+      mk('rect', { x: XS, y: y - U / 2, width: U, height: U, class: 'dash' }, svg);
+      [['×', 85], ['=', 155], ['×', 225], ['=', 269]].forEach(([s, x]) => mk('text', { x, y: y + 5, 'text-anchor': 'middle', class: 'sm faint' }, svg, s));
+      mk('rect', { x: AX, y: y - U / 2, width: Fw, height: U, class: 'w ' + k(i) }, svg);
+      mk('rect', { x: BX, y: y - Fw / 2, width: U, height: Fw, class: 'w ' + k(i) }, svg);
+      mk('rect', { x: ZX, y: y - U / 2, width: Fw, height: U, class: 'dash' }, svg);
+      Zs.push(mk('rect', { x: ZX, y: y - U / 2, width: 0, height: U, class: 's ' + k(i), style: 'fill-opacity:0.35' }, svg));
+      mk('rect', { x: PX, y: y - U / 2, width: U, height: U, class: 'dash' }, svg);
+      const pg = hidden(mk('g', {}, svg));
+      mk('rect', { x: PX, y: y - U / 2, width: U, height: U, fill: `url(#${fig.id}-h${i % 2})`, stroke: i % 2 ? 'var(--accent-2)' : 'var(--accent)', 'stroke-width': 1.2 }, pg);
+      Ps.push(pg);
+      mk('rect', { x: OX, y: y - U / 2, width: U, height: U, class: 'dash' }, svg);
+      if (!sp) {
+        const xg = hidden(mk('g', {}, svg));
+        mk('rect', { x: XS, y: y - U / 2, width: U, height: U, class: 'x' }, xg);
+        Xs.push(xg);
+      } else {
+        own.push(hidden(mk('rect', { x: XS, y: y - U / 2 + (i * U) / t, width: U, height: U / t, class: 's ' + k(i) }, svg)));
+      }
+    }
+    // status line
+    const SY = Y0 + t * LH + 22;
+    const msgs = [];
+    const say = (tl, at, text) => {
+      const e = hidden(mk('text', { x: 6, y: SY, class: 'sm' }, svg, text));
+      if (msgs.length) tl.to(msgs[msgs.length - 1], { opacity: 0 }, { at, dur: 0.25 });
+      tl.to(e, { opacity: 1 }, { at: at + 0.15, dur: 0.3 });
+      msgs.push(e);
+    };
+
+    const tl = Anim.timeline();
+    let T = 0.2;
+    if (!sp) {
+      say(tl, 0, 'f：前向恒等，每卡都有完整的 X');
+      tl.set(Xs, { x: -36 }, { at: 0 }).to(Xs, { x: 0, opacity: 1 }, { at: T, dur: 0.8 });
+      T += 1.2;
+    } else {
+      say(tl, 0, 'SP 区域：每卡只有 s/t 段 token');
+      tl.to(own, { opacity: 1 }, { at: T, dur: 0.4 });
+      T += 0.9;
+      say(tl, T, 'All-Gather（沿 s）：拼回完整的 X');
+      for (let r = 0; r < t; r++) for (let q = 0; q < t; q++) {
+        if (q === r) continue;
+        const g = hidden(mk('g', {}, svg));
+        mk('rect', { x: XS, y: cy(q) - U / 2 + (q * U) / t, width: U, height: U / t, class: 's ' + k(q) }, g);
+        tl.to(g, { opacity: 1 }, { at: T, dur: 0.1 }).to(g, { y: cy(r) - cy(q) }, { at: T + 0.05, dur: 0.9 });
+      }
+      T += 1.3;
+    }
+    say(tl, T, '列并行：Z_i = X·A_i，形状 [N, F/t]，不通信');
+    tl.to(Zs, { attr: { width: Fw } }, { at: T + 0.2, dur: 0.8 });
+    T += 1.3;
+    say(tl, T, 'GeLU 逐元素，各卡在本地算');
+    tl.to(Zs, { style: { 'fill-opacity': 0.85 } }, { at: T + 0.2, dur: 0.6 });
+    T += 1.1;
+    say(tl, T, '行并行：Z_i·B_i 是完整形状 [N, h] 的部分和');
+    tl.to(Ps, { opacity: 1 }, { at: T + 0.2, dur: 0.15 });
+    Ps.forEach((p) => tl.set(p, { scale: 0.2 }, { at: 0 }).to(p, { scale: 1 }, { at: T + 0.2, dur: 0.7 }));
+    T += 1.3;
+    const mid = Y0 + (t * LH) / 2;
+    if (!sp) {
+      say(tl, T, 'All-Reduce：部分和相加，结果发回每张卡');
+      const cps = [];
+      for (let i = 0; i < t; i++) {
+        const g = hidden(mk('g', {}, svg));
+        mk('rect', { x: PX, y: cy(i) - U / 2, width: U, height: U, fill: `url(#${fig.id}-h${i % 2})`, stroke: i % 2 ? 'var(--accent-2)' : 'var(--accent)', 'stroke-width': 1.2 }, g);
+        cps.push(g);
+        tl.to(g, { opacity: 1 }, { at: T, dur: 0.1 }).to(g, { x: MX - PX, y: mid - cy(i) }, { at: T + 0.05, dur: 0.9 });
+      }
+      const sum = hidden(mk('rect', { x: MX, y: mid - U / 2, width: U, height: U, class: 'y' }, svg));
+      tl.to(sum, { opacity: 1 }, { at: T + 0.9, dur: 0.3 }).to(cps, { opacity: 0 }, { at: T + 1.0, dur: 0.2 });
+      T += 1.4;
+      for (let i = 0; i < t; i++) {
+        const g = hidden(mk('g', {}, svg));
+        mk('rect', { x: MX, y: mid - U / 2, width: U, height: U, class: 'y' }, g);
+        tl.to(g, { opacity: 1 }, { at: T, dur: 0.1 }).to(g, { x: OX - MX, y: cy(i) - mid }, { at: T + 0.05, dur: 0.8 });
+      }
+      tl.to(sum, { opacity: 0 }, { at: T + 0.6, dur: 0.3 });
+      T += 1.0;
+    } else {
+      say(tl, T, 'Reduce-Scatter（沿 s）：第 q 段送到 GPU q 相加');
+      for (let r = 0; r < t; r++) for (let q = 0; q < t; q++) {
+        const g = hidden(mk('g', {}, svg));
+        mk('rect', { x: PX, y: cy(r) - U / 2 + (q * U) / t, width: U, height: U / t, fill: `url(#${fig.id}-h${r % 2})`, stroke: r % 2 ? 'var(--accent-2)' : 'var(--accent)', 'stroke-width': 1 }, g);
+        const lag = 0.12 * r;
+        tl.to(g, { opacity: 1 }, { at: T, dur: 0.1 })
+          .to(g, { x: OX - PX, y: cy(q) - cy(r) }, { at: T + 0.1 + lag, dur: 1.0 })
+          .to(g, { opacity: 0 }, { at: T + 1.0 + 0.12 * t, dur: 0.2 });
+      }
+      tl.to(Ps, { opacity: 0.25 }, { at: T + 0.2, dur: 0.4 });
+      for (let q = 0; q < t; q++) {
+        outs.push(hidden(mk('rect', { x: OX, y: cy(q) - U / 2 + (q * U) / t, width: U, height: U / t, class: 'y' }, svg)));
+      }
+      tl.to(outs, { opacity: 1 }, { at: T + 1.0 + 0.12 * t, dur: 0.3 });
+      T += 1.6 + 0.12 * t;
+    }
+    tl.label('end', T);
+    fig._tl = tl;
+    Anim.inView(fig, tl, { controls: true, controlsIn: ctl });
+  }
+
+  ['tp-anim', 'sp-anim'].forEach((id) => {
+    const fig = document.getElementById(id);
+    if (!fig) return;
+    const seg = fig.querySelector('.tp-t');
+    const cur = () => +seg.querySelector('[aria-pressed="true"]').dataset.t;
+    seg.addEventListener('click', (e) => {
+      const b = e.target.closest('button');
+      if (!b) return;
+      seg.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+      build(fig, cur());
+    });
+    build(fig, cur());
+  });
+})();
   </script>
   <script src="/assets/post-links.js"></script>
   <script src="/assets/posts.js"></script>

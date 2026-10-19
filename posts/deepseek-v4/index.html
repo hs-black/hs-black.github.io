@@ -50,6 +50,8 @@
     .prose td.hl { font-weight: 700; }
     .kv-tag { font-family: var(--font-mono); font-size: 0.86em; color: var(--text-soft); }
     .num-in { width: 7em; }
+    .afig svg { max-width: 600px; margin: 0 auto; }
+    .afig .anim-bar { max-width: 600px; margin-left: auto; margin-right: auto; }
     @media (max-width: 560px) {
       .bk-row { grid-template-columns: 5em 1fr 4.6em; }
       .mat { font-size: 11px; }
@@ -216,13 +218,10 @@
       </ul>
       <p>HCA 的压缩器更简单：只有一套 \(C=HW^{KV}\)、\(Z=HW^{Z}\)，不重叠，每 \(m'=128\) 个 token 做一次逐通道 softmax 加权求和（位置偏置 \(B\in\mathbb R^{m'\times c}\)），条目数 \(n/m'\)。</p>
 
-      <figure class="fig"><div class="sx">
-        <svg viewBox="0 0 640 210" role="img" aria-label="CSA 重叠压缩示意">
-          <text x="10" y="20" font-size="13">token：</text>
-          <g id="cmp-tokens"></g>
-          <text x="10" y="196" font-size="12" class="soft">m = 4：条目 i 由「块 i 的 C^a」+「块 i−1 的 C^b」共 8 个 token 加权得到；条目数仍是 n/4。</text>
-        </svg></div>
-        <figcaption>图 2　CSA 压缩器的重叠窗口。橙色是当前块（\(C^a\) 部分），紫色是借用的上一块（\(C^b\) 部分）。</figcaption>
+      <figure class="fig afig" id="af-cmp">
+        <svg viewBox="0 0 440 240" role="img" aria-label="CSA 压缩器的重叠窗口：每个条目由本块和上一块共 8 个 token 加权得到"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>图 2　CSA 压缩器的重叠窗口（\(m=4\)）。条目 \(i\) 由块 \(i\) 的 \(C^a\)（橙）和块 \(i-1\) 的 \(C^b\)（紫）共 8 个 token 加权得到；条目 0 没有上一块，只用 4 个。</figcaption>
       </figure>
 
       <p>压缩之后，每个条目还要做一次 RMSNorm，在最后 64 维上施加 RoPE（位置取该块第一个 token 的位置 \(mi\)），再把非 RoPE 的 448 维量化成 FP8 存进 cache。注意：只有凑满 \(m\) 个 token 才会产生一个新条目；没凑满的尾巴 token 要先放在缓冲区里（8.5 节的「state cache」）。</p>
@@ -235,6 +234,12 @@
       $$\mathcal C^{\text{SprsComp}}_t=\big\{C^{\text{Comp}}_s\;\big|\;I_{t,s}\in\text{Top-}k(I_{t,:})\big\}.$$
       <p>V4-Flash 取 \(k=512\)，V4-Pro 取 \(k=1024\)，都比 V3.2 的 2048 小。每个压缩条目代表 4 个 token，所以 Pro 每层实际「覆盖」约 4096 个 token 的信息，而 V3.2 是 2048 个 token。</p>
       <p>注意 query 的低秩潜向量 \(\mathbf c^Q_t\) 由主注意力和 indexer 共享。indexer 的 query 和 key 在量化到 FP4 之前还要做一次 Hadamard 旋转：正交变换不改变内积，却能把少数离群维度的能量摊到所有维度上，量化误差因此更小。</p>
+
+      <figure class="fig afig" id="af-sel">
+        <svg viewBox="0 0 440 286" role="img" aria-label="CSA 的一次查询：indexer 给压缩条目打分，取 top-k，与滑窗 token 一起参加注意力"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>CSA 里 query \(t\) 的一次注意力（玩具尺寸：10 个已完成的压缩条目、top-\(k=3\)、滑窗 8；分数为示意）。indexer 给每个条目打分，只取分数最高的 \(k\) 个，再和最近的原始 token 放进同一个 softmax。</figcaption>
+      </figure>
 
       <h3>3.3 Shared-KV MQA 与分组输出投影</h3>
       <p>挑出来的压缩条目直接同时充当 key 和 value，所有 query 头共享（MQA）：</p>
@@ -283,6 +288,12 @@
 
       <h3>3.4 HCA：压得更狠，但不挑</h3>
       <p>HCA 和 CSA 共用 query 路径、shared-KV MQA、分组输出投影，区别只在压缩：128 个 token 压成 1 个条目、不重叠、没有 indexer，query 对所有已完成的压缩条目做稠密注意力。1M 上下文时也只有 8192 个条目，是 V3.2 每层 top-k（2048 个 token）的 4 倍，远小于 1M。</p>
+
+      <figure class="fig afig" id="af-hca">
+        <svg viewBox="0 0 440 244" role="img" aria-label="HCA：每 16 个 token 不重叠地压成一个条目，query 对全部条目做稠密注意力"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>HCA（玩具尺寸：每 16 个 token 压成一个条目，真实模型是 128）。条目之间不重叠，也不经过 indexer 挑选，query 对全部已完成的条目做稠密注意力，再加上滑窗。</figcaption>
+      </figure>
       <p>为什么要两种层交替？报告没有为此做消融，只说这种混合结构显著改善了长上下文效率。从结构上看，两者是分工：HCA 以极低成本给每一层提供「全局但模糊」的视图，CSA 提供「按需取回、分辨率 4 倍」的细节，滑窗分支补最近的精确信息。</p>
 
       <h3>3.5 其他细节</h3>
@@ -373,6 +384,12 @@
         <li>\(B_l\)（残差变换）：各条流之间互相混合。</li>
       </ul>
       <p>子层本身的输入输出仍是 \(d\) 维，所以内部结构不用改。HC 相当于提供了一条和隐藏维度解耦的扩展轴：\(n_{hc}=4\) 时残差流宽了 4 倍，但额外计算只是几个 \(4\times4\) 的混合。普通残差就是 \(n_{hc}=1,\ A=B=C=1\) 的特例。</p>
+
+      <figure class="fig afig" id="af-mhc">
+        <svg viewBox="0 0 440 256" role="img" aria-label="超连接的一层：A 把 4 条流合成子层输入，C 把输出写回各条流，B 让各条流互相混合"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>超连接的一层（\(n_{hc}=4\)）：\(A\) 把 4 条流加权合成子层 \(F\) 的输入，\(C\) 把 \(F\) 的输出按各自的权重写回每条流，\(B\) 让 4 条流互相混合（连线粗细 ∝ \(B_{ij}\)）。图里的 \(B\) 是一个示意的双随机矩阵，每行每列的和都是 1。</figcaption>
+      </figure>
       <p>问题是：深层堆叠时信号经过的是 \(\prod_l B_l\)。只要 \(B_l\) 的谱范数稍大于 1，乘上上百层就会爆炸；稍小于 1 就会消失。报告说 HC 在层数多时会频繁出现数值不稳定，难以扩展。</p>
 
       <h3>5.2 把 B 约束成双随机矩阵</h3>
@@ -391,6 +408,12 @@
       <p>其中 \(W^{\text{pre}},W^{\text{post}}\in\mathbb R^{n_{hc}d\times n_{hc}}\)，\(W^{\text{res}}\in\mathbb R^{n_{hc}d\times n_{hc}^2}\)，\(S\) 是静态偏置，\(\alpha\) 是初始化为小值的门控标量。然后施加约束：</p>
       $$A_l=\sigma(\tilde A_l),\qquad C_l=2\sigma(\tilde C_l),\qquad B_l=\mathrm{Sinkhorn}(\exp(\tilde B_l)).$$
       <p>Sinkhorn–Knopp 迭代：从 \(M^{(0)}=\exp(\tilde B_l)\)（保证正）出发，交替做列归一化和行归一化 \(M^{(t)}=\mathcal T_r(\mathcal T_c(M^{(t-1)}))\)，迭代 \(t_{\max}=20\) 次。对正矩阵这个过程收敛到一个双随机矩阵。</p>
+
+      <figure class="fig afig" id="af-sk">
+        <svg viewBox="0 0 440 314" role="img" aria-label="Sinkhorn 迭代：交替做列归一化和行归一化，行和与列和都趋向 1"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>Sinkhorn 迭代 4 轮（\(\tilde B\) 为示意值，格子颜色深浅 ∝ 元素大小）。列归一化让列和变成 1，但会打乱行和；行归一化再把行和拉回 1。来回几轮后行和、列和同时接近 1，谱范数也降到 1 附近。</figcaption>
+      </figure>
       <p>形状账（Pro，\(d=7168,\ n_{hc}=4\)）：三组 \(W\) 合在一起是 \(4d\times(4+4+16)=28672\times24\)，每个子层一份（注意力前一份、MoE 前一份），每层 1.38M 参数，61 层约 84M，相对 1.6T 可以忽略。8.4 节会提到的「mHC 里输出维度只有 24 的矩阵乘」就是它。模型入口把嵌入复制成 4 份，出口用一个只有 sigmoid 权重的 \(A\) 把 4 路合成 1 路再接输出头。</p>
 
       <div class="demo" id="sk-demo">
@@ -855,6 +878,7 @@
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
   <script src="/assets/series.js"></script>
+  <script src="/assets/anim.js"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -879,27 +903,6 @@
     };
     const mulberry = (a) => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
     const gauss = (r) => { let u = 0, v = 0; while (u === 0) u = r(); while (v === 0) v = r(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v); };
-
-    /* ---------- Fig 2: overlapping compression ---------- */
-    (() => {
-      const g = $('cmp-tokens');
-      const x0 = 70, w = 30, gap = 4;
-      for (let j = 0; j < 16; j++) {
-        const blk = Math.floor(j / 4);
-        el('rect', { x: x0 + j * (w + gap), y: 8, width: w, height: 22, rx: 4, style: 'fill:var(--bg-soft);stroke:var(--border)' }, g);
-        el('text', { x: x0 + j * (w + gap) + w / 2, y: 24, 'text-anchor': 'middle', 'font-size': 11, class: 'mono', text: j }, g);
-        if (j % 4 === 0) el('text', { x: x0 + j * (w + gap) + 2 * (w + gap) - gap / 2, y: 46, 'text-anchor': 'middle', 'font-size': 11, class: 'soft', text: '块 ' + blk }, g);
-      }
-      [1, 2, 3].forEach((i, r) => {
-        const y = 62 + r * 36;
-        el('text', { x: 10, y: y + 15, 'font-size': 12.5, text: '条目 ' + i }, g);
-        const xa = x0 + 4 * i * (w + gap), xb = x0 + 4 * (i - 1) * (w + gap), span = 4 * (w + gap) - gap;
-        el('rect', { x: xb, y, width: span, height: 20, rx: 4, style: 'fill:var(--accent-soft);stroke:var(--accent)' }, g);
-        el('text', { x: xb + span / 2, y: y + 14, 'text-anchor': 'middle', 'font-size': 11, text: 'C^b（上一块）' }, g);
-        el('rect', { x: xa, y, width: span, height: 20, rx: 4, style: 'fill:color-mix(in srgb, var(--accent-2) 16%, transparent);stroke:var(--accent-2)' }, g);
-        el('text', { x: xa + span / 2, y: y + 14, 'text-anchor': 'middle', 'font-size': 11, text: 'C^a（本块）' }, g);
-      });
-    })();
 
     /* ---------- Fig 4: EP waves ---------- */
     (() => {
@@ -1236,6 +1239,285 @@
       }
       kS.addEventListener('input', draw);
       draw();
+    })();
+  })();
+  </script>
+  <script>
+  /* ---------- animated figures (assets/anim.js) ---------- */
+  (() => {
+    if (!window.Anim) return;
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) {
+        if (k === 'text') e.textContent = attrs[k];
+        else e.setAttribute(k, attrs[k]);
+      }
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const bind = (fig, tl) => Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.afig-ctl') });
+    const hid = 'opacity:0';
+
+    /* ---------- Fig 2: CSA overlapping compression ---------- */
+    (() => {
+      const fig = document.getElementById('af-cmp');
+      const svg = fig.querySelector('svg');
+      const p = 25, tw = 22, x0 = 20, ty = 30;
+      const tx = (j) => x0 + p * j;
+      const bx = (b) => tx(4 * b), bw = 4 * p - 3, bc = (b) => bx(b) + bw / 2;
+      mk('text', { x: x0, y: 16, 'font-size': 13, class: 'soft', text: '16 个 token，每块 m = 4' }, svg);
+      const hl = [];
+      for (let i = 0; i < 4; i++) {
+        const g = mk('g', { style: hid }, svg);
+        if (i > 0) mk('rect', { x: bx(i - 1) - 3, y: ty - 4, width: bw + 6, height: tw + 8, rx: 6, style: 'fill:var(--accent-soft);stroke:var(--accent);stroke-width:2' }, g);
+        mk('rect', { x: bx(i) - 3, y: ty - 4, width: bw + 6, height: tw + 8, rx: 6, style: 'fill:color-mix(in srgb, var(--accent-2) 16%, transparent);stroke:var(--accent-2);stroke-width:2' }, g);
+        hl.push(g);
+      }
+      for (let j = 0; j < 16; j++) mk('rect', { x: tx(j), y: ty, width: tw, height: tw, rx: 4, style: 'fill:var(--bg-soft);stroke:var(--border)' }, svg);
+      for (let b = 0; b < 4; b++) mk('text', { x: bc(b), y: 72, 'text-anchor': 'middle', 'font-size': 13, class: 'soft', text: '块 ' + b }, svg);
+      const cov = [];
+      for (let i = 0; i < 4; i++) {
+        const y = 88 + 14 * i, ls = [];
+        if (i > 0) ls.push(mk('line', { x1: bx(i - 1) + 3, x2: bx(i - 1) + bw - 3, y1: y, y2: y, style: 'stroke:var(--accent);stroke-width:5;stroke-linecap:round' }, svg));
+        ls.push(mk('line', { x1: bx(i) + 3, x2: bx(i) + bw - 3, y1: y, y2: y, style: 'stroke:var(--accent-2);stroke-width:5;stroke-linecap:round' }, svg));
+        cov.push(ls);
+      }
+      const ey = 160, eh = 30;
+      const ent = [];
+      for (let i = 0; i < 4; i++) {
+        const g = mk('g', { style: hid }, svg);
+        mk('rect', { x: bc(i) - 36, y: ey, width: 72, height: eh, rx: 6, class: 'box-acc' }, g);
+        mk('text', { x: bc(i), y: ey + 20, 'text-anchor': 'middle', 'font-size': 13, text: '条目 ' + i }, g);
+        ent.push(g);
+      }
+      const foot = mk('text', { x: 220, y: 226, 'text-anchor': 'middle', 'font-size': 13, class: 'soft', style: hid, text: '每个条目看 8 个 token，相邻条目共用一个块' }, svg);
+      const tl = Anim.timeline();
+      for (let i = 0; i < 4; i++) {
+        const s = 0.3 + i * 2.0;
+        tl.to(hl[i], { opacity: 1 }, { at: s, dur: 0.3 });
+        const toks = [];
+        for (let j = Math.max(0, 4 * (i - 1)); j < 4 * i + 4; j++) toks.push(j);
+        toks.forEach((j, k) => {
+          const cx = tx(j) + tw / 2, cy = ty + tw / 2;
+          const d = mk('circle', { cx, cy, r: 4.5, class: j < 4 * i ? 'f-acc' : 'f-acc2', style: hid }, svg);
+          tl.to(d, { opacity: 1 }, { at: s + 0.2, dur: 0.15 })
+            .to(d, { x: bc(i) - cx, y: ey + eh / 2 - cy }, { at: s + 0.35 + k * 0.02, dur: 0.8 })
+            .to(d, { opacity: 0 }, { at: s + 1.3, dur: 0.15 });
+        });
+        tl.set(ent[i], { scale: 0.6 }, { at: 0 })
+          .to(ent[i], { opacity: 1 }, { at: s + 1.2, dur: 0.3 })
+          .to(ent[i], { scale: 1 }, { at: s + 1.2, dur: 0.4, ease: 'back' })
+          .to(cov[i], { draw: 1 }, { at: s + 1.3, dur: 0.4 })
+          .to(hl[i], { opacity: 0 }, { at: s + 1.75, dur: 0.25 });
+      }
+      tl.to(foot, { opacity: 1 }, { at: 8.2, dur: 0.4 });
+      bind(fig, tl);
+    })();
+
+    /* ---------- CSA: indexer scores, top-k, sliding window ---------- */
+    (() => {
+      const fig = document.getElementById('af-sel');
+      const svg = fig.querySelector('svg');
+      const tp = 9.6, tw = 8, x0 = 18, ty = 240;
+      const tx = (j) => x0 + tp * j;
+      const ex = (i) => x0 + 4 * tp * i, ew = 4 * tp - 2, ey = 212;
+      const scores = [0.30, 0.82, 0.22, 0.55, 0.95, 0.18, 0.42, 0.74, 0.28, 0.38];
+      const top = [4, 1, 7];
+      const base = 206, H = 100;
+      const title = mk('text', { x: x0, y: 16, 'font-size': 13, style: hid, text: '参加注意力：top-k 条目 + 滑窗 token（同一个 softmax）' }, svg);
+      const frame = mk('rect', { x: 10, y: 24, width: 262, height: 34, rx: 6, style: 'fill:none;stroke:var(--border);stroke-dasharray:4 3;opacity:0' }, svg);
+      const ylab = mk('text', { x: x0, y: 96, 'font-size': 13, class: 'soft', style: hid, text: 'indexer 分数 I(t, s)' }, svg);
+      const bars = scores.map((v, i) => {
+        const b = mk('rect', { x: ex(i) + 8, y: base, width: ew - 16, height: 0, rx: 2, style: 'fill:var(--text-faint)' }, svg);
+        const o = mk('rect', { x: ex(i) + 8, y: base, width: ew - 16, height: 0, rx: 2, class: 'f-acc', style: hid }, svg);
+        return [b, o];
+      });
+      for (let i = 0; i < 10; i++) mk('rect', { x: ex(i), y: ey, width: ew, height: 20, rx: 4, class: 'box-soft' }, svg);
+      for (let j = 0; j < 42; j++) mk('rect', { x: tx(j), y: ty, width: tw, height: 14, rx: 2, style: j === 41 ? 'fill:var(--accent)' : 'fill:var(--bg-soft);stroke:var(--border)' }, svg);
+      const q = mk('rect', { x: tx(41), y: ty, width: tw, height: 14, rx: 2, class: 'f-acc' }, svg);
+      mk('text', { x: tx(41) + tw / 2, y: 228, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:var(--accent)', text: 't' }, svg);
+      const win = mk('rect', { x: tx(34) - 2.5, y: ty - 4, width: 8 * tp + 3, height: 22, rx: 4, style: 'fill:none;stroke:var(--accent-2);stroke-width:2;opacity:0' }, svg);
+      mk('text', { x: x0, y: 276, 'font-size': 13, class: 'soft', text: 'token（每个压缩条目覆盖 4 个）' }, svg);
+      const wlab = mk('text', { x: tx(38), y: 276, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:var(--accent-2);opacity:0', text: '滑窗' }, svg);
+      const eMark = top.map((i) => mk('rect', { x: ex(i), y: ey, width: ew, height: 20, rx: 4, class: 'box-acc', style: hid }, svg));
+      const eClone = top.map((i) => mk('rect', { x: ex(i), y: ey, width: ew, height: 20, rx: 4, class: 'box-acc', style: hid }, svg));
+      const wClone = [];
+      for (let k = 0; k < 8; k++) wClone.push(mk('rect', { x: tx(34 + k), y: ty, width: tw, height: 14, rx: 2, class: 'f-acc2', style: hid }, svg));
+      const tl = Anim.timeline();
+      tl.to(q, { scale: 1.8 }, { at: 0.1, dur: 0.25 }).to(q, { scale: 1 }, { at: 0.35, dur: 0.25 });
+      tl.to(ylab, { opacity: 1 }, { at: 0.5, dur: 0.3 });
+      scores.forEach((v, i) => tl.to(bars[i], { attr: { y: base - H * v, height: H * v } }, { at: 0.6 + 0.07 * i, dur: 0.5 }));
+      top.forEach((i) => tl.to(bars[i][1], { opacity: 1 }, { at: 1.8, dur: 0.4 }));
+      scores.forEach((v, i) => { if (!top.includes(i)) tl.to(bars[i][0], { opacity: 0.3 }, { at: 1.8, dur: 0.4 }); });
+      tl.to([...eClone, ...eMark], { opacity: 1 }, { at: 1.8, dur: 0.4 });
+      tl.to([win, wlab], { opacity: 1 }, { at: 2.5, dur: 0.4 }).to(wClone, { opacity: 1 }, { at: 2.5, dur: 0.4 });
+      top.forEach((i, k) => tl.to(eClone[k], { x: 18 + 44 * k - ex(i), y: 31 - ey }, { at: 3.3 + 0.08 * k, dur: 1.0 }));
+      wClone.forEach((c, k) => tl.to(c, { x: 158 + 12 * k - tx(34 + k), y: 34 - ty }, { at: 3.5 + 0.04 * k, dur: 1.0 }));
+      tl.to([title, frame], { opacity: 1 }, { at: 4.6, dur: 0.4 });
+      bind(fig, tl);
+    })();
+
+    /* ---------- HCA: heavy compression, all entries attended ---------- */
+    (() => {
+      const fig = document.getElementById('af-hca');
+      const svg = fig.querySelector('svg');
+      const tp = 5.6, tw = 4.4, x0 = 20, ty = 196;
+      const tx = (j) => x0 + tp * j;
+      const gc = (g) => tx(16 * g) + (16 * tp - (tp - tw)) / 2;
+      const ey = 112, eh = 26;
+      const title = mk('text', { x: x0, y: 24, 'font-size': 13, style: hid, text: 'query 对全部 4 个条目做稠密注意力，外加滑窗' }, svg);
+      const lines = [0, 1, 2, 3].map((g) => mk('path', { d: 'M' + (tx(69) + tw / 2) + ' ' + (ty - 4) + ' Q' + ((gc(g) + tx(69)) / 2) + ' ' + (ty - 6) + ' ' + gc(g) + ' ' + (ey + eh), style: 'fill:none;stroke:var(--accent);stroke-width:1.6' }, svg));
+      const ent = [0, 1, 2, 3].map((g) => {
+        const e = mk('g', { style: hid }, svg);
+        mk('rect', { x: gc(g) - 38, y: ey, width: 76, height: eh, rx: 6, class: 'box-acc' }, e);
+        mk('text', { x: gc(g), y: ey + 18, 'text-anchor': 'middle', 'font-size': 13, text: '条目 ' + g }, e);
+        return e;
+      });
+      for (let j = 0; j < 70; j++) mk('rect', { x: tx(j), y: ty, width: tw, height: 14, rx: 1.5, style: 'fill:var(--bg-soft);stroke:var(--border);stroke-width:0.8' }, svg);
+      const q = mk('rect', { x: tx(69), y: ty, width: tw, height: 14, rx: 1.5, class: 'f-acc' }, svg);
+      const win = mk('rect', { x: tx(62) - 2, y: ty - 4, width: 8 * tp + 2.8, height: 22, rx: 4, style: 'fill:none;stroke:var(--accent-2);stroke-width:2;opacity:0' }, svg);
+      const wlab = mk('text', { x: tx(66), y: 232, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:var(--accent-2);opacity:0', text: '滑窗' }, svg);
+      mk('text', { x: x0, y: 232, 'font-size': 13, class: 'soft', text: '每 16 个 token 压成 1 个条目，不重叠' }, svg);
+      const tl = Anim.timeline();
+      for (let g = 0; g < 4; g++) {
+        const s = 0.3 + 1.1 * g;
+        for (let k = 0; k < 16; k++) {
+          const j = 16 * g + k, cx = tx(j) + tw / 2, cy = ty + 7;
+          const d = mk('circle', { cx, cy, r: 2.4, class: 'f-acc', style: hid }, svg);
+          tl.to(d, { opacity: 1 }, { at: s, dur: 0.1 })
+            .to(d, { x: gc(g) - cx, y: ey + eh / 2 - cy }, { at: s + 0.1 + 0.012 * k, dur: 0.7 })
+            .to(d, { opacity: 0 }, { at: s + 0.95, dur: 0.12 });
+        }
+        tl.set(ent[g], { scale: 0.6 }, { at: 0 })
+          .to(ent[g], { opacity: 1 }, { at: s + 0.8, dur: 0.25 })
+          .to(ent[g], { scale: 1 }, { at: s + 0.8, dur: 0.4, ease: 'back' });
+      }
+      tl.to(q, { scale: 1.8 }, { at: 4.9, dur: 0.25 }).to(q, { scale: 1 }, { at: 5.15, dur: 0.25 });
+      tl.to(lines, { draw: 1 }, { at: 5.2, dur: 0.7, stagger: 0.1 });
+      tl.to([win, wlab], { opacity: 1 }, { at: 5.9, dur: 0.4 });
+      tl.to(title, { opacity: 1 }, { at: 6.2, dur: 0.4 });
+      bind(fig, tl);
+    })();
+
+    /* ---------- mHC: n = 4 residual streams and one layer ---------- */
+    (() => {
+      const fig = document.getElementById('af-mhc');
+      const svg = fig.querySelector('svg');
+      const ys = [52, 86, 120, 154];
+      const B = [[0.70, 0.15, 0.10, 0.05], [0.10, 0.60, 0.20, 0.10], [0.15, 0.15, 0.55, 0.15], [0.05, 0.10, 0.15, 0.70]];
+      const C = [0.6, 1.4, 0.9, 1.1];
+      const xa = 90, xb0 = 120, xb1 = 250, xp = 332, An = [120, 222], Cn = [306, 222];
+      mk('text', { x: 20, y: 24, 'font-size': 13, class: 'soft', text: 'Xₗ：4 条残差流' }, svg);
+      mk('text', { x: 425, y: 24, 'text-anchor': 'end', 'font-size': 13, class: 'soft', text: 'Xₗ₊₁' }, svg);
+      ys.forEach((y) => { mk('line', { x1: 20, x2: xb0, y1: y, y2: y, class: 'ln' }, svg); mk('line', { x1: xb1, x2: 425, y1: y, y2: y, class: 'ln' }, svg); });
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) mk('line', { x1: xb0, y1: ys[j], x2: xb1, y2: ys[i], style: 'stroke:var(--accent);stroke-opacity:0.35;stroke-width:' + (0.6 + 6 * B[i][j]).toFixed(2) }, svg);
+      mk('text', { x: (xb0 + xb1) / 2, y: 182, 'text-anchor': 'middle', 'font-size': 13, class: 'soft', text: 'B：4 条流互相混合' }, svg);
+      const dash = 'stroke:var(--text-faint);stroke-width:1.2;stroke-dasharray:3 3;fill:none';
+      ys.forEach((y) => { mk('line', { x1: xa, y1: y, x2: An[0], y2: An[1], style: dash }, svg); mk('line', { x1: Cn[0], y1: Cn[1], x2: xp, y2: y, style: dash }, svg); });
+      mk('line', { x1: An[0], y1: An[1], x2: 170, y2: An[1], class: 'ln' }, svg);
+      mk('line', { x1: 270, y1: Cn[1], x2: Cn[0], y2: Cn[1], class: 'ln' }, svg);
+      const F = mk('g', {}, svg);
+      mk('rect', { x: 170, y: 204, width: 100, height: 36, rx: 6, class: 'box-acc2' }, F);
+      mk('text', { x: 220, y: 227, 'text-anchor': 'middle', 'font-size': 13, text: 'F：注意力/MoE' }, F);
+      const node = (c, t) => { const g = mk('g', {}, svg); mk('circle', { cx: c[0], cy: c[1], r: 11, class: 'box' }, g); mk('text', { x: c[0], y: c[1] + 4.5, 'text-anchor': 'middle', 'font-size': 13, text: t }, g); return g; };
+      const nA = node(An, 'A'), nC = node(Cn, 'C');
+      const plus = ys.map((y) => node([xp, y], '+'));
+      const dot = (x, y, r, cls) => mk('circle', { cx: x, cy: y, r, class: cls, style: hid }, svg);
+      const tl = Anim.timeline();
+      // the four streams arrive at the layer
+      const m = ys.map((y) => dot(32, y, 6, 'f-acc'));
+      tl.to(m, { opacity: 1 }, { at: 0, dur: 0.2 }).to(m, { x: xa - 32 }, { at: 0.1, dur: 0.6 });
+      // A: weighted sum of the streams feeds the sub-layer
+      const a = ys.map((y) => dot(xa, y, 4, 'f-acc'));
+      a.forEach((d, j) => tl.to(d, { opacity: 1 }, { at: 0.7, dur: 0.1 }).to(d, { x: An[0] - xa, y: An[1] - ys[j] }, { at: 0.75, dur: 0.6 }).to(d, { opacity: 0 }, { at: 1.35, dur: 0.1 }));
+      tl.to(nA, { scale: 1.35 }, { at: 1.35, dur: 0.15 }).to(nA, { scale: 1 }, { at: 1.5, dur: 0.2 });
+      const f = dot(An[0], An[1], 6, 'f-acc2');
+      tl.to(f, { opacity: 1 }, { at: 1.5, dur: 0.1 }).to(f, { x: 220 - An[0] }, { at: 1.5, dur: 0.6 }).to(f, { opacity: 0 }, { at: 2.1, dur: 0.1 });
+      tl.to(F, { scale: 1.08 }, { at: 2.1, dur: 0.25 }).to(F, { scale: 1 }, { at: 2.35, dur: 0.25 });
+      const o = dot(270, Cn[1], 6, 'f-acc2');
+      tl.to(o, { opacity: 1 }, { at: 2.6, dur: 0.1 }).to(o, { x: Cn[0] - 270 }, { at: 2.6, dur: 0.4 }).to(o, { opacity: 0 }, { at: 3.0, dur: 0.1 });
+      tl.to(nC, { scale: 1.35 }, { at: 3.0, dur: 0.15 }).to(nC, { scale: 1 }, { at: 3.15, dur: 0.2 });
+      // C: the sub-layer output is written back to every stream with its own weight
+      const c = ys.map((y, i) => dot(Cn[0], Cn[1], 2 + 3 * Math.sqrt(C[i]), 'f-acc2'));
+      c.forEach((d, i) => tl.to(d, { opacity: 1 }, { at: 3.1, dur: 0.1 }).to(d, { x: xp - Cn[0], y: ys[i] - Cn[1] }, { at: 3.15, dur: 0.65 }).to(d, { opacity: 0 }, { at: 3.85, dur: 0.15 }));
+      // B: every stream splits along the mixing matrix
+      tl.to(m, { x: xb0 - 32 }, { at: 0.75, dur: 0.35 }).to(m, { opacity: 0 }, { at: 1.15, dur: 0.1 });
+      for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+        const d = dot(xb0, ys[j], 6 * Math.sqrt(B[i][j]), 'f-acc');
+        tl.to(d, { opacity: 1 }, { at: 1.1, dur: 0.1 }).to(d, { x: xb1 - xb0, y: ys[i] - ys[j] }, { at: 1.2, dur: 1.4 }).to(d, { opacity: 0 }, { at: 2.65, dur: 0.1 });
+      }
+      const n = ys.map((y) => dot(xb1, y, 6, 'f-acc'));
+      tl.to(n, { opacity: 1 }, { at: 2.6, dur: 0.15 }).to(n, { x: xp - xb1 }, { at: 2.8, dur: 1.0 });
+      tl.to(plus, { scale: 1.3 }, { at: 3.8, dur: 0.15 }).to(plus, { scale: 1 }, { at: 3.95, dur: 0.2 });
+      tl.to(n, { x: 410 - xb1 }, { at: 4.1, dur: 0.7 });
+      bind(fig, tl);
+    })();
+
+    /* ---------- Sinkhorn: alternate column / row normalisation ---------- */
+    (() => {
+      const fig = document.getElementById('af-sk');
+      const svg = fig.querySelector('svg');
+      const Bt = [[1.2, -0.8, 0.3, 2.1], [-1.5, 0.4, 1.8, -0.2], [0.7, 2.4, -1.1, 0.5], [-0.3, -1.9, 0.9, 1.4]];
+      let M = Bt.map((r) => r.map(Math.exp));
+      const rows = (A) => A.map((r) => r.reduce((s, v) => s + v, 0));
+      const cols = (A) => [0, 1, 2, 3].map((j) => A.reduce((s, r) => s + r[j], 0));
+      const spec = (A) => { // power iteration on A^T A
+        let v = [1, 1, 1, 1];
+        for (let it = 0; it < 60; it++) {
+          const Av = A.map((r) => r.reduce((s, x, j) => s + x * v[j], 0));
+          const w = [0, 1, 2, 3].map((j) => A.reduce((s, r, i) => s + r[j] * Av[i], 0));
+          const nn = Math.hypot(...w); v = w.map((x) => x / nn);
+        }
+        return Math.hypot(...A.map((r) => r.reduce((s, x, j) => s + x * v[j], 0)));
+      };
+      const states = [{ M, kind: null }];
+      for (let h = 0; h < 8; h++) {
+        if (h % 2 === 0) { const cs = cols(M); M = M.map((r) => r.map((v, j) => v / cs[j])); }
+        else { const rs = rows(M); M = M.map((r, i) => r.map((v) => v / rs[i])); }
+        states.push({ M, kind: h % 2 ? 'row' : 'col' });
+      }
+      const cs = 54, gx = 70, gy = 58, f2 = (v) => v.toFixed(2);
+      const op = (A) => { const mx = Math.max(...A.flat()); return A.map((r) => r.map((v) => 0.06 + 0.6 * v / mx)); };
+      const hiC = mk('rect', { x: gx - 2, y: gy + 4 * cs + 4, width: 4 * cs + 4, height: 28, rx: 6, style: 'fill:color-mix(in srgb, var(--accent-2) 14%, transparent);stroke:var(--accent-2);stroke-width:1.5;opacity:0' }, svg);
+      const hiR = mk('rect', { x: gx + 4 * cs + 8, y: gy - 2, width: 58, height: 4 * cs + 4, rx: 6, style: 'fill:color-mix(in srgb, var(--accent-2) 14%, transparent);stroke:var(--accent-2);stroke-width:1.5;opacity:0' }, svg);
+      const cell = [], txt = [];
+      const o0 = op(states[0].M);
+      for (let i = 0; i < 4; i++) {
+        cell.push([]); txt.push([]);
+        for (let j = 0; j < 4; j++) {
+          mk('rect', { x: gx + j * cs + 2, y: gy + i * cs + 2, width: cs - 4, height: cs - 4, rx: 5, style: 'fill:var(--bg-soft);stroke:var(--border)' }, svg);
+          cell[i].push(mk('rect', { x: gx + j * cs + 2, y: gy + i * cs + 2, width: cs - 4, height: cs - 4, rx: 5, style: 'fill:var(--accent);opacity:' + o0[i][j].toFixed(3) }, svg));
+          txt[i].push(mk('text', { x: gx + j * cs + cs / 2, y: gy + i * cs + cs / 2 + 5, 'text-anchor': 'middle', 'font-size': 14, class: 'mono', text: f2(states[0].M[i][j]) }, svg));
+        }
+      }
+      mk('text', { x: gx + 4 * cs + 37, y: gy - 10, 'text-anchor': 'middle', 'font-size': 13, class: 'soft', text: '行和' }, svg);
+      mk('text', { x: gx - 10, y: gy + 4 * cs + 23, 'text-anchor': 'end', 'font-size': 13, class: 'soft', text: '列和' }, svg);
+      const r0 = rows(states[0].M), c0 = cols(states[0].M);
+      const rT = r0.map((v, i) => mk('text', { x: gx + 4 * cs + 37, y: gy + i * cs + cs / 2 + 5, 'text-anchor': 'middle', 'font-size': 14, class: 'mono', text: f2(v) }, svg));
+      const cT = c0.map((v, j) => mk('text', { x: gx + j * cs + cs / 2, y: gy + 4 * cs + 23, 'text-anchor': 'middle', 'font-size': 14, class: 'mono', text: f2(v) }, svg));
+      const round = mk('text', { x: gx - 50, y: 22, 'font-size': 14, text: '第 0 轮' }, svg);
+      const lc = mk('text', { x: gx + 40, y: 22, 'font-size': 14, style: 'fill:var(--accent-2);opacity:0', text: '列归一化' }, svg);
+      const lr = mk('text', { x: gx + 40, y: 22, 'font-size': 14, style: 'fill:var(--accent-2);opacity:0', text: '行归一化' }, svg);
+      const sn = mk('text', { x: 424, y: 22, 'text-anchor': 'end', 'font-size': 14, class: 'mono', text: '‖M‖₂ = ' + f2(spec(states[0].M)) }, svg);
+      const tl = Anim.timeline();
+      tl.set(sn, { text: spec(states[0].M), fmt: (v) => '‖M‖₂ = ' + f2(v) }, { at: 0 });
+      for (let h = 1; h < states.length; h++) {
+        const s = 0.4 + (h - 1) * 1.5, st = states[h], isCol = st.kind === 'col';
+        const hi = isCol ? hiC : hiR, lab = isCol ? lc : lr, other = isCol ? lr : lc;
+        if (isCol) tl.to(round, { text: (h + 1) / 2, fmt: (v) => '第 ' + Math.round(v) + ' 轮' }, { at: s, dur: 0.01 });
+        tl.to(hi, { opacity: 1 }, { at: s, dur: 0.25 }).to(lab, { opacity: 1 }, { at: s, dur: 0.25 }).to(other, { opacity: 0 }, { at: s, dur: 0.2 });
+        const oo = op(st.M), rs = rows(st.M), cs2 = cols(st.M);
+        for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) {
+          tl.to(txt[i][j], { text: st.M[i][j], fmt: f2 }, { at: s + 0.35, dur: 0.8 });
+          tl.to(cell[i][j], { opacity: oo[i][j] }, { at: s + 0.35, dur: 0.8 });
+        }
+        rT.forEach((e, i) => tl.to(e, { text: rs[i], fmt: f2 }, { at: s + 0.35, dur: 0.8 }));
+        cT.forEach((e, j) => tl.to(e, { text: cs2[j], fmt: f2 }, { at: s + 0.35, dur: 0.8 }));
+        tl.to(sn, { text: spec(st.M), fmt: (v) => '‖M‖₂ = ' + f2(v) }, { at: s + 0.35, dur: 0.8 });
+        tl.to(hi, { opacity: 0 }, { at: s + 1.2, dur: 0.2 });
+      }
+      bind(fig, tl);
     })();
   })();
   </script>

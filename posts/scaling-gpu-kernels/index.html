@@ -55,6 +55,17 @@
     .ta-log { font-size: 14px; color: var(--text-soft); margin-top: 10px; min-height: 3.2em; line-height: 1.6; }
     .ta-log b { color: var(--text); }
     .stat-scroll { overflow-x: auto; }
+    /* animated figures (assets/anim.js) */
+    .anim-fig svg { max-width: 560px; margin: 0 auto; }
+    .anim-fig .anim-ctl { max-width: 560px; margin: 0 auto; }
+    .anim-fig .lbl { font-size: 14px; }
+    .anim-fig .sm { font-size: 13px; }
+    .anim-fig .num { font-family: var(--font-mono); font-size: 14px; }
+    .anim-fig .hot-t { fill: var(--accent-2); font-weight: 600; }
+    .anim-fig .acc-f { fill: var(--accent); }
+    .anim-fig .hot-f { fill: var(--accent-2); }
+    .anim-fig .dash { fill: none; stroke: var(--text-faint); stroke-width: 1.2; stroke-dasharray: 4 3; }
+    .anim-fig .cur { fill: none; stroke: var(--accent-2); stroke-width: 2.5; }
     /* timeline */
     pre code .cm { color: var(--text-faint); }
   </style>
@@ -385,6 +396,12 @@ matmul_kernel[grid](a, b, c, M, N, K, a.stride(0), a.stride(1), b.stride(0), b.s
       <p>全局内存是 DRAM。DRAM 每次被访问时，并不是只读出你要的那个字，而是把一段连续地址并行读出来、以突发（burst）的形式送出。GPU 的内存系统也以固定大小的段为单位服务请求：对 compute capability 6.0 及以上的设备，CUDA Best Practices Guide 的说法是，<em>一个 warp 的并发访问会被合并成若干个 32 字节的事务，数量等于覆盖所有线程地址所需的 32 字节段数</em>。</p>
       <p>于是同一个 warp 的 32 个线程如果读的是 32 个相邻的 FP32（共 128 字节、对齐），只需要 4 个 32 字节事务，搬运的每个字节都有用；如果它们读的地址彼此相隔很远，就需要 32 个事务，搬了 1024 字节只用了 128 字节，有效带宽只剩 1/8。这就是<strong>访存合并</strong>（memory coalescing）：让同一个 warp 里相邻的线程访问相邻的地址。</p>
 
+      <figure class="fig anim-fig" id="coal-anim">
+        <svg viewBox="0 0 440 236" role="img" aria-label="一个 warp 的 32 个访存请求合并成 32 字节扇区：连续访问 4 个扇区，步长 64 时 32 个扇区"></svg>
+        <div class="anim-ctl"></div>
+        <figcaption>同一条 load 指令，32 个线程各发一个 4 B 请求。地址连续时它们落进 4 个扇区，搬 128 B 全部有用；步长 64 个元素时每个请求独占一个扇区，搬 1024 B 只用到 128 B。</figcaption>
+      </figure>
+
       <div class="demo" id="coal">
         <div class="demo-label">访存合并可视化：一个 warp 的 32 个线程 → 地址 → 32 字节扇区</div>
         <div class="seg" id="coal-preset" role="group" aria-label="预设">
@@ -445,33 +462,10 @@ const int y = blockIdx.y * BLOCKSIZE + (threadIdx.x % BLOCKSIZE);</code></pre>
 
       <h3>7.2 分块后的流量</h3>
       <p>把 C 切成 \(B_M\times B_N\) 的块，每个 block 负责一块。计算这块需要 A 的 \(B_M\) 行（\(B_M\times K\)）和 B 的 \(B_N\) 列（\(K\times B_N\)），沿 K 方向每次取 \(B_K\) 宽的一片放进共享内存：</p>
-      <figure class="fig">
-        <svg viewBox="0 0 760 260" role="img" aria-label="分块矩阵乘：A 的行条、B 的列条、C 的块，沿 K 方向滑动">
-          <text x="120" y="20" text-anchor="middle">A（M × K）</text>
-          <rect x="20" y="30" width="200" height="200" class="box"/>
-          <rect x="20" y="90" width="200" height="40" class="box-soft"/>
-          <rect x="70" y="90" width="40" height="40" class="box-acc"/>
-          <text x="90" y="115" text-anchor="middle" font-size="12">B_K</text>
-          <text x="232" y="115" class="soft" font-size="12">B_M</text>
-          <path d="M120 140 L160 140" class="ln-acc" marker-end="url(#ar)"/>
-          <text x="140" y="158" text-anchor="middle" class="soft" font-size="12">沿 K 滑动</text>
-
-          <text x="400" y="20" text-anchor="middle">B（K × N）</text>
-          <rect x="300" y="30" width="200" height="200" class="box"/>
-          <rect x="400" y="30" width="40" height="200" class="box-soft"/>
-          <rect x="400" y="80" width="40" height="40" class="box-acc"/>
-          <text x="420" y="105" text-anchor="middle" font-size="12">B_K</text>
-          <text x="420" y="246" text-anchor="middle" class="soft" font-size="12">B_N</text>
-
-          <text x="650" y="20" text-anchor="middle">C（M × N）</text>
-          <rect x="550" y="30" width="200" height="200" class="box"/>
-          <rect x="650" y="90" width="40" height="40" class="box-hot"/>
-          <text x="670" y="115" text-anchor="middle" font-size="12">acc</text>
-          <text x="650" y="170" text-anchor="middle" class="soft" font-size="12">一个 block 负责的 B_M × B_N 块</text>
-          <text x="650" y="188" text-anchor="middle" class="soft" font-size="12">累加器常驻寄存器</text>
-          <defs><marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent)"/></marker></defs>
-        </svg>
-        <figcaption>分块矩阵乘。每一步把 A 的 \(B_M\times B_K\) 片和 B 的 \(B_K\times B_N\) 片搬进共享内存，所有线程从共享内存读它们，乘加到寄存器里的累加器上。</figcaption>
+      <figure class="fig anim-fig" id="tile-fig">
+        <svg id="tile-svg" viewBox="0 0 440 356" role="img" aria-label="分块矩阵乘：A 的行条和 B 的列条沿 K 方向一片片搬进共享内存，乘加到寄存器里的累加器上"></svg>
+        <div class="anim-ctl"></div>
+        <figcaption>分块矩阵乘里的一个 block。每一步把 A 的 \(B_M\times B_K\) 片和 B 的 \(B_K\times B_N\) 片搬进共享内存，所有线程从共享内存读它们，乘加到寄存器里的累加器上；沿 K 走完后累加器写回 C，只写一次。</figcaption>
       </figure>
       <p>每一步从全局内存读 \((B_M+B_N)B_K\) 个元素，做 \(2B_MB_NB_K\) 次运算。一共有 \(\frac{M}{B_M}\cdot\frac{N}{B_N}\cdot\frac{K}{B_K}\) 步，所以：</p>
       $$\text{读取}_{\text{tiled}} = \frac{MNK}{B_MB_NB_K}(B_M+B_N)B_K = MNK\Big(\frac{1}{B_N}+\frac{1}{B_M}\Big).$$
@@ -628,6 +622,11 @@ C[localRow * N + localCol] = sum;</code></pre>
       $$\ell' = e^{m-m'}\ell + \sum_{k\in j} e^{s_k-m'},\qquad \tilde o' = e^{m-m'}\,\tilde o + \sum_{k\in j} e^{s_k-m'}\,v_k.$$
       <p>第二个式子的道理和 \(\ell\) 一样：旧的每一项 \(e^{s_k-m}v_k\) 乘上 \(e^{m-m'}\) 就变成了以新最大值为基准的 \(e^{s_k-m'}v_k\)。处理完所有块后，\(o = \tilde o/\ell\)。用归纳法很容易验证：每一步之后，\(\tilde o\) 和 \(\ell\) 都恰好等于「对已处理的所有项、以当前 \(m\) 为基准」的和，所以最后一步得到精确结果，<strong>不是近似</strong>。</p>
       <p>每一块要做的事：一个小矩阵乘得到 \(s^{(j)}\)；按行求最大值；指数；按行求和；把旧的 \(\tilde o\) 和 \(\ell\) 乘一个修正因子 \(e^{m-m'}\)；再一个小矩阵乘 \(\tilde P_jV_j\) 加到 \(\tilde o\) 上。上面的步进动画里切到 FlashAttention 模式，就能逐块看到 \(m\)、\(\ell\) 和输出的变化。</p>
+      <figure class="fig anim-fig" id="fa-anim">
+        <svg viewBox="0 0 440 404" role="img" aria-label="FlashAttention 前向：Q 块常驻片上，K/V 块依次流过，m、ℓ 和未归一化输出逐块更新，最后写回一次"></svg>
+        <div class="anim-ctl"></div>
+        <figcaption>一个 Q 块的前向（FA2 的循环顺序）：\(Q_i\) 常驻片上，\(K_j,V_j\) 一块块流过；每块先算分数块 \(S_{ij}\)，更新 \(m\)，把旧的 \(\ell\) 和 \(\tilde o\) 乘上 \(e^{m-m'}\)，再加上这一块的贡献。右边跟踪 \(Q_i\) 的第 1 行，\(d=4\)；分数和 \(V\) 是示意数值，\(m,\ell,\tilde o\) 按公式实时算出。\(S\) 从不写回 HBM，\(O_i\) 最后只写一次。</figcaption>
+      </figure>
 
       <h2 id="fa1">12. FlashAttention：分块 + 重计算</h2>
       <h3>12.1 算法</h3>
@@ -1243,6 +1242,315 @@ C[localRow * N + localCol] = sum;</code></pre>
   })();
 })();
 
+  </script>
+  <script src="/assets/anim.js"></script>
+  <script id="anim-figs">
+(() => {
+  if (!window.Anim) return;
+  const NS = 'http://www.w3.org/2000/svg';
+  const mk = (tag, attrs, parent, text) => {
+    const e = document.createElementNS(NS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text != null) e.textContent = text;
+    if (parent) parent.appendChild(e);
+    return e;
+  };
+  const hidden = (e) => { e.style.opacity = '0'; return e; };
+  const bind = (fig, tl) => Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.anim-ctl') });
+
+  /* ---------- coalescing: 32 requests -> 32-byte sectors ---------- */
+  (() => {
+    const fig = document.getElementById('coal-anim');
+    if (!fig) return;
+    const svg = fig.querySelector('svg');
+    const X = (i) => 12 + i * 13;
+    mk('text', { x: 12, y: 18, class: 'lbl' }, svg, '一个 warp：32 个线程');
+    const lab1 = mk('text', { x: 428, y: 18, 'text-anchor': 'end', class: 'sm soft' }, svg, '连续：线程 t 读 a[t]');
+    const lab2 = hidden(mk('text', { x: 428, y: 18, 'text-anchor': 'end', class: 'sm soft' }, svg, '步长 64：线程 t 读 a[64t]'));
+    for (let i = 0; i < 32; i++) mk('rect', { x: X(i), y: 28, width: 11, height: 14, rx: 2, class: 'box-acc' }, svg);
+    // scene 1: 4 sectors of 8 words
+    const s1 = mk('g', {}, svg);
+    const words = [], hit1 = [];
+    for (let s = 0; s < 4; s++) mk('rect', { x: X(8 * s) - 1, y: 118, width: 104, height: 40, rx: 3, class: 'box-soft' }, s1);
+    for (let i = 0; i < 32; i++) words.push(hidden(mk('rect', { x: X(i), y: 122, width: 11, height: 32, rx: 1.5, class: 'acc-f' }, s1)));
+    for (let s = 0; s < 4; s++) hit1.push(hidden(mk('rect', { x: X(8 * s) - 1, y: 118, width: 104, height: 40, rx: 3, class: 'cur' }, s1)));
+    // scene 2: 32 sectors, 1/8 of each used
+    const s2 = hidden(mk('g', {}, svg));
+    const sliv = [], hit2 = [];
+    for (let i = 0; i < 32; i++) mk('rect', { x: X(i), y: 118, width: 11, height: 40, rx: 2, class: 'box-soft' }, s2);
+    for (let i = 0; i < 32; i++) sliv.push(hidden(mk('rect', { x: X(i), y: 118, width: 11, height: 5, class: 'acc-f' }, s2)));
+    for (let i = 0; i < 32; i++) hit2.push(hidden(mk('rect', { x: X(i), y: 118, width: 11, height: 40, rx: 2, class: 'cur' }, s2)));
+    const m1 = mk('text', { x: 12, y: 178, class: 'sm soft' }, svg, 'HBM：每格是一个对齐的 32 B 扇区，实心是用到的字节');
+    const m2 = hidden(mk('text', { x: 12, y: 178, class: 'sm soft' }, svg, '每格一个 32 B 扇区（相邻两格实际相隔 256 B）'));
+    // requests
+    const dots = [];
+    for (let i = 0; i < 32; i++) dots.push(hidden(mk('circle', { cx: X(i) + 5.5, cy: 48, r: 3.2, class: 'hot-f' }, svg)));
+    // readouts
+    mk('text', { x: 12, y: 212, class: 'sm soft' }, svg, '事务数');
+    const nSec = mk('text', { x: 62, y: 212, class: 'num' }, svg, '0');
+    mk('text', { x: 108, y: 212, class: 'sm soft' }, svg, '搬运');
+    const nByte = mk('text', { x: 142, y: 212, class: 'num' }, svg, '0');
+    mk('text', { x: 218, y: 212, class: 'sm soft' }, svg, '有用 128 B');
+    mk('text', { x: 304, y: 212, class: 'sm soft' }, svg, '利用率');
+    const u1 = hidden(mk('text', { x: 352, y: 212, class: 'num' }, svg, '100%'));
+    const u2 = hidden(mk('text', { x: 352, y: 212, class: 'num hot-t' }, svg, '12.5%'));
+    mk('text', { x: 12, y: 230, class: 'sm faint' }, svg, '每个请求 4 B（FP32）');
+
+    const tl = Anim.timeline();
+    const ceil = (v) => Math.ceil(v - 1e-6);
+    // scene 1
+    const st1 = 0.25, fall = 0.7, stg1 = 0.02;
+    tl.to(dots, { opacity: 1 }, { at: 0, dur: 0.25 })
+      .to(dots, { y: 70 }, { at: st1, dur: fall, stagger: stg1, ease: 'in' })
+      .to(dots, { opacity: 0 }, { at: st1 + fall, dur: 0.12, stagger: stg1 })
+      .to(words, { opacity: 1 }, { at: st1 + fall, dur: 0.15, stagger: stg1 })
+      .to(hit1, { opacity: 1 }, { at: st1 + fall, dur: 0.15, stagger: 8 * stg1 })
+      .to(nSec, { text: 4, fmt: (v) => String(ceil(v)) }, { at: st1 + fall, dur: 32 * stg1, ease: 'linear' })
+      .to(nByte, { text: 128, fmt: (v) => ceil(v / 32) * 32 + ' B' }, { at: st1 + fall, dur: 32 * stg1, ease: 'linear' })
+      .to(u1, { opacity: 1 }, { dur: 0.3 })
+      .label('contiguous')
+      .wait(1.4);
+    // switch scene
+    const sw = tl.duration;
+    tl.to([s1, lab1, m1, u1], { opacity: 0 }, { at: sw, dur: 0.5 })
+      .to([s2, lab2, m2], { opacity: 1 }, { at: sw + 0.2, dur: 0.5 })
+      .set(nSec, { text: 0, fmt: (v) => String(ceil(v)) }, { at: sw + 0.3 })
+      .set(nByte, { text: 0, fmt: (v) => ceil(v / 32) * 32 + ' B' }, { at: sw + 0.3 })
+      .set(dots, { y: 0 }, { at: sw + 0.3 });
+    const st2 = sw + 0.9, stg2 = 0.045;
+    tl.to(dots, { opacity: 1 }, { at: st2 - 0.25, dur: 0.25 })
+      .to(dots, { y: 70 }, { at: st2, dur: fall, stagger: stg2, ease: 'in' })
+      .to(dots, { opacity: 0 }, { at: st2 + fall, dur: 0.12, stagger: stg2 })
+      .to(sliv, { opacity: 1 }, { at: st2 + fall, dur: 0.15, stagger: stg2 })
+      .to(hit2, { opacity: 1 }, { at: st2 + fall, dur: 0.15, stagger: stg2 })
+      .to(nSec, { text: 32, fmt: (v) => String(ceil(v)) }, { at: st2 + fall, dur: 32 * stg2, ease: 'linear' })
+      .to(nByte, { text: 1024, fmt: (v) => ceil(v / 32) * 32 + ' B' }, { at: st2 + fall, dur: 32 * stg2, ease: 'linear' })
+      .to(u2, { opacity: 1 }, { dur: 0.3 })
+      .label('strided');
+    bind(fig, tl);
+  })();
+
+  /* ---------- tiled matmul: tiles of A and B through SMEM ---------- */
+  (() => {
+    const fig = document.getElementById('tile-fig');
+    if (!fig) return;
+    const svg = fig.querySelector('svg');
+    const KT = 5, T = 24;
+    mk('rect', { x: 6, y: 6, width: 428, height: 192, rx: 10, class: 'box-soft' }, svg);
+    mk('text', { x: 16, y: 26, class: 'lbl', 'font-weight': 600 }, svg, 'HBM');
+    [['A（M×K）', 80], ['B（K×N）', 220], ['C（M×N）', 360]].forEach(([t, x]) => mk('text', { x, y: 44, 'text-anchor': 'middle', class: 'lbl' }, svg, t));
+    [20, 160, 300].forEach((x) => mk('rect', { x, y: 52, width: 120, height: 120, class: 'box' }, svg));
+    mk('rect', { x: 20, y: 76, width: 120, height: T, class: 'box-acc', opacity: 0.55 }, svg);
+    mk('rect', { x: 220, y: 52, width: T, height: 120, class: 'box-acc', opacity: 0.55 }, svg);
+    for (let k = 1; k < KT; k++) {
+      mk('line', { x1: 20 + k * T, y1: 76, x2: 20 + k * T, y2: 100, class: 'ln' }, svg);
+      mk('line', { x1: 220, y1: 52 + k * T, x2: 244, y2: 52 + k * T, class: 'ln' }, svg);
+    }
+    mk('rect', { x: 360, y: 76, width: T, height: T, class: 'dash' }, svg);
+    const cOut = hidden(mk('rect', { x: 360, y: 76, width: T, height: T, class: 'box-hot' }, svg));
+    const curA = mk('g', {}, svg); mk('rect', { x: 20, y: 76, width: T, height: T, class: 'cur' }, curA);
+    const curB = mk('g', {}, svg); mk('rect', { x: 220, y: 52, width: T, height: T, class: 'cur' }, curB);
+    hidden(curA); hidden(curB);
+    const stepTxt = mk('text', { x: 16, y: 190, class: 'sm soft' }, svg, '');
+    mk('rect', { x: 6, y: 210, width: 276, height: 140, rx: 10, class: 'box' }, svg);
+    mk('text', { x: 16, y: 230, class: 'lbl', 'font-weight': 600 }, svg, '共享内存 SMEM');
+    mk('rect', { x: 296, y: 210, width: 138, height: 140, rx: 10, class: 'box' }, svg);
+    mk('text', { x: 306, y: 230, class: 'lbl', 'font-weight': 600 }, svg, '寄存器');
+    const SA = [80, 282], SB = [190, 282], ACC = [365, 282];
+    mk('rect', { x: SA[0] - 24, y: SA[1] - 24, width: 48, height: 48, class: 'dash' }, svg);
+    mk('rect', { x: SB[0] - 24, y: SB[1] - 24, width: 48, height: 48, class: 'dash' }, svg);
+    mk('text', { x: SA[0], y: 328, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'A 片 B_M×B_K');
+    mk('text', { x: SB[0], y: 328, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'B 片 B_K×B_N');
+    mk('rect', { x: ACC[0] - 24, y: ACC[1] - 24, width: 48, height: 48, class: 'box-hot' }, svg);
+    const accFill = mk('rect', { x: ACC[0] - 24, y: ACC[1] + 24, width: 48, height: 0, class: 'hot-f', opacity: 0.55 }, svg);
+    mk('text', { x: ACC[0], y: 328, 'text-anchor': 'middle', class: 'sm soft' }, svg, '累加器 acc');
+    mk('line', { x1: 214, y1: ACC[1], x2: 334, y2: ACC[1], class: 'ln', 'stroke-dasharray': '3 3' }, svg);
+    mk('text', { x: 268, y: ACC[1] - 8, 'text-anchor': 'middle', class: 'sm faint' }, svg, '乘加');
+    const tA = [], tB = [], pA = [], pB = [];
+    for (let k = 0; k < KT; k++) {
+      const ga = hidden(mk('g', {}, svg)); mk('rect', { x: 20 + k * T, y: 76, width: T, height: T, class: 'box-acc' }, ga); tA.push(ga);
+      const gb = hidden(mk('g', {}, svg)); mk('rect', { x: 220, y: 52 + k * T, width: T, height: T, class: 'box-acc' }, gb); tB.push(gb);
+      pA.push(hidden(mk('circle', { cx: SA[0] + 26, cy: ACC[1], r: 4, class: 'acc-f' }, svg)));
+      pB.push(hidden(mk('circle', { cx: SB[0] + 26, cy: ACC[1], r: 4, class: 'acc-f' }, svg)));
+    }
+    const accOut = hidden(mk('g', {}, svg)); mk('rect', { x: ACC[0] - 24, y: ACC[1] - 24, width: 48, height: 48, class: 'box-hot' }, accOut);
+    const fmt = (v) => (v < 0.5 ? '' : 'K 方向第 ' + Math.round(v) + ' / ' + KT + ' 步 · 已从 HBM 读 A、B 各 ' + Math.round(v) + ' 片');
+
+    const tl = Anim.timeline();
+    tl.to([curA, curB], { opacity: 1 }, { at: 0.2, dur: 0.3 });
+    for (let k = 0; k < KT; k++) {
+      const t0 = tl.duration;
+      if (k > 0) {
+        tl.to(curA, { x: k * T }, { at: t0, dur: 0.35 }).to(curB, { y: k * T }, { at: t0, dur: 0.35 });
+      }
+      const t1 = t0 + (k > 0 ? 0.35 : 0);
+      tl.set(stepTxt, { text: k + 1, fmt }, { at: t1 })
+        .to([tA[k], tB[k]], { opacity: 1 }, { at: t1, dur: 0.15 })
+        .to(tA[k], { x: SA[0] - (32 + k * T), y: SA[1] - 88, scale: 2 }, { at: t1 + 0.1, dur: 0.8 })
+        .to(tB[k], { x: SB[0] - 232, y: SB[1] - (64 + k * T), scale: 2 }, { at: t1 + 0.1, dur: 0.8 });
+      if (k > 0) tl.to([tA[k - 1], tB[k - 1]], { opacity: 0 }, { at: t1 + 0.6, dur: 0.3 });
+      const t2 = t1 + 0.95;
+      tl.to([pA[k], pB[k]], { opacity: 1 }, { at: t2, dur: 0.1 })
+        .to(pA[k], { x: ACC[0] - 24 - (SA[0] + 26) }, { at: t2, dur: 0.55, ease: 'linear' })
+        .to(pB[k], { x: ACC[0] - 24 - (SB[0] + 26) }, { at: t2, dur: 0.4, ease: 'linear' })
+        .to([pA[k], pB[k]], { opacity: 0 }, { at: t2 + 0.5, dur: 0.1 })
+        .to(accFill, { attr: { height: 48 * (k + 1) / KT, y: ACC[1] + 24 - 48 * (k + 1) / KT } }, { at: t2 + 0.45, dur: 0.4 })
+        .label('k' + k)
+        .wait(0.25);
+    }
+    const te = tl.duration;
+    tl.to([curA, curB, tA[KT - 1], tB[KT - 1]], { opacity: 0 }, { at: te, dur: 0.3 })
+      .set(stepTxt, { text: 0, fmt: () => 'K 走完：累加器写回 C，每个输出只写一次' }, { at: te })
+      .to(accOut, { opacity: 1 }, { at: te, dur: 0.15 })
+      .to(accOut, { x: 372 - ACC[0], y: 88 - ACC[1], scale: 0.5 }, { at: te + 0.1, dur: 0.9 })
+      .to(cOut, { opacity: 1 }, { at: te + 0.9, dur: 0.2 })
+      .to(accOut, { opacity: 0 }, { at: te + 1.0, dur: 0.1 })
+      .label('done');
+    bind(fig, tl);
+  })();
+
+  /* ---------- FlashAttention forward for one Q block ---------- */
+  (() => {
+    const fig = document.getElementById('fa-anim');
+    if (!fig) return;
+    const svg = fig.querySelector('svg');
+    // illustrative numbers: scores of row 1 per K/V block, and V (16 positions x d=4)
+    const S = [[0.5, 1.2, -0.3, 0.8], [2.1, 0.4, 1.0, -0.5], [0.2, 1.5, 0.9, 0.1], [2.6, 0.3, -1.0, 1.1]];
+    let seed = 7;
+    const rnd = () => { seed = (seed * 16807) % 2147483647; return seed / 2147483647; };
+    const V = Array.from({ length: 16 }, () => Array.from({ length: 4 }, () => 0.15 + 0.85 * rnd()));
+    const other = Array.from({ length: 4 }, () => Array.from({ length: 16 }, () => 0.15 + 0.6 * rnd()));
+    // online softmax, recorded per block
+    const steps = [];
+    let m = -Infinity, l = 0, o = [0, 0, 0, 0];
+    S.forEach((blk, j) => {
+      const m2 = Math.max(m, ...blk);
+      const c = m === -Infinity ? 0 : Math.exp(m - m2);
+      const p = blk.map((s) => Math.exp(s - m2));
+      const lScaled = l * c, oScaled = o.map((x) => x * c);
+      const l2 = lScaled + p.reduce((a, b) => a + b, 0);
+      const o2 = oScaled.map((x, k) => x + p.reduce((a, pk, q) => a + pk * V[j * 4 + q][k], 0));
+      steps.push({ m2, c, lScaled, oScaled, l2, o2, argmax: blk.indexOf(Math.max(...blk)), p });
+      m = m2; l = l2; o = o2;
+    });
+    const out = o.map((x) => x / l);
+
+    // HBM row
+    mk('rect', { x: 6, y: 6, width: 428, height: 80, rx: 10, class: 'box-soft' }, svg);
+    mk('text', { x: 16, y: 26, class: 'lbl', 'font-weight': 600 }, svg, 'HBM');
+    const GX = [24, 126, 228, 330], TY = 54, TW = 20;
+    const tileX = (g, j) => GX[g] + j * 23;
+    ['Q', 'K', 'V', 'O'].forEach((n, g) => {
+      mk('text', { x: GX[g] + 44, y: 46, 'text-anchor': 'middle', class: 'sm soft' }, svg, n + ' 的 4 块');
+      for (let j = 0; j < 4; j++) mk('rect', { x: tileX(g, j), y: TY, width: TW, height: TW, rx: 2, class: g === 0 && j === 0 ? 'box-acc' : 'box' }, svg);
+    });
+    const oDone = hidden(mk('rect', { x: tileX(3, 0), y: TY, width: TW, height: TW, rx: 2, class: 'box-hot' }, svg));
+    // on-chip area
+    mk('rect', { x: 6, y: 100, width: 428, height: 298, rx: 10, class: 'box' }, svg);
+    mk('text', { x: 16, y: 120, class: 'lbl', 'font-weight': 600 }, svg, '片上：SMEM / 寄存器');
+    const QC = [70, 214], KC = [146, 152], VC = [226, 214];
+    const SX = 114, SY = 182, CW = 16;
+    [QC, KC, VC].forEach((c) => mk('rect', { x: c[0] - 22, y: c[1] - 22, width: 44, height: 44, class: 'dash' }, svg));
+    mk('text', { x: QC[0], y: 256, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'Q_i 常驻');
+    mk('text', { x: KC[0] + 30, y: KC[1] + 5, class: 'sm soft' }, svg, 'K_j');
+    mk('text', { x: VC[0], y: 256, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'V_j');
+    mk('text', { x: SX + 32, y: 270, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'S_ij = Q_i K_jᵀ');
+    mk('rect', { x: SX, y: SY, width: 64, height: 64, class: 'box-soft' }, svg);
+    const cells = [];
+    for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
+      cells.push(hidden(mk('rect', { x: SX + c * CW + 1, y: SY + r * CW + 1, width: CW - 2, height: CW - 2, class: 'acc-f' }, svg)));
+    }
+    mk('rect', { x: SX - 2, y: SY - 2, width: 68, height: CW + 4, class: 'dash' }, svg);
+    const maxMark = [];
+    for (let j = 0; j < 4; j++) maxMark.push(hidden(mk('rect', { x: SX + steps[j].argmax * CW, y: SY, width: CW, height: CW, class: 'cur' }, svg)));
+    // score text row
+    mk('text', { x: 16, y: 300, class: 'sm soft' }, svg, '第 1 行 s：');
+    const sRows = S.map((blk, j) => {
+      const g = hidden(mk('g', {}, svg));
+      blk.forEach((v, q) => mk('text', { x: 108 + q * 40, y: 300, 'text-anchor': 'middle', class: 'num' + (q === steps[j].argmax ? ' hot-t' : '') }, g, (v < 0 ? '−' : '') + Math.abs(v).toFixed(1)));
+      return g;
+    });
+    // stats panel
+    const PX = 272;
+    mk('text', { x: PX, y: 150, class: 'lbl' }, svg, 'm');
+    mk('text', { x: PX, y: 174, class: 'lbl' }, svg, 'ℓ');
+    mk('text', { x: PX, y: 198, class: 'lbl' }, svg, 'e^(m−m′)');
+    const fm = (v) => (v < -50 ? '−∞' : v.toFixed(2));
+    const fc = (v) => (v < -0.5 ? '—' : v.toFixed(2));
+    const mT = mk('text', { x: 426, y: 150, 'text-anchor': 'end', class: 'num' }, svg, '-99');
+    const lT = mk('text', { x: 426, y: 174, 'text-anchor': 'end', class: 'num' }, svg, '0');
+    const cT = mk('text', { x: 426, y: 198, 'text-anchor': 'end', class: 'num' }, svg, '-1');
+    const oLab = mk('text', { x: PX, y: 230, class: 'sm soft' }, svg, 'õ（第 1 行，未归一化）');
+    const oLab2 = hidden(mk('text', { x: PX, y: 230, class: 'sm hot-t' }, svg, 'o = õ / ℓ，写回 HBM'));
+    const BASE = 372, SC = 26;
+    mk('line', { x1: PX, y1: BASE, x2: 426, y2: BASE, class: 'ln' }, svg);
+    const bars = [0, 1, 2, 3].map((k) => mk('rect', { x: PX + 6 + k * 38, y: BASE, width: 26, height: 0, class: 'acc-f', opacity: 0.85 }, svg));
+    const barH = (vals) => vals.map((v) => v * SC);
+    const blkT = mk('text', { x: 16, y: 340, class: 'sm soft' }, svg, '');
+    // movers
+    const mover = (g, j) => { const e = hidden(mk('g', {}, svg)); mk('rect', { x: tileX(g, j), y: TY, width: TW, height: TW, rx: 2, class: g === 3 ? 'box-hot' : 'box-acc' }, e); return e; };
+    const qM = mover(0, 0);
+    const kM = [0, 1, 2, 3].map((j) => mover(1, j));
+    const vM = [0, 1, 2, 3].map((j) => mover(2, j));
+    const toSlot = (g, j, c) => ({ x: c[0] - (tileX(g, j) + TW / 2), y: c[1] - (TY + TW / 2), scale: 2.2 });
+    const setBars = (tl, vals, at, dur) => bars.forEach((b, k) => tl.to(b, { attr: { height: vals[k], y: BASE - vals[k] } }, { at, dur }));
+
+    const tl = Anim.timeline();
+    tl.to(qM, { opacity: 1 }, { at: 0.1, dur: 0.15 })
+      .to(qM, toSlot(0, 0, QC), { at: 0.2, dur: 0.8 })
+      .label('q');
+    steps.forEach((st, j) => {
+      let t = tl.duration + 0.2;
+      tl.set(blkT, { text: j + 1, fmt: (v) => (v < 0.5 ? '' : 'K/V 块 j = ' + Math.round(v) + ' / 4') }, { at: t });
+      tl.to(kM[j], { opacity: 1 }, { at: t, dur: 0.15 }).to(kM[j], toSlot(1, j, KC), { at: t + 0.1, dur: 0.7 });
+      if (j > 0) {
+        tl.to([kM[j - 1], vM[j - 1], sRows[j - 1], maxMark[j - 1]], { opacity: 0 }, { at: t + 0.4, dur: 0.3 })
+          .to(cells, { opacity: 0 }, { at: t + 0.4, dur: 0.3 });
+      }
+      t += 0.85;
+      // S tile computed row by row
+      const vals = [];
+      for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) vals.push(r === 0 ? 0.25 + 0.75 * st.p[c] / Math.max(...st.p) : other[j][r * 4 + c]);
+      cells.forEach((cell, i) => tl.to(cell, { opacity: vals[i] }, { at: t + i * 0.03, dur: 0.25 }));
+      tl.to(sRows[j], { opacity: 1 }, { at: t + 0.1, dur: 0.3 });
+      t += 0.75;
+      // new max
+      tl.to(maxMark[j], { opacity: 1 }, { at: t, dur: 0.2 })
+        .to(mT, { text: st.m2, fmt: fm }, { at: t, dur: 0.5 })
+        .to(cT, { text: st.c, fmt: fc }, { at: t, dur: j === 0 ? 0 : 0.5 });
+      t += 0.6;
+      // rescale old state
+      if (j > 0 && st.c < 0.999) {
+        tl.to(lT, { text: st.lScaled, fmt: (v) => v.toFixed(2) }, { at: t, dur: 0.6 });
+        setBars(tl, barH(st.oScaled), t, 0.6);
+        t += 0.75;
+      }
+      // V block arrives, add this block's contribution
+      tl.to(vM[j], { opacity: 1 }, { at: t, dur: 0.15 }).to(vM[j], toSlot(2, j, VC), { at: t + 0.1, dur: 0.6 });
+      t += 0.7;
+      tl.to(lT, { text: st.l2, fmt: (v) => v.toFixed(2) }, { at: t, dur: 0.6 });
+      setBars(tl, barH(st.o2), t, 0.6);
+      tl.label('b' + j, t + 0.6).wait(0.5);
+    });
+    // finalize
+    let t = tl.duration + 0.1;
+    tl.to([kM[3], vM[3], sRows[3], maxMark[3], qM], { opacity: 0 }, { at: t, dur: 0.4 })
+      .to(cells, { opacity: 0 }, { at: t, dur: 0.4 })
+      .set(blkT, { text: 0, fmt: () => '4 块走完：除以 ℓ，O_i 写回一次' }, { at: t })
+      .to(oLab, { opacity: 0 }, { at: t, dur: 0.3 })
+      .to(oLab2, { opacity: 1 }, { at: t + 0.2, dur: 0.3 });
+    setBars(tl, barH(out), t + 0.3, 0.7);
+    t += 1.1;
+    const oM = hidden(mk('g', {}, svg));
+    mk('rect', { x: PX + 6, y: BASE - 40, width: 140, height: 40, rx: 3, class: 'box-hot' }, oM);
+    tl.to(oM, { opacity: 1 }, { at: t, dur: 0.2 })
+      .to(oM, { x: tileX(3, 0) + TW / 2 - (PX + 76), y: TY + TW / 2 - (BASE - 20), scale: 0.15 }, { at: t + 0.2, dur: 0.9 })
+      .to(oDone, { opacity: 1 }, { at: t + 1.05, dur: 0.2 })
+      .to(oM, { opacity: 0 }, { at: t + 1.1, dur: 0.1 })
+      .label('end');
+    bind(fig, tl);
+  })();
+})();
   </script>
   <script src="/assets/post-links.js"></script>
   <script src="/assets/posts.js"></script>

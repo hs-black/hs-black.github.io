@@ -44,6 +44,9 @@
     .mix input { width: 5.2em; font: inherit; font-size: 13px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-soft); color: var(--text); }
     .mix td.num { text-align: right; font-family: var(--font-mono); font-size: 13px; }
     .mix tr.over td.num.ep { color: var(--accent-2); font-weight: 600; }
+    .afig svg { display: block; width: 100%; max-width: 600px; height: auto; margin: 0 auto; }
+    .afig svg text { font-family: var(--font-sans); }
+    .afig .anim-bar { max-width: 600px; margin-left: auto; margin-right: auto; }
     .mix-wrap { overflow-x: auto; position: relative; }
   </style>
 </head>
@@ -180,6 +183,12 @@
       <p>的迭代都<strong>不改变奇异向量</strong>，只把每个奇异值独立地映射为 \(\varphi(\sigma)=a\sigma+b\sigma^3+c\sigma^5\)。要得到 \(UV^\top\)，只需让 \(\varphi\) 反复作用后把 \([0,1]\) 里的每个数都推到 1 附近。先把 \(X_0=G/\|G\|_F\) 归一化，保证所有奇异值 \(\le1\)。经典的三次版本 \(\varphi(\sigma)=\tfrac32\sigma-\tfrac12\sigma^3\) 能精确收敛到 1，但对很小的奇异值，每步只放大 1.5 倍，太慢。<a href="https://kellerjordan.github.io/posts/muon/">Keller Jordan</a> 的做法是把系数调成</p>
       $$(a,b,c)=(3.4445,\ -4.7750,\ 2.0315),$$
       <p>让 \(\varphi'(0)=a\) 尽量大（小奇异值增长最快），代价是不再精确收敛到 1，而是在大约 \([0.7,1.3]\) 之间振荡——他发现这个误差不影响训练 loss。5 步就够。实际代码里还在 BF16 下做迭代，矩阵行多于列时先转置（让 \(XX^\top\) 是较小的那个方阵）。拿一个 2×2 矩阵看这个过程最直观：它把单位圆映成椭圆，椭圆的两个半轴就是两个奇异值；正交化就是把椭圆变回圆。</p>
+
+      <figure class="afig" id="af-ns">
+        <svg viewBox="0 0 440 250" role="img" aria-label="Newton–Schulz 迭代把一个病态矩阵的奇异值逐步推向 1：椭圆变圆，奇异值柱变齐"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>Muon 的五次 Newton–Schulz 作用在一个奇异值按 0.6 的幂衰减的 8×8 动量矩阵上（示意）。左：单位圆在最大、最小两个奇异方向张成的平面里被映成的椭圆；右：8 个奇异值。迭代只改奇异值、不改朝向，最后所有奇异值都落在 1 附近，但不正好等于 1。</figcaption>
+      </figure>
 
       <div class="demo" id="ns">
         <div class="demo-label">Newton–Schulz 迭代：2×2 矩阵的奇异值</div>
@@ -414,6 +423,7 @@
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
   <script src="/assets/series.js"></script>
+  <script src="/assets/anim.js"></script>
   <script>
     (() => {
       const $ = (id) => document.getElementById(id);
@@ -646,6 +656,152 @@
       $('mix-add').addEventListener('click', () => { rows.push(['新来源', 100, 0]); mixRender(); });
       mixRender();
     })();
+  </script>
+  <script>
+  /* ---------- animated figures (assets/anim.js) ---------- */
+  (() => {
+    if (!window.Anim) return;
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) {
+        if (k === 'text') e.textContent = attrs[k];
+        else e.setAttribute(k, attrs[k]);
+      }
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const bind = (fig, tl) => Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.afig-ctl') });
+    const hid = 'opacity:0';
+    const T = { fill: 'fill:var(--text)', soft: 'fill:var(--text-soft)', faint: 'fill:var(--text-faint)' };
+
+    /* ---------- Muon: Newton–Schulz pushes every singular value toward 1 ---------- */
+    (() => {
+      const fig = document.getElementById('af-ns');
+      if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const [a, b, c] = [3.4445, -4.7750, 2.0315];
+      const raw = [0, 1, 2, 3, 4, 5, 6, 7].map((i) => 0.6 ** i);   // a fast-decaying spectrum (illustrative)
+      const fro = Math.hypot(...raw);
+      const steps = [raw.map((s) => s / fro)];
+      for (let k = 0; k < 5; k++) steps.push(steps[k].map((s) => a * s + b * s ** 3 + c * s ** 5));
+      const cx = 105, cy = 132, R = 80;
+      mk('circle', { cx, cy, r: R, style: 'fill:none;stroke:var(--text-faint);stroke-width:1.2;stroke-dasharray:4 4' }, svg);
+      mk('text', { x: cx, y: cy + R + 20, 'text-anchor': 'middle', 'font-size': 13, style: T.soft, text: '虚线：单位圆（σ = 1）' }, svg);
+      const g = mk('g', { transform: 'translate(' + cx + ' ' + cy + ') rotate(-30)' }, svg);
+      const s0 = steps[0];
+      const ell = mk('ellipse', { cx: 0, cy: 0, rx: R * s0[0], ry: R * s0[7], style: 'fill:var(--accent-soft);stroke:var(--accent);stroke-width:2' }, g);
+      const ax1 = mk('line', { x1: 0, y1: 0, x2: R * s0[0], y2: 0, style: 'stroke:var(--accent);stroke-width:1.5' }, g);
+      const ax2 = mk('line', { x1: 0, y1: 0, x2: 0, y2: -R * s0[7], style: 'stroke:var(--accent-2);stroke-width:2' }, g);
+      const bx0 = 228, pitch = 26, bw = 18, base = 214, H = 130;
+      const yOne = base - H;
+      mk('line', { x1: bx0 - 6, x2: bx0 + 8 * pitch, y1: yOne, y2: yOne, style: 'stroke:var(--text-faint);stroke-dasharray:4 3' }, svg);
+      mk('text', { x: bx0 - 10, y: yOne + 4, 'text-anchor': 'end', 'font-size': 13, style: T.soft, text: '1' }, svg);
+      mk('line', { x1: bx0 - 6, x2: bx0 + 8 * pitch, y1: base, y2: base, style: 'stroke:var(--border)' }, svg);
+      mk('text', { x: bx0 + 4 * pitch - 4, y: base + 20, 'text-anchor': 'middle', 'font-size': 13, style: T.soft, text: '8 个奇异值（降序）' }, svg);
+      const bars = s0.map((s, i) => mk('rect', { x: bx0 + i * pitch, y: base - H * s, width: bw, height: H * s, rx: 2, style: i === 0 ? 'fill:var(--accent)' : i === 7 ? 'fill:var(--accent-2)' : 'fill:var(--text-faint)' }, svg));
+      const kT = mk('text', { x: 12, y: 24, 'font-size': 15, style: T.fill, text: '' }, svg);
+      const rT = mk('text', { x: 428, y: 24, 'text-anchor': 'end', 'font-size': 14, style: T.soft, text: '' }, svg);
+      const fmtK = (v) => (v < 0.5 ? '归一化：X₀ = M / ‖M‖' : 'Newton–Schulz 第 ' + Math.round(v) + ' 步');
+      const fmtR = (v) => 'σ_min / σ_max = ' + v.toFixed(2);
+      const tl = Anim.timeline();
+      tl.set(kT, { text: 0, fmt: fmtK }, { at: 0 }).set(rT, { text: s0[7] / s0[0], fmt: fmtR }, { at: 0 });
+      for (let k = 1; k <= 5; k++) {
+        const s = 0.6 + (k - 1) * 1.5, v = steps[k];
+        const mx = Math.max(...v), mn = Math.min(...v);
+        tl.to(kT, { text: k, fmt: fmtK }, { at: s, dur: 0.01 });
+        tl.to(ell, { attr: { rx: R * v[0], ry: R * v[7] } }, { at: s, dur: 1.0 });
+        tl.to(ax1, { attr: { x2: R * v[0] } }, { at: s, dur: 1.0 });
+        tl.to(ax2, { attr: { y2: -R * v[7] } }, { at: s, dur: 1.0 });
+        v.forEach((x, i) => tl.to(bars[i], { attr: { y: base - H * x, height: H * x } }, { at: s + 0.03 * i, dur: 1.0 }));
+        tl.to(rT, { text: mn / mx, fmt: fmtR }, { at: s, dur: 1.0 });
+      }
+      tl.wait(0.3);
+      bind(fig, tl);
+    })();
+
+    /* ---------- QK-Clip: per-head rescaling of W_q / W_k ---------- */
+    (() => {
+      const fig = document.getElementById('af-qk');
+      if (!fig) return;
+      const svg = fig.querySelector('svg');
+      const tau = 100, kap = [40, 55, 70, 30], grow = [1.03, 1.05, 1.12, 1.01];
+      const base = 236, px = 1.0, yS = (v) => base - px * v;
+      const hx = (h) => 30 + 56 * h;
+      // simulate 5 steps: optimizer update, then clip heads with S > tau
+      let q = [1, 1, 1, 1], k = [1, 1, 1, 1];
+      const S = () => kap.map((K, h) => K * q[h] * k[h]);
+      const hist = [{ q: q.slice(), k: k.slice(), S: S(), clip: [] }];
+      for (let t = 1; t <= 5; t++) {
+        q = q.map((v, h) => v * grow[h]); k = k.map((v, h) => v * grow[h]);
+        const upd = { q: q.slice(), k: k.slice(), S: S() };
+        const clip = [];
+        upd.S.forEach((s, h) => { if (s > tau) { const gm = tau / s; q[h] *= Math.sqrt(gm); k[h] *= Math.sqrt(gm); clip.push(h); } });
+        hist.push({ upd, q: q.slice(), k: k.slice(), S: S(), clip });
+      }
+      // threshold line across both panels
+      mk('line', { x1: 14, x2: 432, y1: yS(tau), y2: yS(tau), style: 'stroke:var(--accent-2);stroke-width:1.5;stroke-dasharray:6 4' }, svg);
+      mk('text', { x: 14, y: yS(tau) - 6, 'font-size': 13, style: 'fill:var(--accent-2)', text: 'τ = 100' }, svg);
+      mk('line', { x1: 14, x2: 236, y1: base, y2: base, style: 'stroke:var(--border)' }, svg);
+      const sBar = [], ex = [], qB = [], kB = [];
+      for (let h = 0; h < 4; h++) {
+        const s0 = hist[0].S[h];
+        sBar.push(mk('rect', { x: hx(h) - 4, y: yS(s0), width: 22, height: px * s0, rx: 2, style: 'fill:var(--accent)' }, svg));
+        ex.push(mk('rect', { x: hx(h) - 4, y: yS(tau), width: 22, height: 0, rx: 2, style: 'fill:var(--accent-2)' }, svg));
+        qB.push(mk('rect', { x: hx(h) + 21, y: base - 30, width: 7, height: 30, style: 'fill:var(--text-faint)' }, svg));
+        kB.push(mk('rect', { x: hx(h) + 30, y: base - 30, width: 7, height: 30, style: 'fill:var(--text-soft)' }, svg));
+        mk('text', { x: hx(h) + 16, y: base + 18, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:var(--text-soft)', text: '头 ' + (h + 1) }, svg);
+      }
+      mk('text', { x: 14, y: 60, 'font-size': 13, style: T.soft, text: '每个头的 S_max（粗）与 ‖W_q‖、‖W_k‖（细）' }, svg);
+      // right: S_max of head 3 over steps
+      const cx0 = 262, cdx = 32, X = (t) => cx0 + cdx * t;
+      mk('line', { x1: cx0, x2: X(5) + 4, y1: base, y2: base, style: 'stroke:var(--border)' }, svg);
+      mk('text', { x: (cx0 + X(5)) / 2, y: base + 18, 'text-anchor': 'middle', 'font-size': 13, style: T.soft, text: '训练步 →' }, svg);
+      mk('text', { x: cx0, y: 82, 'font-size': 13, style: T.soft, text: '头 3 的 S_max' }, svg);
+      const clip = mk('clipPath', { id: 'qk-clipR' }, svg);
+      const cr = mk('rect', { x: cx0 - 6, y: 60, width: 8, height: base - 58 }, clip);
+      const free = [hist[0].S[2]];
+      for (let t = 1; t <= 5; t++) free.push(kap[2] * grow[2] ** (2 * t));
+      const top = 90;
+      const cy = (v) => Math.max(top, yS(v));
+      mk('path', { d: free.map((v, t) => (t ? 'L' : 'M') + X(t) + ' ' + cy(v)).join(' '), 'clip-path': 'url(#qk-clipR)', style: 'fill:none;stroke:var(--text-faint);stroke-width:1.6;stroke-dasharray:5 4' }, svg);
+      let d = 'M' + X(0) + ' ' + yS(hist[0].S[2]);
+      for (let t = 1; t <= 5; t++) { d += ' L' + X(t) + ' ' + yS(hist[t].upd.S[2]); if (hist[t].clip.includes(2)) d += ' L' + X(t) + ' ' + yS(hist[t].S[2]); }
+      mk('path', { d, 'clip-path': 'url(#qk-clipR)', style: 'fill:none;stroke:var(--accent);stroke-width:2.2;stroke-linejoin:round' }, svg);
+      const lgFree = mk('text', { x: X(5) + 2, y: top + 4, 'text-anchor': 'end', 'font-size': 12.5, style: 'fill:var(--text-faint);opacity:0', text: '不裁剪' }, svg);
+      const stepT = mk('text', { x: 14, y: 24, 'font-size': 15, style: T.fill, text: '第 0 步' }, svg);
+      const lu = mk('text', { x: 100, y: 24, 'font-size': 14, style: 'fill:var(--accent);opacity:0', text: '优化器更新：权重谱范数变大' }, svg);
+      const lc = mk('text', { x: 100, y: 24, 'font-size': 14, style: 'fill:var(--accent-2);opacity:0', text: 'QK-Clip：W_q、W_k 各乘 √γ' }, svg);
+      const tl = Anim.timeline();
+      const setState = (st, at, dur) => {
+        for (let h = 0; h < 4; h++) {
+          const s = st.S[h];
+          tl.to(sBar[h], { attr: { y: yS(s), height: px * s } }, { at, dur });
+          tl.to(ex[h], { attr: { y: yS(Math.max(s, tau)), height: px * Math.max(0, s - tau) } }, { at, dur });
+          tl.to(qB[h], { attr: { y: base - 30 * st.q[h], height: 30 * st.q[h] } }, { at, dur });
+          tl.to(kB[h], { attr: { y: base - 30 * st.k[h], height: 30 * st.k[h] } }, { at, dur });
+        }
+      };
+      let t0 = 0.4;
+      for (let t = 1; t <= 5; t++) {
+        const h = hist[t];
+        tl.to(stepT, { text: t, fmt: (v) => '第 ' + Math.round(v) + ' 步' }, { at: t0, dur: 0.01 });
+        tl.to(lu, { opacity: 1 }, { at: t0, dur: 0.2 }).to(lc, { opacity: 0 }, { at: t0, dur: 0.2 });
+        setState(h.upd, t0, 0.8);
+        tl.to(cr, { attr: { width: X(t) - cx0 + 4 } }, { at: t0, dur: 0.8, ease: 'linear' });
+        t0 += 1.0;
+        if (h.clip.length) {
+          tl.to(lc, { opacity: 1 }, { at: t0, dur: 0.2 }).to(lu, { opacity: 0 }, { at: t0, dur: 0.2 });
+          setState(h, t0 + 0.2, 0.7);
+          tl.to(cr, { attr: { width: X(t) - cx0 + 8 } }, { at: t0 + 0.2, dur: 0.7 });
+          t0 += 1.2;
+        }
+        t0 += 0.2;
+      }
+      tl.to(lgFree, { opacity: 1 }, { at: t0 - 0.4, dur: 0.4 });
+      bind(fig, tl);
+    })();
+  })();
   </script>
   <script src="/assets/post-links.js"></script>
   <script src="/assets/posts.js"></script>

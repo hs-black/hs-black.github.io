@@ -74,6 +74,10 @@
     .tl-btns input[type="range"] { flex: 1; min-width: 160px; }
     .share { display: flex; height: 14px; border-radius: 4px; overflow: hidden; margin-top: 8px; background: var(--bg-soft); }
     .share span { height: 100%; }
+    .afig { margin: 1.4em 0 0; }
+    .afig svg { display: block; width: 100%; max-width: 600px; height: auto; margin: 0 auto; }
+    .afig svg text { font-family: var(--font-sans); }
+    .afig .anim-bar { max-width: 600px; margin-left: auto; margin-right: auto; }
     .kbd { font-family: var(--font-mono); font-size: 0.9em; }
   </style>
 </head>
@@ -444,6 +448,12 @@
       <h3>完全重算（full）</h3>
       <p>在每个 Transformer 层的边界设检查点，即只存每层的输入。反向到某层时，先用这个输入把该层前向重跑一遍，再做反向。等于在反向里多做一次完整的前向。按每个参数、每个 token 计，前向 2 FLOPs、重算 2、反向 4，训练 FLOPs 从 \(6ND\) 变成约 \(8ND\)（第 10 节会推导这个 2 : 4），多出三分之一；实际一步的耗时通常也会增加 30–40%。显存方面，激活值从每层几十个 \(sbh\) 降到每层一个 \(2sbh\)，再加上反向时一层的工作集。</p>
 
+      <figure class="afig" id="af-mem">
+        <svg viewBox="0 0 440 410" role="img" aria-label="一步训练中的显存：静态部分固定，激活值前向逐层压栈、反向逐层弹出；完全重算只存每层输入，峰值更低但时间更长"></svg>
+        <div class="afig-ctl"></div>
+        <figcaption>一步训练里的显存（4 层，大小为示意；梯度画成预先分配好的缓冲）。权重、梯度和优化器状态是固定的底座；激活值在前向时逐层压栈，反向时按相反顺序弹出，曲线是一个锯齿。完全重算只存每层的输入，反向到某层时先把这一层的激活重算出来、用完即弃，峰值低得多，代价是每层多一次前向，整步更长。</figcaption>
+      </figure>
+
       <h3>选择性重算（selective）</h3>
       <p>完全重算有点浪费：并不是所有激活都同样「贵」。关键的观察是：注意力里 \(QK^\top\)、softmax、乘 V 这几步，激活值很大（带 \(as^2\) 项）但计算量相对小（每个元素只做很少的运算）；而线性层的激活值小、重算却贵。所以只丢掉注意力核心部分，保留其余。公式里的 \(5as/h\) 项正是来自这部分：对 GPT-3（\(a=96, s=2048, h=12288\)）\(5as/h = 80\)，比 34 还大。Korthikanti 等人在 GPT-3 上测得，这样能省 70% 的激活显存，只多 2.7% 的 FLOPs。选择性重算后每层的激活值变成 \(34\,sbh\)，和序列长度呈线性。</p>
       <p>如果把一次迭代的 FLOPs 精确写出来（包括注意力和输出层），模型本身的 FLOPs 和选择性重算后硬件实际做的 FLOPs 分别是：</p>
@@ -700,6 +710,7 @@ optimizer.step()</code></pre>
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
   <script src="/assets/series.js"></script>
+  <script src="/assets/anim.js"></script>
   <script>
   (() => {
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -997,6 +1008,137 @@ optimizer.step()</code></pre>
       }
       setPre('405b');
     })();
+  })();
+  </script>
+  <script>
+  /* ---------- animated figure (assets/anim.js): memory over one step, with / without recomputation ---------- */
+  (() => {
+    if (!window.Anim) return;
+    const fig = document.getElementById('af-mem');
+    if (!fig) return;
+    const svg = fig.querySelector('svg');
+    const NS = 'http://www.w3.org/2000/svg';
+    const mk = (tag, attrs, parent) => {
+      const e = document.createElementNS(NS, tag);
+      for (const k in attrs) {
+        if (k === 'text') e.textContent = attrs[k];
+        else e.setAttribute(k, attrs[k]);
+      }
+      if (parent) parent.appendChild(e);
+      return e;
+    };
+    const L = 4, U = 0.45, T0 = 0.3;           // seconds per time unit, start offset
+    const at = (u) => T0 + u * U;
+    const BOT = 300, STAT = [['权重', 30, '--m-w'], ['梯度', 20, '--m-g'], ['优化器状态', 40, '--m-opt']];
+    const SH = STAT.reduce((s, x) => s + x[1], 0);
+    const ACT = 26, CK = 6, stripY = 34;
+    const tl = Anim.timeline();
+    const traces = [];
+
+    function column(cx, title, recompute) {
+      mk('text', { x: cx, y: 20, 'text-anchor': 'middle', 'font-size': 14, style: 'fill:var(--text)', text: title }, svg);
+      const bx = (l) => cx - 81 + l * 42;
+      for (let l = 0; l < L; l++) {
+        mk('rect', { x: bx(l), y: stripY, width: 36, height: 22, rx: 4, style: 'fill:var(--surface);stroke:var(--border)' }, svg);
+        mk('text', { x: bx(l) + 18, y: stripY + 16, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:var(--text-soft)', text: 'L' + (l + 1) }, svg);
+      }
+      const cur = (style) => mk('rect', { x: bx(0) - 2, y: stripY - 2, width: 40, height: 26, rx: 5, style: 'fill:none;stroke-width:2.5;opacity:0;' + style }, svg);
+      const cF = cur('stroke:var(--accent)'), cB = cur('stroke:var(--accent-2)'), cR = cur('stroke:var(--accent);stroke-dasharray:4 3');
+      const lab = (t, col) => mk('text', { x: cx, y: 76, 'text-anchor': 'middle', 'font-size': 13, style: 'opacity:0;fill:var(' + col + ')', text: t }, svg);
+      const lF = lab('前向 →', '--accent'), lB = lab('← 反向', '--accent-2'), lR = lab('重算这一层的前向', '--accent');
+      // static base
+      let y = BOT;
+      STAT.forEach(([n, h, c]) => {
+        y -= h;
+        mk('rect', { x: cx - 50, y, width: 100, height: h - 1, rx: 3, style: 'fill:var(' + c + ');opacity:0.85' }, svg);
+        mk('text', { x: cx, y: y + h / 2 + 4.5, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:#fff', text: n }, svg);
+      });
+      const blk = (top, h, text, dashed) => {
+        const g = mk('g', { style: 'opacity:0' }, svg);
+        mk('rect', { x: cx - 50, y: top, width: 100, height: h - 1, rx: 3, style: dashed ? 'fill:var(--m-act);fill-opacity:0.45;stroke:var(--m-act);stroke-dasharray:4 3' : 'fill:var(--m-act)' }, g);
+        if (text) mk('text', { x: cx, y: top + h / 2 + 4.5, 'text-anchor': 'middle', 'font-size': 13, style: 'fill:' + (dashed ? 'var(--text)' : '#fff'), text }, g);
+        return g;
+      };
+      const show = (el, u, top) => { tl.set(el, { y: 86 - top }, { at: 0 }).to(el, { opacity: 1 }, { at: at(u), dur: 0.15 }).to(el, { y: 0 }, { at: at(u), dur: 0.45 }); };
+      const pop = (el, u) => { tl.to(el, { y: -24, opacity: 0 }, { at: at(u), dur: 0.35 }); };
+      const phase = (lbl, c, l, u) => {
+        [lF, lB, lR].forEach((x) => tl.to(x, { opacity: x === lbl ? 1 : 0 }, { at: at(u), dur: 0.15 }));
+        [cF, cB, cR].forEach((x) => tl.to(x, { opacity: x === c ? 1 : 0 }, { at: at(u), dur: 0.15 }));
+        tl.to(c, { x: l * 42 }, { at: at(u), dur: 0.2 });
+      };
+      const ev = [[0, 0]];  // [time unit, activation px]
+      let mem = 0;
+      const step = (u, dv) => { mem += dv; ev.push([u, mem]); };
+      let u = 0;
+      const stack = [];
+      const per = recompute ? CK : ACT;
+      for (let l = 0; l < L; l++) {
+        phase(lF, cF, l, u);
+        const top = BOT - SH - per * (l + 1);
+        const b = blk(top, per, recompute ? '' : 'L' + (l + 1) + ' 激活');
+        stack.push(b);
+        show(b, u, top);
+        step(u + 0.5, per);
+        u += 1;
+      }
+      for (let l = L - 1; l >= 0; l--) {
+        const mine = stack[l];
+        if (recompute) {
+          phase(lR, cR, l, u);
+          const top = BOT - SH - CK * (l + 1) - ACT;
+          const r = blk(top, ACT, 'L' + (l + 1) + ' 重算', true);
+          show(r, u, top);
+          step(u + 0.5, ACT);
+          u += 1;
+          phase(lB, cB, l, u);
+          pop(r, u + 1.6); pop(mine, u + 1.6);
+          step(u + 1.8, -ACT - CK);
+          u += 2;
+        } else {
+          phase(lB, cB, l, u);
+          pop(mine, u + 1.6);
+          step(u + 1.8, -ACT);
+          u += 2;
+        }
+      }
+      [lF, lB, lR, cF, cB, cR].forEach((x) => tl.to(x, { opacity: 0 }, { at: at(u), dur: 0.2 }));
+      const peak = Math.max(...ev.map((e) => e[1]));
+      const py = BOT - SH - peak;
+      const pk = mk('g', { style: 'opacity:0' }, svg);
+      mk('line', { x1: cx - 62, x2: cx + 62, y1: py, y2: py, style: 'stroke:var(--text);stroke-dasharray:5 4' }, pk);
+      mk('text', { x: cx + 64, y: py + 4.5, 'font-size': 12.5, style: 'fill:var(--text-soft)', text: '峰值' }, pk);
+      const tPeak = ev.find((e) => e[1] === peak)[0];
+      tl.to(pk, { opacity: 1 }, { at: at(tPeak), dur: 0.3 });
+      traces.push({ ev, end: u });
+    }
+
+    column(110, '不重算', false);
+    column(330, '完全重算', true);
+
+    // memory trace
+    const X0 = 44, X1 = 428, TU = 16, CB = 392, CS = 0.5;
+    const X = (u) => X0 + (X1 - X0) * u / TU, Y = (v) => CB - 8 - CS * v;
+    mk('line', { x1: X0, x2: X1, y1: CB, y2: CB, style: 'stroke:var(--border)' }, svg);
+    mk('line', { x1: X0, x2: X1, y1: Y(0), y2: Y(0), style: 'stroke:var(--text-faint);stroke-dasharray:2 3' }, svg);
+    mk('text', { x: X0 - 4, y: Y(0) + 4, 'text-anchor': 'end', 'font-size': 13, style: 'fill:var(--text-soft)', text: '底座' }, svg);
+    mk('text', { x: X0 - 4, y: Y(50), 'text-anchor': 'end', 'font-size': 13, style: 'fill:var(--text-soft)', text: '激活' }, svg);
+    mk('text', { x: X1, y: CB + 0, 'text-anchor': 'end', 'font-size': 12.5, style: 'fill:var(--text-faint)', dy: 14, text: '时间 →' }, svg);
+    const clip = mk('clipPath', { id: 'mem-clip' }, svg);
+    const cr = mk('rect', { x: X0 - 2, y: 310, width: 0, height: 100 }, clip);
+    const colors = ['var(--text-soft)', 'var(--accent)'];
+    traces.forEach(({ ev }, i) => {
+      let d = 'M' + X(0) + ' ' + Y(0), prev = 0;
+      ev.slice(1).forEach(([u, v]) => { d += ' L' + X(u) + ' ' + Y(prev) + ' L' + X(u) + ' ' + Y(v); prev = v; });
+      d += ' L' + X(traces[i].end) + ' ' + Y(prev);
+      mk('path', { d, 'clip-path': 'url(#mem-clip)', style: 'fill:none;stroke-width:2;stroke-linejoin:round;stroke:' + colors[i] }, svg);
+    });
+    mk('line', { x1: 270, x2: 286, y1: 324, y2: 324, style: 'stroke-width:2;stroke:' + colors[0] }, svg);
+    mk('text', { x: 290, y: 328.5, 'font-size': 13, style: 'fill:var(--text-soft)', text: '不重算' }, svg);
+    mk('line', { x1: 340, x2: 356, y1: 324, y2: 324, style: 'stroke-width:2;stroke:' + colors[1] }, svg);
+    mk('text', { x: 360, y: 328.5, 'font-size': 13, style: 'fill:var(--text-soft)', text: '完全重算' }, svg);
+    tl.to(cr, { attr: { width: X1 - X0 + 4 } }, { at: T0, dur: TU * U, ease: 'linear' });
+    tl.wait(0.3);
+    Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.afig-ctl') });
   })();
   </script>
   <script src="/assets/post-links.js"></script>

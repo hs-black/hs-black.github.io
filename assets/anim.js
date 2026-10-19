@@ -42,7 +42,7 @@
   function targets(sel, root) {
     if (typeof sel === 'string') return Array.from((root || document).querySelectorAll(sel));
     if (sel instanceof Element) return [sel];
-    return Array.from(sel);
+    return Array.from(sel).flatMap((x) => targets(x, root));
   }
 
   // Per-element animated state, flushed to the DOM after every render.
@@ -61,7 +61,7 @@
     if (XFORM.includes(key)) return state(el)[key];
     if (key === 'opacity') { const o = getComputedStyle(el).opacity; return o === '' ? 1 : +o; }
     if (key === 'draw') return el.dataset.draw !== undefined ? +el.dataset.draw : 0;
-    if (key === 'text') return parseFloat(el.textContent) || 0;
+    if (key === 'text') { if (el.dataset.animText === undefined) el.dataset.animText = el.textContent; return parseFloat(el.textContent) || 0; }
     if (COLOR_PROPS.includes(key)) {
       const cs = getComputedStyle(el);
       return rgba(key === 'background' ? cs.backgroundColor : cs[key]);
@@ -172,6 +172,8 @@
     function render(t) {
       if (!built) build();
       for (const { el, key, init, segs } of built) {
+        // Before its first tween a text element keeps whatever it said originally.
+        if (key === 'text' && segs[0] && t < segs[0].start) { el.textContent = el.dataset.animText; continue; }
         let v = init;
         let fmt;
         for (const s of segs) {
@@ -227,6 +229,13 @@
       else raf = 0;
     }
     api.player = player;
+    // Colors are resolved from CSS tokens when the timeline is built; rebuild
+    // when the color scheme flips so var(--accent) etc. follow light/dark.
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if (!built) return;
+      built.forEach((b) => { if (b.key === 'text' && b.el.dataset.animText !== undefined) b.el.textContent = b.el.dataset.animText; });
+      built = null; lastT = t; render(t);
+    });
     return api;
   }
 
