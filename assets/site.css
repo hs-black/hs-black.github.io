@@ -465,6 +465,7 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
 .table-wrap table { min-width: 480px; }
 
 .prose .katex-display { overflow-x: auto; overflow-y: hidden; padding: 4px 0; }
+.prose .katex { position: relative; }
 
 .prose details {
   padding: 10px 16px;

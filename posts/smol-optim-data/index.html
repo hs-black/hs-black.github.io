@@ -1,0 +1,651 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>分词器、优化器、超参与数据配比 · Zunzhe Zhang</title>
+  <meta name="description" content="读 Smol Training Playbook：BPE 与分词器评估、AdamW 与 Muon、学习率调度、batch size 与超参 scaling law、数据配比与多阶段训练。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .table-wrap { position: relative; }
+    .prose .katex { position: relative; }
+    .fig { margin: 1.4em 0; }
+    .fig svg { display: block; width: 100%; height: auto; }
+    svg .t { fill: var(--text); font-family: var(--font-sans); }
+    svg .ts { fill: var(--text-soft); font-family: var(--font-sans); }
+    svg .tf { fill: var(--text-faint); font-family: var(--font-sans); }
+    svg .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    svg .box-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    svg .box-b { fill: color-mix(in srgb, var(--accent-2) 12%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    svg .ln { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+    svg .ln-a { stroke: var(--accent); stroke-width: 2.5; fill: none; }
+    svg .ln-b { stroke: var(--accent-2); stroke-width: 2.5; fill: none; }
+    svg .grid { stroke: var(--border); stroke-width: 1; fill: none; }
+    svg .fa { fill: var(--accent); }
+    svg .fb { fill: var(--accent-2); }
+    svg .ff { fill: var(--text-faint); }
+    .demo svg { display: block; width: 100%; height: auto; }
+    .note-small { font-size: 13px; color: var(--text-faint); margin-top: 10px; line-height: 1.6; }
+    .two { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; align-items: start; }
+    @media (max-width: 640px) { .two { grid-template-columns: 1fr; } }
+    .toks { display: flex; flex-wrap: wrap; gap: 6px 10px; margin-top: 10px; font-family: var(--font-mono); font-size: 14px; }
+    .word { display: inline-flex; gap: 2px; align-items: center; }
+    .word .tk { padding: 1px 5px; border-radius: 5px; background: var(--accent-soft); color: var(--text); border: 1px solid color-mix(in srgb, var(--accent) 35%, transparent); }
+    .word .tk.new { background: color-mix(in srgb, var(--accent-2) 20%, transparent); border-color: var(--accent-2); }
+    .word .cnt { color: var(--text-faint); font-size: 12px; margin-left: 3px; }
+    .merges { font-family: var(--font-mono); font-size: 13px; color: var(--text-soft); margin-top: 8px; line-height: 1.7; max-height: 7.5em; overflow-y: auto; }
+    .mix { width: 100%; border-collapse: collapse; font-size: 14px; }
+    .mix th, .mix td { padding: 6px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+    .mix input { width: 5.2em; font: inherit; font-size: 13px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-soft); color: var(--text); }
+    .mix td.num { text-align: right; font-family: var(--font-mono); font-size: 13px; }
+    .mix tr.over td.num.ep { color: var(--accent-2); font-weight: 600; }
+    .mix-wrap { overflow-x: auto; position: relative; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>分词器、优化器、超参与数据配比</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="smol"></nav>
+
+    <article class="prose">
+      <p>读 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">Smol Training Playbook</a> 的第三篇。<a href="/posts/smol-architecture/">上一篇</a>定下了网络结构，这一篇处理剩下的三件事：<strong>分词器</strong>（书里放在架构章末尾）、<strong>优化器与训练超参</strong>（「Optimizer and Training Hyperparameters」一节），以及<strong>数据配比</strong>（「The Art of Data Curation」一章）。书里有一句话贯穿这三部分：架构决定模型<em>怎么</em>学，数据决定它学<em>什么</em>；而超参决定这个学习过程能不能稳定、高效地走完。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#tok">分词器：词表大小、BPE、怎么评估</a></li>
+          <li><a href="#adamw">AdamW：为什么所有人都还在用它</a></li>
+          <li><a href="#muon">Muon：正交化的更新与 Newton–Schulz 迭代</a></li>
+          <li><a href="#lr">学习率：预热、cosine、WSD、multi-step</a></li>
+          <li><a href="#bs">Batch size 与临界 batch</a></li>
+          <li><a href="#hpsl">超参的 scaling law</a></li>
+          <li><a href="#smolhp">SmolLM3 的选择与守则</a></li>
+          <li><a href="#data">数据配比：为什么它最重要</a></li>
+          <li><a href="#dataabl">怎么做数据消融</a></li>
+          <li><a href="#smoldata">SmolLM3 的数据配比</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="tok">分词器：词表大小、BPE、怎么评估</h2>
+      <p>分词器可能是语言模型里最被低估的组件。它把原始文本切成一串离散的单元（token），每个映射成一个整数 id。设计之前先回答三个问题：</p>
+      <ul>
+        <li><strong>要支持哪些语言？</strong>多语言模型如果配一个只见过英文的分词器，非英文文本会被切成多得多的 token，训练成本、推理速度、效果都受影响。</li>
+        <li><strong>哪些领域重要？</strong>数学和代码需要仔细处理数字。</li>
+        <li><strong>目标数据配比是什么？</strong>如果自己训分词器，最好在一个接近最终训练配比的样本上训。</li>
+      </ul>
+
+      <h3>词表大小</h3>
+      <p>词表越大，压缩越好（同样的文本 token 更少），但 embedding 矩阵也越大：输入 embedding \(V\times h\)、输出层再一个 \(V\times h\)。对小模型这是不小的参数比例（上一篇的 1B baseline 里共享后的 embedding 也占两成多），模型越大相对代价越小。经验上：只做英文约 50k 就够；多语言通常要 100k 以上；Llama 3 这类模型用了 128k 以上。同一家族的小模型用 embedding 共享来压低占比，同时享受大词表。</p>
+      <p><a href="https://arxiv.org/abs/2402.01035">Dagan et al.</a> 从三个角度分析了词表大小：压缩率的收益随词表增大指数下降，所以存在一个最优大小；推理时，大模型更受益于大词表，因为 token 变少省下的前向计算超过了 softmax 多出来的开销；显存方面，最优大小取决于序列长度和 batch——上下文越长、batch 越大，大词表通过减少 token 数省下的 KV cache 越多。还有一个工程细节：<strong>把词表大小设成 128 的倍数</strong>（比如 50,304 而不是 50,000），GPU 上矩阵维度能被 2 的高次幂整除时内存对齐更好、吞吐更高。</p>
+
+      <h3>BPE 算法</h3>
+      <p>用现成分词器还是自己训，取决于覆盖：现有分词器在目标词表大小下能不能处理好你的语言和领域。现有分词器里最流行的算法是<strong>字节对编码（BPE）</strong>（<a href="https://arxiv.org/abs/1508.07909">Sennrich et al.</a>）；WordPiece、SentencePiece 等也存在但用得少（也有直接在字节或字符上工作、不需要分词器的研究方向）。BPE 的训练过程很简单：</p>
+      <ol>
+        <li>把语料切成「词」（预分词，现代分词器用正则把文本切成单词、数字串、标点等块，合并不会跨越块边界），统计每个词的频次；</li>
+        <li>初始词表是所有基本符号（字符，或字节级 BPE 里的 256 个字节，后者保证任何文本都能编码、不会有未知 token）；</li>
+        <li>统计所有相邻符号对在语料中的出现次数（按词频加权），把最频繁的一对合并成新符号，加入词表，记下这条合并规则；</li>
+        <li>重复第 3 步，直到词表达到目标大小。</li>
+      </ol>
+      <p>编码新文本时，按学到的合并规则的顺序依次应用。下面用 Sennrich 论文里的经典小例子（low、lower、newest、widest，<code>_</code> 表示词尾）一步一步跑，也可以换成你自己的文本：</p>
+
+      <div class="demo" id="bpe">
+        <div class="demo-label">BPE 逐步合并</div>
+        <label class="ctrl" style="grid-template-columns:1fr"><input class="docs-in" id="bpe-in" value="low low low low low lower lower newest newest newest newest newest newest widest widest widest" style="width:100%;font:inherit;font-size:14px;padding:4px 8px;border:1px solid var(--border);border-radius:8px;background:var(--bg-soft);color:var(--text)"></label>
+        <div style="margin-top:8px"><button class="btn primary" id="bpe-step">合并一步</button> <button class="btn" id="bpe-10">合并 10 步</button> <button class="btn" id="bpe-reset">重置</button></div>
+        <div class="readout">
+          <div><span class="k">已合并</span><span class="v" id="bpe-n"></span></div>
+          <div><span class="k">词表大小</span><span class="v" id="bpe-v"></span></div>
+          <div><span class="k">语料总 token 数</span><span class="v" id="bpe-t"></span></div>
+          <div><span class="k">token / 词</span><span class="v" id="bpe-f"></span></div>
+        </div>
+        <div class="toks" id="bpe-toks"></div>
+        <div class="merges" id="bpe-merges"></div>
+        <p class="note-small">按空白分词、每个词末尾加 <code>_</code>；频次相同的符号对按字典序取第一个。橙色的 token 是最近一步合并出来的。右边的「token / 词」就是下面要讲的 fertility。</p>
+      </div>
+
+      <h3>怎么衡量分词器好坏</h3>
+      <p>不能看几个例子就下结论。书里用 <a href="https://arxiv.org/abs/2506.20920">FineWeb2</a> 的两个指标：</p>
+      <ul>
+        <li><strong>Fertility（繁殖率）</strong>：平均每个词需要多少个 token。越低压缩越好，训练和推理越快。</li>
+        <li><strong>被切开的词的比例（proportion of continued words, PCW）</strong>：被切成 2 个及以上 token 的词占多少。越低越好。</li>
+      </ul>
+      $$\text{fertility}=\frac{1}{|W|}\sum_{w\in W}\#\text{tok}(w),\qquad \text{PCW}=\frac{1}{|W|}\sum_{w\in W}\mathbb 1\big[\#\text{tok}(w)\ge2\big].$$
+      <p>「词」需要用每种语言合适的分词工具切（spaCy、Stanza，DataTrove 里封装了各语言的 word tokenizer），这样跨语言比较才有意义。只比较单一语言时，也可以用字符数或字节数代替词数（characters-to-tokens、bytes-to-tokens），但它们跨语言有缺陷：UTF-8 里汉字占 3 字节、拉丁字母 1–2 字节；字符数又没考虑不同语言的词长差异（中文的词比德语复合词短得多）。</p>
+      <p>书里在 Wikipedia 上每种语言抽 100 篇文章，比较了四个分词器（部分结果）：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>分词器</th><th class="num">英语</th><th class="num">中文</th><th class="num">法语</th><th class="num">西班牙语</th><th class="num">阿拉伯语</th></tr></thead>
+          <tbody>
+            <tr><td>Llama 3</td><td class="num">1.48 / 0.32</td><td class="num">1.60 / 0.43</td><td class="num">1.73 / 0.48</td><td class="num">1.72 / 0.46</td><td class="num">2.35 / 0.72</td></tr>
+            <tr><td>Gemma 3</td><td class="num">1.41 / 0.26</td><td class="num">1.47 / 0.33</td><td class="num">1.56 / 0.40</td><td class="num">1.59 / 0.41</td><td class="num">2.25 / 0.70</td></tr>
+            <tr><td>Mistral Small</td><td class="num">1.59 / 0.37</td><td class="num">1.78 / 0.47</td><td class="num">1.69 / 0.47</td><td class="num">1.70 / 0.46</td><td class="num">2.15 / 0.66</td></tr>
+            <tr><td>Qwen3</td><td class="num">1.54 / 0.33</td><td class="num">1.45 / 0.31</td><td class="num">1.75 / 0.48</td><td class="num">1.76 / 0.47</td><td class="num">2.26 / 0.66</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>每格是 fertility / PCW。Gemma 3 在多种语言上都最低，归功于多语言训练数据和很大的词表（262k，约是 Llama 3 128k 的两倍）；Qwen3 在中文上最好，但英、法、西语落后于 Llama 3；Mistral Small 阿拉伯语最好，英文和中文较弱。</p>
+      <p><strong>数字</strong>需要专门看。多数现代分词器把数字拆成单个数位，「123」变成「1」「2」「3」（PaLM、DeepSeek-V2）。看起来反直觉，但如果「342792」是一个不可分的 token，模型得记住它和其他每个数字 token 做加减乘的结果；拆开后，模型学的是逐位运算的规则。Llama 3 则是把 1 到 999 编成独立 token、更大的数由它们拼成（实现上是预分词正则把连续数字切成最多 3 位一组）。</p>
+
+      <h3>用现成的还是自己训</h3>
+      <p>很多新模型从 GPT-4 的分词器出发、补充多语言 token。如果你的语言和领域和上面这些分词器的覆盖吻合，直接用它们——久经考验。SmolLM3 选了 Llama 3 的分词器：在目标语言（英、法、西、葡、德、意）上质量有竞争力，128k 的词表对 3B 模型也不算太大；更大的模型里 embedding 占比小，Gemma 3 的效率优势就更有吸引力。低资源语言或独特的数据配比则可能需要自己训。这有个先有鸡还是先有蛋的问题：做数据消融需要分词器，训分词器又需要知道最终配比。办法是先用一个凑合的分词器做数据消融，正式开训前按确定的配比重训分词器，再确认下游效果提升、fertility 仍然好。</p>
+      <p>另外两个和分词器有关的提醒：换了分词器，loss 就不能直接比（<a href="/posts/smol-decisions/#eval">第一篇</a>讲过）；50k 的英文分词器干不了严肃的多语言，但如果你不覆盖那么多语言，也不需要 256k 的词表。</p>
+
+      <h2 id="adamw">AdamW：为什么所有人都还在用它</h2>
+      <p>优化器决定每个参数每一步实际怎么更新，同时它也很吃显存和算力，会影响需要多少卡、训多快。书里总结的「现状表」只有两行：Kimi K2、GLM-4.5 用 Muon，其他所有人用 AdamW。为什么？写这一节的作者自嘲是「人懒」；更实际的原因是 AdamW 长期在各个规模上都好用，而换掉这么核心的组件很吓人，尤其在很长的训练里验证一个新优化器很贵。</p>
+      <p>公平比较优化器也比看上去难：规模会改变动力学，小消融难以模拟；每个优化器都需要自己的超参搜索（一维？二维？三维？），不能拿调好的 AdamW 超参直接套。还常见基线没调好、新优化器跟一个弱的 AdamW 比的情况，Marin 团队的 <a href="https://arxiv.org/abs/2509.02046">Fantastic Pretraining Optimizers</a> 显示光这一点就会严重夸大报告的收益。</p>
+      <h3>Adam 的更新</h3>
+      <p>Adam 是一阶方法（只用梯度），用历史梯度的动量为每个参数自适应调节步长。对参数 \(\theta\)、第 \(t\) 步梯度 \(g_t\)：</p>
+      $$m_t=\beta_1m_{t-1}+(1-\beta_1)g_t,\qquad v_t=\beta_2v_{t-1}+(1-\beta_2)g_t^2,$$
+      $$\hat m_t=\frac{m_t}{1-\beta_1^t},\quad \hat v_t=\frac{v_t}{1-\beta_2^t},\qquad \theta_t=\theta_{t-1}-\eta_t\Big(\frac{\hat m_t}{\sqrt{\hat v_t}+\epsilon}+\lambda\,\theta_{t-1}\Big).$$
+      <p>\(m\) 是梯度的指数滑动平均（一阶矩，动量），\(v\) 是梯度平方的滑动平均（二阶矩）；除以 \(1-\beta^t\) 是修正初期从 0 开始带来的偏小；\(\hat m/\sqrt{\hat v}\) 让每个坐标的步长大致归一——梯度一直很大的参数步子不会更大。它相当于一个对角的预条件器。每个参数要额外存 \(m, v\) 两个 FP32 状态，即 8 字节。</p>
+      <h3>W：解耦的权重衰减</h3>
+      <p>SGD 里加 L2 正则就是在 loss 上加 \(\frac\lambda2\|\theta\|^2\)，梯度多一项 \(\lambda\theta\)。在 Adam 里这么做，这一项也会进入 \(m\) 和 \(v\)，被除以 \(\sqrt{\hat v}\)：梯度大的参数，正则被削弱；正则强度变得依赖梯度幅度。<a href="https://arxiv.org/abs/1711.05101">AdamW</a> 把衰减从自适应部分里拿出来，直接作用在参数上（上式括号里的 \(\lambda\theta_{t-1}\) 不经过 \(m,v\)），每步相当于把参数乘 \(1-\eta_t\lambda\)。</p>
+      <p>这些年 AdamW 的超参几乎没动过：\(\beta_1=0.9,\ \beta_2=0.95\)，梯度裁剪 1.0（全局梯度范数超过 1 就整体缩放到 1），权重衰减 0.1（Llama 3 405B 降到 0.01）。同一组数从 Llama 1、2、3 用到 DeepSeek V1、V2、V3。</p>
+
+      <h2 id="muon">Muon：正交化的更新与 Newton–Schulz 迭代</h2>
+      <p>Muon 把每个参数<strong>矩阵</strong>当作一个整体来更新：</p>
+      $$G_t=\nabla_\theta\mathcal L_t(\theta_{t-1}),\quad B_t=\mu B_{t-1}+G_t,\quad O_t=\mathrm{NewtonSchulz5}(B_t)\approx UV^\top\ \ (B_t=U\Sigma V^\top),\quad \theta_t=\theta_{t-1}-\eta O_t.$$
+      <p>就是带动量的梯度，然后把它「正交化」：保留奇异向量、把所有奇异值都换成 1。书里总结了三个关键点：</p>
+      <ol>
+        <li><strong>矩阵几何而非逐参数</strong>：AdamW 对每个参数单独做（对角）预条件；Muon 把权重矩阵当成一个对象，沿 \(UV^\top\) 更新，捕捉的是行、列子空间的结构。</li>
+        <li><strong>正交化带来各向同性的步长</strong>：SVD 把 \(G=U\Sigma V^\top\) 分成大小（\(\Sigma\)）和方向（\(U,V\)）。换成 \(UV^\top\) 就丢掉了奇异值，让步长在活跃子空间里各向同性。乍看是丢了信息，但它减少了偏向少数主方向的倾向，让那些奇异值很小、本来会被压制的方向也得到探索。这种探索会不会给模型带来 loss 看不出的能力差异，还是开放问题。</li>
+        <li><strong>经验上更能容忍大 batch</strong>：这可能是采用 Muon 的关键动机（下面讲 batch size 时会说为什么大 batch 重要）。</li>
+      </ol>
+      <h3>为什么是 \(UV^\top\)：谱范数下的最速下降</h3>
+      <p>书里说 Muon 的「二阶」藏在 Newton–Schulz 里，没有展开。我补一个常见的推导（来自 <a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein</a>）：线性化 loss，一步更新 \(\Delta W\) 带来的变化是 \(\langle G,\Delta W\rangle=\operatorname{tr}(G^\top\Delta W)\)。如果限制更新的<strong>谱范数</strong>（最大奇异值，衡量矩阵对任意输入向量的最大放大倍数）不超过 \(\eta\)：</p>
+      $$\min_{\|\Delta W\|_{\text{op}}\le\eta}\ \operatorname{tr}(G^\top\Delta W)=-\eta\sum_i\sigma_i(G),\qquad \text{取到最小值的是}\ \Delta W=-\eta\,UV^\top.$$
+      <p>（由 von Neumann 迹不等式，\(\operatorname{tr}(G^\top\Delta W)\ge-\sum_i\sigma_i(G)\sigma_i(\Delta W)\ge-\eta\sum_i\sigma_i(G)\)，等号在 \(\Delta W\) 与 \(G\) 共享奇异向量、奇异值全为 \(\eta\) 时成立。）对比之下，在逐元素的 \(\ell_\infty\) 约束下最速下降方向是 \(-\eta\,\operatorname{sign}(G)\)，这正是不带动量平滑时 Adam 的极限形式。所以 Adam 和 Muon 的区别可以看成「用什么范数衡量一步走多远」。</p>
+      <h3>Newton–Schulz：不做 SVD 的正交化</h3>
+      <p>每步对每个矩阵做 SVD 太慢。Newton–Schulz 迭代只用矩阵乘法逼近 \(UV^\top\)。关键观察：对 \(X=U\Sigma V^\top\)，有 \((XX^\top)X=U\Sigma^3V^\top\)，所以任何形如</p>
+      $$X_{k+1}=aX_k+b\,(X_kX_k^\top)X_k+c\,(X_kX_k^\top)^2X_k$$
+      <p>的迭代都<strong>不改变奇异向量</strong>，只把每个奇异值独立地映射为 \(\varphi(\sigma)=a\sigma+b\sigma^3+c\sigma^5\)。要得到 \(UV^\top\)，只需让 \(\varphi\) 反复作用后把 \([0,1]\) 里的每个数都推到 1 附近。先把 \(X_0=G/\|G\|_F\) 归一化，保证所有奇异值 \(\le1\)。经典的三次版本 \(\varphi(\sigma)=\tfrac32\sigma-\tfrac12\sigma^3\) 能精确收敛到 1，但对很小的奇异值，每步只放大 1.5 倍，太慢。<a href="https://kellerjordan.github.io/posts/muon/">Keller Jordan</a> 的做法是把系数调成</p>
+      $$(a,b,c)=(3.4445,\ -4.7750,\ 2.0315),$$
+      <p>让 \(\varphi'(0)=a\) 尽量大（小奇异值增长最快），代价是不再精确收敛到 1，而是在大约 \([0.7,1.3]\) 之间振荡——他发现这个误差不影响训练 loss。5 步就够。实际代码里还在 BF16 下做迭代，矩阵行多于列时先转置（让 \(XX^\top\) 是较小的那个方阵）。下面用一个 2×2 矩阵看这个过程：它把单位圆映成椭圆，椭圆的两个半轴就是两个奇异值；正交化就是把椭圆变回圆。</p>
+
+      <div class="demo" id="ns">
+        <div class="demo-label">Newton–Schulz 迭代：2×2 矩阵的奇异值</div>
+        <div class="seg" id="ns-coef">
+          <button data-c="q" aria-pressed="true">Muon 五次 (3.4445, −4.7750, 2.0315)</button>
+          <button data-c="b">基线五次 (2, −1.5, 0.5)</button>
+          <button data-c="c">经典三次 (1.5, −0.5, 0)</button>
+        </div>
+        <div class="ctrls">
+          <label class="ctrl"><span>σ₁（大）</span><input type="range" id="ns-s1" min="0.1" max="10" step="0.1" value="5"><output id="ns-s1-v"></output></label>
+          <label class="ctrl"><span>σ₂（小）</span><input type="range" id="ns-s2" min="-3" max="1" step="0.05" value="-1.3"><output id="ns-s2-v"></output></label>
+          <label class="ctrl"><span>旋转角（U、V）</span><input type="range" id="ns-r" min="0" max="180" step="1" value="30"><output id="ns-r-v"></output></label>
+          <label class="ctrl"><span>迭代步数 k</span><input type="range" id="ns-k" min="0" max="8" step="1" value="0"><output id="ns-k-v"></output></label>
+        </div>
+        <button class="btn" id="ns-play">播放 0 → 5 步</button>
+        <div class="two" style="margin-top:10px">
+          <svg id="ns-ell" viewBox="0 0 300 300" role="img" aria-label="X_k 把单位圆映成的椭圆"></svg>
+          <svg id="ns-map" viewBox="0 0 300 300" role="img" aria-label="奇异值映射与迭代轨迹"></svg>
+        </div>
+        <div class="readout">
+          <div><span class="k">X<sub>k</sub> 的奇异值</span><span class="v" id="ns-sv"></span></div>
+          <div><span class="k">条件数 σ₁/σ₂</span><span class="v" id="ns-cond"></span></div>
+          <div><span class="k">X<sub>k</sub>（矩阵）</span><span class="v" id="ns-mat" style="font-size:14px"></span></div>
+        </div>
+        <p class="note-small">σ₂ 滑块是对数刻度（10 的幂），默认 σ₂ = 0.05、σ₁ = 5，原始条件数 100。左：灰色是单位圆，紫色是 X<sub>k</sub> 作用后的形状（先 /‖G‖<sub>F</sub> 归一化）。右：曲线是 φ(σ)，对角线是 y = σ，橙/紫折线是两个奇异值逐步的轨迹（蛛网图）。矩阵真的按上面的公式做了矩阵乘法，不是只算标量。</p>
+      </div>
+
+      <p>Muon 只用于隐藏层的二维权重；embedding、输出层以及向量和标量参数（norm 的增益、bias）仍用 AdamW（Keller Jordan 的建议，embedding 和输出头用 AdamW 效果更好）。扩到大模型还需要两个改动，来自 <a href="https://arxiv.org/abs/2502.16982">Moonlight（Muon is Scalable）</a>：加上权重衰减；以及按矩阵形状缩放更新——形状 \([A,B]\) 的满秩矩阵，正交化后更新的 RMS 理论上是 \(\sqrt{1/\max(A,B)}\)，于是乘 \(0.2\sqrt{\max(A,B)}\)，让各矩阵更新的 RMS 都接近 0.2，和 AdamW 典型的 0.2–0.4 对齐，这样学习率和权重衰减可以和 AdamW 部分共用：</p>
+      $$W_t=W_{t-1}-\eta_t\big(0.2\,O_t\sqrt{\max(A,B)}+\lambda W_{t-1}\big).$$
+      <p>优化器的「动物园」还很大：Shampoo、SOAP、PSGD、CASPR、DION、Sophia、Lion，AdamW 自己也有 NAdamW、StableAdamW 等变体。书里没有展开，推荐看 Marin 的那篇系统比较，它的核心教训是比较时超参调优有多重要。</p>
+
+      <h2 id="lr">学习率：预热、cosine、WSD、multi-step</h2>
+      <p>学习率（LR）控制每步按梯度改多少。太低训练慢得痛苦，loss 曲线平平，可能困在差的局部；太高会越过好的解、不收敛，甚至发散。而且最优学习率不是常数：离好解远的早期大学习率好用，接近收敛时就会不稳定。所以要有调度：从 0 预热避免早期混乱，最后衰减让模型落进好的极小值。</p>
+      <p><strong>预热</strong>：多数现代 LLM 用固定的预热步数（比如 2000），与模型大小和训练长度无关（第二篇开头那张表里大多是 2k）。很短的训练常用总步数的 1–5%；书里说更长的训练里加长预热一般不影响效果。</p>
+      <h3>cosine 的问题</h3>
+      <p>改变学习率能帮助收敛早已是共识（<a href="https://arxiv.org/abs/1708.07120">Smith 2018</a>），很长时间里 cosine 衰减（<a href="https://arxiv.org/abs/1608.03983">SGDR</a>）是训 LLM 的默认：预热到峰值后按余弦曲线平滑降到最小值：</p>
+      $$\eta(t)=\eta_{\min}+\tfrac12(\eta_{\max}-\eta_{\min})\Big(1+\cos\frac{\pi(t-W)}{T-W}\Big),\quad W\le t\le T.$$
+      <p>简单好用，缺点是<strong>不灵活</strong>：必须事先知道总步数 \(T\)。训到一半模型还没到平台、又拿到了更多算力想多训？或者做 scaling law、要在不同 token 数上训同一个模型？cosine 只能从头再来。书里的旁注：这种不灵活曾让早期 scaling law 研究跑偏——Kaplan 等人对不同 token 数的模型用了固定长度的 cosine，低估了数据量的作用；Chinchilla 让调度长度匹配每个模型实际的训练时长，纠正了这一点。</p>
+      <h3>WSD 与 multi-step</h3>
+      <p>很多团队改用不必在预热后立刻开始衰减的调度。<strong>Warmup–Stable–Decay（WSD）</strong>（<a href="https://arxiv.org/abs/2404.06395">MiniCPM</a>）：预热后保持恒定的高学习率，最后 10–20% 的 token 迅速衰减。<strong>Multi-step</strong>（<a href="https://arxiv.org/abs/2401.02954">DeepSeek LLM</a>）：恒定后分几次台阶式下降。DeepSeek LLM 的具体做法是 2000 步预热到峰值，训完 80% token 时降到峰值的 31.6%，90% 时再降到 10%。</p>
+      <p>好处：可以中途延长训练而不必重来；可以提前衰减来看清进度；可以在一次主训练里做不同 token 数的 scaling law 实验（从稳定段的不同位置分叉出去衰减）。研究表明 WSD 和 multi-step 都能达到 cosine 的效果（<a href="https://arxiv.org/abs/2405.18392">Hägele et al.</a>、DeepSeek LLM）。（GLM-4.5 提到 WSD 在 SimpleQA、MMLU 上不如 cosine，但没给结果。）</p>
+      <p>新的超参也随之出现：</p>
+      <ul>
+        <li><strong>WSD 的衰减多长</strong>：训练越长，匹配 cosine 所需的衰减比例越小；一般建议 10–20% 的 token。Hägele et al. 还比较了衰减曲线的形状，发现 \((1-\sqrt{\cdot})\) 形状比线性好：\(f(n)=1-\sqrt{(n-(N-N_{\text{decay}}))/N_{\text{decay}}}\)。</li>
+        <li><strong>multi-step 的台阶怎么放</strong>：DeepSeek LLM 的 80/10/10（稳定到 80%，80–90% 第一级，90–100% 第二级）能匹配 cosine，改成 70/15/15、60/20/20 还能略好。DeepSeek-V2 用了 60/30/10；DeepSeek-V3 更花：恒定段之后从 67% 到 97% 用 cosine 衰减，然后短暂恒定，最后一次陡降。V2、V3 的报告没给这些改动的消融，书里建议先用简单的 WSD 或 multi-step，再通过消融调参数。</li>
+      </ul>
+
+      <div class="demo" id="lrs">
+        <div class="demo-label">学习率调度绘图</div>
+        <div class="seg" id="lr-type">
+          <button data-t="cos" aria-pressed="true">Cosine</button>
+          <button data-t="wsd">WSD</button>
+          <button data-t="ms">Multi-step</button>
+          <button data-t="lin">线性衰减</button>
+        </div>
+        <div class="ctrls">
+          <label class="ctrl"><span>预热（% 总步数）</span><input type="range" id="lr-w" min="0" max="20" step="0.5" value="2"><output id="lr-w-v"></output></label>
+          <label class="ctrl"><span>WSD 衰减比例</span><input type="range" id="lr-d" min="5" max="50" step="1" value="10"><output id="lr-d-v"></output></label>
+          <label class="ctrl"><span>WSD 衰减形状</span><select id="lr-shape"><option value="lin">线性</option><option value="sqrt">1 − sqrt</option><option value="cos">cosine</option></select><span></span></label>
+          <label class="ctrl"><span>Multi-step 台阶</span><select id="lr-ms"><option value="80,90">80/10/10（DeepSeek LLM）</option><option value="70,85">70/15/15</option><option value="60,80">60/20/20</option><option value="60,90">60/30/10（DeepSeek-V2）</option></select><span></span></label>
+          <label class="ctrl"><span>最小 LR（% 峰值）</span><input type="range" id="lr-min" min="0" max="30" step="1" value="10"><output id="lr-min-v"></output></label>
+          <label class="ctrl"><span>中途延长到</span><input type="range" id="lr-ext" min="100" max="200" step="5" value="100"><output id="lr-ext-v"></output></label>
+        </div>
+        <svg id="lr-svg" viewBox="0 0 600 260" role="img" aria-label="学习率曲线"></svg>
+        <div class="readout">
+          <div><span class="k">50% 处 LR / 峰值</span><span class="v" id="lr-50"></span></div>
+          <div><span class="k">LR 积分（相对恒定峰值）</span><span class="v" id="lr-area"></span></div>
+          <div><span class="k">延长训练要重来吗</span><span class="v" id="lr-restart"></span></div>
+        </div>
+        <p class="note-small">横轴是原计划总步数的百分比。「中途延长」把计划从 100% 延长到更多：WSD 和 multi-step 只需把衰减段往后挪，已训的部分（实线）完全可以复用；cosine 和线性衰减的已训部分与新计划下的曲线（虚线）对不上。Multi-step 的两级固定为峰值的 31.6% 和 10%（DeepSeek LLM 的数值），最小 LR 滑块对它无效。</p>
+      </div>
+
+      <h3>消融：WSD 能追上 cosine</h3>
+      <p>书里在 1B 模型上比较了 cosine 和两种 WSD（衰减 10%、20%）。最终表现相近。过程很有意思：稳定段里 cosine 的 loss 和评测（尤其 HellaSwag）都更好，因为它的学习率已经在降了；WSD 一进入衰减段，loss 和下游指标几乎线性地改善，最后追平。所以 10–20% 的衰减足以匹配 cosine，同时保留中途延长的灵活性；SmolLM3 用了 10% 衰减的 WSD。一个比较时的坑：<strong>拿稳定段的 WSD checkpoint 和 cosine 比，要先对 WSD checkpoint 做一次衰减</strong>，否则不公平。</p>
+      <h3>学习率扫描</h3>
+      <p>最优学习率依赖训练时长：短消融里收敛最快的，未必是长训练的最优。先用简单扫描排除明显太高或太低的值。书里在 1B、45B token 上试了 1e-4、5e-4、5e-3、5e-2：5e-2 几乎立刻发散，loss 尖峰后再也回不来；1e-4 太保守，稳定但收敛慢得多；5e-4 和 5e-3 收敛更好、表现相近。SmolLM3 在 3B、100B token、AdamW + WSD 上比较了几个值：2e-4 比 1e-4 收敛快得多（loss 和下游都是），3e-4 只比 2e-4 好一点，却增加了长训练不稳定的风险，于是选了 2e-4。</p>
+
+      <h2 id="bs">Batch size 与临界 batch</h2>
+      <p>Batch size 是每次更新前处理的样本（LLM 里通常按 token 计）数。硬件和训练栈能很好地横向扩展时，加大 batch 能提高吞吐（每秒处理的 token 数）。但超过某个点，大 batch 开始损害<strong>数据效率</strong>：达到同样的 loss 需要更多的 token。这个转折点叫<strong>临界 batch size</strong>（<a href="https://arxiv.org/abs/1812.06162">McCandlish et al.</a>）：</p>
+      <ul>
+        <li>低于临界值时加大 batch（并重新调学习率）：用同样多的 token 达到同样的 loss，不浪费数据；</li>
+        <li>高于临界值时加大 batch：墙钟时间可能还在下降（更多卡在干活），但需要更多 token（更多钱）才能达到同样的 loss。</li>
+      </ul>
+      <h3>为什么要随 batch 调学习率</h3>
+      <p>设单个样本的梯度 \(\tilde g^{(i)}\) 的均值是真梯度 \(g\)、协方差是 \(\Sigma\)。对 \(B\) 个样本取平均：</p>
+      $$\tilde g_B=\frac1B\sum_{i=1}^B\tilde g^{(i)},\qquad \mathbb E[\tilde g_B]=g,\qquad \operatorname{Cov}(\tilde g_B)=\frac{\Sigma}{B}.$$
+      <p>SGD 更新 \(\Delta w=-\eta\tilde g_B\) 的方差 \(\propto\eta^2\Sigma/B\)。batch 变成 \(k\) 倍时，要保持更新的噪声大致不变，学习率乘 \(\sqrt k\)：</p>
+      $$B\to kB\quad\Rightarrow\quad \eta\to\sqrt k\,\eta.$$
+      <p>书里说这条<strong>平方根缩放</strong>对 AdamW、Muon 是个有用的经验法则，但具体怎么缩放依赖优化器，AdamW 里还和 \(\beta_1,\beta_2\) 有交互。（作为对照：纯 SGD 文献里更常见的是线性缩放规则，出发点是保持「每个样本对参数的平均推动」不变，而不是保持噪声不变。两者都只是近似。）</p>
+      <h3>临界 batch 从哪来：梯度噪声尺度</h3>
+      <p>McCandlish et al. 用一个简单的统计量预测临界 batch，叫<strong>梯度噪声尺度</strong>。在 Hessian 近似为单位阵倍数的简化下：</p>
+      $$\mathcal B_{\text{simple}}=\frac{\operatorname{tr}(\Sigma)}{|G|^2},\qquad \frac{\mathbb E\big[|G_{\text{est}}-G|^2\big]}{|G|^2}=\frac{\mathcal B_{\text{simple}}}{B}.$$
+      <p>它就是「单样本梯度的总方差」与「真梯度的平方范数」之比：\(B\) 比它小时，batch 梯度的噪声比信号还大，加大 batch 收益接近线性；比它大时，梯度已经很准，再加 batch 几乎白费。论文推出训练步数 \(S\) 与消耗样本数 \(E\) 之间的权衡：</p>
+      $$\Big(\frac{S}{S_{\min}}-1\Big)\Big(\frac{E}{E_{\min}}-1\Big)=1,\qquad S=S_{\min}\Big(1+\frac{\mathcal B}{B}\Big),\quad E=E_{\min}\Big(1+\frac{B}{\mathcal B}\Big),$$
+      <p>临界 batch \(\mathcal B_{\text{crit}}=E_{\min}/S_{\min}\)。在 \(B=\mathcal B_{\text{crit}}\) 处，步数和数据量都是各自最小值的 2 倍。训练早期 \(|G|^2\) 大，噪声尺度小，临界 batch 小；之后模型更新趋稳，临界 batch 变大（论文说常常在训练中增长一个数量级以上）。这解释了<strong>batch size 预热</strong>：DeepSeek-V3 前约 469B token 用 12.6M 的 batch，之后加到 62.9M。MiniMax-01 把 loss 当作临界 batch 的代理，最后阶段用到 128M 的 batch；他们没有相应提高学习率，所以这个 batch 调度起到了类似学习率衰减的作用。</p>
+      <p><a href="https://arxiv.org/abs/2505.23971">Merrill et al. 2025</a> 提了一个更实用的检验：从当前训练分出一个短分支，一支保持原 batch，一支用更大的 batch 和重新缩放的学习率（切换时预热学习率、重置优化器状态），在一个窗口内比较两条 loss 曲线是否吻合（容差和窗口都凭经验定），吻合才采用大 batch。他们的结果表明 \(\mathcal B_{\text{simple}}\) 这个估计（本身也有噪声）低估了实际的临界 batch。</p>
+
+      <h2 id="hpsl">超参的 scaling law</h2>
+      <p>最优学习率和 batch size 不只取决于结构和大小，还取决于算力预算 \(C\approx6ND\)（\(N\) 参数、\(D\) token；每参数每 token 约 6 FLOPs）。DeepSeek LLM 和 Qwen2.5 都演示了怎么为超参拟合 scaling law。DeepSeek LLM 的流程：</p>
+      <ol>
+        <li>选好调度（最好是 WSD 或 multi-step，这样同一个 run 可以延长到不同 token 数，不用重来）；</li>
+        <li>在一系列算力预算（1e17 到 2e19 FLOPs）上，扫学习率和 batch size；</li>
+        <li>把泛化误差不超过最小值 0.25% 的配置都算作「近似最优」，每个给出一个数据点 \((C,\eta)\) 或 \((C,B)\)；</li>
+        <li>在 log–log 坐标下拟合幂律。</li>
+      </ol>
+      <p>他们得到的是</p>
+      $$\eta_{\text{opt}}=0.3118\cdot C^{-0.125},\qquad B_{\text{opt}}=0.2920\cdot C^{0.3271}\ \ (\text{token}).$$
+      <p>直觉：训练越大越长，越需要稳的更新（更小的学习率）和更准的梯度估计（更大的 batch）。另一个重要发现：在固定的模型大小和预算下，<strong>表现在很宽的超参范围内都很稳定</strong>，最优点是一片宽的区域，所以只需要「足够接近」。但书里也提醒：scaling law 给的是起点，目标不是「每个梯度最优的样本数」，而是「在时间和卡数约束下能达到的最低 loss」。实践中常可以把 batch 开到比预测更大，换取明显更高的吞吐，只要不超过临界 batch。</p>
+
+      <div class="demo" id="bsd">
+        <div class="demo-label">Batch size：步数与数据量的权衡 + 超参公式</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>B / 𝓑<sub>crit</sub>（log）</span><input type="range" id="bs-r" min="-2" max="2" step="0.02" value="0"><output id="bs-r-v"></output></label>
+        </div>
+        <svg id="bs-svg" viewBox="0 0 600 260" role="img" aria-label="步数与样本数的权衡曲线"></svg>
+        <div class="readout">
+          <div><span class="k">步数 S / S<sub>min</sub></span><span class="v" id="bs-s"></span></div>
+          <div><span class="k">数据量 E / E<sub>min</sub></span><span class="v" id="bs-e"></span></div>
+        </div>
+        <hr>
+        <div class="ctrls">
+          <label class="ctrl"><span>参数 N（B）</span><input type="range" id="hp-n" min="-1" max="2.5" step="0.01" value="0.4886"><output id="hp-n-v"></output></label>
+          <label class="ctrl"><span>训练 token D（T）</span><input type="range" id="hp-d" min="-2" max="1.6" step="0.01" value="1.0414"><output id="hp-d-v"></output></label>
+        </div>
+        <div class="readout">
+          <div><span class="k">C = 6ND</span><span class="v" id="hp-c"></span></div>
+          <div><span class="k">DeepSeek 公式 η<sub>opt</sub></span><span class="v" id="hp-lr"></span></div>
+          <div><span class="k">DeepSeek 公式 B<sub>opt</sub></span><span class="v" id="hp-b"></span></div>
+        </div>
+        <p class="note-small">上半：McCandlish 的模型 S = S<sub>min</sub>(1 + 𝓑/B)、E = E<sub>min</sub>(1 + B/𝓑)。下半：默认是 SmolLM3（3.08B、11T）。注意 DeepSeek 的 C 用的是「非 embedding FLOPs/token × token 数」，这里用 6ND 近似；公式是在他们的数据和设置上拟合的，迁移到别处只能当起点。代入 7B、2T 会得到约 4.2e-4 和 9.2M token，和 DeepSeek LLM 7B 实际用的 4.2e-4、9.4M 吻合；代入 SmolLM3 得到约 3.8e-4、12M，而 SmolLM3 实际用了 2e-4 和 2.36M。</p>
+      </div>
+
+      <p><strong>μP</strong>：书里在初始化部分提到 μP（Maximal Update Parametrization）是另一条路（Cohere 的 Command A 用了它），在 MoE 部分把「怎么把 μP 用到 MoE」列为开放问题，但没有展开。简单说，μP 通过按宽度缩放初始化方差和每层学习率，让最优超参在模型变宽时基本不变，于是可以在小模型上调好直接迁移到大模型，和上面「拟合超参随 C 的幂律」是两种思路。</p>
+
+      <h2 id="smolhp">SmolLM3 的选择与守则</h2>
+      <p>优化器：在 1B、100B token 上比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但对学习率敏感、容易发散；AdEMAMix 的 loss 和 Muon 相近，敏感度更低；AdamW 最稳，但最终 loss 高于调好的两个。扩到 3B 后，Muon 和 AdEMAMix 发散更频繁——可能是消融结束后才发现的一个并行 bug 导致的（训练马拉松篇会讲），但没有确认。最终选了非常「香草」的设置：AdamW（\(\beta_1=0.9,\beta_2=0.95\)），权重衰减 0.1，梯度裁剪 1。</p>
+      <p>调度：WSD。SmolLM3 在 SmolLM2 上就用过，书里说这是他们最好的决定之一：易用，训练总长可以灵活调整，还能做中途的衰减实验。学习率扫描后定为 2e-4。全局 batch 试了 2M 到 4M token，对 loss 和下游影响很小，于是选了吞吐最好的 2.36M token。</p>
+      <p>这一节的守则（TL;DR：<strong>平衡探索与执行，完成胜过完美</strong>）：</p>
+      <ul>
+        <li><strong>合理分配时间</strong>。花几周打磨一个新方法的小改进，不如把同样的算力投到更好的数据或更彻底的结构消融上。书里说，虽然可能让结构爱好者失望，最大的提升通常来自数据。</li>
+        <li><strong>拿不准时选灵活和稳定</strong>。两种方法效果相当，选更灵活、实现更成熟稳定的那个：能延长训练、能做中途实验的 WSD，比一个收敛也许略好但僵硬的调度更有价值。</li>
+        <li><strong>知道什么时候停止优化、开始训练</strong>。总还有一个超参可以调、一个优化器可以试。给探索定截止日期并遵守它——真正训完的模型永远胜过从未开训的完美模型。</li>
+      </ul>
+
+      <h2 id="data">数据配比：为什么它最重要</h2>
+      <p>设想：架构打磨了几周、超参调好了、基础设施最稳，模型漂亮地收敛了，然后它写不出连贯的代码，基础数学吃力，说着说着还换了语言。问题通常出在数据上。架构决定模型怎么学，数据决定它学什么，再多的算力和优化器调参也弥补不了学错了内容。得到对的训练数据不只是有好的数据集，还要组好<strong>配比（mixture）</strong>：在冲突的目标间平衡（比如强英文 vs 多语言），调整各部分比例以对齐性能目标。要回答的是：想让模型擅长什么？每个领域用哪些数据集、怎么混？对目标训练规模，有没有足够的高质量数据？</p>
+      <h3>配比反直觉的地方</h3>
+      <p>网页这种充足的数据源覆盖不了全部所需的知识和能力，所以近期模型还依赖数学、代码等专门领域的预训练数据。直觉的做法是：找出目标能力、为每个领域收集高质量数据、混起来。现实更复杂，因为<strong>各领域在争夺同一份训练预算</strong>：为了代码能力把代码数据调高，就隐含地把其他所有来源调低了，可能损害别的能力。</p>
+      <p>每个来源里还常有一个「高质量」子集特别有用。为什么不只用高质量数据？因为对 SmolLM3 这样 11T token 的训练预算，极端过滤意味着把数据重复很多遍。<a href="https://arxiv.org/abs/2305.16264">Muennighoff et al.</a> 研究了数据受限下的 scaling：在固定算力下，<strong>重复最多 4 个 epoch 与使用全新数据相比 loss 几乎没有差别</strong>；再多重复，增加算力的价值逐渐衰减到零。所以理想情况是同时用好高质量和较低质量的数据。下面的计算器可以按配比算每个来源要过几遍（会把超过 4 个 epoch 的标出来）。</p>
+      <p>模型在任何任务上的表现很大程度上取决于它见过多少相关数据，所以调配比是平衡各领域能力最直接的手段。这些权衡依赖于模型、难以预测，消融不可或缺。</p>
+      <h3>多阶段训练（课程）</h3>
+      <p>配比不必全程不变。早期的 GPT-3 和早期 Llama 全程用一个静态配比；现在的趋势是多阶段（SmolLM2 就是），配比随训练变化。动机是模型最终的行为强烈受训练末尾数据的影响（<a href="https://arxiv.org/abs/2410.08527">Chen et al.</a>）。于是策略是：早期多用量大的来源，末尾混入量小但质量高的来源。什么时候换？没有通用规则，书里的原则是：</p>
+      <ol>
+        <li><strong>由表现驱动</strong>：盯住关键基准，针对能力瓶颈调整配比。比如别的能力都在涨、数学平了，就是引入更高质量数学数据的信号。</li>
+        <li><strong>把高质量数据留到后期</strong>：小而精的数学、代码数据在退火阶段（最后的学习率衰减阶段）引入，效果最大。</li>
+      </ol>
+      <p>这里和学习率调度连上了：WSD 的衰减段就是天然的「退火阶段」，高质量数据放在这里，既符合「末尾数据影响最大」，又利用了衰减段 loss 快速下降的特性。</p>
+
+      <h2 id="dataabl">怎么做数据消融</h2>
+      <p>和结构消融的一个关键区别：数据消融<strong>尽量在目标规模上做</strong>。小模型和大模型容量不同：很小的模型可能吃不下很多种语言，大模型却能吸收而不牺牲别的能力。在太小的规模上做数据消融，可能得出错误的配比结论。SmolLM3 的主要数据消融直接用 3B 模型、50B 和 100B token 的短训练（从头训）。</p>
+      <p>另一种设置是<strong>退火实验（annealing ablation）</strong>：不从头训，而是从主训练的一个中间 checkpoint（比如 7T token 处）出发，换一个数据组成继续训并把学习率衰减到 0。SmolLM2、Llama 3、OLMo 2 都用过。它测试的是多阶段训练里后期配比的改动。SmolLM3 的具体做法：在约 7T token（stage 1 后期）的 checkpoint 上跑 50B token 的退火，配比是 <strong>40% 原 stage 1 配比 + 60% 待测数据集</strong>。比如测 MegaMath 是否提升数学，就用 40% stage 1 数据（保持 75/12/10/3 的领域比例）+ 60% MegaMath。评测上也扩展了基准，加入多语言任务，以便权衡不同语言比例。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 600 230" role="img" aria-label="从头消融与退火消融的学习率示意">
+          <g font-size="13">
+            <text class="t" x="145" y="18" text-anchor="middle" font-size="15" font-weight="600">从头消融（3B × 100B）</text>
+            <line class="grid" x1="20" y1="190" x2="280" y2="190"/><line class="grid" x1="20" y1="40" x2="20" y2="190"/>
+            <path class="ln-a" d="M20 190 L33 60 L241 60 L280 190"/>
+            <text class="tf" x="20" y="208" text-anchor="middle">0</text><text class="tf" x="280" y="208" text-anchor="middle">100B</text>
+            <text class="t" x="455" y="18" text-anchor="middle" font-size="15" font-weight="600">退火消融（vs 主训练）</text>
+            <line class="grid" x1="320" y1="190" x2="590" y2="190"/><line class="grid" x1="320" y1="40" x2="320" y2="190"/>
+            <path class="ln" d="M320 190 L323 60 L516 60 L590 190" stroke-width="2.5"/>
+            <path class="ln-b" d="M474 60 L492 190"/>
+            <circle cx="474" cy="60" r="4" class="fb"/>
+            <text class="tf" x="320" y="208" text-anchor="middle">0</text><text class="tf" x="590" y="208" text-anchor="end">11T</text>
+            <text class="ts" x="470" y="50" text-anchor="end">~7T checkpoint</text>
+            <text class="ts" x="332" y="112">橙：50B token 退火</text>
+            <text class="ts" x="332" y="130">40% 原配比</text>
+            <text class="ts" x="332" y="148">+ 60% 新数据</text>
+            <text class="tf" x="300" y="226" text-anchor="middle">纵轴：学习率（WSD）。灰：主训练；橙：从主训练分出的退火分支</text>
+          </g>
+        </svg>
+        <figcaption>两种数据消融。按书中的示意图重画，横轴不按比例。</figcaption>
+      </figure>
+
+      <p><strong>自动找配比的方法</strong>：<a href="https://arxiv.org/abs/2305.10429">DoReMi</a> 用一个小代理模型学习各领域的权重，以最小化验证 loss；<a href="https://arxiv.org/abs/2206.07137">RHO-LOSS</a> 按 holdout loss 挑单个训练样本，优先选「可学、值得学、还没学会」的；<a href="https://arxiv.org/abs/2407.01492">RegMix</a> 把配比当回归问题，用正则化回归在多个评测目标和数据域之间平衡。HF 在以前的项目里试过 DoReMi 和 RHO-LOSS，发现它们倾向于收敛到大致等于各数据集自然大小比例的分布——基本是在说「哪个多就多用哪个」，没有胜过仔细的手动消融。近期的 SOTA 模型仍靠系统消融和退火实验手动调配比，SmolLM3 也是。</p>
+
+      <h2 id="smoldata">SmolLM3 的数据配比</h2>
+      <p>目标：英文和多语言都能处理，数学和代码要强。方法对低资源语言或金融、医疗等特定领域同样适用：找候选数据集、做消融、设计平衡所有目标领域的配比。书里不讲怎么造高质量数据集（见 FineWeb、FineWeb2、Stack-Edu 和 FineMath 的报告），只讲怎么把现有数据集组合起来。起点是 SmolLM2 在 1.7B 上已经验证过的英文网页配方，以及当时能拿到的最好的数学和代码数据。</p>
+      <ul>
+        <li><strong>英文网页</strong>：FineWeb-Edu 和 DCLM 是当时最强的开放英文网页数据，合计 5.1T token。FineWeb-Edu 帮教育和 STEM 类基准，DCLM 帮常识推理。在 3B、100B token 上扫了 20/80、40/60、50/50、60/40、80/20，60/40 或 50/50 最平衡（和 SmolLM2 的发现一致），stage 1 用 50/50。另加了 pes2o、Wikipedia & Wikibooks、StackExchange，对表现没影响，为了多样性。</li>
+        <li><strong>多语言网页</strong>：主攻法、西、德、意、葡五种语言，取自 FineWeb2-HQ，共 628B token；另有中文、阿拉伯语、俄语等 10 种语言以小比例加入，不是为了 SOTA，而是方便别人在这些语言上继续预训练（FineWeb2-HQ 不支持的语言用 FineWeb2）。关键问题是非英文占多少：在 3B 上消融发现 <strong>12% 多语言</strong>（约占网页部分的 14%）最平衡，多语言提升、英文不掉。只有 628B 非英文对 5.1T 英文，再高就得更多重复多语言数据。</li>
+        <li><strong>代码</strong>：stage 1 来自 StarCoder2 / The Stack v2 语料：The Stack v2（16 种语言，按 StarCoder2Data 过滤）、GitHub pull request（真实的代码评审推理）、Jupyter 和 Kaggle notebook（可执行的分步工作流）、GitHub issue 和 StackExchange 讨论。<a href="https://arxiv.org/abs/2408.10914">Aryabumi et al.</a> 发现代码能提升代码之外的能力（自然语言推理、世界知识），建议 25% 代码。SmolLM3 从 25% 开始消融，英文基准（HellaSwag、ARC-C、MMLU）明显下降；降到 10% 后，相比 0% 代码英文基准没有提升，但因为代码生成本身很重要，还是保留了。教育过滤的 Stack-Edu 推迟到后期阶段加入（高质量数据留到后期）。</li>
+        <li><strong>数学</strong>：早期用较大、较通用的 FineMath3+ 和 InfiWebMath3+；后期上采样 FineMath4+、InfiWebMath4+，并引入 <a href="https://arxiv.org/abs/2504.02807">MegaMath</a> 和 OpenMathInstruct、OpenMathReasoning 等指令与推理数据。stage 1 只用 3% 数学（两者各半）：可用的只有 54B token，而 stage 1 估计 8T–9T token，再多就要超过 5 个 epoch。</li>
+      </ul>
+      <p>合起来，stage 1 的领域比例是英文网页 / 多语言 / 代码 / 数学 = 75 / 12 / 10 / 3。后续两个阶段的配比在训练马拉松篇里。</p>
+
+      <div class="demo" id="mix">
+        <div class="demo-label">数据配比计算器：每个来源过几遍</div>
+        <div class="ctrls">
+          <label class="ctrl"><span>本阶段总 token（T）</span><input type="range" id="mix-T" min="0.1" max="20" step="0.1" value="8.5"><output id="mix-T-v"></output></label>
+        </div>
+        <div class="mix-wrap">
+          <table class="mix">
+            <thead><tr><th>来源</th><th>可用（B token）</th><th>权重 %</th><th class="num">分到（B）</th><th class="num">epoch</th></tr></thead>
+            <tbody id="mix-body"></tbody>
+          </table>
+        </div>
+        <div class="readout">
+          <div><span class="k">权重合计</span><span class="v" id="mix-sum"></span></div>
+          <div><span class="k">最多重复的来源</span><span class="v" id="mix-max" style="font-size:15px"></span></div>
+        </div>
+        <p class="note-small">默认是 SmolLM3 stage 1 的领域比例，总量取书中「8T–9T」的中点 8.5T；英文网页 5.1T、多语言 628B、数学 54B 来自书中，<b>代码的可用量书里没给，1000B 是我随手填的</b>。超过 4 个 epoch 的行标为橙色（Muennighoff et al. 的经验界）。可以改任意数字，或加一个来源。</p>
+        <button class="btn" id="mix-add">加一行</button>
+      </div>
+
+      <p>默认数字下可以复核书里的说法：数学 3% × 8.5T ≈ 255B，对 54B 是约 4.7 个 epoch——再提高比例就超过 5 遍；英文网页约 1.25 遍，多语言约 1.6 遍。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>：Designing the Model Architecture → The Tokenizer；Optimizer and Training Hyperparameters（Optimizers: AdamW and Beyond、Learning Rate、Batch Size、Scaling Laws for Hyperparameters、SmolLM3、Rules of Engagement）；The Art of Data Curation 全章。</li>
+        <li>分词器：<a href="https://arxiv.org/abs/1508.07909">Sennrich et al.（BPE）</a>；<a href="https://arxiv.org/abs/2402.01035">Dagan et al.</a>；<a href="https://arxiv.org/abs/2506.20920">FineWeb2（fertility、PCW）</a>。</li>
+        <li>优化器：<a href="https://arxiv.org/abs/1412.6980">Adam</a>；<a href="https://arxiv.org/abs/1711.05101">AdamW（Decoupled Weight Decay）</a>；<a href="https://kellerjordan.github.io/posts/muon/">Keller Jordan, Muon</a>（Newton–Schulz 系数、基线 (2, −1.5, 0.5)、[0.7, 1.3] 的目标区间、embedding/输出层用 AdamW）；<a href="https://jeremybernste.in/writing/deriving-muon">Jeremy Bernstein, Deriving Muon</a>；<a href="https://arxiv.org/abs/2502.16982">Liu et al., Muon is Scalable for LLM Training</a>（更新 RMS 匹配 0.2√max(A,B)）；<a href="https://arxiv.org/abs/2509.02046">Wen et al., Fantastic Pretraining Optimizers</a>。</li>
+        <li>学习率：<a href="https://arxiv.org/abs/1608.03983">SGDR</a>；<a href="https://arxiv.org/abs/2404.06395">MiniCPM（WSD）</a>；<a href="https://arxiv.org/abs/2405.18392">Hägele et al.（1−sqrt 冷却）</a>；<a href="https://arxiv.org/abs/2401.02954">DeepSeek LLM（multi-step 80/10/10、31.6%/10%、超参 scaling law 0.3118·C<sup>−0.125</sup> 与 0.2920·C<sup>0.3271</sup>、0.25% 近似最优）</a>。</li>
+        <li>Batch size：<a href="https://arxiv.org/abs/1812.06162">McCandlish et al.（𝓑<sub>simple</sub>、S/E 权衡）</a>；<a href="https://arxiv.org/abs/2505.23971">Merrill et al.</a>；<a href="https://arxiv.org/abs/2412.19437">DeepSeek-V3</a>。</li>
+        <li>数据：<a href="https://arxiv.org/abs/2305.16264">Muennighoff et al.（4 个 epoch）</a>；<a href="https://arxiv.org/abs/2410.08527">Chen et al.</a>；<a href="https://arxiv.org/abs/2305.10429">DoReMi</a>；<a href="https://arxiv.org/abs/2206.07137">RHO-LOSS</a>；<a href="https://arxiv.org/abs/2407.01492">RegMix</a>；<a href="https://arxiv.org/abs/2408.10914">Aryabumi et al.</a>；<a href="https://arxiv.org/abs/2502.02737">SmolLM2（Stack-Edu、FineMath）</a>。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="smol"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+    (() => {
+      const $ = (id) => document.getElementById(id);
+      const setSeg = (wrap, btn) => wrap.querySelectorAll('button').forEach((b) => b.setAttribute('aria-pressed', b === btn ? 'true' : 'false'));
+      const reduce = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const esc = (t) => t.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+      /* ---------- BPE ---------- */
+      let words, merges, lastMerged;
+      function bpeReset() {
+        const counts = new Map();
+        $('bpe-in').value.toLowerCase().split(/\s+/).filter(Boolean).forEach((w) => counts.set(w, (counts.get(w) || 0) + 1));
+        words = [...counts.entries()].map(([w, c]) => ({ syms: [...w, '_'], c }));
+        merges = []; lastMerged = null;
+        bpeDraw();
+      }
+      function bpeStep() {
+        const pairs = new Map();
+        for (const w of words) for (let i = 0; i + 1 < w.syms.length; i++) { const k = w.syms[i] + '\u0000' + w.syms[i + 1]; pairs.set(k, (pairs.get(k) || 0) + w.c); }
+        if (!pairs.size) return false;
+        let best = null, bc = -1;
+        [...pairs.keys()].sort().forEach((k) => { if (pairs.get(k) > bc) { bc = pairs.get(k); best = k; } });
+        const [a, b] = best.split('\u0000'), m = a + b;
+        for (const w of words) {
+          const out = [];
+          for (let i = 0; i < w.syms.length; i++) { if (i + 1 < w.syms.length && w.syms[i] === a && w.syms[i + 1] === b) { out.push(m); i++; } else out.push(w.syms[i]); }
+          w.syms = out;
+        }
+        merges.push([a, b, bc]); lastMerged = m;
+        return true;
+      }
+      function bpeDraw() {
+        const base = new Set(); words.forEach((w) => [...(w.syms.join(''))].forEach((ch) => base.add(ch)));
+        const vocab = base.size + merges.length;
+        const tot = words.reduce((s, w) => s + w.syms.length * w.c, 0), nw = words.reduce((s, w) => s + w.c, 0);
+        $('bpe-n').textContent = merges.length; $('bpe-v').textContent = vocab; $('bpe-t').textContent = tot; $('bpe-f').textContent = (tot / nw).toFixed(2);
+        $('bpe-toks').innerHTML = words.map((w) => '<span class="word">' + w.syms.map((s) => '<span class="tk' + (s === lastMerged ? ' new' : '') + '">' + esc(s) + '</span>').join('') + '<span class="cnt">×' + w.c + '</span></span>').join('');
+        $('bpe-merges').innerHTML = merges.length ? merges.map(([a, b, c], i) => (i + 1) + '. ' + esc(a) + ' + ' + esc(b) + ' → ' + esc(a + b) + '（' + c + ' 次）').reverse().join('<br>') : '还没有合并。初始词表 = 语料里出现的所有字符 + 词尾符号 _';
+      }
+      $('bpe-step').addEventListener('click', () => { bpeStep(); bpeDraw(); });
+      $('bpe-10').addEventListener('click', () => { for (let i = 0; i < 10; i++) if (!bpeStep()) break; bpeDraw(); });
+      $('bpe-reset').addEventListener('click', bpeReset);
+      $('bpe-in').addEventListener('change', bpeReset);
+      bpeReset();
+
+      /* ---------- Newton-Schulz ---------- */
+      const COEF = { q: [3.4445, -4.7750, 2.0315], b: [2, -1.5, 0.5], c: [1.5, -0.5, 0] };
+      let coef = COEF.q;
+      const mm = (A, B) => [[A[0][0] * B[0][0] + A[0][1] * B[1][0], A[0][0] * B[0][1] + A[0][1] * B[1][1]], [A[1][0] * B[0][0] + A[1][1] * B[1][0], A[1][0] * B[0][1] + A[1][1] * B[1][1]]];
+      const tr = (A) => [[A[0][0], A[1][0]], [A[0][1], A[1][1]]];
+      const add = (...Ms) => Ms.reduce((S, [k, M]) => [[S[0][0] + k * M[0][0], S[0][1] + k * M[0][1]], [S[1][0] + k * M[1][0], S[1][1] + k * M[1][1]]], [[0, 0], [0, 0]]);
+      const rot = (a) => [[Math.cos(a), -Math.sin(a)], [Math.sin(a), Math.cos(a)]];
+      function svd2(A) { // singular values of 2x2
+        const a = A[0][0], b = A[0][1], c = A[1][0], d = A[1][1];
+        const s1 = a * a + b * b + c * c + d * d, det = Math.abs(a * d - b * c);
+        const r = Math.sqrt(Math.max(0, s1 * s1 / 4 - det * det));
+        return [Math.sqrt(s1 / 2 + r), Math.sqrt(Math.max(0, s1 / 2 - r))];
+      }
+      function nsIter(G, k) {
+        const fro = Math.hypot(G[0][0], G[0][1], G[1][0], G[1][1]);
+        let X = [[G[0][0] / fro, G[0][1] / fro], [G[1][0] / fro, G[1][1] / fro]];
+        const hist = [X];
+        for (let i = 0; i < k; i++) {
+          const A = mm(X, tr(X)), AA = mm(A, A);
+          const Bm = add([coef[1], A], [coef[2], AA]);
+          X = add([coef[0], X], [1, mm(Bm, X)]);
+          hist.push(X);
+        }
+        return hist;
+      }
+      function nsUpdate() {
+        const s1 = +$('ns-s1').value, s2 = Math.pow(10, +$('ns-s2').value), ang = +$('ns-r').value * Math.PI / 180, k = +$('ns-k').value;
+        $('ns-s1-v').textContent = s1.toFixed(1); $('ns-s2-v').textContent = s2 < 0.1 ? s2.toFixed(3) : s2.toFixed(2);
+        $('ns-r-v').textContent = $('ns-r').value + '°'; $('ns-k-v').textContent = k;
+        const G = mm(mm(rot(ang), [[s1, 0], [0, s2]]), rot(-ang * 0.6 + 0.4));
+        const hist = nsIter(G, 8);
+        const X = hist[k];
+        const sv = svd2(X);
+        $('ns-sv').textContent = sv[0].toFixed(3) + ', ' + sv[1].toFixed(3);
+        $('ns-cond').textContent = sv[1] > 1e-9 ? (sv[0] / sv[1]).toFixed(2) : '∞';
+        $('ns-mat').textContent = '[' + X[0].map((v) => v.toFixed(2)).join(', ') + '; ' + X[1].map((v) => v.toFixed(2)).join(', ') + ']';
+        // ellipse
+        const C = 150, R = 95;
+        let e = '<circle cx="' + C + '" cy="' + C + '" r="' + R + '" class="grid" stroke-dasharray="4 3"/>';
+        e += '<line class="grid" x1="20" x2="280" y1="' + C + '" y2="' + C + '"/><line class="grid" y1="20" y2="280" x1="' + C + '" x2="' + C + '"/>';
+        let p = '';
+        for (let i = 0; i <= 72; i++) { const t = i / 72 * 2 * Math.PI; const v = [Math.cos(t), Math.sin(t)]; const x = X[0][0] * v[0] + X[0][1] * v[1], y = X[1][0] * v[0] + X[1][1] * v[1]; p += (i ? 'L' : 'M') + (C + R * x).toFixed(1) + ' ' + (C - R * y).toFixed(1); }
+        e += '<path d="' + p + 'Z" class="ln-a" fill="var(--accent-soft)"/>';
+        e += '<text class="ts" x="150" y="296" text-anchor="middle" font-size="14">k = ' + k + '：X<tspan font-size="10" dy="3">k</tspan><tspan dy="-3"> 作用于单位圆</tspan></text>';
+        $('ns-ell').innerHTML = e;
+        // map + cobweb
+        const W = 300, pl = 30, pb = 30, top = 10, maxV = 1.4;
+        const Xs = (v) => pl + v / maxV * (W - pl - 10), Ys = (v) => W - pb - v / maxV * (W - pb - top);
+        let m = '';
+        [0, 0.5, 1].forEach((v) => { m += '<line class="grid" x1="' + pl + '" x2="' + (W - 10) + '" y1="' + Ys(v) + '" y2="' + Ys(v) + '"/><text class="tf" x="' + (pl - 4) + '" y="' + (Ys(v) + 4) + '" font-size="12" text-anchor="end">' + v + '</text><text class="tf" x="' + Xs(v) + '" y="' + (W - pb + 16) + '" font-size="12" text-anchor="middle">' + v + '</text>'; });
+        m += '<line class="ln" stroke-dasharray="3 3" x1="' + Xs(0) + '" y1="' + Ys(0) + '" x2="' + Xs(maxV) + '" y2="' + Ys(maxV) + '"/>';
+        m += '<rect x="' + Xs(0) + '" y="' + Ys(1.3) + '" width="' + (Xs(maxV) - Xs(0)) + '" height="' + (Ys(0.7) - Ys(1.3)) + '" fill="var(--accent-soft)" opacity="0.6"/>';
+        const phi = (s) => coef[0] * s + coef[1] * s ** 3 + coef[2] * s ** 5;
+        let cp = '';
+        for (let i = 0; i <= 140; i++) { const s = i / 140 * 1.25; const y = Math.max(-0.1, Math.min(maxV, phi(s))); cp += (i ? 'L' : 'M') + Xs(s).toFixed(1) + ' ' + Ys(y).toFixed(1); }
+        m += '<path d="' + cp + '" class="ln" stroke="var(--text-soft)" stroke-width="2"/>';
+        const sv0 = svd2(hist[0]);
+        [[sv0[0], 'ln-a'], [sv0[1], 'ln-b']].forEach(([s, cls], j) => {
+          let path = 'M' + Xs(Math.min(s, maxV)) + ' ' + Ys(0), cur = s;
+          for (let i = 0; i < k; i++) { const nx = phi(cur); path += 'L' + Xs(Math.min(cur, maxV)).toFixed(1) + ' ' + Ys(Math.min(Math.max(nx, 0), maxV)).toFixed(1) + 'L' + Xs(Math.min(Math.max(nx, 0), maxV)).toFixed(1) + ' ' + Ys(Math.min(Math.max(nx, 0), maxV)).toFixed(1); cur = nx; }
+          m += '<path d="' + path + '" class="' + cls + '" stroke-width="1.8"/>';
+        });
+        m += '<text class="ts" x="' + (W - 12) + '" y="' + (top + 14) + '" font-size="12" text-anchor="end">φ(σ)，阴影 = [0.7, 1.3]</text>';
+        m += '<text class="ts" x="160" y="296" text-anchor="middle" font-size="13">σ（横）→ φ(σ)（纵）</text>';
+        $('ns-map').innerHTML = m;
+      }
+      ['ns-s1', 'ns-s2', 'ns-r', 'ns-k'].forEach((id) => $(id).addEventListener('input', nsUpdate));
+      $('ns-coef').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; setSeg($('ns-coef'), b); coef = COEF[b.dataset.c]; nsUpdate(); });
+      let nsTimer = null;
+      $('ns-play').addEventListener('click', () => {
+        clearInterval(nsTimer);
+        if (reduce) { $('ns-k').value = 5; nsUpdate(); return; }
+        let k = 0; $('ns-k').value = 0; nsUpdate();
+        nsTimer = setInterval(() => { k++; $('ns-k').value = k; nsUpdate(); if (k >= 5) clearInterval(nsTimer); }, 700);
+      });
+      nsUpdate();
+
+      /* ---------- LR schedules ---------- */
+      let lrType = 'cos';
+      function lrAt(type, t, T, opt) { // t, T in same units; returns fraction of peak
+        const W = opt.w * T, mn = opt.min;
+        if (t < W) return t / Math.max(W, 1e-9);
+        if (type === 'cos') return mn + 0.5 * (1 - mn) * (1 + Math.cos(Math.PI * (t - W) / (T - W)));
+        if (type === 'lin') return 1 - (1 - mn) * (t - W) / (T - W);
+        if (type === 'wsd') {
+          const D = opt.d * T, s = T - D;
+          if (t < s) return 1;
+          const x = (t - s) / D;
+          const f = opt.shape === 'lin' ? 1 - x : opt.shape === 'sqrt' ? 1 - Math.sqrt(x) : 0.5 * (1 + Math.cos(Math.PI * x));
+          return mn + (1 - mn) * f;
+        }
+        if (type === 'ms') { const [a, b] = opt.ms; return t < a * T ? 1 : t < b * T ? 0.316 : 0.1; }
+        return 1;
+      }
+      function lrUpdate() {
+        const opt = { w: +$('lr-w').value / 100, d: +$('lr-d').value / 100, shape: $('lr-shape').value, ms: $('lr-ms').value.split(',').map((x) => +x / 100), min: +$('lr-min').value / 100 };
+        const ext = +$('lr-ext').value / 100;
+        $('lr-w-v').textContent = $('lr-w').value + '%'; $('lr-d-v').textContent = $('lr-d').value + '%'; $('lr-min-v').textContent = $('lr-min').value + '%'; $('lr-ext-v').textContent = $('lr-ext').value + '%';
+        const W = 600, H = 260, pl = 48, pr = 22, pt = 14, pb = 36, Xmax = 2.0;
+        const X = (t) => pl + t / Xmax * (W - pl - pr), Y = (v) => pt + (1 - v / 1.05) * (H - pt - pb);
+        let s = '';
+        [0, 0.25, 0.5, 0.75, 1].forEach((v) => { s += '<line class="grid" x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text class="tf" x="' + (pl - 6) + '" y="' + (Y(v) + 4) + '" text-anchor="end" font-size="16">' + v + '</text>'; });
+        for (let t = 0; t <= Xmax + 1e-9; t += 0.5) s += '<text class="tf" x="' + X(t) + '" y="' + (H - pb + 22) + '" text-anchor="middle" font-size="16">' + Math.round(t * 100) + '%</text>';
+        s += '<line class="ln" stroke-dasharray="2 4" x1="' + X(1) + '" x2="' + X(1) + '" y1="' + pt + '" y2="' + (H - pb) + '"/>';
+        const path = (type, T, from, to, cls, extra) => { let p = ''; const n = 300; for (let i = 0; i <= n; i++) { const t = from + (to - from) * i / n; p += (i ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(lrAt(type, t, T, opt)).toFixed(1); } return '<path d="' + p + '" class="' + cls + '" ' + (extra || '') + '/>'; };
+        ['cos', 'wsd', 'ms', 'lin'].filter((t) => t !== lrType).forEach((t) => { s += path(t, 1, 0, 1, 'ln', 'opacity="0.35"'); });
+        if (ext > 1) {
+          const flexible = lrType === 'wsd' || lrType === 'ms';
+          // portion already trained under the original plan: up to the point where schedules diverge
+          const div = flexible ? (lrType === 'wsd' ? 1 - opt.d : opt.ms[0]) : opt.w;
+          s += path(lrType, ext, 0, ext, 'ln-b', 'stroke-dasharray="6 4"');
+          s += path(lrType, 1, 0, Math.max(div, 0.001), 'ln-a');
+          s += path(lrType, 1, Math.max(div, 0.001), 1, 'ln-a', 'opacity="0.3"');
+          $('lr-restart').textContent = flexible ? '不用：从 ' + Math.round(div * 100) + '% 处接着训' : '要：从预热结束起就对不上';
+        } else {
+          s += path(lrType, 1, 0, 1, 'ln-a');
+          $('lr-restart').textContent = '（把「中途延长」拉过 100%）';
+        }
+        let area = 0; const n = 2000; for (let i = 0; i < n; i++) area += lrAt(lrType, (i + 0.5) / n, 1, opt) / n;
+        $('lr-50').textContent = lrAt(lrType, 0.5, 1, opt).toFixed(3);
+        $('lr-area').textContent = area.toFixed(3);
+        $('lr-svg').innerHTML = s;
+      }
+      $('lr-type').addEventListener('click', (e) => { const b = e.target.closest('button'); if (!b) return; setSeg($('lr-type'), b); lrType = b.dataset.t; lrUpdate(); });
+      ['lr-w', 'lr-d', 'lr-shape', 'lr-ms', 'lr-min', 'lr-ext'].forEach((id) => $(id).addEventListener('input', lrUpdate));
+      lrUpdate();
+
+      /* ---------- batch tradeoff + hp scaling ---------- */
+      function bsUpdate() {
+        const r = Math.pow(10, +$('bs-r').value);
+        $('bs-r-v').textContent = r >= 10 ? r.toFixed(0) : r >= 1 ? r.toFixed(2) : r.toFixed(3);
+        const S = 1 + 1 / r, E = 1 + r;
+        $('bs-s').textContent = S.toFixed(2) + '×'; $('bs-e').textContent = E.toFixed(2) + '×';
+        const W = 600, H = 260, pl = 54, pr = 16, pt = 12, pb = 48, lmax = Math.log10(101);
+        const X = (e) => pl + Math.log10(e) / lmax * (W - pl - pr), Y = (s) => pt + (1 - Math.log10(s) / lmax) * (H - pt - pb);
+        let g = '';
+        [1, 2, 5, 10, 100].forEach((v) => { g += '<line class="grid" x1="' + pl + '" x2="' + (W - pr) + '" y1="' + Y(v) + '" y2="' + Y(v) + '"/><text class="tf" x="' + (pl - 6) + '" y="' + (Y(v) + 5) + '" font-size="16" text-anchor="end">' + v + '×</text>'; g += '<text class="tf" x="' + X(v) + '" y="' + (H - pb + 20) + '" font-size="16" text-anchor="middle">' + v + '×</text>'; });
+        let p = ''; for (let i = 0; i <= 200; i++) { const rr = Math.pow(10, -2 + 4 * i / 200); p += (i ? 'L' : 'M') + X(1 + rr).toFixed(1) + ' ' + Y(1 + 1 / rr).toFixed(1); }
+        g += '<path d="' + p + '" class="ln-a"/>';
+        g += '<circle cx="' + X(2) + '" cy="' + Y(2) + '" r="4" class="ff"/><text class="ts" x="' + (X(2) + 10) + '" y="' + (Y(2) - 10) + '" font-size="16">B = 𝓑crit</text>';
+        g += '<circle cx="' + X(E) + '" cy="' + Y(S) + '" r="6" class="fb"/>';
+        g += '<text class="ts" x="' + ((pl + W) / 2) + '" y="' + (H - 4) + '" text-anchor="middle" font-size="17">消耗数据 E / E_min（越右越费数据）</text>';
+        g += '<text class="ts" x="' + (pl + 6) + '" y="' + (pt + 14) + '" font-size="17">↑ 步数 S / S_min（越高越费时间）</text>';
+        $('bs-svg').innerHTML = g;
+      }
+      function hpUpdate() {
+        const N = Math.pow(10, +$('hp-n').value) * 1e9, D = Math.pow(10, +$('hp-d').value) * 1e12;
+        $('hp-n-v').textContent = (N / 1e9).toFixed(N < 1e10 ? 2 : 0) + 'B'; $('hp-d-v').textContent = (D / 1e12).toFixed(D < 1e13 ? 2 : 1) + 'T';
+        const C = 6 * N * D;
+        $('hp-c').textContent = C.toExponential(2);
+        $('hp-lr').textContent = (0.3118 * Math.pow(C, -0.125)).toExponential(2);
+        const B = 0.2920 * Math.pow(C, 0.3271);
+        $('hp-b').textContent = (B / 1e6).toFixed(1) + 'M tok';
+      }
+      $('bs-r').addEventListener('input', bsUpdate); ['hp-n', 'hp-d'].forEach((id) => $(id).addEventListener('input', hpUpdate));
+      bsUpdate(); hpUpdate();
+
+      /* ---------- mixture ---------- */
+      const rows = [
+        ['英文网页（FineWeb-Edu + DCLM 等）', 5100, 75],
+        ['多语言网页（FineWeb2-HQ 等）', 628, 12],
+        ['代码（可用量为示意）', 1000, 10],
+        ['数学（FineMath3+ / InfiWebMath3+）', 54, 3],
+      ];
+      function mixRender() {
+        $('mix-body').innerHTML = rows.map((r, i) => '<tr data-i="' + i + '"><td><input data-k="0" value="' + esc(String(r[0])) + '" style="width:100%;min-width:9em"></td><td><input data-k="1" type="number" min="0.1" step="1" value="' + r[1] + '"></td><td><input data-k="2" type="number" min="0" step="0.5" value="' + r[2] + '"></td><td class="num tk"></td><td class="num ep"></td></tr>').join('');
+        mixUpdate();
+      }
+      function mixUpdate() {
+        const T = +$('mix-T').value * 1000; $('mix-T-v').textContent = (+$('mix-T').value).toFixed(1) + 'T';
+        let sum = 0, worst = null;
+        [...$('mix-body').children].forEach((tr_, i) => {
+          const r = rows[i]; sum += +r[2];
+          const tok = T * r[2] / 100, ep = tok / Math.max(r[1], 1e-9);
+          tr_.querySelector('.tk').textContent = tok >= 1000 ? (tok / 1000).toFixed(2) + 'T' : tok.toFixed(0) + 'B';
+          tr_.querySelector('.ep').textContent = ep.toFixed(2);
+          tr_.classList.toggle('over', ep > 4);
+          if (!worst || ep > worst[1]) worst = [r[0], ep];
+        });
+        $('mix-sum').textContent = sum.toFixed(1) + '%' + (Math.abs(sum - 100) > 0.01 ? '（≠100）' : '');
+        $('mix-max').textContent = worst ? worst[0].replace(/（.*）/, '') + '：' + worst[1].toFixed(2) + ' 遍' : '';
+      }
+      $('mix-body').addEventListener('input', (e) => { const inp = e.target; const i = +inp.closest('tr').dataset.i, k = +inp.dataset.k; rows[i][k] = k === 0 ? inp.value : +inp.value; mixUpdate(); });
+      $('mix-T').addEventListener('input', mixUpdate);
+      $('mix-add').addEventListener('click', () => { rows.push(['新来源', 100, 0]); mixRender(); });
+      mixRender();
+    })();
+  </script>
+</body>
+</html>
