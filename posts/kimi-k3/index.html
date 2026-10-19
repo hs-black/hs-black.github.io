@@ -67,9 +67,9 @@
     <nav class="series" data-series="reports"></nav>
 
     <article class="prose">
-      <p>Kimi K3（arXiv 2607.24653，<em>Kimi K3: Open Frontier Intelligence</em>，2026 年 7 月）是 Moonshot AI 在 K2 之后的旗舰：总参数 2.8T（表 1 精确值 2.78T），激活 104B，原生视觉，上下文 1M token，权重全部开源。报告说架构、数据和训练配方的改进合起来，相对 K2 带来约 2.5 倍的整体缩放效率。</p>
+      <p>Kimi K3 是 Moonshot AI 在 2026 年 7 月发布的旗舰模型，接在 K2 之后：总参数 2.78T（通常说 2.8T），激活 104B，原生视觉，上下文 1M token，权重全部开源。架构、数据和训练配方的改进合起来，相对 K2 带来约 2.5 倍的整体缩放效率。</p>
       <p>和 K2 相比，K3 几乎每个部件都换了：注意力从全 MLA 换成 Kimi Linear 的 KDA–MLA 混合（并对 KDA 做了两处改动）；残差连接换成“注意力残差”（AttnRes）；MoE 换成 896 个专家、每 token 激活 16 个的 Stable LatentMoE，配上新激活函数 SiTU-GLU 和新的负载均衡方法分位数均衡（Quantile Balancing）；优化器变成逐头 Muon。后训练是按领域和推理强度训练 9 个专家再做多教师在线蒸馏，基础设施则围绕“3T 级 MoE + 1M 上下文 Agent RL”重做了一遍。</p>
-      <p>这篇按报告顺序逐个讲。KDA 的基础（delta 规则、分块算法、3:1 混合、NoPE）在<a href="/posts/kimi-linear/">上一篇</a>里，Muon 和 QK-Clip 在<a href="/posts/kimi-k2/">K2 那篇</a>里，这里只讲 K3 的新东西。四个交互演示：衰减下界与 BF16 范围、SiTU-GLU 曲线、分位数均衡模拟器、LatentMoE 与 MoonEP 计算器。</p>
+      <p>下面先讲架构（注意力、残差、MoE 和负载均衡），再讲训练、后训练和支撑这一切的系统。KDA 的基础（delta 规则、分块算法、3:1 混合、NoPE）在<a href="/posts/kimi-linear/">上一篇</a>里，Muon 和 QK-Clip 在<a href="/posts/kimi-k2/">K2 那篇</a>里，这里只讲 K3 的新东西。文中有四个交互演示：衰减下界与 BF16 范围、SiTU-GLU 曲线、分位数均衡模拟器、LatentMoE 与 MoonEP 计算器。</p>
 
       <nav class="toc" aria-label="目录">
         <strong>目录</strong>
@@ -89,12 +89,12 @@
           <li><a href="#infra-serve">基础设施（四）：推理与线上服务</a></li>
           <li><a href="#eval">评测与案例</a></li>
           <li><a href="#take">小结</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </nav>
 
       <h2 id="overview">1. 全貌：K2 与 K3 对照</h2>
-      <p>报告表 1 的架构对照：</p>
+      <p>先把 K3 和 K2 的架构放在一起看：</p>
       <div class="table-wrap">
         <table>
           <thead><tr><th>项目</th><th class="num">Kimi K2</th><th class="num">Kimi K3</th></tr></thead>
@@ -116,12 +116,12 @@
           </tbody>
         </table>
       </div>
-      <p>层数核对：每个 block 是 3 层 KDA + 1 层 Gated MLA，共 23 个 block，得到 69 KDA + 23 MLA；骨干末尾再加一层 Gated MLA，保证最后一层总是全局注意力，合计 24 MLA、93 层。</p>
-      <p>报告把架构的设计目标总结为在三个维度上“扩展信息流”：<strong>序列</strong>（KDA + Gated MLA 的混合注意力）、<strong>深度</strong>（注意力残差）、<strong>宽度</strong>（Stable LatentMoE）。下面按这个顺序讲。</p>
+      <p>93 层是这样拼出来的：每个 block 是 3 层 KDA + 1 层 Gated MLA，共 23 个 block，得到 69 KDA + 23 MLA；骨干末尾再加一层 Gated MLA，保证最后一层总是全局注意力，合计 24 MLA、93 层。</p>
+      <p>这些改动可以归结为在三个维度上“扩展信息流”：<strong>序列</strong>（KDA + Gated MLA 的混合注意力）、<strong>深度</strong>（注意力残差）、<strong>宽度</strong>（Stable LatentMoE）。下面按这个顺序讲。</p>
 
       <h2 id="attn">2. 混合注意力：KDA 的两处改动与 Gated MLA</h2>
       <h3>2.1 KDA 回顾</h3>
-      <p>KDA 的递推是（单头，\(d_k=d_v\)）</p>
+      <p>K3 的大部分层是 KDA（Kimi Delta Attention），一种线性注意力：它不保留所有历史 token 的 KV cache，而是维护一个固定大小的状态矩阵 \(S_t\)，每来一个 token 就更新一次。递推是（单头，\(d_k=d_v\)）</p>
       $$S_t = \big(I-\beta_tk_tk_t^\top\big)\operatorname{Diag}(\alpha_t)S_{t-1} + \beta_tk_tv_t^\top,\qquad \tilde o_t = S_t^\top q_t ,$$
       <p>\(\alpha_t\in(0,1)^{d_k}\) 是逐通道的一步保留率，\(\beta_t\in(0,1)\) 是 delta 规则的写入强度。\(q,k\) 经过 ShortConv、Swish、L2Norm，\(v\) 经过 ShortConv、Swish，\(\beta_t\) 是 sigmoid。衰减的 logit 由低秩投影加每头的偏置给出：\(z_t^h = W_\alpha^{\uparrow}W_\alpha^{\downarrow}x_t + b_\alpha^h\in\mathbb R^{d_k}\)。训练用分块形式，块内的输出是</p>
       $$O_{[t]} = (\Gamma\odot Q_{[t]})S_{[t]} + \operatorname{Tril}\big[(Q_{[t]}\odot\Gamma)(K_{[t]}/\Gamma)^\top\big]\big(U_{[t]}-W_{[t]}S_{[t]}\big).$$
@@ -130,7 +130,7 @@
       <p>K3 换掉了从 logit 到对数衰减 \(g=\log\alpha\) 的映射：</p>
       $$\text{Kimi Linear：}\ g_t^h = -e^{A_h}\operatorname{Softplus}(z_t^h)\in(-\infty,0),\qquad \text{K3：}\ g_t^h = g_{\min}\operatorname{Sigmoid}\big(e^{A_h}z_t^h\big)\in(g_{\min},0),\qquad \alpha_t^h = e^{g_t^h}.$$
       <p>\(A_h\) 是可学习的每头对数尺度（初始化为 0），\(g_{\min}=-5\) 固定。于是每个保留率 \(\alpha>e^{-5}\approx 6.7\times10^{-3}\)，一个 16-token 小块内的累积对数衰减落在 \((-80,0)\)，倒数小于 \(e^{80}\)。BF16 的最大有限值约 \(3.39\times10^{38}\approx e^{88.7}\)，所以倒数一定在 BF16 范围内。有了这个有限范围，<strong>对角小块也能直接用稠密 Tensor Core 矩阵乘</strong>，按位置对计算的路径被整个去掉。</p>
-      <p>代价是模型不再能在一步之内“完全清空”某个通道（最少保留 0.67%）。不过一个通道连续几步都取下界，几步之后也就几乎清零了（例如 4 步后 \(e^{-20}\approx 2\times10^{-9}\)）。报告说这种参数化与已有工作中“有下界的循环门”密切相关。</p>
+      <p>代价是模型不再能在一步之内“完全清空”某个通道（最少保留 0.67%）。不过一个通道连续几步都取下界，几步之后也就几乎清零了（例如 4 步后 \(e^{-20}\approx 2\times10^{-9}\)）。这种参数化和 RNN 文献里“有下界的循环门”是同一类思路。</p>
 
       <div class="demo" id="decay-demo">
         <div class="demo-label">交互演示 · 衰减参数化与 BF16 范围</div>
@@ -151,17 +151,17 @@
       </div>
 
       <h3>2.3 改动二：全秩输出门</h3>
-      <p>Kimi Linear 的输出门是低秩的（\(W_g^{\uparrow}W_g^{\downarrow}\)），K3 改成输入相关的全秩投影：</p>
+      <p>输出门决定每个通道读出多少。Kimi Linear 的输出门是低秩的（\(W_g^{\uparrow}W_g^{\downarrow}\)），K3 改成输入相关的全秩投影：</p>
       $$y_t = W_o\big[\operatorname{Sigmoid}(W_gx_t)\odot\operatorname{RMSNorm}(\tilde o_t)\big].$$
       <h3>2.4 Gated MLA</h3>
       <p>全局注意力层仍是 MLA（只缓存压缩隐向量 \(c_t=W_cx_t\)，用上投影重建 key/value）。和 K2、K2.5 不同，K3 按 Kimi Linear 的做法对所有 MLA 层用 <strong>NoPE</strong>：查询和键都不加位置编码，位置与近因信息完全由 KDA 层提供，MLA 层只负责不受限制的全局内容交互。这样扩展上下文时不用重调 RoPE 底数或 YaRN。</p>
       <p>MLA 也加了一个与 KDA 一致的、输入相关的逐通道全秩输出门：</p>
       $$y_t = W_o\big[\operatorname{Sigmoid}(W_gx_t)\odot\tilde o_t\big],$$
-      <p>让每个 token 能调节它从全局注意力读出的通道。另一个细节：为了纠正已有工作指出的 flash attention 中有偏的舍入误差，训练时注意力输出保持 FP32。这让输出 tile 的片上占用翻倍，于是他们重新设计了训练 kernel，让输出 tile 与 KV 暂存缓冲区复用（而不是与 query tile 复用），腾出共享内存给更深的 KV 流水线，反而提高了吞吐。</p>
+      <p>让每个 token 能调节它从全局注意力读出的通道。另一个细节：flash attention 在低精度下的舍入误差是有偏的，为了消除它，训练时注意力输出保持 FP32。这让输出 tile 的片上占用翻倍，于是他们重新设计了训练 kernel，让输出 tile 与 KV 暂存缓冲区复用（而不是与 query tile 复用），腾出共享内存给更深的 KV 流水线，反而提高了吞吐。</p>
 
       <h2 id="attnres">3. 注意力残差：在深度上做注意力</h2>
       <h3>3.1 动机</h3>
-      <p>标准的（PreNorm）残差连接 \(h_{l+1}=h_l+f_l(\cdot)\) 把之前所有层的输出以固定的单位权重累加到一个状态里。报告的类比很直接：这像是 RNN 在时间上把所有历史压进一个隐状态；Transformer 在序列维上用注意力替代了循环，AttnRes 就在<strong>深度</strong>维上做同样的事——每层按数据相关的权重，有选择地取用之前各层的输出。AttnRes 的原始论文（arXiv 2603.15031）还指出，均匀累加会让隐状态随深度不受控地增长，逐层稀释每层的贡献（PreNorm dilution）。</p>
+      <p>标准的（PreNorm）残差连接 \(h_{l+1}=h_l+f_l(\cdot)\) 把之前所有层的输出以固定的单位权重累加到一个状态里。可以这样类比：这像是 RNN 在时间上把所有历史压进一个隐状态；Transformer 在序列维上用注意力替代了循环，AttnRes 就在<strong>深度</strong>维上做同样的事——每层按数据相关的权重，有选择地取用之前各层的输出。均匀累加还有一个具体问题：隐状态随深度不受控地增长，每一层的贡献被逐层稀释（PreNorm dilution）。</p>
       <h3>3.2 完整形式</h3>
       <p>第 \(l\) 层有一个可学习的伪查询 \(w_l\in\mathbb R^d\)（不依赖输入），key 和 value 都是之前的层输出：</p>
       $$k_i = v_i = \begin{cases} h_1 &amp; i=0\ (\text{token embedding})\\ f_i(h_i) &amp; 1\le i\le l-1\end{cases},\qquad \alpha_{i\to l} = \frac{\exp\big(w_l^\top\operatorname{RMSNorm}(k_i)\big)}{\sum_{j=0}^{l-1}\exp\big(w_l^\top\operatorname{RMSNorm}(k_j)\big)},\qquad h_l = \sum_{i=0}^{l-1}\alpha_{i\to l}\,v_i .$$
@@ -169,9 +169,9 @@
       <h3>3.3 分块形式（Block AttnRes）</h3>
       <p>把 \(L\) 层分成 \(N\) 个块。块内的层输出直接求和成一个块表示 \(b_n=\sum_{j\in\mathcal B_n}f_j(h_j)\)，\(b_0=h_1\)（embedding 总是一个源）。块 \(n\) 的第 \(i\) 层在以下 value 上做注意力：</p>
       $$V = \begin{cases}[b_0,\dots,b_{n-1}] &amp; i=1\\ [b_0,\dots,b_{n-1},\ b_n^{i-1}] &amp; i\ge2\end{cases}$$
-      <p>其中 \(b_n^{i-1}\) 是块内前 \(i-1\) 层的部分和。显存与通信从 \(O(Ld)\) 降到 \(O(Nd)\)。推理时，“对已完成的块做注意力”可以并行地一次算出，再用 online softmax 与块内顺序累积的部分和合并，显著降低推理开销。原论文的经验是 \(N\approx8\) 就能拿回大部分收益。K3 用 8 个 12 层的块（96 > 93，所以最后一块是不满的），算上 embedding 共 9 个源。</p>
+      <p>其中 \(b_n^{i-1}\) 是块内前 \(i-1\) 层的部分和。显存与通信从 \(O(Ld)\) 降到 \(O(Nd)\)。推理时，“对已完成的块做注意力”可以并行地一次算出，再用 online softmax 与块内顺序累积的部分和合并，显著降低推理开销。经验上 \(N\approx8\) 就能拿回大部分收益。K3 用 8 个 12 层的块（96 > 93，所以最后一块是不满的），算上 embedding 共 9 个源。</p>
       <figure>
-        <svg class="diagram" viewBox="0 0 640 200" role="img" aria-label="Block AttnRes 示意">
+        <svg class="diagram" viewBox="0 0 640 200" role="img" aria-label="Block AttnRes 结构">
           <defs><marker id="ah" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path class="arrowhead" d="M0,0 L10,5 L0,10 z"/></marker></defs>
           <rect class="boxb" x="10" y="80" width="70" height="40" rx="6"/><text x="45" y="105" text-anchor="middle">b₀=emb</text>
           <rect class="box" x="110" y="70" width="120" height="60" rx="6"/><text x="170" y="96" text-anchor="middle">块 1（12 层）</text><text class="t-soft" x="170" y="114" text-anchor="middle">求和 → b₁</text>
@@ -187,14 +187,14 @@
           <path class="attn" style="marker-end:url(#ah)" d="M310,70 C350,55 370,70 398,90"/>
           <path class="arrow" style="marker-end:url(#ah)" d="M80,100 L108,100"/><path class="arrow" style="marker-end:url(#ah)" d="M230,100 L248,100"/><path class="arrow" style="marker-end:url(#ah)" d="M370,100 L398,100"/>
         </svg>
-        <figcaption>Block AttnRes：每层对“embedding + 已完成块的和 + 本块部分和”做 softmax 加权（按报告 §2.2 的公式重画）。</figcaption>
+        <figcaption>Block AttnRes：每层对“embedding + 已完成块的和 + 本块部分和”做 softmax 加权。</figcaption>
       </figure>
 
       <h2 id="moe">4. Stable LatentMoE</h2>
       <h3>4.1 LatentMoE：路由专家在压缩空间里工作</h3>
-      <p>扩大专家池和每 token 激活的专家数能扩大“专家专门化”的空间。但在普通 MoE 里每个被选中的专家都接收完整的 \(d\) 维表示，通信量和专家权重的读取量随激活专家数线性增长。LatentMoE（Elango 等，2026）的做法是把模型宽度与路由专家的宽度解耦：共享专家保留全宽路径处理通用变换；路由专家在宽度为 \(\ell\) 的压缩空间里工作：</p>
+      <p>扩大专家池和每 token 激活的专家数能扩大“专家专门化”的空间。但在普通 MoE 里每个被选中的专家都接收完整的 \(d\) 维表示，通信量和专家权重的读取量随激活专家数线性增长。LatentMoE 的做法是把模型宽度与路由专家的宽度解耦：共享专家保留全宽路径处理通用变换；路由专家在宽度为 \(\ell\) 的压缩空间里工作：</p>
       $$u = \sum_{i\in\mathcal T_k(x)}p_i\,E_i^{\text{routed}}\big(W^{\downarrow}x\big)\in\mathbb R^{\ell},\qquad y = \sum_{j=1}^{N_s}E_j^{\text{shared}}(x) + W^{\uparrow}\operatorname{RMSNorm}(u).$$
-      <p>K3 中 \(d=7168\)，\(\ell=3584\)，\(N_s=2\)，896 个路由专家激活 16 个，稀疏度 56。按我的算法：每 token 发往专家的数据量是 \(16\times3584=57344\) 个数，和 K2 的 \(8\times7168\) 完全相同——激活专家数翻倍，而通信量不变。每个路由专家的参数是 \(3\times3584\times3072\approx33\)M，92 个 MoE 层 × 896 个专家合计约 2.72T，占总参 2.78T 的绝大部分；每 token 激活的路由专家参数约 \(92\times16\times33\text{M}\approx48.6\)B。</p>
+      <p>K3 中 \(d=7168\)，\(\ell=3584\)，\(N_s=2\)，896 个路由专家激活 16 个，稀疏度 56。算一下通信：每 token 发往专家的数据量是 \(16\times3584=57344\) 个数，和 K2 的 \(8\times7168\) 完全相同——激活专家数翻倍，而通信量不变。每个路由专家的参数是 \(3\times3584\times3072\approx33\)M，92 个 MoE 层 × 896 个专家合计约 2.72T，占总参 2.78T 的绝大部分；每 token 激活的路由专家参数约 \(92\times16\times33\text{M}\approx48.6\)B。</p>
       <h3>4.2 两个失效模式</h3>
       <p>这么极端的稀疏度放大了原始设计的两个问题：</p>
       <ul>
@@ -203,15 +203,15 @@
       </ul>
       <p>Stable LatentMoE 用三个部件对付它们：\(W^{\uparrow}\) 之前的 RMSNorm、SiTU-GLU（压激活爆炸），以及分位数均衡（负载均衡，下一节）。</p>
       <h3>4.3 归一化</h3>
-      <p>原始 LatentMoE 直接对聚合后的 \(u\) 做 \(W^{\uparrow}\)，而 \(u\) 的尺度随被选中的专家和路由权重变化。K3 在聚合和上投影之间插入 RMSNorm（上面公式里那个），降低路由分支对尺度变化的敏感性，再与全宽的共享分支相加。报告说这不仅稳定训练，还一致地改善了验证 loss 和下游指标。</p>
+      <p>原始 LatentMoE 直接对聚合后的 \(u\) 做 \(W^{\uparrow}\)，而 \(u\) 的尺度随被选中的专家和路由权重变化。K3 在聚合和上投影之间插入 RMSNorm（上面公式里那个），降低路由分支对尺度变化的敏感性，再与全宽的共享分支相加。这不仅稳定了训练，还一致地改善了验证 loss 和下游指标。</p>
       <h3>4.4 SiTU-GLU</h3>
       <p>GLU 是 \(\operatorname{Sigmoid}(W_gx)\odot W_ux\)；SwiGLU 把门换成 \(\operatorname{Swish}(z)=z\,\sigma(z)\)。SwiGLU 的两个乘数都是无界的，两个大坐标同时出现就会产生激活离群值，在低精度下增加溢出风险。原始 GLU 的 sigmoid 门有界，但失去了 Swish 在正半轴近似线性的响应。K3 的折中是对 Swish 的线性因子和 up 分支都加平滑上限 \(\operatorname{softcap}(z,\beta)=\beta\tanh(z/\beta)\)：</p>
       $$\operatorname{SiTU\text{-}GLU}(x) = \Big[\beta_1\tanh\!\Big(\frac{W_gx}{\beta_1}\Big)\odot\operatorname{Sigmoid}(W_gx)\Big]\odot\Big[\beta_2\tanh\!\Big(\frac{W_ux}{\beta_2}\Big)\Big],\qquad \beta_1=4,\ \beta_2=25 .$$
-      <p>三条性质（报告附录 B）：</p>
+      <p>它有三条性质：</p>
       <ul>
         <li><strong>局部一致</strong>：\(\beta\tanh(z/\beta) = z + O(z^3/\beta^2)\)，所以在原点附近与 SwiGLU 一阶相同；\(\beta_1,\beta_2\to\infty\) 时逐点退化为 SwiGLU。</li>
         <li><strong>有界</strong>：\(|\tanh|\lt1\)、\(0\lt\sigma\lt1\)，每个输出坐标满足 \(|\cdot|\le\beta_1\beta_2=100\)。</li>
-        <li><strong>负半轴仍然衰减到 0</strong>：sigmoid 因子保留，所以 Swish 的负尾巴形状不变；cap 主要控制大的正激活。与对门的预激活做硬截断相比，平滑上限在饱和边界之外仍有非零梯度，报告说训练表现更好。</li>
+        <li><strong>负半轴仍然衰减到 0</strong>：sigmoid 因子保留，所以 Swish 的负尾巴形状不变；cap 主要控制大的正激活。与对门的预激活做硬截断相比，平滑上限在饱和边界之外仍有非零梯度，训练表现更好。</li>
       </ul>
 
       <div class="demo" id="situ-demo">
@@ -237,7 +237,7 @@
       $$\mathcal T_i = \operatorname{argtop}_k(s_i + b),\qquad p_{i,j} = \frac{s_{i,j}}{\sum_{r\in\mathcal T_i}s_{i,r}},\ j\in\mathcal T_i .$$
       <p>偏置只影响分派，不影响混合权重和路由器的梯度。原方法每步按负载误差的符号固定步长更新：\(b_j\leftarrow b_j+\gamma\operatorname{sign}(\bar\ell-\ell_j)\)。\(\gamma\) 小则适应慢，大则负载振荡。专家数到 896 时这个权衡很难调。</p>
       <h3>5.2 从最优均衡指派推导</h3>
-      <p>报告附录 C 把均衡路由写成一个指派问题：\(m\) 个 token、\(n\) 个专家，每个 token 选 \(k\) 个，每个专家恰好接 \(q=mk/n\) 个，最大化总分：</p>
+      <p>符号更新的问题在于它只知道“该往哪边调”，不知道“该调多少”。要一步调到位，先把均衡路由写成一个指派问题：\(m\) 个 token、\(n\) 个专家，每个 token 选 \(k\) 个，每个专家恰好接 \(q=mk/n\) 个，最大化总分：</p>
       $$\max_{x_{ij}\in\{0,1\}}\sum_{i,j}x_{ij}s_{ij}\quad\text{s.t.}\quad\sum_jx_{ij}=k,\qquad \sum_ix_{ij}=\frac{mk}{n}.$$
       <p>二部图 b-匹配多面体是整的，所以松弛到 \(x\in[0,1]\) 不损失最优性。对两组等式约束引入乘子 \(\alpha_i\)（token 侧）、\(\beta_j\)（专家侧），交换 max 与 min 后内层可以逐元素求解：\(x_{ij}^*=1\) 当且仅当 \(s_{ij}-\alpha_i-\beta_j\gt0\)。代回得到凸的对偶目标</p>
       $$\min_{\alpha,\beta}\ \sum_{i,j}\max\big(0,\ s_{ij}-\alpha_i-\beta_j\big) + k\sum_i\alpha_i + \frac{mk}{n}\sum_j\beta_j .$$
@@ -248,11 +248,11 @@
       <p>每步只用一次前向：路由时把 Top-\(k\) 改成在 \(s_i+b^{(t)}\) 上取 Top-\((k+1)\)，前 \(k\) 个是实际走的路由，第 \(k+1\) 个就是截断值 \(\alpha_i^{(t)}\)（专家要进入 token \(i\) 的 Top-\(k\) 必须超过它），省掉单独的 token 侧分位数计算。然后</p>
       $$\hat b_j^{(t+1)} = -\operatorname{quantile}_{1-k/n}\big(s_{:,j}-\alpha^{(t)}\big),\qquad b^{(t+1)} = \hat b^{(t+1)} - \operatorname{mean}\big(\hat b^{(t+1)}\big)\mathbf 1 .$$
       <p>第二行去掉一个不影响 Top-\(k\) 的公共偏移。为了因果性，更新只在下一步生效，一个 batch 永远不用由它自己算出的偏置来路由。</p>
-      <p>和符号更新的关系：对偶目标对 \(\beta_j\) 的次梯度是“目标负载减实际负载”，对它做 SignSGD 正好是原来的固定步长符号更新；QB 则直接跳到这个坐标的精确最小值。这解释了 QB 为什么没有类似学习率的超参，以及为什么近千个专家也能几步就平衡。报告也提到 BIP 求解的是不等式约束版本，会多出 \(\max(0,\cdot)\) 截断，只能压制过载专家、不能提拔欠载专家，平衡慢得多。</p>
+      <p>和符号更新的关系：对偶目标对 \(\beta_j\) 的次梯度是“目标负载减实际负载”，对它做 SignSGD 正好是原来的固定步长符号更新；QB 则直接跳到这个坐标的精确最小值。这解释了 QB 为什么没有类似学习率的超参，以及为什么近千个专家也能几步就平衡。另一个相关方法 BIP（基于二元整数规划的负载均衡）求解的是不等式约束版本，会多出 \(\max(0,\cdot)\) 截断，只能压制过载专家、不能提拔欠载专家，平衡慢得多。</p>
       <h3>5.4 直方图估计分位数</h3>
       <p>一个全局 batch 有数百万 token，分散在各个 rank 和梯度累积步上，收集全部 margin 求精确分位数不可行。做法是给每个专家维护直方图：对“所需偏置” \(r_{ij}=\alpha_i-s_{ij}\) 计数（它的 \(k/n\) 分位数就是 \(\hat b_j\)）。因为 sigmoid 分数在 \((0,1)\)，截断值 \(\alpha_i\) 在 \((b_{\min},1+b_{\max})\)，所以 \(r_{ij}\in[b_{\min}-1,\ b_{\max}+1]\)，在这个区间上均匀分 \(B\) 个桶，每步重算区间。各 rank 在所有 micro-batch 上本地累加计数，步末一次整数 all-reduce 得到全局直方图，找到累计计数达到 \(\lceil q\rceil\) 的桶，在桶内线性插值。误差不超过一个桶宽；\(B=1000\) 时最多几个 \(10^{-3}\)，没有可测的残余不均衡。通信量只有每层每步 \(nB\) 个整数，与 token 数无关；而且计数可加，结果严格等于全局 batch 的分位数（而不是各 rank 分位数的平均）。再对估计值做 EMA 还能进一步降低批间噪声。</p>
 
-      <p>下面的模拟器在合成的路由分数上真实地跑三种方法。每步随机生成一个新 batch（专家有固定的偏好偏差，且随步数缓慢漂移，模拟路由器在学习），按当前偏置路由、统计负载、再更新偏置。纵轴是 MaxVio = 最大负载 / 目标负载。</p>
+      <p>下面的模拟器在合成的路由分数上实际运行三种方法。每步随机生成一个新 batch（专家有固定的偏好偏差，且随步数缓慢漂移，模拟路由器在学习），按当前偏置路由、统计负载、再更新偏置。纵轴是 MaxVio = 最大负载 / 目标负载。</p>
 
       <div class="demo" id="qb-demo">
         <div class="demo-label">交互演示 · 分位数均衡 vs 符号更新</div>
@@ -271,17 +271,17 @@
           <div><span class="k">最后 20 步平均 MaxVio：QB 直方图</span><span class="v" id="qb-r3">–</span></div>
           <div><span class="k">QB 首次 MaxVio &lt; 1.5 的步</span><span class="v" id="qb-r4">–</span></div>
         </div>
-        <p class="note">每步 2048 个 token；分数 s = sigmoid(专家偏好 + token 噪声)，专家偏好按随机游走漂移（固定种子）。全部为合成数据。QB 用上一步算出的偏置路由当前 batch（与报告的因果约定相同），所以剩余的不均衡来自批间采样噪声和分布漂移：目标负载 q = 2048k/n，每个专家的负载有约 √q 的随机波动，取 n 个专家里的最大值就有一个下限，batch 越大这个下限越接近 1。</p>
+        <p class="note">每步 2048 个 token；分数 s = sigmoid(专家偏好 + token 噪声)，专家偏好按随机游走漂移（数据为示意）。QB 用上一步算出的偏置路由当前 batch（与训练中的因果约定相同），所以剩余的不均衡来自批间采样噪声和分布漂移：目标负载 q = 2048k/n，每个专家的负载有约 √q 的随机波动，取 n 个专家里的最大值就有一个下限，batch 越大这个下限越接近 1。</p>
       </div>
 
       <h2 id="vision">6. 原生视觉与逐头 Muon</h2>
       <h3>6.1 原生多模态</h3>
-      <p>K3 从训练一开始就联合优化语言和视觉，文本、图片、视频在同一个上下文里由同一个骨干处理，没有事后的模态对齐阶段。报告认为这是“视觉在环”的长程行为的基础：模型写代码、看渲染结果的截图或视频帧、再改，全在一个 token 流里，不需要跨模型交接。</p>
+      <p>K3 从训练一开始就联合优化语言和视觉，文本、图片、视频在同一个上下文里由同一个骨干处理，没有事后的模态对齐阶段。这是“视觉在环”的长程行为的基础：模型写代码、看渲染结果的截图或视频帧、再改，全在一个 token 流里，不需要跨模型交接。</p>
       <h3>6.2 MoonViT-V2：从零开始、用下一个 token 预测训练</h3>
-      <p>和 K2.5 最大的不同是视觉编码器不再用对比学习预训练的模型（如 SigLIP）初始化，而是<strong>从零开始、用下一个 token 预测</strong>训练。主要理由是稳定性：把预训练编码器接到 LLM 上联合优化时，SigLIP 初始化的 MoonViT-3D 梯度范数持续偏高、频繁尖峰；从零训练的 MoonViT-V2 全程稳定。另一个理由是让编码器的表示直接由语言建模目标塑造，而不是由偏好全局语义的对比损失塑造。报告称 MoonViT-V2 在各项视觉评测上与 SigLIP 初始化的基线持平，所以认为在这个规模下对比预训练作为初始化是不必要的。</p>
+      <p>和 K2.5 最大的不同是视觉编码器不再用对比学习预训练的模型（如 SigLIP）初始化，而是<strong>从零开始、用下一个 token 预测</strong>训练。主要理由是稳定性：把预训练编码器接到 LLM 上联合优化时，SigLIP 初始化的 MoonViT-3D 梯度范数持续偏高、频繁尖峰；从零训练的 MoonViT-V2 全程稳定。另一个理由是让编码器的表示直接由语言建模目标塑造，而不是由偏好全局语义的对比损失塑造。MoonViT-V2 在各项视觉评测上与 SigLIP 初始化的基线持平，说明在这个规模下对比预训练作为初始化是不必要的。</p>
       <p>结构：27 层 ViT，约 0.4B 参数，用 RMSNorm，去掉线性层和注意力投影的所有 bias（进一步稳定从零训练）；图片和视频共享全部参数，注意力分解为帧内空间和帧间时间两步，并在时间维上池化；投影前做 2×2 的 pixel shuffle，视觉 token 数减为 1/4。按 patch 14 算一下最大输入：\(3584\times3584\) 的图是 \(256\times256=65536\) 个 patch，pixel shuffle 后 16384 个 token，在 1M 上下文里放得下几十张。</p>
       <h3>6.3 逐头 Muon</h3>
-      <p>K3 仍用 Muon（K2 的 QK-Clip 也保留了），但对注意力投影做了逐头化：不对整个 \(Q,K,V\) 投影矩阵做 Newton–Schulz，而是把动量矩阵沿头的维度切开，每个头的块单独正交化。直觉是：整体正交化把所有头当成一个耦合的块，梯度/动量大的头主导共同的更新方向，小的头得不到充分归一化；逐头正交化让每个头的更新尺度一致。报告说这让各头的学习动态更均衡、大规模训练更稳定，而且对细长的每头块做 Newton–Schulz 比对整个矩阵更便宜。</p>
+      <p>K3 仍用 Muon（K2 的 QK-Clip 也保留了），但对注意力投影做了逐头化：不对整个 \(Q,K,V\) 投影矩阵做 Newton–Schulz，而是把动量矩阵沿头的维度切开，每个头的块单独正交化。直觉是：整体正交化把所有头当成一个耦合的块，梯度/动量大的头主导共同的更新方向，小的头得不到充分归一化；逐头正交化让每个头的更新尺度一致。这让各头的学习动态更均衡、大规模训练更稳定，而且对细长的每头块做 Newton–Schulz 比对整个矩阵更便宜。</p>
 
       <h2 id="pretrain">7. 预训练：缩放律、配方与 1M 上下文</h2>
       <h3>7.1 数据</h3>
@@ -293,25 +293,25 @@
       <ul>
         <li>原生多模态：视觉和文本 token 交错在同一个下一个 token 预测目标里；</li>
         <li>优化器：逐头 Muon + K2 的权重裁剪（QK-Clip）；负载均衡用 QB；</li>
-        <li>余弦学习率，1% 线性 warm-up，权重衰减 0.1；</li>
-        <li>上下文：预训练从 8K 开始，后期扩到 64K；冷却阶段从 256K 扩到 1M（四阶段课程），把昂贵的长序列计算集中在总预算的一小部分。</li>
+        <li>余弦学习率，1% 线性 warmup，权重衰减 0.1；</li>
+        <li>上下文：预训练从 8K 开始，后期扩到 64K；cooldown 阶段从 256K 扩到 1M（四阶段课程），把昂贵的长序列计算集中在总预算的一小部分。</li>
       </ul>
       <h3>7.4 长上下文</h3>
-      <p>因为没有显式位置编码（MLA 用 NoPE，位置由 KDA 的门控衰减隐式编码），模型直接外推到 1M，不需要 RoPE 缩放或插值。长文档和长视频的数据清洗包括精确与模糊去重（视频还用帧的感知哈希）、启发式与分类器质量过滤、结构校验；真正长且连贯的数据稀缺，所以上采样，避免冷却期长上下文分布被短序列淹没。报告强调“长度本身不带来长程能力”，于是还合成了长上下文数据：把多模态文档和子任务打乱拼接，使嵌入的任务只有关注散布在整个 1M 上下文里的信息才能解决，防止注意力退化成局部模式。</p>
+      <p>因为没有显式位置编码（MLA 用 NoPE，位置由 KDA 的门控衰减隐式编码），模型直接外推到 1M，不需要 RoPE 缩放或插值。长文档和长视频的数据清洗包括精确与模糊去重（视频还用帧的感知哈希）、启发式与分类器质量过滤、结构校验；真正长且连贯的数据稀缺，所以上采样，避免 cooldown 期长上下文分布被短序列淹没。但长度本身不带来长程能力，所以还合成了长上下文数据：把多模态文档和子任务打乱拼接，使嵌入的任务只有关注散布在整个 1M 上下文里的信息才能解决，防止注意力退化成局部模式。</p>
 
       <h2 id="post">8. 后训练：9 个专家与多教师在线蒸馏</h2>
       <p>三阶段：SFT 建立基础 agent 能力；RL 在不同推理强度下训练各领域专家；多教师在线蒸馏（MOPD）把它们合并成一个模型。</p>
       <h3>8.1 SFT 与聊天模板</h3>
       <p>在 K2/K2.5 的 SFT 数据上大幅扩充复杂 agent 任务：用之前 Kimi 系列的领域模型合成轨迹，经多阶段验证和人工参与标注。所有数据用新的 XTML 聊天模板序列化，并且<strong>从 SFT 开始就做量化感知训练</strong>（MXFP4 权重、MXFP8 激活，见 8.5）。</p>
-      <p>XTML（eXtensible Token Markup Language，附录 F）是一种类 XML 标记，但尖括号语法换成三个保留特殊 token：<code>[open]</code>、<code>[sep]</code>、<code>[close]</code>，外加停止符 <code>[end_of_msg]</code>。每个结构边界都是一个显式特殊 token，消除了元素边界处的分词歧义，也简化约束解码。几个设计点：</p>
+      <p>XTML（eXtensible Token Markup Language）是一种类 XML 标记，但尖括号语法换成三个保留特殊 token：<code>[open]</code>、<code>[sep]</code>、<code>[close]</code>，外加停止符 <code>[end_of_msg]</code>。每个结构边界都是一个显式特殊 token，消除了元素边界处的分词歧义，也简化约束解码。几个设计点：</p>
       <ul>
         <li><strong>消息分区与 KV cache</strong>：全局选项（工具声明、推理强度）放在所有输入消息之前，它们很少变；一次性选项（tool_choice、response_format）放在输入消息之后，所以每次请求改它们不会让历史的 KV cache 失效。会话中途动态加载的工具通过额外的 tool-declare 消息插入，不必重建前文。</li>
         <li><strong>通道</strong>：助手消息分 think、response、tools 三个通道（借鉴 OpenAI Harmony 格式）。思考模式和指令模式只靠生成前缀区分（<code>[open]think[sep]</code> 或 <code>[open]response[sep]</code>）。K3 只支持“保留思考”：思考模式下历史里的 think 通道总被保留（即使为空）。</li>
-        <li><strong>工具调用</strong>：每个调用带 tool 和 index 属性，结果消息重复同样的 tool/index；参数有类型，字符串参数直接以原文出现（代码不再是转义的 JSON 字符串）。</li>
-        <li><strong>推理强度</strong>：作为 thinking-effort 类型的全局选项消息，用自然语言写明请求的级别；模式预留 low/medium/high/max 四级，K3 支持其中一部分。所有选项都翻译成上下文里的短自然语言指令，预训练模型本来就会遵循指令，新选项几乎不需要额外训练（报告叫“低对齐税”）。</li>
+        <li><strong>工具调用</strong>：每个调用带 tool 和 index 属性，结果消息重复同样的 tool/index；参数有类型，字符串参数直接以原样出现（代码不再是转义的 JSON 字符串）。</li>
+        <li><strong>推理强度</strong>：作为 thinking-effort 类型的全局选项消息，用自然语言写明请求的级别；模式预留 low/medium/high/max 四级，K3 支持其中一部分。所有选项都翻译成上下文里的短自然语言指令，预训练模型本来就会遵循指令，新选项几乎不需要额外训练，即“低对齐税”。</li>
       </ul>
       <h3>8.2 RL：三个领域 × 三档强度</h3>
-      <p>不为单个任务训练专门的 RL 模型，而是在三个大领域上扩展 RL，每个领域在每档推理强度下各训练一个专家：(i) 通用任务（通用体验、视觉、推理、忠实度、搜索、知识工作）；(ii) 通用 agent（长程助手任务、深度研究、段落级写作）；(iii) 编码 agent（软件工程、编码体验、kernel 任务、Web 开发）。三个领域 × {low, high, max} = 9 个专家。报告图 8 显示，随 RL FLOPs 增加，工具调用步数持续上升，各项能力全面提高。</p>
+      <p>不为单个任务训练专门的 RL 模型，而是在三个大领域上扩展 RL，每个领域在每档推理强度下各训练一个专家：(i) 通用任务（通用体验、视觉、推理、忠实度、搜索、知识工作）；(ii) 通用 agent（长程助手任务、深度研究、段落级写作）；(iii) 编码 agent（软件工程、编码体验、kernel 任务、Web 开发）。三个领域 × {low, high, max} = 9 个专家。随 RL FLOPs 增加，工具调用步数持续上升，各项能力全面提高。</p>
       <p><strong>算法</strong>：在同步 RL 框架的 partial rollout 上扩展。每轮对 \(N\) 个提示各采 \(K\) 条，保持 \(N\times K\) 条在跑；当一个比例 \(\lambda\in(0,1)\) 的轨迹完成（\(\lambda NK\) 条）就暂停生成，进入策略优化，不等长尾。暂停的 rollout 排队，在下一轮开始时优先恢复（靠第 12 节的沙箱基础设施保存环境状态）。一个提示的 \(K\) 条都完成就立即送去优化，优化算法沿用 K2.5。这样一条长轨迹会跨越多轮，带来数据陈旧（off-policy）问题；他们的算法用逐 token 的正则把策略更新限制在局部邻域内，能容忍高度陈旧的数据。</p>
       <h3>8.3 推理强度 RL 与生成式奖励模型</h3>
       <p><strong>逐题预算</strong>：每题 \(x\) 有一个由冷启动模型估计的初始预算 \(b_0(x)\)；轨迹总 token 数 \(T(y)\) 超过 \(\tau\cdot b_0(x)\) 时，任务奖励直接改为 \(-1\)。通用任务的 \(T(y)\) 只算思考 token；agent 任务算全部输出 token（含推理和工具调用参数）。按 \(\tau\) 做分阶段课程：先用较大的 \(\tau\) 训练 max 档（仍封顶以压制过度思考），再把 \(\tau\) 退火到更小值得到 high 和 low 档。\(\tau\) 的调整按领域、在人工指导下进行。各档专家的轨迹再一起用于 SFT 和 MOPD。</p>
@@ -319,7 +319,7 @@
       <h3>8.4 多教师在线蒸馏（MOPD）</h3>
       <p>训练学生时，对领域 \(d\) 和采样的强度 \(e\)，由对应的教师 \(\pi^{(d,e)}_{\text{teacher}}\)（9 个之一）指导。学生自己生成（on-policy），每个 token 的奖励是教师与学生的对数概率差：</p>
       $$r_{\text{opd}}^d(y_t\mid e,x,y_{\lt t}) = \operatorname{clip}\Big(\operatorname{sg}\Big(\log\frac{\pi_{\text{teacher}}^{(d,e)}(y_t\mid x,y_{\lt t})}{\pi_\theta(y_t\mid e,x,y_{\lt t})}\Big),\ -R_{\max},\ R_{\max}\Big).$$
-      <p>\(\operatorname{sg}\) 是 stop-gradient，裁剪到 \(\pm R_{\max}\) 是为了避免极端的优势值。这个奖励在期望上等于负的逐 token 反向 KL：把它当作稠密奖励放进 RL 框架，就是在学生自己的分布上最小化 \(\mathrm{KL}(\pi_\theta\,\|\,\pi_{\text{teacher}})\)。好处是它和 RL 用同一套基础设施（包括 partial rollout）。注意教师的条件里没有 \(e\)：每个教师本身就是某一档强度的专家。报告还试过更细粒度的 top-\(k\) 蒸馏目标，收敛速度和最终效果都没有明显优势。</p>
+      <p>\(\operatorname{sg}\) 是 stop-gradient，裁剪到 \(\pm R_{\max}\) 是为了避免极端的优势值。这个奖励在期望上等于负的逐 token 反向 KL：把它当作稠密奖励放进 RL 框架，就是在学生自己的分布上最小化 \(\mathrm{KL}(\pi_\theta\,\|\,\pi_{\text{teacher}})\)。好处是它和 RL 用同一套基础设施（包括 partial rollout）。注意教师的条件里没有 \(e\)：每个教师本身就是某一档强度的专家。更细粒度的 top-\(k\) 蒸馏目标也试过，收敛速度和最终效果都没有明显优势。</p>
       <h3>8.5 面向部署的后训练</h3>
       <p><strong>MXFP4 QAT</strong>：MoE 专家权重占了绝大部分参数内存，所以把它们量化成 MXFP4（激活用 MXFP8），而注意力投影、latent MoE 投影、共享专家和路由器保持高精度。整个后训练（SFT 和 RL）都做量化感知训练；RL 中 rollout 与训练用同一量化方案，消除训练–推理不一致。</p>
       <p><strong>草稿模型</strong>：K3 预训练时就带一个结构与骨干 block 相同的 MTP 层。EAGLE-3 的草稿模型是单个解码层，结构与 MTP 层一致，所以把预训练的 MTP 层微调成 EAGLE-3 式草稿：目标模型冻结，只训草稿层和特征融合投影。训练时按 EAGLE-3 的“训练时测试”协议展开 7 步，除第一步外草稿都吃自己之前的输出。草稿输入融合目标模型的低、中、高层特征，分别取第 1、第 4 和最后一个 AttnRes 块的输出；拼接后用无偏置矩阵 \(W_{E3}\) 投影回隐藏维，\(W_{E3}\) 初始化为 \([0\ 0\ I]\)，使融合表示一开始就等于 MTP 层预训练时看到的高层特征，再逐渐学会用低、中层特征。</p>
@@ -328,6 +328,7 @@
       <p>\(p,q\) 都在温度 1 下计算，不加真实标签的交叉熵项。草稿微调同样用 MXFP4/MXFP8 的 QAT 配置。</p>
 
       <h2 id="env">9. RL 环境与任务合成</h2>
+      <p>RL 的上限取决于任务和环境的质量。K3 在这方面做了七类工作：</p>
       <ul>
         <li><strong>统一的白盒 RL 环境</strong>：用一个固定 agent harness 训练会过拟合到特定的工具 schema、系统提示、上下文管理或交互协议。他们把 harness 表示为可配置、可组合的模块（工具接口、系统提示、上下文管理策略、skills、记忆、子 agent 等），可以拼出 Kimi Code、Claude Code、Codex、OpenClaw、Hermes 等主流 harness 或全新的组合；RL 时给不同任务组动态构造不同配置。</li>
         <li><strong>知识图谱引导的任务合成</strong>：建一个自我演化的、分层的有向无环知识图谱。从粗粒度种子节点开始，每个节点分配一个 agent 去做多次网页搜索调查概念，加新节点前先在已有图里找等价或相关概念以减少重复；边总是从粗到细；agent 判断概念已足够“原子”时停止扩展。合成时按目标分布在不同粒度采样节点（单个或相关组合），结合祖先节点的上下文组成搜索查询，取回真实材料，再由合成 agent 生成不同类型的任务。</li>
@@ -341,8 +342,8 @@
       <h2 id="infra-kda">10. 基础设施（一）：KDA 的 kernel 与上下文并行</h2>
       <h3>10.1 不同场景的 kernel</h3>
       <ul>
-        <li><strong>训练与预填充</strong>：分块形式块内并行、块间串行，朴素执行时两阶段交替，串行传递状态时 SM 空闲。FlashKDA 是基于 CUTLASS 的分块 kernel，把块内计算和跨块状态传递重叠：拆成 token 并行的阶段和头并行的递推，各自调度调优，明显快于 Triton 参考实现，并作为 flash-linear-attention 的后端自动调用。</li>
-        <li><strong>单卡内上下文并行（长预填充）</strong>：张量并行按头切分，但不会缩短递推；纯 TP 部署下预填充超长序列，每个 rank 只有几个头，大部分 SM 闲着。关键观察是每一段的状态转移可以独立于入口状态计算，事后再精确组合。所以一个 SM 级的规划器把序列切给同一张卡的多个 SM，并行算各段的转移，再合并恢复每段的精确初始状态——完全在卡内，没有跨卡通信。</li>
+        <li><strong>训练与 prefill</strong>：分块形式块内并行、块间串行，朴素执行时两阶段交替，串行传递状态时 SM 空闲。FlashKDA 是基于 CUTLASS 的分块 kernel，把块内计算和跨块状态传递重叠：拆成 token 并行的阶段和头并行的递推，各自调度调优，明显快于 Triton 参考实现，并作为 flash-linear-attention 的后端自动调用。</li>
+        <li><strong>单卡内上下文并行（长 prefill）</strong>：张量并行按头切分，但不会缩短递推；纯 TP 部署下 prefill 超长序列，每个 rank 只有几个头，大部分 SM 闲着。关键观察是每一段的状态转移可以独立于入口状态计算，事后再精确组合。所以一个 SM 级的规划器把序列切给同一张卡的多个 SM，并行算各段的转移，再合并恢复每段的精确初始状态——完全在卡内，没有跨卡通信。</li>
       </ul>
       <h3>10.2 KDA 上下文并行（KCP）</h3>
       <p>跨卡的上下文并行里，softmax 注意力要交换随长度增长的 KV 块；线性注意力只需要传固定大小的状态。普通线性注意力的递推是加法的，每个 rank 从 \(S=0\) 算出本地状态，再对前面的 rank 求和即可。KDA 不行：记 \(M_t=(I-\beta_tk_tk_t^\top)\operatorname{Diag}(\alpha_t)\)，\(S_t=M_tS_{t-1}+\beta_tk_tv_t^\top\)，一段 token 的效果依赖于进入这段时的状态。</p>
@@ -355,7 +356,7 @@
       <h3>11.1 MoonEP：完美均衡的专家并行</h3>
       <p>传统 EP 的 token 负载在 rank 间不均，计算失衡拖慢吞吐，动态变化的形状还造成显存碎片。MoonEP（已开源）在 DeepEP 的计算流上增加了冗余专家的在线规划与迁移：前向时根据当前 micro-batch、当前层的路由结果规划冗余专家并在专家计算前预取；反向时把冗余专家的梯度先放本地 reduce 缓冲，算完再归约回原 rank 的梯度缓冲。</p>
       <ul>
-        <li><strong>有界冗余下的完美均衡</strong>：要求每个 rank 恰好收到 \(S\times K\) 个 token（\(S\) 序列长度、\(K\) 每 token 选择的专家数）。问题是需要多少冗余专家。设 \(E\) 个专家、EP 大小 \(R\)。报告证明（附录 E）总存在一个均衡方案，使每个 rank 的冗余专家不超过 \(E/R\)，且这个界基本是紧的。证明的构造是：反复取一个欠载 rank 和一个过载 rank，从过载的那里迁 token 把欠载的恰好填满，每个 rank 最多被填一次，所以它的远程 token 只来自一个 rank，涉及那个 rank 上至多 \(E/R\) 个本地专家。紧性：让 rank 0 上的专家完全没有 token、其余专家平分全部 token，rank 0 至少需要 \(\lceil E(R-1)/R^2\rceil\approx E/R\) 个冗余专家。预留 \(E/R\) 个槽就保证规划永远可行，训练不会中断；而先前的方法（ECHO、UltraEP）预设冗余数或设每 rank token 上限，找不到可行方案时训练被迫停止，上限还要手调。</li>
+        <li><strong>有界冗余下的完美均衡</strong>：要求每个 rank 恰好收到 \(S\times K\) 个 token（\(S\) 序列长度、\(K\) 每 token 选择的专家数）。问题是需要多少冗余专家。设 \(E\) 个专家、EP 大小 \(R\)。可以证明总存在一个均衡方案，使每个 rank 的冗余专家不超过 \(E/R\)，且这个界基本是紧的。证明的构造是：反复取一个欠载 rank 和一个过载 rank，从过载的那里迁 token 把欠载的恰好填满，每个 rank 最多被填一次，所以它的远程 token 只来自一个 rank，涉及那个 rank 上至多 \(E/R\) 个本地专家。紧性：让 rank 0 上的专家完全没有 token、其余专家平分全部 token，rank 0 至少需要 \(\lceil E(R-1)/R^2\rceil\approx E/R\) 个冗余专家。预留 \(E/R\) 个槽就保证规划永远可行，训练不会中断；而先前的方法（ECHO、UltraEP）预设冗余数或设每 rank token 上限，找不到可行方案时训练被迫停止，上限还要手调。</li>
         <li><strong>在线规划</strong>：每步求精确最优太贵。离线用整数线性规划对代表性情况求精确解作参照，线上用一个近似最优、开销可忽略、且总满足 \(E/R\) 上界的 GPU 规划 kernel。</li>
         <li><strong>零拷贝通信</strong>：规划 kernel 预先算好每个 token 的目的地，融合的 permute/unpermute 直接把 token 送到远端按专家分组的位置，返回通信缓冲的视图给计算用。最坏不均衡下，DeepEP 要同样免拷贝需要 \(S\times K\times R\) 的缓冲，MoonEP 因完美均衡只需要固定的 \(S\times K\)。</li>
         <li><strong>静态形状、免同步</strong>：每个 rank 恰收 \(S\times K\) 个 token，所有层的计算形状静态已知，消除了每层 MoE 的主机–设备同步和启动开销。</li>
@@ -379,7 +380,7 @@
           <div><span class="k">冗余专家上界 E/R；最坏下界</span><span class="v" id="ep-r6">–</span></div>
           <div><span class="k">免拷贝缓冲：DeepEP 最坏 / MoonEP</span><span class="v" id="ep-r7">–</span></div>
         </div>
-        <p class="note">d = 7168、专家 FFN 中间维 3072、92 个 MoE 层取自 K3 表 1（93 层减 1 层 dense）；专家参数按 SwiGLU 类结构 3·ℓ·3072 估算。冗余专家的上界 E/R 与紧的下界 ⌈E(R−1)/R²⌉ 取自报告附录 E。缓冲大小以“S×K 个 token”为单位。</p>
+        <p class="note">d = 7168、专家 FFN 中间维 3072、92 个 MoE 层（93 层减 1 层 dense）都是 K3 的实际配置；每个专家有 gate、up、down 三个矩阵，参数按 3·ℓ·3072 计。冗余专家的上界是 E/R，紧的下界是 ⌈E(R−1)/R²⌉。缓冲大小以“S×K 个 token”为单位。</p>
       </div>
 
       <h3>11.2 显存</h3>
@@ -387,20 +388,20 @@
         <li><strong>统一激活管理器</strong>：反向需要保存的每个张量都关联一个可插拔的存储后端；重计算、量化、卸载/远程卸载只是存储策略，可以在张量粒度自由组合，通过轻量注解声明、与模型代码解耦。重计算按函数粒度，支持跨层重计算。所有显存都在主计算 stream 上分配、由单一内存池管理，避免多 stream 碎片；激活按层预取、与计算重叠。K3 中大部分激活用块级 FP8 量化 + 卸载/远程卸载，逐元素算子用重计算。</li>
         <li><strong>省显存的 MoE</strong>：原生实现中“排列后的概率”的梯度依赖前向输出 output；受 SonicMoE 启发，通过数学变换改写成只依赖中间激活和上游梯度的形式，代价是一个轻量的逐元素计算；group GEMM 前向只保存 dispatch 的输入，反向时重算 dispatch 恢复 GEMM 的输入，引入的通信与部分 GEMM 反向重叠。</li>
         <li><strong>省显存的注意力残差</strong>：块表示在块边界层生成一次、被后续所有层共享并常驻 GPU；AttnRes 计算整体包在 checkpoint 里，每层为反向保存的激活与标准残差结构相同。流水线并行下用基于缓存的流水线通信，只增量传输新生成的块，micro-batch 结束即释放，达到显存占用的理论下界。</li>
-        <li><strong>PP rank 间均衡激活</strong>：interleaved 1F1B 下激活在 PP rank 间不均（warm-up 导致前面的 rank 常驻更多），用 Mooncake Transfer Engine 把激活远程卸载到其他 PP rank 的内存里。</li>
+        <li><strong>PP rank 间均衡激活</strong>：interleaved 1F1B 下激活在 PP rank 间不均（warmup 导致前面的 rank 常驻更多），用 Mooncake Transfer Engine 把激活远程卸载到其他 PP rank 的内存里。</li>
         <li><strong>Pipeline ZeRO-2 梯度分片与卸载</strong>：梯度在 DP rank 间分片，分片存在 CPU 内存里，GPU 上只保留双梯度缓冲；DP 归约到双缓冲后再累加到 CPU 分片。</li>
         <li><strong>基于 P2P 的 Muon 正交化</strong>：分布式优化器把参数均匀切到各 DP rank，而 Newton–Schulz 需要完整矩阵。朴素做法是每个 rank 对整个参数缓冲做 all-gather，显存大且通信成瓶颈；K3 让每个 rank 只通过点对点通信从相应 owner 取回自己负责的参数的各个分片，按模型 chunk 缓冲流水线化，隐藏通信。</li>
       </ul>
       <h3>11.3 多模态编码器</h3>
       <ul>
         <li><strong>编码器内的动态 CP</strong>：大图和长视频让视觉编码器计算时间暴涨并造成设备间不均。单张大图沿 patch 维切到多卡，注意力通过跨 CP rank 的 gather-KV 计算；再把每个 CP 组分成若干子 CP 组，把多张大图负载均衡地分配上去，避免通信占比随规模增长。</li>
-        <li><strong>把编码器计算塞进 PP 气泡</strong>：K2.5 引入了解耦编码器流程（DEP），把 ViT 与文本训练分阶段。K3 观察到在 interleaved 1F1B 下，前几个 micro-batch 的文本前向都排在最开头，最后几个的文本反向都在最末尾，于是进一步拆分 ViT 计算：前几个 micro-batch 的 ViT 前向同步提前做，其余的前向塞进流水线气泡，反向同理。大部分 ViT 计算被藏进气泡。</li>
+        <li><strong>把编码器计算塞进 PP bubble</strong>：K2.5 引入了解耦编码器流程（DEP），把 ViT 与文本训练分阶段。K3 观察到在 interleaved 1F1B 下，前几个 micro-batch 的文本前向都排在最开头，最后几个的文本反向都在最末尾，于是进一步拆分 ViT 计算：前几个 micro-batch 的 ViT 前向同步提前做，其余的前向塞进流水线 bubble，反向同理。大部分 ViT 计算被藏进 bubble。</li>
       </ul>
 
       <h2 id="infra-rl">12. 基础设施（三）：1M 上下文的 Agent RL</h2>
       <p>沿用 K2 的共置 RL，让每个 1M 上下文的 K3 RL 实验控制在几百张 GPU 内，并用 partial rollout 降低超长轨迹的尾延迟。新问题是长上下文 rollout 需要额外的 DRAM 来保留 KV cache，与训练侧状态竞争。</p>
       <ul>
-        <li><strong>外部 KV cache 池（write-back）</strong>：1M 上下文多步 rollout 中，前缀 KV cache 未命中极其昂贵；partial rollout 在每轮开始时让大量未完成的长预填充请求同时到达，投机解码又加快了请求周转，都会触发抢占、降低命中率。他们把前缀保留与 GPU 驻留解耦：正在解码的块留在 GPU；可复用的空闲前缀只在被逐出 GPU 时才写回 CPU DRAM 中的外部池，下次复用前预取回来。KDA 状态和对应的 MLA KV 块一起卸载、一起预取，生命周期对齐。相比 write-through，只为离开活跃解码路径的前缀付出 DRAM 和带宽。为腾出 DRAM，训练迭代结束后把训练状态（权重和优化器状态）卸载到 NVMe；rollout 结束后释放外部池。</li>
+        <li><strong>外部 KV cache 池（write-back）</strong>：1M 上下文多步 rollout 中，前缀 KV cache 未命中极其昂贵；partial rollout 在每轮开始时让大量未完成的长 prefill 请求同时到达，投机解码又加快了请求周转，都会触发抢占、降低命中率。他们把前缀保留与 GPU 驻留解耦：正在解码的块留在 GPU；可复用的空闲前缀只在被逐出 GPU 时才写回 CPU DRAM 中的外部池，下次复用前预取回来。KDA 状态和对应的 MLA KV 块一起卸载、一起预取，生命周期对齐。相比 write-through，只为离开活跃解码路径的前缀付出 DRAM 和带宽。为腾出 DRAM，训练迭代结束后把训练状态（权重和优化器状态）卸载到 NVMe；rollout 结束后释放外部池。</li>
         <li><strong>rollout 自动限流</strong>：多步 rollout 中上下文随轨迹推进逐渐变长，按整条轨迹平均长度设固定并发既难估又在早期过于保守，设太高则后期 KV cache 吃紧触发抢占。在请求调度层用运行时信号（活跃请求数、排队数、KV cache 利用率）动态控制发往推理引擎的请求数。</li>
         <li><strong>复用梯度缓冲做非策略模型前向</strong>：参考模型这类只做前向的模型权重太大，不常驻 GPU；放在 CPU，需要时把它们物化到策略模型的 FP32 梯度缓冲里（反正之后真实梯度会覆盖）。在 ZeRO-2 分片与卸载下每卡只保留两个 VPP chunk 的梯度缓冲，就按 chunk 流式加载：一个槽算当前 chunk，另一个预取下一个。</li>
       </ul>
@@ -418,27 +419,27 @@
       <p>混合架构让前缀缓存变复杂：KDA 的递推状态和 MLA 的 KV cache 大小与生命周期完全不同，而一个缓存的前缀只有当两者能在同一边界一起恢复时才可复用。</p>
       <ul>
         <li><strong>统一的分页布局</strong>：把 KDA 状态和 MLA KV 放进同一个分页块池，页字节数统一，共用一套分配、引用计数和逐出逻辑。页内各头的状态逐头连续存放，每个头的字节流自成一体，是跨节点传输的最小单位；prefill/decode 分离且两边 TP 度不同时，在传输路径上重排，GPU 侧零重排。</li>
-        <li><strong>解耦哈希粒度与物理块</strong>：基于块哈希的前缀缓存只能复用块对齐的前缀。KDA 每条序列只有一个大状态，快照只能在稀疏的边界上做，这把共享的块大小逼到 1024–6144 token；在这么粗的粒度下缓存几乎没用（短于一块的请求永远不能复用，分块预填充在跨过整块之前不导出可缓存前缀）。K3 让前缀哈希在 MLA 页内的细粒度哈希块（如 512 token）上进行，物理块仍是粗的分配单位；KDA 状态的 checkpoint 只存在（一部分）哈希端点上——那是查询唯一可能引用的位置。被后续推进取代的中间 checkpoint 会回收，对话轮次边界上的保留供跨请求复用；缓存的 checkpoint 是只读快照，命中时先拷贝到请求的私有状态。</li>
-        <li><strong>两阶段查找</strong>：MLA 阶段按链式哈希匹配整块，在第一个缺失块处退回到块内的哈希端点；KDA 阶段要求候选边界上每个 KDA 缓存组都有 checkpoint。命中位置是同时满足两者的最长边界，总是哈希块的整数倍，不必是物理块的整数倍。报告的例子：前 2800 个 token 与缓存前缀一致的请求，在 \(B=2560=5\times512\) 处命中（位于一个 6144-token 物理块深处），从 \(B\) 继续预填充，不重算 \([0,B)\)。</li>
+        <li><strong>解耦哈希粒度与物理块</strong>：基于块哈希的前缀缓存只能复用块对齐的前缀。KDA 每条序列只有一个大状态，快照只能在稀疏的边界上做，这把共享的块大小逼到 1024–6144 token；在这么粗的粒度下缓存几乎没用（短于一块的请求永远不能复用，分块 prefill 在跨过整块之前不导出可缓存前缀）。K3 让前缀哈希在 MLA 页内的细粒度哈希块（如 512 token）上进行，物理块仍是粗的分配单位；KDA 状态的 checkpoint 只存在（一部分）哈希端点上——那是查询唯一可能引用的位置。被后续推进取代的中间 checkpoint 会回收，对话轮次边界上的保留供跨请求复用；缓存的 checkpoint 是只读快照，命中时先拷贝到请求的私有状态。</li>
+        <li><strong>两阶段查找</strong>：MLA 阶段按链式哈希匹配整块，在第一个缺失块处退回到块内的哈希端点；KDA 阶段要求候选边界上每个 KDA 缓存组都有 checkpoint。命中位置是同时满足两者的最长边界，总是哈希块的整数倍，不必是物理块的整数倍。举个例子：前 2800 个 token 与缓存前缀一致的请求，在 \(B=2560=5\times512\) 处命中（位于一个 6144-token 物理块深处），从 \(B\) 继续 prefill，不重算 \([0,B)\)。</li>
         <li><strong>并发调度下的一致性</strong>：三条规则各对应一个具体的失效模式——分配私有副本前先在所有组里钉住所有命中块（共享空闲链表可能把别组刚命中的块逐出）；本调度步内刚分配或注册、拷贝尚未落地的块不参与匹配；KDA checkpoint 要么在所有组都可命中、要么都不可（逐出一个组的就原子地作废兄弟）。</li>
       </ul>
       <h3>13.2 kernel</h3>
       <ul>
-        <li><strong>KDA 解码 + 投机解码</strong>：解码时瓶颈从并行变成管理每步原地更新的状态。MTP 投机解码中，如果验证拒掉部分草稿 token，状态已经越过最后接受的 token，无法简单回滚；为每个草稿位置存一份状态快照又会成倍增加状态读写，在线上大 batch 下不可接受。观察是：任何被接受前缀之后的状态完全由草稿 token 的投影输入决定，而它们比状态小得多。所以只缓存投影输入，在片上重建被接受 token 的状态，只写回验证通过的 token 和 bonus token 的状态（与同期工作 ReplaySSM 独立提出的设计相同）。重放的 token、bonus token 和下一个草稿窗口在一个融合 kernel 的同一个递推循环里处理，覆盖短卷积、输入归一化、门控、KDA 递推和输出归一化。验证延迟随验证 token 数次线性增长，低于缓存状态的基线。</li>
-        <li><strong>Block AttnRes</strong>：两阶段调度——批量的块间阶段每块读一次缓存的块表示，然后每层用 online softmax 合并块内部分和。两个阶段都以访存为主。预填充时为避免每个 TP rank 都物化块表示，对激活用序列并行：TP all-reduce 拆成 reduce-scatter 和 all-gather，块内 kernel 插在两者之间作用于序列分片的隐状态，每个 token 的块表示只在一个 rank 上物化。解码时块间 kernel 放在侧 stream 上与主 stream 重叠；块内阶段把 AttnRes 输出与部分和更新的合并以及随后的 RMSNorm 融合进前面的 TP all-reduce，省掉一个单独的 kernel。</li>
+        <li><strong>KDA decode + 投机解码</strong>：decode 时瓶颈从并行变成管理每步原地更新的状态。MTP 投机解码中，如果验证拒掉部分草稿 token，状态已经越过最后接受的 token，无法简单回滚；为每个草稿位置存一份状态快照又会成倍增加状态读写，在线上大 batch 下不可接受。观察是：任何被接受前缀之后的状态完全由草稿 token 的投影输入决定，而它们比状态小得多。所以只缓存投影输入，在片上重建被接受 token 的状态，只写回验证通过的 token 和 bonus token 的状态（与同期工作 ReplaySSM 独立提出的设计相同）。重放的 token、bonus token 和下一个草稿窗口在一个融合 kernel 的同一个递推循环里处理，覆盖短卷积、输入归一化、门控、KDA 递推和输出归一化。验证延迟随验证 token 数次线性增长，低于缓存状态的基线。</li>
+        <li><strong>Block AttnRes</strong>：两阶段调度——批量的块间阶段每块读一次缓存的块表示，然后每层用 online softmax 合并块内部分和。两个阶段都以访存为主。prefill 时为避免每个 TP rank 都物化块表示，对激活用序列并行：TP all-reduce 拆成 reduce-scatter 和 all-gather，块内 kernel 插在两者之间作用于序列分片的隐状态，每个 token 的块表示只在一个 rank 上物化。decode 时块间 kernel 放在侧 stream 上与主 stream 重叠；块内阶段把 AttnRes 输出与部分和更新的合并以及随后的 RMSNorm 融合进前面的 TP all-reduce，省掉一个单独的 kernel。</li>
         <li><strong>Stable LatentMoE</strong>：latent 下投影与路由器合并成一个 GEMM；latent 权重在 rank 间分片，用 multimem store 指令把输出 all-gather 融合进 GEMM epilogue，并与共享专家计算等重叠。路由专家在小 batch 下的 group GEMM 退化成对权重的访存受限流式读取，传统的面向计算的 tile 式 kernel 不适合；改用 WarpDecode 的以 token 为中心的设计（每个 warp 负责一个输出神经元，直接从显存流式读对应权重），并把 warp 再细分成处理不同专家子集的 lane team，最后 warp 内归约；权重布局离线重排，大幅降低运行时反量化开销。</li>
       </ul>
       <h3>13.3 集群级调度</h3>
       <ul>
-        <li><strong>缓存亲和调度</strong>：1M 上下文下一个典型的编码请求带 400K token 的前缀、只需增量预填充 4K，命中前缀缓存比未命中便宜几个数量级。所以把请求路由到持有其前缀缓存的集群（跨集群搬缓存太慢）。但亲和性把会话绑死在一个集群，集群故障会中断所有会话；于是用一致性哈希把每个会话钉在两个集群上：主集群服务，预先指定的备集群在主集群故障时接管（需要重新预填充）。一致性哈希让不同会话的备集群均匀分布，故障后的重预填充工作被分散到许多集群。</li>
+        <li><strong>缓存亲和调度</strong>：1M 上下文下一个典型的编码请求带 400K token 的前缀、只需增量 prefill 4K，命中前缀缓存比未命中便宜几个数量级。所以把请求路由到持有其前缀缓存的集群（跨集群搬缓存太慢）。但亲和性把会话绑死在一个集群，集群故障会中断所有会话；于是用一致性哈希把每个会话钉在两个集群上：主集群服务，预先指定的备集群在主集群故障时接管（需要重新 prefill）。一致性哈希让不同会话的备集群均匀分布，故障后重新 prefill 的工作被分散到许多集群。</li>
         <li><strong>基于预算的准入控制</strong>：线上流量混合了 2K 以下的短请求和长达 1M 的超长请求，单请求成本跨约三个数量级，基于“平均请求”的容量规划、排队模型和限流都失效。典型故障是一波长请求占满算力，之后到达的短请求无法及时调度，所有流量的首 token 时间（TTFT）都变差。做法是给不同请求类别分配各自的资源预算，突发的长上下文流量最多吃掉自己那份。</li>
       </ul>
 
       <h2 id="eval">14. 评测与案例</h2>
-      <p>对比对象是报告里的 Claude Fable 5、GPT-5.6 Sol、Claude Opus 4.8、GPT-5.5 和开源的 GLM-5.2，都在最大推理强度下（GPT-5.5 用 xhigh）。K3 的评测用 max 强度、温度 1.0，单步任务 top-p 0.95，agent 任务 top-p 1.0。报告的总体判断：整体上略逊于最强的两个闭源模型 Claude Fable 5 和 GPT-5.6 Sol，但一致领先其余被评测的开源和闭源模型。下面只列报告正文里明确写出的数字：</p>
+      <p>对比对象是 Claude Fable 5、GPT-5.6 Sol、Claude Opus 4.8、GPT-5.5 和开源的 GLM-5.2，都在最大推理强度下（GPT-5.5 用 xhigh）。K3 的评测用 max 强度、温度 1.0，单步任务 top-p 0.95，agent 任务 top-p 1.0。总体上，K3 略逊于最强的两个闭源模型 Claude Fable 5 和 GPT-5.6 Sol，但一致领先其余被评测的开源和闭源模型。部分结果如下：</p>
       <div class="table-wrap">
         <table>
-          <thead><tr><th>类别</th><th>基准</th><th class="num">Kimi K3</th><th>备注（报告原文）</th></tr></thead>
+          <thead><tr><th>类别</th><th>基准</th><th class="num">Kimi K3</th><th>备注</th></tr></thead>
           <tbody>
             <tr><td>推理/知识</td><td>GPQA Diamond</td><td class="num">93.5</td><td>与前沿相当</td></tr>
             <tr><td></td><td>HLE-Full（有工具 / 无工具）</td><td class="num">56.0 / 43.5</td><td>落后 Fable 5 与 GPT-5.6 Sol</td></tr>
@@ -462,7 +463,7 @@
         </table>
       </div>
       <p><strong>成本</strong>：BrowseComp 上 K3 以每题 2.03 美元拿到最高分，约为 GPT-5.6 Sol（90.4）的一半成本，比最大强度的 Claude 便宜一个数量级；Kimi Code Bench 2.0 上落后 Fable 5 4.0 分，成本为其 38%；GDPval-AA v2 上与 GPT-5.6 Sol 相差不到 50 Elo、成本低 13%，比 Fable 5 便宜 2.6 倍。</p>
-      <p><strong>案例</strong>（报告第 7 节）：GPU kernel 优化，每个模型在相同沙箱里最多 24 小时，K3 把 AttnRes kernel 从 283.6 ms 降到 114.4 ms，DSA 和 KDA 的运行时间分别减少 55.1% 和 73.6%，MLA（头维 512）达到峰值 TFLOPS 的一半以上；开发了一个小型 Triton 类编译器 MiniTriton（自定义 tile 级 Python 前端、MLIR 注解与优化层、PTX 代码生成），在 L20 上张量核矩阵乘在最大尺寸接近 cuBLAS（约 90% 实测 roof）；在 48 小时的自主运行中用开源 EDA 工具和 Nangate45 库为一个同架构的纳米模型设计了推理芯片原型（4 mm² 面积预算内 100 MHz 时序收敛，RTL 仿真解码吞吐超过 8700 token/s，146 万个标准单元）。</p>
+      <p><strong>案例</strong>：GPU kernel 优化，每个模型在相同沙箱里最多 24 小时，K3 把 AttnRes kernel 从 283.6 ms 降到 114.4 ms，DSA 和 KDA 的运行时间分别减少 55.1% 和 73.6%，MLA（头维 512）达到峰值 TFLOPS 的一半以上；开发了一个小型 Triton 类编译器 MiniTriton（自定义 tile 级 Python 前端、MLIR 注解与优化层、PTX 代码生成），在 L20 上张量核矩阵乘在最大尺寸接近 cuBLAS（约 90% 实测 roof）；在 48 小时的自主运行中用开源 EDA 工具和 Nangate45 库为一个同架构的纳米模型设计了推理芯片原型（4 mm² 面积预算内 100 MHz 时序收敛，RTL 仿真解码吞吐超过 8700 token/s，146 万个标准单元）。</p>
 
       <h2 id="take">15. 小结</h2>
       <ul>
@@ -472,12 +473,15 @@
         <li><strong>系统</strong>：KDA 的状态是固定大小的，这一点被反复利用——KCP 只需一次固定大小的 all-gather，前缀缓存把状态当成哈希端点上的 checkpoint，投机解码只缓存小得多的投影输入。</li>
       </ul>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
+      <p>K3 报告很长，推荐先读 §2（架构）和附录 C（分位数均衡的推导），再按兴趣看 §5 的系统部分。</p>
       <ul>
-        <li>Kimi Team. <em>Kimi K3: Open Frontier Intelligence</em>. arXiv:2607.24653（v2）：<a href="https://arxiv.org/html/2607.24653#S2">§2 架构</a>、<a href="https://arxiv.org/html/2607.24653#S3">§3 预训练</a>、<a href="https://arxiv.org/html/2607.24653#S4">§4 后训练</a>、<a href="https://arxiv.org/html/2607.24653#S5">§5 基础设施</a>、<a href="https://arxiv.org/html/2607.24653#S6">§6 评测</a>、<a href="https://arxiv.org/html/2607.24653#S7">§7 案例</a>、附录 B–F。</li>
-        <li>Kimi Team. <em>Attention Residuals</em>. <a href="https://arxiv.org/abs/2603.15031">arXiv:2603.15031</a>。</li>
+        <li>Kimi Team. <em>Kimi K3: Open Frontier Intelligence</em>. arXiv:2607.24653：<a href="https://arxiv.org/html/2607.24653#S2">§2 架构</a>、<a href="https://arxiv.org/html/2607.24653#S3">§3 预训练</a>、<a href="https://arxiv.org/html/2607.24653#S4">§4 后训练</a>、<a href="https://arxiv.org/html/2607.24653#S5">§5 基础设施</a>、<a href="https://arxiv.org/html/2607.24653#S6">§6 评测</a>、<a href="https://arxiv.org/html/2607.24653#S7">§7 案例</a>；表 1（与 K2 的架构对比）、附录 B（SiTU-GLU 的性质）、附录 C（分位数均衡）、附录 E（MoonEP 冗余专家的界）、附录 F（XTML）。</li>
+        <li>Kimi Team. <em>Attention Residuals</em>. <a href="https://arxiv.org/abs/2603.15031">arXiv:2603.15031</a>（AttnRes 原论文，含 PreNorm dilution 的分析和块数的消融）。</li>
         <li>Kimi Team. <em>Kimi Linear</em>. <a href="https://arxiv.org/abs/2510.26692">arXiv:2510.26692</a>；<em>Kimi K2</em>. <a href="https://arxiv.org/abs/2507.20534">arXiv:2507.20534</a>；<em>Kimi K2.5: Visual Agentic Intelligence</em>. <a href="https://arxiv.org/abs/2602.02276">arXiv:2602.02276</a>（K3 多处沿用其视觉通路、RL 算法与 DEP）。</li>
-        <li>V. Elango et al. <em>LatentMoE</em>（2026），按 K3 报告的引用。</li>
+        <li>V. Elango et al. <em>LatentMoE: Toward Optimal Accuracy per FLOP and Parameter in Mixture of Experts</em>. <a href="https://arxiv.org/abs/2601.18089">arXiv:2601.18089</a>。</li>
+        <li>苏剑林. <em>Travels in MoE: 6. Promoting load balance via optimal assignment</em>（科学空间博客，中文，2026），分位数均衡的推导思路来源。</li>
+        <li>Dao AI Lab. <a href="https://tridao.me/blog/2026/replayssm/">ReplaySSM: cache SSM inputs, not state</a>（2026）（与 K3 的 KDA 投机解码同思路）。</li>
         <li>开源代码：<a href="https://github.com/MoonshotAI/MoonEP">MoonshotAI/MoonEP</a>、<a href="https://github.com/kvcache-ai/AgentENV">kvcache-ai/AgentENV</a>、<a href="https://github.com/MoonshotAI/minitriton">MoonshotAI/minitriton</a>、<a href="https://github.com/MoonshotAI/nano-kpu">MoonshotAI/nano-kpu</a>。</li>
       </ul>
     </article>
