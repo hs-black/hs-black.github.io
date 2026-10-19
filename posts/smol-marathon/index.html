@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>训练马拉松：吞吐、loss spike 与中途调整 · Zunzhe Zhang</title>
-  <meta name="description" content="读 Smol Training Playbook 的长跑一章：起跑检查清单、SmolLM3 的四个谜案、loss spike 的诊断与处理、多阶段 mid-training 与 4k→128k 长上下文扩展。">
+  <meta name="description" content="按下开始键之后会发生什么：吞吐与完成时间的账、起跑检查清单、SmolLM3 训练中的四个谜案、loss spike 的诊断与处理、多阶段 mid-training 与 4k→128k 长上下文扩展。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
@@ -63,8 +63,8 @@
     <nav class="series" data-series="smol"></nav>
 
     <article class="prose">
-      <p>这一篇读的是 Hugging Face 的 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a> 中「The Training Marathon」一章：架构、数据配比和超参都定好了以后，真正按下「开始训练」之后会发生什么。主角是 SmolLM3：一个 3B 的稠密模型，在 384 张 H100（48 个节点）上训了将近一个月，一共 11T token。</p>
-      <p>这一章没有新算法，讲的是一次真实大规模训练里的各种意外：吞吐突然塌掉、数据加载器有隐藏的扩展性问题、loss 变得更抖、一个张量并行的随机种子 bug 让模型在 1T token 时落后于预期，最后不得不重启。然后是怎么监控、遇到 loss spike 怎么办、训练中途怎么换数据配比，以及怎么把上下文从 4k 扩到 128k。我按「先把账算清 → 起跑检查 → 四个谜案 → 监控与 spike → mid-training → 长上下文」的顺序写，每一部分都尽量把背后的机制讲到能自己复现推理的程度。</p>
+      <p>架构、数据配比和超参都定好了，按下「开始训练」之后会发生什么？这一篇用 SmolLM3 做例子：一个 3B 的稠密模型，在 384 张 H100（48 个节点）上训了将近一个月，一共 11T token。</p>
+      <p>长时间的大规模训练里很少有新算法，更多的是意外：吞吐突然塌掉、dataloader 有隐藏的扩展性问题、loss 变得更抖、一个张量并行的随机种子 bug 让模型在 1T token 时明显落后于预期，最后不得不重启。我们先把吞吐的账算清，再过一遍起跑前的检查清单，然后逐个拆解这四个谜案；之后讲监控、loss spike 的诊断与处理、什么时候该重启，最后是训练中途换数据配比和把上下文从 4k 扩到 128k。每一部分都尽量把背后的机制讲到你能自己推出来。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -81,38 +81,40 @@
           <li><a href="#longctx">长上下文扩展：4k → 64k 训练，YaRN 到 128k</a></li>
           <li><a href="#rope-demo">交互：RoPE 频率、ABF 与 YaRN</a></li>
           <li><a href="#lessons">小结</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
       <h2 id="ledger">1. 先把账算清：吞吐、MFU 与完成时间</h2>
       <p>长跑之前，先定义几个整篇都会用到的量。</p>
       <ul>
-        <li><strong>吞吐（throughput）</strong>：训练系统每秒处理多少 token。可以按整个集群算，也可以按单卡算（tokens/s/GPU）。playbook 在基础设施一章里明确说，比较并行配置时他们看的就是「每卡每秒 token 数」。</li>
-        <li><strong>训练 FLOPs</strong>：稠密 Transformer 每个训练 token 大约要 \(6N\) 次浮点运算，\(N\) 是参数量。其中前向 \(2N\)（每个参数一次乘加 = 2 FLOPs），反向约是前向的两倍 \(4N\)。这个近似忽略了注意力里与序列长度相关的那部分计算，对 4k 上下文的 3B 模型来说误差不大。</li>
+        <li><strong>吞吐（throughput）</strong>：训练系统每秒处理多少 token。可以按整个集群算，也可以按单卡算（tokens/s/GPU）。比较不同的并行配置时，最好用的是单卡吞吐，因为它和卡数无关。</li>
+        <li><strong>训练 FLOPs</strong>：稠密 Transformer 每个训练 token 大约要 \(6N\) 次浮点运算，\(N\) 是参数量。其中前向 \(2N\)（每个参数一次乘加 = 2 FLOPs），反向约是前向的两倍 \(4N\)。这个近似漏掉了注意力分数本身的计算（\(QK^\top\) 和乘 \(V\)），这部分和序列长度成正比，下面会单独补上。</li>
         <li><strong>MFU（model FLOPs utilization）</strong>：模型「有用」计算速度占硬件理论峰值的比例：
           $$\text{MFU} = \frac{6N \cdot \text{tokens/s/GPU}}{\text{峰值 FLOPs/s}}.$$
         </li>
       </ul>
-      <p>把 SmolLM3 的数字代进去。playbook 说他们的配置目标是约 30% MFU，监控时预期的稳定吞吐是 13,500–14,000 tokens/s（playbook 没写这是单卡还是整体，但只有按单卡理解，下面的账才对得上）。取中间值 13,750：</p>
+      <p>把 SmolLM3 的数字代进去。它的并行配置调到了约 30% 的 MFU，训练中预期的稳定吞吐是每卡 13,500–14,000 tokens/s。取中间值 13,750，只算 \(6N\) 的部分：</p>
       $$6 \times 3\times 10^{9} \times 13{,}750 \approx 2.48\times 10^{14}\ \text{FLOPs/s} \approx 248\ \text{TFLOPs/s}.$$
-      <p>H100 的 BF16 稠密峰值是 990 TFLOPs/s，所以按 \(6N\) 算出来的 MFU 约 25%；如果把注意力的 FLOPs 也算上会再高一点，和「约 30%」是一个量级。整个集群的吞吐是 \(384 \times 13{,}750 \approx 5.28\text{M}\) tokens/s，11T token 需要</p>
+      <p>H100 的 BF16 稠密峰值是 990 TFLOPs/s，所以这部分对应约 25% 的 MFU。再补上注意力分数的计算：每层前向里 \(QK^\top\) 和乘 \(V\) 各约 \(2sd\) FLOPs/token（\(s\) 是序列长度，\(d\) 是隐藏维度），加上反向一共约 \(12sd\)。SmolLM3 有 36 层、\(d=2048\)、\(s=4096\)，于是每个 token 多出</p>
+      $$12 \times 36 \times 4096 \times 2048 \approx 3.6\times 10^{9}\ \text{FLOPs},$$
+      <p>约为 \(6N = 1.8\times 10^{10}\) 的 20%（按惯例不扣除因果掩码省下的一半）。算上它，MFU 约 30%，正好是目标值。整个集群的吞吐是 \(384 \times 13{,}750 \approx 5.28\text{M}\) tokens/s，11T token 需要</p>
       $$\frac{11\times 10^{12}}{5.28\times 10^{6}} \approx 2.08\times 10^{6}\ \text{s} \approx 24\ \text{天}.$$
-      <p>这和 playbook 在 checkpoint 一节里随口提到的「24 天的训练」吻合。这笔账说明了为什么吞吐是基础设施上最重要的指标：<strong>吞吐掉一半，一个月的训练就变成两个月。</strong>账上每一项都是乘法关系，任何一项塌掉都直接体现在完成日期上。</p>
+      <p>也就是说，这是一次计划约 24 天的训练。这笔账说明了为什么吞吐是基础设施上最重要的指标：<strong>吞吐掉一半，一个月的训练就变成两个月。</strong>账上每一项都是乘法关系，任何一项塌掉都直接体现在完成日期上。</p>
 
       <h2 id="preflight">2. 起跑前检查清单</h2>
-      <p>按下开始键之前，playbook 会把下面五件事从头到尾过一遍。每一条后面其实都对应着一次「以前吃过的亏」。</p>
+      <p>按下开始键之前，值得把下面五件事从头到尾过一遍。每一条背后都对应着一次以前吃过的亏。</p>
       <ol>
         <li><strong>基础设施就绪。</strong>如果集群调度系统（Slurm）支持预留（reservation），就用。SmolLM3 整个训练期间有一个固定的 48 节点预留：不用排队、吞吐稳定，还能长期跟踪<em>同一批</em>节点的健康状况。开训前对 GPU 做压力测试（他们用内部工具 GPU Fryer 和 NVIDIA 的 DCGM Diagnostics），检查降频和性能退化——SmolLM3 开训前就这样找出了两张会降频的卡并换掉了。另外要防止存储膨胀：每个 checkpoint 存完后上传到 S3，下一个 checkpoint 存好就删掉本地那份，所以本地高速 SSD 上永远只有一份。</li>
-        <li><strong>评测流水线。</strong>评测比看起来更耗时间：手动跑、记结果、画图，一次就是几个小时。尽量全自动化，并且在开训之前确认它能正常运行和记录。SmolLM3 每保存一个 checkpoint 就自动在集群上触发一个评测任务，结果写进 Wandb 和 Trackio。</li>
+        <li><strong>评测流水线。</strong>评测比看起来更耗时间：手动跑、记结果、画图，一次就是几个小时。尽量全自动化，并且在开训之前确认它能正常运行和记录。SmolLM3 每保存一个 checkpoint 就自动在集群上触发一个评测任务，结果写进 Weights &amp; Biases 和 Trackio。</li>
         <li><strong>Checkpoint 与自动恢复。</strong>确认 checkpoint 存得对，并且训练任务能在无人干预的情况下从最新的 checkpoint 恢复。Slurm 上用 <code>--requeue</code>：任务失败后自动重新排队，并从最近的 checkpoint 接着跑。</li>
         <li><strong>指标记录。</strong>确认所有关心的指标都在记录：评测分数、吞吐（tokens/s）、训练 loss、梯度范数、节点健康（GPU 利用率、温度、显存占用），以及本次训练特有的调试指标。</li>
-        <li><strong>配置自查。</strong>训练配置、启动脚本、Slurm 提交命令再核对一遍。</li>
+        <li><strong>配置自查。</strong>训练配置、启动脚本、Slurm 提交命令再从头检查一遍。</li>
       </ol>
       <p>这几条看起来朴素，但后文每一个谜案的排查都依赖它们：没有节点监控就看不出吞吐下跌和磁盘读延迟相关；没有自动评测和参考 checkpoint，就发现不了 TP 的 bug；没有自动恢复，每次掉节点都要有人半夜起来重启。</p>
 
       <h2 id="eta">3. 交互：吞吐与完成日期计算器</h2>
-      <p>把第 1 节的账做成一个小工具。输入模型大小、目标 token 数、卡数和单卡吞吐，再估计一下中途会挂几次、每次损失多少时间，就能得到预计完成日期。默认值是 SmolLM3 的配置；故障次数、每次恢复耗时和 checkpoint 间隔是我编的示意值，不是 playbook 报告的数字。</p>
+      <p>把第 1 节的账做成一个小工具。输入模型大小、目标 token 数、卡数和单卡吞吐，再估计一下中途会挂几次、每次损失多少时间，就能得到预计完成日期。默认值是 SmolLM3 的配置。</p>
       <p>每次故障损失的时间按「恢复开销 + 半个 checkpoint 间隔」估算：故障发生的时刻在两个 checkpoint 之间大致均匀分布，所以平均要重算半个间隔的训练。</p>
 
       <div class="demo" id="eta-demo">
@@ -147,7 +149,7 @@
         <p class="note" id="e-o-note"></p>
       </div>
 
-      <p>拖一下「吞吐下跌」：跌 50% 时纯计算时间直接翻倍。这就是 playbook 把吞吐当作头号红线指标的原因——下一节的前两个谜案，都是吞吐出了问题。</p>
+      <p>拖一下「吞吐下跌」：跌 50% 时纯计算时间直接翻倍。这就是吞吐被当作头号红线指标的原因。下一节的前两个谜案，都是吞吐出了问题。</p>
 
       <h2 id="mysteries">4. 规模化带来的四个谜案</h2>
       <p>SmolLM3 的消融做得很充分：3B 模型在 100B token 上的消融结果不错；相对 SmolLM2 的架构改动（GQA、NoPE、文档内注意力掩码、新分词器）都被验证过，要么提升要么持平；数据配比也在英文、多语言、代码和数学之间找到了平衡；整套配置在 48 个节点上调到了约 30% 的 MFU，开训前还专门在 48 节点上验证过吞吐。即便如此，正式开始 11T token 的长跑之后，问题一个接一个。</p>
@@ -203,7 +205,7 @@
             <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--accent-2)"/></marker>
           </defs>
         </svg>
-        <figcaption>谜案 1 的成因与修复（根据 playbook 的文字描述重画）。</figcaption>
+        <figcaption>谜案 1 的成因与修复。</figcaption>
       </figure>
 
       <p><strong>修复 1：换数据存储位置。</strong>他们找不到办法让 Weka 在整个训练期间把数据目录固定为「热」，于是换存储。直接从 S3 流式读太慢，最后决定在<strong>每个节点的本地 scratch 盘上各放一份完整数据</strong>。</p>
@@ -238,7 +240,7 @@
       </ul>
       <p>集群预留在烧钱、时间很紧，他们选了第二个，更安全也更快：数据已经在每个节点上了，本地重新打乱很便宜（约 1 小时）。而且<strong>每个 epoch 用不同的种子各生成一份打乱顺序</strong>，避免多个 epoch 重复同样的打乱模式。</p>
       <div class="callout">
-        <p><strong>补丁还是修好？</strong>时间紧时，采用一个经过验证的现成方案或临时绕过，往往比调试自己坏掉的实现更快：谜案 2 直接搬来 TokenizedBytes 而不是修 nanosets 的索引，谜案 3 用离线预打乱而不是改 dataloader。但 playbook 也提醒，捷径走多了，系统会变成一堆难以维护和优化的补丁。</p>
+        <p><strong>补丁还是修好？</strong>时间紧时，采用一个经过验证的现成方案或临时绕过，往往比调试自己坏掉的实现更快：谜案 2 直接搬来 TokenizedBytes 而不是修 nanosets 的索引，谜案 3 用离线预打乱而不是改 dataloader。代价是：捷径走多了，系统会变成一堆难以维护和优化的补丁。</p>
       </div>
 
       <p><strong>第二次起跑。</strong>到这时他们有了：稳定的吞吐（本地 scratch 存储 + 备用节点）、不再随步数下跌（TokenizedBytes）、干净的序列级打乱（每个 epoch 离线预打乱）。重新启动后，loss 平滑，吞吐稳定。</p>
@@ -248,7 +250,7 @@
       <p><strong>缩小范围。</strong>相对 SmolLM2 的每一处架构和数据改动都单独验证过，所以怀疑转向训练框架。两套设置之间尚未测试的差异只剩几处，最明显的是<strong>张量并行（TP）</strong>：SmolLM2 单卡放得下，训练时没开 TP；SmolLM3 需要 TP=2 才放得进显存。之前没想过专门测试它，因为 3B 消融也用了 TP，结果看起来合理。</p>
       <p><strong>验证。</strong>用和 SmolLM3 完全相同的设置（文档掩码、NoPE、同样的数据和超参）训练一个 1.7B 模型，一组开 TP、一组不开。差别立刻显现：开 TP 的版本 loss 一直更高、下游表现更差。确认是 TP 相关的 bug。</p>
       <p><strong>根因。</strong>对比 TP 和非 TP 训练的权重后发现：<strong>所有 TP rank 用的是同一个随机种子</strong>，而每个 rank 本应用不同的种子来初始化自己那一片权重。修复只有几行：</p>
-<pre><code># nanotron/trainer.py（playbook 给出的 diff，略去上下文）
+<pre><code># nanotron/trainer.py（略去上下文）
 - set_random_seed(self.config.general.seed)
 + # 每个 TP rank 用不同的种子，保证各分片初始化不同
 + tp_rank = dist.get_rank(self.parallel_context.tp_pg)
@@ -272,12 +274,12 @@
           <text x="532" y="140" text-anchor="middle" class="soft" font-size="13">两片完全相同 → 一半神经元是另一半的复制</text>
           <text x="360" y="190" text-anchor="middle" class="faint" font-size="12">注意力层同理：按头切分的 Q/K/V 在两个 rank 上初始化成一样的头</text>
         </svg>
-        <figcaption>张量并行下种子相同的后果（示意）。</figcaption>
+        <figcaption>张量并行下种子相同的后果。</figcaption>
       </figure>
 
-      <p>下面是我自己的分析，不是 playbook 的原话：如果两片权重完全相同，而且后续每一步的更新也完全对称（同样的输入、同样的下游权重，所以同样的梯度），那这两片永远保持相同——等于把 MLP 和注意力的有效宽度砍掉了一半。实际中对称性能被打破多少，取决于实现细节（比如哪些参数并不按 TP 切分、数值误差等）。playbook 的描述是：权重初始化在分片之间相关，影响了收敛；不是灾难性的，模型照样在学、在进步，但效率损失足以解释在规模上观察到的差距。他们的原话是「我们一半的权重没有被正确初始化」。</p>
+      <p>这为什么会拖慢学习？设想一个极端情况：两片权重完全相同，而且之后每一步的更新也完全对称（同样的输入、同样的下游权重，因此同样的梯度），那这两片就永远相同，等于把 MLP 和注意力的有效宽度砍掉了一半。实际训练中对称性会被部分打破（有些参数并不按 TP 切分，还有数值误差），所以模型没有坏掉：它照样在学、在进步，只是各分片的初始化彼此相关，收敛变慢。相当于一半的权重没有被正确初始化，这个效率损失足以解释 1T token 处看到的差距。</p>
       <p>修好种子后，他们重复了消融，确认 TP 与非 TP 的 loss 曲线和下游表现一致；又做了额外的健全性检查：分别训练 SmolLM2 风格（架构和数据）的 3B 模型和 SmolLM3 的 3B 模型，与 SmolLM2 的 checkpoint 对比。结果符合预期：1.7B 的 SmolLM2 弱于 3B 的 SmolLM2 变体，后者又被 SmolLM3-3B 超过。</p>
-      <p>值得注意的是这个 bug 被定位的速度：从发现差距到修好只用了一天。原因是其他所有组件都被消融验证过，TP 是唯一可疑的、没被单独测试过的部分。playbook 把这一点归功于前面反复强调的原则：扎实的消融不只是为了做出好模型，更是为了训练出问题时，能对每个决定有信心，迅速知道哪些部分没被充分测试。之后剩下的一个月基本平静，只有偶尔因为节点故障触发的重启。</p>
+      <p>值得注意的是这个 bug 被定位的速度：从发现差距到修好只用了一天。原因是其他所有组件都被消融验证过，TP 是唯一可疑的、没被单独测试过的部分。这是扎实消融的另一个价值：它不只帮你做出好模型，还让你在训练出问题时对每个决定都有把握，能迅速找到没被充分测试的那一块。之后剩下的一个月基本平静，只有偶尔因为节点故障触发的重启。</p>
 
       <h2 id="monitor">5. 监控：只看 loss 曲线不够</h2>
       <p>TP bug 能被发现，靠的不是 loss 曲线——loss 看起来一切正常——而是<strong>下游评测落后于预期</strong>。而 SmolLM2 的中间 checkpoint 评测结果是关键的参照物：它让团队很早就意识到 3B 模型没走在正轨上。由此得到两条建议：</p>
@@ -299,7 +301,7 @@
       </div>
 
       <h2 id="spikes">6. Loss spike：分类、成因、预防与急救</h2>
-      <p>SmolLM3 在 1T token 处重启了。那么，训练出问题时是不是总得重启？取决于问题的严重程度和根因。最常见的「中途问题」是 <strong>loss spike</strong>：训练 loss 突然跳高，可能只是小插曲，也可能是发散的前兆。playbook 引用了 Stas Bekman 在《Machine Learning Engineering Open Book》里的比喻：训练 loss 曲线像心电图，有好的、坏的、和「你该担心了」的。</p>
+      <p>SmolLM3 在 1T token 处重启了。那么，训练出问题时是不是总得重启？取决于问题的严重程度和根因。最常见的「中途问题」是 <strong>loss spike</strong>：训练 loss 突然跳高，可能只是小插曲，也可能是发散的前兆。Stas Bekman 有个贴切的比喻：训练 loss 曲线像心电图，有好的、坏的，也有「你该担心了」的。</p>
 
       <h3>两大类</h3>
       <ul>
@@ -323,9 +325,9 @@
         <li><strong>数据过滤与打乱。</strong>确保数据干净且充分打乱。例如 OLMo 2 发现，去掉含有大量重复 n-gram 的文档（1 到 13 个 token 的片段重复 32 次以上）能显著降低 spike 频率。</li>
         <li><strong>Z-loss。</strong>在 loss 里加一项，防止输出 logits 变得过大。记 softmax 的配分函数为 \(Z = \sum_{i} e^{z_i}\)（\(z_i\) 是词表上的 logits），则
           $$\mathcal{L}_{\text{z-loss}} = \lambda \cdot \log^2 Z.$$
-          它把 \(\log Z\) 往 0 拉，也就是让 logits 的整体尺度不要漂移；交叉熵对 logits 整体平移不敏感，所以这一项基本不影响模型本身要学的东西。playbook 的 1B 消融里加 z-loss 不影响 loss 和下游表现；SmolLM3 最后没用，因为他们的实现有额外开销，开训前没来得及优化。</li>
+          它把 \(\log Z\) 往 0 拉，也就是让 logits 的整体尺度不要漂移；交叉熵对 logits 整体平移不敏感，所以这一项基本不影响模型本身要学的东西。在 1B 规模的消融里，加 z-loss 对 loss 和下游表现都没有影响；SmolLM3 最后没用它，因为当时的实现有额外开销，开训前没来得及优化。</li>
         <li><strong>Embedding 不做权重衰减。</strong>OLMo 2 发现这能提升稳定性。原因是 weight decay 会让 embedding 的范数逐渐变小，而 LayerNorm 的雅可比与输入范数成反比，范数小会让前几层梯度变大。</li>
-        <li><strong>QK-norm。</strong>在算注意力之前对 query 和 key 做归一化，防止注意力 logits 过大。OLMo 2 等团队发现它有助于稳定；有意思的是，Marin 团队发现它甚至可以在<em>训练中途</em>加进去，用来修复发散。不过 playbook 在架构一章也提到，有工作发现 QK-norm 损害长上下文检索，所以 SmolLM3 没用（3B 模型本来也不太容易不稳定）。</li>
+        <li><strong>QK-norm。</strong>在算注意力之前对 query 和 key 做归一化，防止注意力 logits 过大。OLMo 2 等团队发现它有助于稳定；有意思的是，Marin 团队发现它甚至可以在<em>训练中途</em>加进去，用来修复发散。不过也有工作发现 QK-norm 会损害长上下文检索（见系列的<a href="/posts/smol-architecture/">架构篇</a>），所以 SmolLM3 没用它；3B 模型本来也不太容易不稳定。</li>
       </ul>
 
       <h3>急救：spike 还是发生了</h3>
@@ -338,7 +340,7 @@
       </ul>
 
       <h2 id="diag">7. 交互：loss 曲线诊断台</h2>
-      <p>下面把上面的分类和处理方法做成一个可以动手的玩具。所有曲线都是<strong>编出来的示意曲线</strong>：基线是 \(L(t)=a+b\,t^{-c}\) 形式的幂律下降加噪声，再叠上不同类型的异常；每种处理办法的「效果」是按上一节的定性规律硬编码的（比如不可恢复的 spike 只回滚不够），不是从真实训练里模拟出来的。它的作用是帮你记住「什么症状 → 想到什么原因 → 该用哪个处理」。</p>
+      <p>把上面的分类和处理方法做成一个可以动手的玩具。基线是 \(L(t)=a+b\,t^{-c}\) 形式的幂律下降加噪声，上面叠加不同类型的异常；每种处理办法的效果按上一节的定性规律设定，比如不可恢复的 spike 只回滚是不够的。选一种症状，再勾选处理办法，看曲线怎么变，帮你建立「症状 → 原因 → 处理」的对应。</p>
 
       <div class="demo" id="spike-demo">
         <div class="demo-label">Loss 曲线诊断台（示意）</div>
@@ -363,7 +365,7 @@
       </div>
 
       <h2 id="restart">8. 重启还是在线修复</h2>
-      <p>回到开头的问题：SmolLM3 为什么选择在 1T token 处重启，而不是在线修？playbook 的理由是：TP 种子 bug 意味着「起跑就站错了脚」，一半的权重没有被正确初始化。当时模型的表现和 SmolLM2 相近，并且在相似的位置趋于平缓——也就是说继续训下去，大概率得到一个和 SmolLM2 差不多、但训练成本几乎翻倍的模型。这时重启才划算。</p>
+      <p>回到开头的问题：SmolLM3 为什么选择在 1T token 处重启，而不是在线修？因为 TP 种子 bug 意味着起跑就站错了脚，一半的权重没有被正确初始化。当时模型的表现和 SmolLM2 相近，并且在相似的位置趋于平缓——也就是说继续训下去，大概率得到一个和 SmolLM2 差不多、但训练成本几乎翻倍的模型。这时重启才划算。</p>
       <p>把它抽象一下，判断的依据大致是：</p>
       <ul>
         <li><strong>问题是否已经「写进」了参数状态</strong>，而且后续训练无法纠正？初始化错误属于这一类，坏 batch 造成的可恢复 spike 不属于。</li>
@@ -407,9 +409,9 @@
           <text x="655" y="190" text-anchor="middle" font-size="11" class="faint">11.1T</text>
           <text x="690" y="215" text-anchor="end" font-size="11" class="faint">4k→32k、32k→64k 各 50B（宽度未按比例）</text>
         </svg>
-        <figcaption>SmolLM3 预训练的阶段划分（token 数按 playbook；学习率形状只是示意 WSD 调度）。</figcaption>
+        <figcaption>SmolLM3 预训练的阶段划分（学习率曲线为示意）。</figcaption>
       </figure>
-      <p>为什么配比能在训练中途换、而且换在衰减阶段特别有效？架构一章里 playbook 用的是 WSD（warmup–stable–decay）调度：大部分时间学习率恒定，最后一段快速衰减。衰减阶段模型「定型」，这时看到的数据对最终能力影响最大，所以把最高质量、最稀缺的数据留到这时上采样，单位 token 的收益最高。这一点在系列的上一篇<a href="/posts/smol-optim-data/">分词器、优化器、超参与数据配比</a>里有更多讨论。</p>
+      <p>为什么配比能在训练中途换、而且换在衰减阶段特别有效？SmolLM3 用的是 WSD（warmup–stable–decay）学习率调度：短暂 warmup 之后，大部分时间学习率恒定，最后一段快速衰减。衰减阶段模型「定型」，这时看到的数据对最终能力影响最大，所以把最高质量、最稀缺的数据留到这时上采样，单位 token 的收益最高。这一点在系列的上一篇<a href="/posts/smol-optim-data/">分词器、优化器、超参与数据配比</a>里有更多讨论。</p>
 
       <h2 id="longctx">10. 长上下文扩展：4k → 64k 训练，YaRN 到 128k</h2>
       <p>上下文长度决定模型一次能处理多少文本：分析长文档、维持多轮对话的连贯、处理整个代码库都需要它。SmolLM3 以 4k 开训，但实际应用需要 128k。</p>
@@ -422,17 +424,17 @@
       <div class="callout">
         <p><strong>基座模型上的长上下文评测。</strong>消融时他们发现，HELMET 在基座模型上噪声很大：同样的训练换个种子，结果差异明显。Gao et al. 建议在上面先做 SFT 来降低方差；SmolLM3 团队选择改用 RULER，在基座模型层面信号更可靠。</p>
       </div>
-      <p><strong>数据：上采样长文档没带来提升。</strong>这个阶段常见的做法是上采样长文档，比如长网页和书。他们试了上采样书籍、文章，甚至仿照 Qwen2.5-1M 的方法，用 FineWeb-Edu 和 Python-Edu 合成检索、填空（fill-in-the-middle）类任务的文档。出乎意料，这些都不比直接沿用阶段 3 的配比好——后者在 RULER 上已经能和 Llama 3.2 3B、Qwen2.5-3B 竞争。他们的猜测：基线配比里本来就有来自网页和代码的长文档（估计约占 10% 的 token），而且 NoPE 帮了忙。（这里的 NoPE 指 RNoPE：每四层里有一层不用位置编码，其余层用 RoPE，见系列的<a href="/posts/smol-architecture/">架构篇</a>。）</p>
+      <p><strong>数据：上采样长文档没带来提升。</strong>这个阶段常见的做法是上采样长文档，比如长网页和书。他们试了上采样书籍、文章，甚至仿照 Qwen2.5-1M 的方法，用 FineWeb-Edu 和 Python-Edu 合成检索、填空（fill-in-the-middle）类任务的文档。出乎意料，这些都不比直接沿用阶段 3 的配比好——后者在 RULER 上已经能和 Llama 3.2 3B、Qwen2.5-3B 竞争。可能的解释是：基线配比里本来就有来自网页和代码的长文档（估计约占 10% 的 token），而且 NoPE 帮了忙。（这里的 NoPE 指 RNoPE：每四层里有一层不用位置编码，其余层用 RoPE，见系列的<a href="/posts/smol-architecture/">架构篇</a>。）</p>
       <p>扩展阶段他们还顺手进一步上采样了数学、代码和推理问答数据，并加入了几十万条 ChatML 格式的样本。另外试过在 4k → 32k 扩展时用滑动窗口注意力（窗口 4k、8k、16k），RULER 上都不如全注意力。</p>
 
       <h3>RoPE 回顾：为什么要调 θ</h3>
       <p>RoPE 把 query/key 向量的维度两两配对，每一对看作平面上的一个点，按位置 \(m\) 旋转角度 \(m\,\theta_k\)。第 \(k\) 对（\(k=0,\dots,d/2-1\)，\(d\) 是每个头的维度）的角频率是</p>
       $$\theta_k = b^{-2k/d},$$
-      <p>\(b\) 就是常说的「RoPE theta / base」，原始值是 10,000。两个 token 在位置 \(m, n\) 的点积只依赖相对位置 \(m-n\)。第 \(k\) 对转满一圈所需的位置数（波长）是</p>
+      <p>\(b\) 就是常说的「RoPE theta / base」，原始 RoPE 用 10,000，SmolLM3 主预训练（4k 上下文）用的是 50,000。两个 token 在位置 \(m, n\) 的点积只依赖相对位置 \(m-n\)。第 \(k\) 对转满一圈所需的位置数（波长）是</p>
       $$\lambda_k = \frac{2\pi}{\theta_k} = 2\pi\, b^{2k/d}.$$
       <p>\(k\) 小的维度对转得快（波长短，分辨局部顺序），\(k\) 大的转得慢（波长长，编码远距离信息）。问题在于：如果训练时上下文只有 4k，那些波长远大于 4k 的低频维度，在训练中只见过「转了一小段弧」的情形；推理时把上下文拉长到 32k，这些维度会出现训练中没见过的角度，注意力行为就不可预期。同时，随着距离增大，旋转造成的点积衰减也会让远处 token 的注意力分数衰减过快（Xiong et al., 2023；Rozière et al., 2024）。</p>
       <p><strong>RoPE ABF（Adjusted Base Frequency，Xiong et al., 2023）</strong> 的做法就是把 \(b\) 调大：所有维度的旋转都变慢，同样的角度对应更远的距离，远处 token 的注意力不会衰减得那么快。可以一次调大，也可以随着上下文逐级调大。</p>
-      <p>SmolLM3 的取值：4k → 32k 时 θ 调到 2M，32k → 64k 时调到 5M。（同一团队的 <a href="https://huggingface.co/blog/smollm3">SmolLM3 发布博客</a>写的第一阶段是 1.5M，与 playbook 的 2M 不一致，这里以 playbook 为准并注明。）他们发现更大的值如 10M 能让 RULER 略好一点，但会伤害一些短上下文任务（比如 GSM8k），所以停在 5M——这个值不影响那些任务。作为对比，Qwen3 在把上下文从 4k 扩到 32k 时把 θ 从 10k 调到了 1M，然后用 YaRN 做 4 倍外推到 131k。</p>
+      <p>SmolLM3 的取值：4k → 32k 时 θ 从 50k 调到 2M，32k → 64k 时再调到 5M（发布的模型 config 里 <code>rope_theta</code> 就是 5,000,000）。他们发现更大的值如 10M 能让 RULER 略好一点，但会伤害一些短上下文任务（比如 GSM8k），所以停在 5M——这个值不影响那些任务。作为对比，Qwen3 在把上下文从 4k 扩到 32k 时把 θ 从 10k 调到了 1M，然后用 YaRN 做 4 倍外推到 131k。</p>
 
       <h3>YaRN：推理时外推到 128k</h3>
       <p>他们希望 SmolLM3 推理时能处理 128k，但在 128k 序列上训练太贵，于是用 <strong>YaRN</strong>（Yet another RoPE extensioN，Peng et al., 2023）让模型外推到训练长度之外。和 ABF「所有维度一起调慢」不同，YaRN 对不同频率的维度区别对待。设原训练长度为 \(L\)、扩展倍数为 \(s = L'/L\)，对第 \(d\) 对维度计算「训练长度内转了几圈」：</p>
@@ -442,7 +444,7 @@
       \qquad
       \theta_d' = \bigl(1-\gamma(r(d))\bigr)\frac{\theta_d}{s} + \gamma(r(d))\,\theta_d .$$
       <p>含义是：在训练长度内转了很多圈的高频维度（\(r\gt\beta\)）已经见过所有角度，不需要动；连一圈都没转满的低频维度（\(r\lt\alpha\)）按 \(1/s\) 做位置插值，把新长度压回训练见过的角度范围；中间的线性过渡。此外 YaRN 还给注意力 logits 加一个温度：\(\text{softmax}\bigl(q^\top k / (t\sqrt{d})\bigr)\)，其中 \(\sqrt{1/t} = 0.1\ln s + 1\)，用来补偿插值后注意力分布变「平」的问题。</p>
-      <p>playbook 写道，理论上 YaRN 允许把序列长度扩大四倍。实践中他们发现：<strong>用 64k 的 checkpoint 外推到 128k，比用 32k 的 checkpoint 效果更好</strong>，说明训练长度越接近目标推理长度越好；但推到 256k（64k 的 4 倍）时 RULER 表现下降，所以他们建议只用到 128k。</p>
+      <p>YaRN 一般用来把上下文扩到训练长度的 4 倍左右。SmolLM3 的实验发现：<strong>用 64k 的 checkpoint 外推到 128k，比用 32k 的 checkpoint 效果更好</strong>，说明训练长度越接近目标推理长度越好；但推到 256k（64k 的 4 倍）时 RULER 表现下降，所以他们建议只用到 128k。</p>
 
       <h2 id="rope-demo">11. 交互：RoPE 频率、ABF 与 YaRN</h2>
       <p>下面画出每一对维度的波长 \(\lambda_k = 2\pi b^{2k/d}\)（纵轴是对数刻度），横线分别是训练长度 \(L\) 和目标长度 \(L'\)。波长高于训练长度横线的维度对，在训练中连一圈都没转满。调大 θ（ABF）会把整条曲线往上抬；打开 YaRN 会显示每一对维度的插值比例 \(\gamma\)，以及插值后的有效波长。</p>
@@ -466,11 +468,11 @@
           <div><span class="k">YaRN 完全插值 / 部分 / 不动</span><span class="v" id="r-o3">–</span></div>
           <div><span class="k">YaRN 注意力温度 √(1/t)</span><span class="v" id="r-o4">–</span></div>
         </div>
-        <p class="note">试试：d=128、θ=10k、L=4k 时，「没转满一圈」的维度对有多少；再把 θ 拉到 2M（SmolLM3 的 4k→32k 设置），把 L 调到 32k 看看。这里只按公式计算几何量，不代表模型实际效果。</p>
+        <p class="note">试试：d=128（SmolLM3 的每头维度）、θ=50k（它主预训练的设置）、L=4k 时，「没转满一圈」的维度对有多少；再把 θ 拉到 2M、L 调到 32k（4k→32k 阶段的设置）看看。图里只是按公式算出的几何量，不代表模型的实际效果。</p>
       </div>
 
       <h2 id="lessons">12. 小结</h2>
-      <p>playbook 对整个预训练的总结很朴素：规划确定哪些东西值得测，消融验证每个决定，监控尽早发现问题，出问题时，系统性的去风险告诉你去哪里找。SmolLM3 最终得到了一个 11T token 训练的 3B 模型，在数学、代码、多语言和长上下文上有竞争力，位于 Qwen3 系列模型的帕累托前沿上。把这一章的经验按我自己的理解压缩成几条：</p>
+      <p>整个预训练可以浓缩成很朴素的几句话：规划决定哪些东西值得测，消融验证每个决定，监控尽早发现问题；出问题时，前面系统性的去风险工作会告诉你该去哪里找。SmolLM3 最终得到了一个 11T token 训练的 3B 模型，在数学、代码、多语言和长上下文上有竞争力，位于 Qwen3 系列模型的帕累托前沿上。具体到这次长跑，可以记住这几条：</p>
       <ol>
         <li><strong>排查从「什么变了」开始。</strong>谜案 1、2 都是先列出正式训练与消融的全部差异，再逐个排除：硬件（换节点、缩到单节点复现）、存储、步数。</li>
         <li><strong>能在小规模复现就在小规模复现。</strong>谜案 2 在单节点复现，谜案 4 在 1.7B 上复现，调试成本从「几百张卡」降到「几张卡」。</li>
@@ -481,10 +483,11 @@
       </ol>
       <p>基座模型训完以后还要做后训练才能变成一个助手，这是下一篇的内容；而这一篇里反复出现的存储、网络、降频、checkpoint，在<a href="/posts/smol-infrastructure/">基础设施篇</a>里有完整的测量数据。</p>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li>Ben Allal, Tunstall, Tazi, Bakouch, Beeching, Patiño, Fourrier, Frere, Lozhkov, Raffel, et al. <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook: The Secrets to Building World-Class LLMs</a>（2025）。本文主要依据其中 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#the-training-marathon">The Training Marathon</a> 一章的 Preflight Checklist、Scaling Surprises（Mystery #1–#4）、Staying the Course、Mid-Training 各节，以及 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#positional-encoding-and-long-context">Positional Encoding and Long Context</a>、<a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#improving-stability">Improving Stability</a> 两节。</li>
-        <li>Hugging Face. <a href="https://huggingface.co/blog/smollm3">SmolLM3: smol, multilingual, long-context reasoner</a>（发布博客，长上下文阶段的 θ 取值与 playbook 略有出入）。</li>
+        <li>Ben Allal, Tunstall, Tazi, Bakouch, Beeching, Patiño, Fourrier, Frere, Lozhkov, Raffel, et al. <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook: The Secrets to Building World-Class LLMs</a>（2025）。想看更多实验细节和原始曲线，推荐读其中 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#the-training-marathon">The Training Marathon</a> 一章（Preflight Checklist、Scaling Surprises、Staying the Course、Mid-Training 各节），以及 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#positional-encoding-and-long-context">Positional Encoding and Long Context</a>、<a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#improving-stability">Improving Stability</a> 两节。</li>
+        <li>Hugging Face. <a href="https://huggingface.co/blog/smollm3">SmolLM3: smol, multilingual, long-context reasoner</a>（发布博客）。</li>
+        <li>Hugging Face. <a href="https://github.com/huggingface/smollm/tree/main/text/pretraining/smollm3">SmolLM3 预训练配置</a>：各阶段的数据配比、并行配置与 RoPE θ（<code>stage1_8T.yaml</code>、<code>long_context_4k_to_32k.yaml</code> 等）。</li>
         <li>Chowdhery et al. <a href="https://arxiv.org/abs/2204.02311">PaLM: Scaling Language Modeling with Pathways</a>（2022）：数据与参数状态交互引发 spike、跳过 200–500 个 batch、z-loss。</li>
         <li>OLMo Team. <a href="https://arxiv.org/abs/2501.00656">2 OLMo 2 Furious</a>（2025）：初始化、embedding 不做权重衰减、重复 n-gram 过滤、QK-norm。</li>
         <li>Almazrouei et al. <a href="https://arxiv.org/abs/2311.16867">The Falcon Series of Open Language Models</a>（2023）。</li>
@@ -648,7 +651,7 @@
           el('line', { x1: P.l, x2: W - P.r, y1: Y(v), y2: Y(v), class: 'grid' }, svg);
           const tx = el('text', { x: P.l - 6, y: Y(v) + 4, 'text-anchor': 'end', class: 'axis' }, svg); tx.textContent = v.toFixed(1);
         }
-        const tl = el('text', { x: W - P.r, y: H - 8, 'text-anchor': 'end', class: 'axis' }, svg); tl.textContent = '训练步数 →（示意）';
+        const tl = el('text', { x: W - P.r, y: H - 8, 'text-anchor': 'end', class: 'axis' }, svg); tl.textContent = '训练步数 →';
         const yl = el('text', { x: P.l, y: H - 8, class: 'axis' }, svg); yl.textContent = 'loss';
         el('path', { d: bs.map((v, t) => (t ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(v).toFixed(1)).join(''), class: 'base' }, svg);
         el('path', { d: ys.map((v, t) => (t ? 'L' : 'M') + X(t).toFixed(1) + ' ' + Y(v).toFixed(1)).join(''), class: 'curve' }, svg);

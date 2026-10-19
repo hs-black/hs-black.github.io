@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>后训练：SFT、偏好优化与 RL · Zunzhe Zhang</title>
-  <meta name="description" content="读 Smol Training Playbook 的后训练一章：评测先行、chat template 与 loss 掩码、SFT 超参与 packing、推理 mid-training、DPO/APO 推导、GRPO 与长度惩罚、on-policy 蒸馏。">
+  <meta name="description" content="把 3B 基座变成混合推理助手：评测先行、chat template 与 loss 掩码、SFT 超参与 packing、推理 mid-training、DPO/APO 推导、GRPO 与长度惩罚、on-policy 蒸馏。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
@@ -67,8 +67,8 @@
     <nav class="series" data-series="smol"></nav>
 
     <article class="prose">
-      <p>预训练给了模型知识和原始能力，但它只是一个「预测下一个 token」的模型。人们要的是助手和代码 agent。把前者变成后者的过程叫<strong>后训练（post-training）</strong>：监督微调（SFT）、偏好优化、强化学习，以及模型合并等。这一篇读 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">Smol Training Playbook</a> 的「Beyond Base Models — Post-Training in 2025」一章，跟着 SmolLM3 从一个 3B 基座模型变成一个<strong>混合推理（hybrid reasoning）</strong>模型的全过程。</p>
-      <p>playbook 本身偏经验，很多算法只给了一句话的定义。我在对应位置补上了推导：DPO 是怎么从 RLHF 目标里来的、APO 和 ORPO、KTO 的损失长什么样、GRPO 的优势函数和它的几个已知偏差、DAPO 的长度惩罚。这些推导来自原论文，我在文中标注了出处。</p>
+      <p>预训练给了模型知识和原始能力，但它只是一个「预测下一个 token」的模型。人们要的是助手和代码 agent。把前者变成后者的过程叫<strong>后训练（post-training）</strong>：监督微调（SFT）、偏好优化、强化学习，以及模型合并等。这一篇跟着 SmolLM3 走一遍这个过程：从一个 3B 基座模型，变成一个<strong>混合推理（hybrid reasoning）</strong>模型。</p>
+      <p>一路上会遇到不少算法，我们不只说它们是什么，也把关键的推导走一遍：DPO 是怎么从 RLHF 目标里推出来的，APO、ORPO、KTO 的损失长什么样，GRPO 的优势函数和它的几个已知偏差，以及 DAPO 的长度惩罚。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -92,7 +92,7 @@
           <li><a href="#rlvr-hybrid">把 RLVR 用在混合推理模型上</a></li>
           <li><a href="#onpolicy">RL 之外：online DPO 与 on-policy 蒸馏</a></li>
           <li><a href="#merge">模型合并（简述）</a></li>
-          <li><a href="#refs">参考</a></li>
+          <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
 
@@ -100,7 +100,7 @@
       <p><strong>混合推理模型</strong>有两种工作模式：一种给出简洁、直接的回答；另一种先做长的逐步推理，再给答案。模式通常由用户在 system 消息里指定。SmolLM3 沿用 Qwen3 的做法，用两个轻量指令显式控制：<code>/think</code> 打开扩展推理，<code>/no_think</code> 要求简洁回答。推理过程写在 <code>&lt;think&gt; … &lt;/think&gt;</code> 之间；在 <code>/no_think</code> 模式下，这对标签之间是空的。</p>
 
       <h2 id="compass">2. 后训练的罗盘与「小」消融</h2>
-      <p>预训练一章的「为什么 → 训练什么 → 怎么训」罗盘在后训练里同样适用。</p>
+      <p>动手之前先想清楚要什么。<a href="/posts/smol-decisions/">讲预训练决策时</a>用过的「为什么 → 训练什么 → 怎么训」罗盘，在后训练里同样适用。</p>
       <ul>
         <li><strong>为什么要后训练？</strong>研究（比如探索 RL 能否解锁新的推理能力）、生产（为了延迟把大模型蒸馏成小模型）、或者战略性开源（某个用例没有好的开放模型）。区别在于后训练是在已有能力上加工，而不是从零创造。动手之前先问：真的需要吗？现在许多开放权重模型在大量任务上已经接近闭源模型，如果只要一个通用助手，Hub 上现成的可能就够了。有没有高质量的领域数据？能不能衡量成功？没有清楚的评测标准，就不知道后训练到底有没有用。</li>
         <li><strong>后训练要达到什么？</strong>一个很少跑题的指令遵循者？能切换语气和角色的助手？能做数学、代码、agent 任务的推理引擎？多语言对话？</li>
@@ -110,7 +110,7 @@
       <p>一个值得注意的方法论差别：预训练里「小消融」意味着更小的模型和数据；后训练里「小」意味着<strong>更小的数据集和更简单的算法</strong>。他们几乎从不换一个基座模型来做消融，因为后训练的行为太依赖具体模型，而且后训练跑得够快，可以直接在目标模型上迭代。例外是从 Hub 选现成基座的时候：同样大小、一个训了 1T token 一个训了 10T token，差别非常大，这时比较不同基座是有意义的。</p>
 
       <h2 id="evals">3. 评测先行</h2>
-      <p>后训练的第一步和预训练一样：确定评测集。既然 LLM 主要被当作助手用，playbook 认为目标应该是「好用」，而不是追逐抽象的「智能」基准。一个好助手至少要能：处理含糊的指令、逐步规划、写代码、在合适的时候调用工具。他们的评测是分层的：</p>
+      <p>后训练的第一步和预训练一样：确定评测集。既然 LLM 主要被当作助手用，目标就应该是「好用」，而不是追逐抽象的「智能」基准。一个好助手至少要能：处理含糊的指令、逐步规划、写代码、在合适的时候调用工具。他们的评测是分层的：</p>
       <ul>
         <li><strong>能力评测</strong>：知识（GPQA Diamond 是主要的科学知识评测——研究生水平的选择题，对小模型远未饱和，比 MMLU 一类信号更好且更快；SimpleQA 测事实性，但小模型知识有限，普遍很差）；数学（最新一年的 AIME；MATH-500 对小模型仍是有用的健全性检查，但对推理模型基本饱和）；代码（最新版 LiveCodeBench；SWE-bench Verified 对小模型太难）；多语言（Global MMLU，以及测多语言数学的 MGSM）。</li>
         <li><strong>综合任务评测</strong>：长上下文（大海捞针 NIAH 太浅，更全面的是 RULER、HELMET，以及 OpenAI 的 MRCR、GraphWalks）；指令遵循（IFEval 用「可验证指令」自动打分，IFBench 约束更多样；多轮用 Multi-IF 或 MultiChallenge）；对齐（人工或 LMArena 很贵，常用 LLM 评委代理：AlpacaEval、ArenaHard、MixEval，其中 MixEval 与 LMArena 人类 Elo 相关性最强）；工具调用（BFCL、TAU-Bench）。</li>
@@ -136,7 +136,7 @@
           </tbody>
         </table>
       </div>
-      <p>表里的 <strong>avg@k</strong> 是对每道题采样 \(k\) 次、取平均正确率。为什么题少的基准要这么做？设单次采样的正确率是 \(p\)，\(n\) 道题、每题采 1 次，准确率的标准误约为 \(\sqrt{p(1-p)/n}\)。AIME 只有 30 题，\(p=0.5\) 时标准误约 9 个百分点——两个 checkpoint 差 5 分完全可能是噪声。每题采 64 次以后，抽样带来的那部分方差下降为约 \(1/64\)（题目本身难度分布带来的方差不会消失，但我们比较的是同一套题上的两个模型，关心的正是抽样噪声）。playbook 的经验法则：题数少于约 2k 的评测，都应该采 \(k\) 次报告 avg@k。</p>
+      <p>表里的 <strong>avg@k</strong> 是对每道题采样 \(k\) 次、取平均正确率。为什么题少的基准要这么做？设单次采样的正确率是 \(p\)，\(n\) 道题、每题采 1 次，准确率的标准误约为 \(\sqrt{p(1-p)/n}\)。AIME 只有 30 题，\(p=0.5\) 时标准误约 9 个百分点——两个 checkpoint 差 5 分完全可能是噪声。每题采 64 次以后，采样噪声的方差缩小到约 \(1/64\)，标准误约 1 个百分点。题目集合本身是固定的，比较同一套题上的两个 checkpoint 时，我们要压低的正是这部分采样噪声。一个经验法则：题数少于约 2k 的评测，都应该每题采 \(k\) 次、报告 avg@k。</p>
       <p>其他从数千个模型评测中总结出来的规则：</p>
       <ul>
         <li>开发期用小子集加速，比如 LiveCodeBench v4 与 v5 高度相关但只用一半时间；或者用 tinyBenchmarks 之类方法找能复现全集结果的最小子集。</li>
@@ -147,11 +147,11 @@
         <li>实现新评测时，先复现几个模型的公开结果；否则以后修实现时要重评所有 checkpoint。</li>
         <li>拿不准时，回去看评测数据本身，看看你到底给模型喂了什么 prompt。</li>
       </ul>
-      <p>playbook 也坦白：实际情况比上面说的乱。截止时间很紧，他们在很多评测还没实现时就开始训练了（RULER 直到发布前几天才可用）。事后看这是个错误：应该早早和预训练团队商量好哪些核心评测要贯穿后训练，并在基座训完之前实现好。</p>
+      <p>实际情况往往比上面说的乱。SmolLM3 的截止时间很紧，很多评测还没实现就开始训练了（RULER 直到发布前几天才可用）。事后看这是个错误：应该早早和预训练团队商量好哪些核心评测要贯穿后训练，并在基座训完之前实现好。</p>
 
       <h2 id="frameworks">4. 框架</h2>
       <p>后训练框架很多：TRL、Axolotl、OpenInstruct、Unsloth、verl、Prime RL、PipelineRL、ART、TorchForge、NemoRL、OpenRLHF，支持的算法（SFT / PO / RL）、是否多模态、全参微调（FullFT）还是 LoRA、是否分布式各有不同。<strong>LoRA</strong>（低秩适配）冻结基座，只训练插在权重旁边的低秩矩阵 \(W + BA\)（\(B\in\mathbb{R}^{d\times r}, A\in\mathbb{R}^{r\times k}, r \ll d\)），参数和显存省很多。Hugging Face 维护 TRL，SmolLM3 就是用 TRL（实际上是 TRL 的内部 fork，便于快速加功能，之后再合回上游）训的。</p>
-      <p>对「什么都应该自己从头写」的观点，playbook 的态度很明确：PPO、GRPO 这类算法出了名地难写对，归一化或 KL 惩罚上的一个小错就能浪费好几天算力；单文件实现也很难从 1B 扩到 100B+。从头实现一次 PPO 是很好的学习，但大多数时候应该挑一个框架，然后按需改它。</p>
+      <p>要不要什么都自己从头写？通常不要。PPO、GRPO 这类算法出了名地难写对，归一化或 KL 惩罚上的一个小错就能浪费好几天算力；单文件实现也很难从 1B 扩到 100B+。从头实现一次 PPO 是很好的学习，但大多数时候应该挑一个框架，然后按需改它。</p>
 
       <h2 id="sft">5. 为什么几乎都从 SFT 开始</h2>
       <p>RL 很热，但几乎所有有效的后训练流程仍然从<strong>监督微调（SFT）</strong>开始：在「prompt → 理想回答」的数据上做下一个 token 预测。理由很直接：</p>
@@ -160,7 +160,7 @@
         <li><strong>稳定</strong>：RL 对奖励设计和超参非常敏感，SFT「直接能用」；</li>
         <li><strong>是正确的基线</strong>：好的 SFT checkpoint 通常已经拿到大部分收益，也让后面的 DPO 或 RL 有效得多。基座模型（除了少数例外）太「生」，直接用高级方法收益不大。</li>
       </ul>
-      <p>例外是 DeepSeek-R1-Zero：在前沿，没有更强的模型可蒸馏，人工标注对长思维链又太嘈杂，于是他们跳过 SFT 直接做 RL，去发现标准监督教不出来的推理行为。playbook 的评价是：如果你处在那个位置，确实可以先 RL；但处在那个位置的人大概不会读这份指南。</p>
+      <p>例外是 DeepSeek-R1-Zero：在前沿，没有更强的模型可蒸馏，人工标注对长思维链又太嘈杂，于是他们跳过 SFT 直接做 RL，去发现标准监督教不出来的推理行为。如果你也处在前沿，确实可以先上 RL；但大多数人并不在那个位置。</p>
       <p><strong>选基座模型</strong>看三点：大小（按实际部署选；大模型泛化更好、样本效率更高）；架构（MoE 服务效率高但根据他们的经验更难微调，小规模上稠密模型更简单、常常更好）；后训练口碑（社区里已经有很多基于它的好微调模型，说明它「好训」）。他们的经验是 Qwen、Mistral、DeepSeek 的基座最适合后训练，Qwen 尤其受欢迎，因为同一系列覆盖的尺寸范围很大（Qwen3 从 0.6B 到 235B），方便放大。</p>
 
       <h2 id="template">6. Chat template</h2>
@@ -187,8 +187,8 @@
         <li>是不是推理模型？要用 <code>&lt;think&gt;</code> 分隔思考和答案；有的模型在多轮对话中会丢弃之前轮次的推理，template 要处理这个逻辑。</li>
         <li>和推理引擎兼容吗？vLLM、SGLang 有专门的推理和工具解析器，兼容它们能省很多事，尤其是对工具调用一致性要求高的 agent 评测。</li>
       </ul>
-      <p>playbook 比较了几种常见 template：ChatML（简单、适合大多数情况，但不支持推理）、Qwen3（混合推理）、DeepSeek-R1（用 <code>&lt;think&gt;</code> 预填推理，不支持自定义 system 和工具）、Llama 3（内置 Python 解释器等工具）、Gemma 3（system 写在第一轮 user 里）、Command A Reasoning（一个模型多个 template）、gpt-oss（基于 Harmony 格式，复杂但灵活）。多数情况下 ChatML 或 Qwen 的 template 是好起点。</p>
-      <p>SmolLM3 需要混合推理，Qwen3 的 template 是少数各方面平衡得好的，但有一个他们不满意的地方：<strong>除最后一轮外，所有轮次的推理内容都被丢掉</strong>（和 OpenAI 的推理模型类似）。推理时这样做合理，可以避免上下文爆炸；但他们认为<strong>训练时应该保留所有轮次的推理 token</strong>，才能正确地给模型提供条件。于是他们自己设计了 template：结构化的 system prompt（类似 Llama 3），也允许整体覆盖；支持「代码 agent」——执行任意 Python 代码而不是 JSON 工具调用；在 system 消息里显式控制推理模式。下面是 SmolLM3 template 渲染出来的样子（来自 playbook 的例子，按 ChatML 风格的特殊 token 组织）：</p>
+      <p>常见的 template 有：ChatML（简单、适合大多数情况，但不支持推理）、Qwen3（混合推理）、DeepSeek-R1（用 <code>&lt;think&gt;</code> 预填推理，不支持自定义 system 和工具）、Llama 3（内置 Python 解释器等工具）、Gemma 3（system 写在第一轮 user 里）、Command A Reasoning（一个模型多个 template）、gpt-oss（基于 Harmony 格式，复杂但灵活）。多数情况下 ChatML 或 Qwen 的 template 是好起点。</p>
+      <p>SmolLM3 需要混合推理，Qwen3 的 template 是少数各方面平衡得好的，但有一个他们不满意的地方：<strong>除最后一轮外，所有轮次的推理内容都被丢掉</strong>（和 OpenAI 的推理模型类似）。推理时这样做合理，可以避免上下文爆炸；但他们认为<strong>训练时应该保留所有轮次的推理 token</strong>，才能正确地给模型提供条件。于是他们自己设计了 template：结构化的 system prompt（类似 Llama 3），也允许整体覆盖；支持「代码 agent」——执行任意 Python 代码而不是 JSON 工具调用；在 system 消息里显式控制推理模式。下面是 SmolLM3 template 渲染出来的样子，特殊 token 沿用 ChatML 风格：</p>
 <pre><code>&lt;|im_start|&gt;system
 ## Metadata
 
@@ -212,7 +212,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       <h2 id="mask-demo">7. 交互：chat template 与 loss 掩码</h2>
       <p>SFT 的损失只是一个带掩码的交叉熵。把整段对话渲染、分词后得到 \(x_1,\dots,x_T\)，掩码 \(m_t\in\{0,1\}\) 决定哪些位置计损失：</p>
       $$\mathcal{L}_{\text{SFT}} = -\frac{1}{\sum_t m_t}\sum_{t=1}^{T} m_t \log \pi_\theta(x_t \mid x_{\lt t}).$$
-      <p>下面把一段两轮对话按上面的格式渲染出来（分词是我手工切的示意，不是 SmolLM3 分词器的真实结果）。高亮的 token 会计入损失。可以切换：只训练 assistant 还是全部 token、推理模式、历史轮次的推理是保留还是丢弃（Qwen3 风格），以及复现 vibe test 发现的那个 bug。</p>
+      <p>下面把一段两轮对话按上面的格式渲染出来，高亮的 token 会计入损失。可以切换：只训练 assistant 还是全部 token、推理模式、历史轮次的推理是保留还是丢弃（Qwen3 风格），以及复现 vibe test 发现的那个 bug。</p>
 
       <div class="demo" id="mask-demo-box">
         <div class="demo-label">Chat template 渲染与 loss 掩码（示意分词）</div>
@@ -252,10 +252,10 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
 
       <h2 id="hparams">9. SFT 超参：掩码、packing、学习率、epoch</h2>
       <h3>掩码 user 轮次</h3>
-      <p>聊天数据里 user 和 assistant 消息交替出现。如果对所有 token 都算损失，模型实际上也在学「自动补全用户的问题」，而不是专注于产生好回答。掩掉 user 轮次能避免这一点。TRL 里的做法是在 template 中用 <code>{% generation %}</code> … <code>{% endgeneration %}</code> 包住 assistant 的部分，<code>apply_chat_template(..., return_assistant_tokens_mask=True)</code> 就会返回一个 <code>assistant_masks</code>，assistant token 为 1、其余为 0。playbook 的经验是：掩码通常只带来几个点的提升，对 SmolLM3 影响最大的是 IFEval——模型更少复述 prompt，更严格地遵守各种约束。</p>
+      <p>聊天数据里 user 和 assistant 消息交替出现。如果对所有 token 都算损失，模型实际上也在学「自动补全用户的问题」，而不是专注于产生好回答。掩掉 user 轮次能避免这一点。TRL 里的做法是在 template 中用 <code>{% generation %}</code> … <code>{% endgeneration %}</code> 包住 assistant 的部分，<code>apply_chat_template(..., return_assistant_tokens_mask=True)</code> 就会返回一个 <code>assistant_masks</code>，assistant token 为 1、其余为 0。经验上，掩码通常只带来几个点的提升，对 SmolLM3 影响最大的是 IFEval——模型更少复述 prompt，更严格地遵守各种约束。</p>
 
       <h3>打包还是不打包</h3>
-      <p>SFT 数据长度参差不齐，不打包时每个 batch 要用大量 padding 补齐到最长样本，浪费算力。<strong>Packing</strong> 把多条样本拼接到目标最大长度。TRL 用的是「best-fit decreasing」策略（Ding et al., 2024）：先按长度降序排列，再把每条样本放进剩余空间最合适的那个包里，这样既少截断文档，又少 padding。（拼接时通常还要配合位置 id 重置或文档内注意力掩码，防止样本之间互相看到；这是我补充的一般做法，playbook 这一节没展开。）</p>
+      <p>SFT 数据长度参差不齐，不打包时每个 batch 要用大量 padding 补齐到最长样本，浪费算力。<strong>Packing</strong> 把多条样本拼接到目标最大长度。TRL 用的是「best-fit decreasing」策略（Ding et al., 2024）：先按长度降序排列，再把每条样本放进剩余空间最合适的那个包里，这样既少截断文档，又少 padding。拼接时通常还要为每条样本重置位置 id，或者用文档内注意力掩码，防止样本之间互相看到。</p>
       <p>在他们的 baseline 数据上，<strong>packing 让吞吐提升了 3–5 倍</strong>；有效 batch size 超过 32 后运行时间不再下降，因为 32 是不开梯度累积的最大值。打包后每个 batch 的非 padding token 数随 batch size 线性增长，最多是不打包时的 33 倍。但这意味着每个 epoch 的优化步数变少：比如在有效 batch size 128 时，打包让 IFEval 等评测明显下降；总体上，对这个模型和数据集，有效 batch size 超过 32 后打包带来平均性能下降。一个粗略的算账方法：数据共 \(S\) 条样本、平均 \(\bar\ell\) token，不打包时每步处理 \(B\) 条，每 epoch \(S/B\) 步；打包到长度 \(L\) 后每步 \(B\) 个包、约 \(BL/\bar\ell\) 条样本，每 epoch 只有约 \(S\bar\ell/(BL)\) 步——样本平均越短，步数砍得越狠。</p>
       <p>结论：大规模 SFT（数据海量）时打包几乎总是划算；数据小或很多样（领域微调、有限的人工数据）时，可以考虑不打包，让每条样本干净地贡献梯度。最好的办法是实验：先开 packing，同时看吞吐和下游评测。</p>
 
@@ -282,7 +282,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       </div>
       <p>SmolLM3 的候选数据：Mixture of Thoughts（35 万条 DeepSeek-R1 蒸馏的数学、代码、科学推理样本）、Llama-Nemotron-Post-Training-Dataset（只保留 DeepSeek-R1 的输出，约 364 万条、187 亿 token）、OpenThoughts3-1.2M（120 万条 QwQ-32B 蒸馏样本，165 亿 token）。Mixture of Thoughts 留给最终 SFT，后两者用于 mid-training。mid-training 用 ChatML 而不是 SmolLM3 的 template，避免过早把 template「烧」进模型；训练 5 个 epoch，学习率 2e-5，8 个节点，有效 batch size 128。</p>
       <p>顺序上 mid-training 在 SFT 之前，但是否需要它，往往要先跑过 SFT、发现短板才知道。实践中常常是迭代的：SFT → 找弱项 → 针对性 mid-training → 再 SFT。</p>
-      <p><strong>融化的 GPU。</strong>这些实验在他们的集群上很难跑：老化的 GPU 会在不同时间降频，导致硬件故障和强制重启。起初怀疑 DeepSpeed，于是换成数据并行——有点帮助，但 loss 变得截然不同！后来发现是 Hugging Face Accelerate 数据并行的一个 bug：<strong>权重和梯度以模型原生精度（BF16）存储</strong>，导致数值不稳定，以及梯度累积和优化过程中的精度损失。大多数训练框架会用 FP32 存「主权重」（master weights）和优化器状态，只在前向和反向时转成 BF16。最终他们换回 DeepSpeed，加上频繁的 checkpoint，尽量减少 GPU 过热「掉线」造成的损失。（事后看，这种规模的长任务用久经考验、吞吐更高的 Nanotron 更合理。）规则：频繁保存 checkpoint 并推到远端存储（比如 Hub），框架要能自动从故障中恢复。</p>
+      <p><strong>融化的 GPU。</strong>这些实验在他们的集群上很难跑：老化的 GPU 会在不同时间降频，导致硬件故障和强制重启。起初怀疑 DeepSpeed，于是换成数据并行——有点帮助，但 loss 变得截然不同！后来发现是 Hugging Face Accelerate 数据并行的一个 bug：<strong>权重和梯度以模型原生精度（BF16）存储</strong>，导致数值不稳定，以及梯度累积和优化过程中的精度损失。大多数训练框架会用 FP32 存「主权重」（master weights）和优化器状态，只在前向和反向时转成 BF16。最终他们换回 DeepSpeed，加上频繁的 checkpoint，尽量减少 GPU 过热「掉线」造成的损失。事后看，这种规模的长任务用久经考验、吞吐更高的 Nanotron 更合理。规则：频繁保存 checkpoint 并推到远端存储（比如 Hub），框架要能自动从故障中恢复。</p>
       <p>结果：NVIDIA 的数据比 OpenThoughts 好，两者合起来最好。在 mid-training 后的 checkpoint 上用同样的 baseline SFT 配比：扩展推理模式下 AIME25 和 LiveCodeBench v4 几乎翻了三倍，GPQA-D 提高整整 10 分；推理核心甚至部分迁移到了 <code>/no_think</code> 模式，推理基准提高约 4–6 分。结论：对推理模型，如果基座在预训练时没见过很多推理数据，几乎总值得做一些 mid-training。反过来，如果基座已经有这个技能，或者只想引出风格、闲聊这类浅层能力，就跳过 mid-training，把算力留给偏好优化或 RL。</p>
 
       <h2 id="bf16-demo">11. 交互：为什么需要 FP32 主权重</h2>
@@ -333,10 +333,10 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       <p><strong>梯度。</strong>记 \(\Delta = \hat r_\theta(y_w) - \hat r_\theta(y_l)\)，利用 \(\frac{d}{dz}\log\sigma(z) = \sigma(-z)\)：</p>
       $$\nabla_\theta\mathcal{L}_{\text{DPO}} = -\beta\,\mathbb{E}\Bigl[\underbrace{\sigma(-\Delta)}_{\text{权重}}\bigl(\nabla_\theta\log\pi_\theta(y_w|x) - \nabla_\theta\log\pi_\theta(y_l|x)\bigr)\Bigr].$$
       <p>它提高 chosen 的似然、降低 rejected 的似然，权重 \(\sigma(-\Delta)\) 在隐式奖励「排错了」（\(\Delta \lt 0\)）时接近 1，排对且差距大时趋于 0。注意 DPO 只关心<em>差值</em>：两者的似然同时下降，只要 rejected 降得更快，损失也会减小——这正是下面 APO 想要控制的。</p>
-      <p>\(\beta\) 的含义：它是 KL 约束的强度。\(\beta\) 越小，KL 惩罚越弱，最优策略可以离参考模型越远；对损失本身来说，\(\beta\) 把对数比放大成隐式奖励，\(\beta\) 小时需要更大的对数比差才能把损失降下去。（playbook 原文说「较低的值鼓励靠近参考模型」，这和 RLHF 目标里 \(\beta\) 作为 KL 系数的含义正好相反；按公式，\(\beta\) 越大越接近参考模型。我在这里以公式为准。）</p>
+      <p>\(\beta\) 的含义：它就是 RLHF 目标里 KL 惩罚的系数。\(\beta\) 越大，偏离参考模型的代价越高，最优策略 \(\pi^* \propto \pi_{\text{ref}}\exp(r/\beta)\) 越接近 \(\pi_{\text{ref}}\)；\(\beta\) 越小，策略越能放开去拟合偏好数据。从损失本身也能看出来：\(\beta\) 把对数比放大成隐式奖励，\(\beta\) 大时只需很小的对数比差就能把 \(\sigma(\Delta)\) 推到接近 1、梯度权重随之消失，模型自然停在参考模型附近；\(\beta\) 小时要拉开很大的对数比差，模型会走得更远。</p>
 
       <h2 id="dpo-demo">13. 交互：DPO / APO 损失与梯度</h2>
-      <p>拖动 chosen 和 rejected 的对数比 \(\rho = \log\frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}\)（训练开始时 \(\pi_\theta=\pi_{\text{ref}}\)，两者都是 0），看不同损失的值，以及损失对 \(\rho_w\)、\(\rho_l\) 的梯度：负的 \(\partial\mathcal{L}/\partial\rho_w\) 表示梯度下降会推高 chosen 的似然。APO 的两个变体按 TRL 的实现计算（与论文公式差一个常数）。</p>
+      <p>拖动 chosen 和 rejected 的对数比 \(\rho = \log\frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}\)（训练开始时 \(\pi_\theta=\pi_{\text{ref}}\)，两者都是 0），看不同损失的值，以及损失对 \(\rho_w\)、\(\rho_l\) 的梯度：负的 \(\partial\mathcal{L}/\partial\rho_w\) 表示梯度下降会推高 chosen 的似然。APO 的两个变体按 TRL 的实现计算，比下文的公式多一个常数 1，不影响梯度。</p>
       <div class="demo" id="dpo-box">
         <div class="demo-label">偏好损失可视化</div>
         <div class="seg" id="dp-type" style="margin-top:12px">
@@ -360,7 +360,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       </div>
 
       <h2 id="po-variants">14. KTO、ORPO、APO 与 SmolLM3 的调参</h2>
-      <p>DPO 刚出来时（2023 年中），网上争论它能否比得上 RL，也没有工业规模的配方。Hugging Face 几个月后发布的 Zephyr 7B 全部用合成数据训练，展示了 DPO 的显著收益。此后它成了「上 RL 之前先改进 SFT 模型」的默认方法。playbook 列出了他们觉得最有效的几个变体：</p>
+      <p>DPO 刚出来时（2023 年中），网上争论它能否比得上 RL，也没有工业规模的配方。Hugging Face 几个月后发布的 Zephyr 7B 全部用合成数据训练，展示了 DPO 的显著收益。此后它成了「上 RL 之前先改进 SFT 模型」的默认方法。下面几个变体在实践中也很有用：</p>
       <ul>
         <li><strong>KTO</strong>（Kahneman–Tversky Optimization，Ethayarajh et al., 2024）：不需要成对数据，只需要每个回答「好 / 不好」的标签（比如用户的 👍/👎）。论文里的形式：记 \(r_\theta = \log\frac{\pi_\theta(y|x)}{\pi_{\text{ref}}(y|x)}\)，参考点 \(z_0\) 是策略相对参考模型的 KL 的一个批内估计（截断到非负），
         $$v(x,y) = \begin{cases}\lambda_D\,\sigma\bigl(\beta(r_\theta - z_0)\bigr) & y \text{ 可取}\\ \lambda_U\,\sigma\bigl(\beta(z_0 - r_\theta)\bigr) & y \text{ 不可取}\end{cases},\qquad
@@ -373,13 +373,13 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
         \mathcal{L}^{\text{APO}}_{\text{down}} = \sigma\bigl(r_\theta(x,y_w)\bigr) - \sigma\bigl(r_\theta(x,y_w) - r_\theta(x,y_l)\bigr).$$
         APO-zero 把 chosen 往上推、rejected 往下推，两项独立，以 0（即参考模型）为锚点；适合 chosen 比模型当前输出更好的情形。APO-down 让 chosen 的似然也下降，但要求 rejected 降得更多；适合 chosen 其实比模型当前输出差的情形。「强 vs 弱」数据里 chosen 来自 Qwen3-32B，明显强于 3B 模型自己的输出，所以 APO-zero 是自然的选择。</li>
       </ul>
-      <p>在 TRL 的 <code>DPOTrainer</code> 里切换这些损失只是改一行。他们的初始实验：用 Ai2 的 Tulu 3 Preference Personas IF 数据集测 <code>/no_think</code> 模式下 IFEval 的提升；复用它的 prompt，用 Qwen3-32B 和 Qwen3-0.6B 生成「强 vs 弱」对，作为 <code>/think</code> 模式的偏好数据；训练 1 个 epoch，看域内 IFEval 的提升和域外（如 AIME25）的影响。两种模式的域内提升都很显著：<strong>APO-zero 在 IFEval 上比 SFT checkpoint 高 15–20 个百分点</strong>，域外表现也最好，于是之后的消融都用 APO-zero。playbook 特别强调：偏好优化不只是让模型更有帮助，它<strong>也能教模型推理得更好</strong>。</p>
+      <p>在 TRL 的 <code>DPOTrainer</code> 里切换这些损失只是改一行。他们的初始实验：用 Ai2 的 Tulu 3 Preference Personas IF 数据集测 <code>/no_think</code> 模式下 IFEval 的提升；复用它的 prompt，用 Qwen3-32B 和 Qwen3-0.6B 生成「强 vs 弱」对，作为 <code>/think</code> 模式的偏好数据；训练 1 个 epoch，看域内 IFEval 的提升和域外（如 AIME25）的影响。两种模式的域内提升都很显著：<strong>APO-zero 在 IFEval 上比 SFT checkpoint 高 15–20 个百分点</strong>，域外表现也最好，于是之后的消融都用 APO-zero。这说明偏好优化不只是让模型更有帮助，它<strong>也能教模型推理得更好</strong>。</p>
 
       <h3>调参</h3>
       <p>偏好优化通常只有三个超参真正影响训练动态：学习率、\(\beta\)、batch size。SmolLM3 的实验从在整个 smoltalk2 上训好的 SFT checkpoint 出发（SFT 学习率 2e-5）：</p>
       <ul>
         <li><strong>学习率</strong>：扫描了比 SFT 小约 200 倍（1e-7）到约 2 倍（1e-5）的范围。小约 10 倍的学习率在两种模式下都提升了 SFT 模型，超过这个界限的都让扩展推理模式变差。<code>/no_think</code> 模式更稳定，最佳在 5e-6，但主要由 LiveCodeBench v4 一个基准驱动，所以最终用了 1e-6。建议扫描比 SFT 学习率小 5–20 倍的范围。</li>
-        <li><strong>β</strong>：扫描了 0.01 到 0.99。不开扩展推理时各值表现稳定；β=0.1 在两种模式下都最好，且优于 SFT checkpoint；更小的 β 反而比 SFT 还差。建议在 0.01–0.5 之间扫描：更大的值可能抹掉评测没覆盖到的 SFT 能力。</li>
+        <li><strong>β</strong>：扫描了 0.01 到 0.99。不开扩展推理时各值表现稳定；β=0.1 在两种模式下都最好，且优于 SFT checkpoint；更小的 β 反而比 SFT 还差。这符合上面的分析：β 越小，KL 约束越弱，模型离 SFT checkpoint 越远，评测没覆盖到的能力也越容易被冲掉。建议在 0.01–0.5 之间扫描。</li>
         <li><strong>数据量</strong>：测了 2k 到 340k 对，表现都比较稳定；超过 100k 对时扩展推理模式有下降，但幅度不如学习率的影响大。最终用了 169k 对，但小数据集也能比 SFT 好——迭代期可以用小数据快速试。</li>
       </ul>
       <p>汇总起来，得到最终的 SmolLM3-3B：同尺寸最好，和 Qwen 自己的混合推理模型一起位于帕累托前沿。规则总结：别怕自己造偏好数据（推理已经便宜到「不用计量」）；先用 DPO 做基线再迭代，视数据类型 ORPO、KTO、APO 可能显著更好；学习率约为 SFT 的 1/10；β 在 0.01–0.5 扫描；多数偏好算法一个 epoch 后就过拟合，所以把数据分块、迭代训练。</p>
@@ -403,7 +403,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       $$\mathcal{J}_{\text{GRPO}}(\theta) = \mathbb{E}\Biggl[\frac{1}{G}\sum_{i=1}^{G}\frac{1}{|o_i|}\sum_{t=1}^{|o_i|}\Bigl\{\min\bigl(\rho_{i,t}\hat A_{i,t},\ \operatorname{clip}(\rho_{i,t},1-\varepsilon,1+\varepsilon)\hat A_{i,t}\bigr) - \beta\,\mathbb{D}_{\text{KL}}\Bigr\}\Biggr],
       \quad \rho_{i,t} = \frac{\pi_\theta(o_{i,t}\mid q,o_{i,\lt t})}{\pi_{\theta_{\text{old}}}(o_{i,t}\mid q,o_{i,\lt t})}.$$
       <p>KL 用的是逐 token 的无偏、恒非负的估计 \(\mathbb{D}_{\text{KL}} = \frac{\pi_{\text{ref}}}{\pi_\theta} - \log\frac{\pi_{\text{ref}}}{\pi_\theta} - 1\)。裁剪的作用：当优势为正时，重要性比超过 \(1+\varepsilon\) 后不再给更多奖励；优势为负时，低于 \(1-\varepsilon\) 后不再继续惩罚——单步更新不会把策略推得太远。</p>
-      <p><strong>已知的偏差与修正。</strong>playbook 推荐的 Dr. GRPO（Liu et al., 2025）指出 GRPO 有两个「内置」偏差：</p>
+      <p><strong>已知的偏差与修正。</strong>Dr. GRPO（Liu et al., 2025）指出 GRPO 有两个「内置」偏差：</p>
       <ul>
         <li><strong>长度归一化 \(1/|o_i|\)</strong>：对错误回答（负优势），回答越长每个 token 的惩罚越小，于是鼓励「错的时候写长一点」；对正确回答，越短奖励越集中。Dr. GRPO 去掉这一项（改为除以一个常数）。</li>
         <li><strong>标准差归一化</strong>：组内奖励方差小的题（几乎全对或几乎全错，即太容易或太难的题）会被放大权重。Dr. GRPO 去掉除以 std，只减均值。</li>
@@ -411,7 +411,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       <p>DAPO（Yu et al., 2025）则提出了一组让 R1-Zero 式训练稳定的改动：裁剪上下界解耦（clip-higher，\(\varepsilon_{\text{low}}\ne\varepsilon_{\text{high}}\)）；动态采样，过滤掉组内全对或全错的 prompt（这时优势全为 0，没有梯度）；token 级损失，即对整批的所有 token 做平均（\(\frac{1}{\sum_i|o_i|}\sum_i\sum_t\)），长回答里的每个 token 和短回答里的权重一样；以及下面要用到的超长惩罚。</p>
 
       <h2 id="grpo-demo">16. 交互：GRPO 组内优势计算器</h2>
-      <p>下面是一组 \(G=8\) 个回答。点「对 / 错」切换验证器奖励（对 = 1，错 = 0），改回答长度，看每个回答的优势和每个 token 分到的梯度权重如何变化。可以打开 DAPO 的超长惩罚、关掉 std 归一化（Dr. GRPO），以及切换三种损失聚合方式。数字全部按公式实时计算；默认的对错和长度是我随手设的示意值。</p>
+      <p>下面是一组 \(G=8\) 个回答。点「对 / 错」切换验证器奖励（对 = 1，错 = 0），改回答长度，看每个回答的优势和每个 token 分到的梯度权重如何变化。可以打开 DAPO 的超长惩罚、关掉 std 归一化（Dr. GRPO），以及切换三种损失聚合方式。数字全部按公式实时计算，默认的对错和长度为示意。</p>
       <div class="demo" id="grpo-box">
         <div class="demo-label">GRPO 组内优势</div>
         <div class="chk">
@@ -487,13 +487,13 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       </div>
 
       <h2 id="merge">19. 模型合并（简述）</h2>
-      <p>playbook 在引言里把「模型合并的黑魔法」列为后训练的一部分，但正文没有展开。SmolLM3 的<a href="https://huggingface.co/blog/smollm3">发布博客</a>里有具体做法：APO 之后长上下文能力（RULER）下降，他们用 MergeKit 做了两步合并——先把各个 APO checkpoint 做成一个「model soup」（权重平均），再把 soup 和一个长上下文能力强的 mid-training checkpoint 做线性合并，权重 0.9 / 0.1。这样恢复了基座在 128k 以内的 RULER 分数，最终发布的就是这个合并后的模型。线性合并就是 \(\theta = \sum_k w_k\theta_k\)，能成立的前提是这些模型都从同一个初始化微调而来、位于同一个低损失区域附近。</p>
-      <p>playbook 对整章的收尾是：评测先行，SFT 配比迭代，偏好优化，再视情况上 RL；vibe test 能抓到指标抓不到的 bug；chat template 能悄无声息地破坏指令遵循；后训练的数据配比和预训练一样重要。训练只是故事的一半，下一篇讲<a href="/posts/smol-infrastructure/">基础设施</a>。</p>
+      <p>后训练里还有一门「黑魔法」：模型合并。SmolLM3 用它解决了一个具体问题：APO 之后长上下文能力（RULER）下降，他们用 MergeKit 做了两步合并——先把各个 APO checkpoint 做成一个「model soup」（权重平均），再把 soup 和一个长上下文能力强的 mid-training checkpoint 做线性合并，权重 0.9 / 0.1。这样恢复了基座在 128k 以内的 RULER 分数，最终发布的就是这个合并后的模型。线性合并就是 \(\theta = \sum_k w_k\theta_k\)，能成立的前提是这些模型都从同一个初始化微调而来、位于同一个低损失区域附近。</p>
+      <p>回顾整个流程：评测先行，SFT 配比迭代，偏好优化，再视情况上 RL；vibe test 能抓到指标抓不到的 bug；chat template 能悄无声息地破坏指令遵循；后训练的数据配比和预训练一样重要。训练只是故事的一半，下一篇讲<a href="/posts/smol-infrastructure/">基础设施</a>。</p>
 
-      <h2 id="refs">参考</h2>
+      <h2 id="refs">参考与延伸阅读</h2>
       <ul>
-        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>（2025），主要依据 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#beyond-base-modelspost-training-in-2025">Beyond Base Models — Post-Training in 2025</a> 一章各节：Post-Training Compass、First Things First: Evals、Tools of the Trade、Why (Almost) Every Post-Training Pipeline Starts with SFT、Boosting Reasoning Through Continued Pretraining、From SFT to Preference Optimization、Going On-Policy and Beyond Supervised Labels。</li>
-        <li>Hugging Face. <a href="https://huggingface.co/blog/smollm3">SmolLM3 发布博客</a>（模型合并）。</li>
+        <li><a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook">The Smol Training Playbook</a>（2025）。想看完整的实验曲线和更多细节，推荐读 <a href="https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#beyond-base-modelspost-training-in-2025">Beyond Base Models — Post-Training in 2025</a> 一章，本文的 SmolLM3 实验都来自这里：Post-Training Compass、First Things First: Evals、Tools of the Trade、Why (Almost) Every Post-Training Pipeline Starts with SFT、Boosting Reasoning Through Continued Pretraining、From SFT to Preference Optimization、Going On-Policy and Beyond Supervised Labels。</li>
+        <li>Hugging Face. <a href="https://huggingface.co/blog/smollm3">SmolLM3: smol, multilingual, long-context reasoner</a>（发布博客，含模型合并的做法）。</li>
         <li>Rafailov et al. <a href="https://arxiv.org/abs/2305.18290">Direct Preference Optimization: Your Language Model is Secretly a Reward Model</a>（2023）。</li>
         <li>D'Oosterlinck et al. <a href="https://arxiv.org/abs/2408.06266">Anchored Preference Optimization and Contrastive Revisions</a>（2024）；TRL <a href="https://github.com/huggingface/trl/blob/main/trl/trainer/dpo_trainer.py"><code>dpo_trainer.py</code></a> 中 <code>apo_zero</code> / <code>apo_down</code> 的实现。</li>
         <li>Ethayarajh et al. <a href="https://arxiv.org/abs/2402.01306">KTO: Model Alignment as Prospect Theoretic Optimization</a>（2024）。</li>
@@ -567,10 +567,10 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
         $('mk-o1').textContent = total; $('mk-o2').textContent = lossN; $('mk-o3').textContent = thinkN;
         const notes = [];
         if (mode === 'all') notes.push('全部 token 计损失：模型也在学补全 system 和 user 的文字。');
-        else notes.push('只有 assistant 部分（包括它的 <|im_start|>assistant 头和 <|im_end|>，与 playbook 中 {% generation %} 包住的范围一致）计入损失。');
+        else notes.push('只有 assistant 部分（包括它的 <|im_start|>assistant 头和 <|im_end|>，即 {% generation %} 包住的范围）计入损失。');
         if (!think) notes.push('/no_think：think 块是空的，但标签照样输出。');
         if (drop && think) notes.push('丢弃历史推理：第一轮 assistant 的推理不在序列里，训练时模型看不到自己之前的思考过程——SmolLM3 认为训练时应保留。');
-        if (bug) notes.push('bug：custom_instructions 被设成 None，人设被替换成默认 system prompt，而回答仍然是数据里原来的风格（这里为了演示把海盗腔去掉了；真实数据里回答保留人设，模型就学会了「system 说的和回答无关」）。');
+        if (bug) notes.push('bug：custom_instructions 被设成 None，人设被替换成默认 system prompt，但回答仍是按原来的人设写的，模型于是学会了「system 说什么和回答无关」。');
         $('mk-note').textContent = notes.join(' ');
       }
       segInit('mk-mode', render); segInit('mk-think', render);
@@ -622,7 +622,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
         const dirL = gl > 1e-6 ? '压低 rejected' : gl < -1e-6 ? '推高 rejected' : 'rejected 不动';
         const extra = {
           dpo: 'DPO 只看差值 Δρ = ρ_w − ρ_l，两个梯度大小相等、方向相反。把 ρ_w 和 ρ_l 同时拉到 −20：只要差值不变，损失就不变——两者的似然一起下降也照样「满意」。',
-          apo0: 'APO-zero 的两项各自以 0（参考模型）为锚：ρ_w 越低推得越用力（在 0 附近最大），ρ_l 同理。差值再大，只要 ρ_w 还在 0 附近，chosen 仍会被继续推高。',
+          apo0: 'APO-zero 的两项各自以 0（参考模型）为锚：chosen 项的梯度大小是 βσ(βρ_w)(1−σ(βρ_w))，在 ρ_w = 0 附近最大，离 0 越远越小；ρ_l 同理。所以它不只看差值：差值再大，只要 ρ_w 还在 0 附近，chosen 仍会被继续推高。',
           apod: 'APO-down：ρ_w 自身项把 chosen 往下压，差值项要求 rejected 下降得更多。用于 chosen 并不比模型当前输出更好的情形。',
         }[t];
         $('dp-note').textContent = '梯度下降方向：' + dirW + '，' + dirL + '。' + extra;
