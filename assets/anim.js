@@ -290,9 +290,11 @@
   // Otherwise the whole timeline plays when the slide is entered.
   function slide(slideEl, tl, o = {}) {
     const stops = tl.labels.map((l) => l.t);
+    if (!stops.length || stops[stops.length - 1] < tl.duration) stops.push(tl.duration);
     let startTimer = 0;
     if (o.steps) {
-      for (let i = 0; i < stops.length; i++) {
+      // The first stop plays on entry; only later stops need a key press.
+      for (let i = 1; i < stops.length; i++) {
         const f = document.createElement('span');
         f.className = 'fragment anim-step';
         f.hidden = true;
@@ -305,7 +307,7 @@
     if (o.steps) tl.player.onupdate((time) => {
       if (!slideEl.classList.contains('is-active') || tl.player.playing) return;
       clearTimeout(startTimer);
-      const step = time >= tl.duration - 1e-3 ? stops.length :
+      const step = time >= tl.duration - 1e-3 ? stops.length - 1 :
         Math.max(-1, stops.filter((t) => t <= time + 1e-3).length - 1);
       document.dispatchEvent(new CustomEvent('animseek', { detail: { slide: slideEl, step } }));
     });
