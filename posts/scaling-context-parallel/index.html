@@ -1,0 +1,611 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>上下文并行与 Ring Attention · Zunzhe Zhang</title>
+  <meta name="description" content="长序列训练的激活怎么切：online softmax 合并、Ring Attention、zig-zag 负载均衡、All-Gather 式 CP 与 DeepSpeed-Ulysses。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    .table-wrap { position: relative; } /* keeps KaTeX hidden MathML from widening the page */
+    figure.diagram svg { display: block; width: 100%; height: auto; }
+    figure.diagram { margin: 1.4em 0; }
+    .svg-text { fill: var(--text); font-family: var(--font-sans); }
+    .svg-soft { fill: var(--text-soft); font-family: var(--font-sans); }
+    .svg-mono { fill: var(--text-soft); font-family: var(--font-mono); }
+    .box { fill: var(--surface); stroke: var(--border); stroke-width: 1.5; }
+    .box-a { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.5; }
+    .box-b { fill: color-mix(in srgb, var(--accent-2) 14%, transparent); stroke: var(--accent-2); stroke-width: 1.5; }
+    .line { stroke: var(--text-faint); stroke-width: 1.5; fill: none; }
+
+    .ring-top { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; margin: 10px 0; font-size: 14px; }
+    .ring-top .lbl { color: var(--text-faint); font-size: 13px; margin-right: 4px; }
+    .ring-grid { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 16px; align-items: start; }
+    @media (max-width: 640px) { .ring-grid { grid-template-columns: minmax(0, 1fr); } }
+    .ring-grid svg { width: 100%; height: auto; display: block; }
+    .panel-title { font-size: 13px; color: var(--text-faint); margin-bottom: 4px; }
+    .bars { display: grid; gap: 4px; font-size: 12.5px; }
+    .bar-row { display: grid; grid-template-columns: 3.6em 1fr 4.2em; gap: 8px; align-items: center; }
+    .bar-row .lab { font-family: var(--font-mono); color: var(--text-soft); }
+    .bar-row .num { font-family: var(--font-mono); color: var(--text-soft); text-align: right; }
+    .bar-track { height: 14px; border-radius: 4px; background: var(--bg-soft); position: relative; overflow: hidden; }
+    .bar-fill { position: absolute; left: 0; top: 0; bottom: 0; border-radius: 4px; background: var(--accent); transition: width 0.3s; }
+    .bar-fill.idle { background: var(--accent-2); opacity: 0.35; }
+    .step-note { font-size: 14px; color: var(--text-soft); margin-top: 8px; min-height: 2.8em; line-height: 1.6; }
+    .legend-row { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 12.5px; color: var(--text-soft); margin-top: 8px; }
+    .legend-row i { display: inline-block; width: 14px; height: 10px; border-radius: 2px; vertical-align: -1px; margin-right: 5px; }
+
+    .chart-wrap { position: relative; }
+    .chart-wrap svg { width: 100%; height: auto; display: block; }
+    .tip { position: absolute; pointer-events: none; padding: 6px 10px; border-radius: 8px; background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow); font-size: 12.5px; line-height: 1.5; color: var(--text); white-space: nowrap; display: none; z-index: 5; }
+    .calc-row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; font-size: 14px; margin: 8px 0; }
+    .calc-row label { display: inline-flex; gap: 6px; align-items: center; }
+    .fit-table td, .fit-table th { font-family: var(--font-mono); font-size: 13px; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>上下文并行与 Ring Attention</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p><a href="/posts/scaling-tensor-parallel/">上一篇</a>的张量并行加序列并行，把一层里的激活要么沿 hidden 维切、要么沿序列维切，最大激活降到了 \(bsh/t\)。但它有一个边界：TP 区域内部，每张卡上的张量仍然是完整的序列长度，比如 \([b, s, F/t]\)；而 TP 度又被 NVLink 域卡在 8 左右。序列一长（128K、1M），这点切分就不够了。</p>
+      <p>上下文并行（Context Parallelism，CP）的做法是：把序列切开，并且在<strong>整个模型</strong>里都保持切开，包括注意力。MLP、LayerNorm 这些逐 token 的操作不受影响；唯一的麻烦是注意力，因为每个 query 要看到（因果情况下：之前的）所有 key 和 value。这篇讲怎么在不拼回完整序列的前提下精确地算注意力（online softmax 合并），怎么把 KV 在设备间转圈同时把通信藏在计算后面（Ring Attention），为什么因果掩码会让朴素切法浪费一半算力、以及怎么用 zig-zag 修好它，最后对比另一条路：按头切的 DeepSpeed-Ulysses。</p>
+
+      <div class="toc">
+        <strong>目录</strong>
+        <ol>
+          <li><a href="#act">激活随序列长度增长</a></li>
+          <li><a href="#idea">上下文并行的基本想法</a></li>
+          <li><a href="#lse">分块注意力：online softmax 与 log-sum-exp 合并</a></li>
+          <li><a href="#ring">Ring Attention</a></li>
+          <li><a href="#causal">因果掩码带来的负载不均</a></li>
+          <li><a href="#zigzag">Zig-zag 与 Striped：重新分配 token</a></li>
+          <li><a href="#demo-ring">演示：Ring Attention 逐步执行</a></li>
+          <li><a href="#allgather">All-Gather 式 CP</a></li>
+          <li><a href="#ulysses">DeepSpeed-Ulysses：按头的 All-to-All</a></li>
+          <li><a href="#compare">通信量对比与选择</a></li>
+          <li><a href="#demo-mem">演示：激活显存 vs 序列长度</a></li>
+          <li><a href="#combine">和其他并行组合</a></li>
+          <li><a href="#refs">参考</a></li>
+        </ol>
+      </div>
+
+      <h2 id="act">激活随序列长度增长</h2>
+      <p>先回顾激活显存从哪来。训练时，反向传播要用到前向的中间结果，所以每一层都要存下一批张量。Korthikanti 等人对 GPT 结构的一层逐项记账（bf16，不做重计算，\(a\) 为头数）：</p>
+      $$m_\text{act}^{\text{层}} = sbh\left(34 + 5\frac{as}{h}\right)$$
+      <p>第一项正比于 \(s\)，来自线性层输入、LayerNorm 输入、MLP 中间激活等；第二项正比于 \(s^2\)，来自注意力分数矩阵 \(QK^\top\)、softmax 输出和它的 dropout mask，每个头都是一个 \(s\times s\) 的矩阵。Ultra-Scale Playbook 用这个公式画出了 Llama 系列在不同序列长度下的显存：几千 token 以下激活可以忽略，2K–4K 以后就开始占大头，并且随 \(s\) 增长得越来越快。</p>
+      <p>FlashAttention 不存 \(s\times s\) 的矩阵，只存 \(Q,K,V,O\) 和每行的 log-sum-exp，反向时分块重算分数矩阵。这样第二项就没了，激活变成和 \(s\) <strong>线性</strong>增长。线性听起来还好，但数字仍然很大。按 Llama 结构（RMSNorm、GQA、SwiGLU、FlashAttention）记账，每层每条序列存 \(12sbh + 4sb\,n_{kv}d_h + 6sbF\) 字节（推导见<a href="/posts/scaling-tensor-parallel/#memory">上一篇的显存账</a>）。拿 Llama-3 70B（\(h=8192\)，\(F=28672\)，8 个 KV 头）在 \(s=128\text{K}\)、TP=8 + SP 下算一下：</p>
+      <ul>
+        <li>每层：\(s\,(12h + 4n_{kv}d_h + 6F)/t\)，代入得 131072 × 34304 字节 ≈ 4.19 GiB，80 层合计约 335 GiB。</li>
+        <li>就算做全层重计算，每层只存层输入 \(2sbh/t\)，80 层也要 20 GiB；反向重算某一层时还要临时放下这一层的 4.19 GiB；fp32 logits \(4sbV/t\) 再加 7.8 GiB。</li>
+      </ul>
+      <p>而模型状态本身（706 亿参数，每卡 1/8 加上 ZeRO 切分）也要占几十 GB。这说明：长序列下，重计算只能把激活压到「和 \(s\) 线性、系数是 \(2h\cdot L\)」的水平，Playbook 也指出全重计算还会带来约 30% 的额外计算。剩下唯一的办法是把 \(s\) 本身分到更多卡上。</p>
+
+      <h2 id="idea">上下文并行的基本想法</h2>
+      <p>CP 把输入序列沿 \(s\) 维切成 \(N\) 段（\(N\) 是 CP 度），第 \(i\) 张卡只处理第 \(i\) 段 token 的所有层。和 SP 的区别是：SP 只在 LayerNorm/Dropout 这些区域切序列，进入 TP 区域时要 All-Gather 回完整序列；CP 则从 embedding 到 loss 一直切着。</p>
+      <ul>
+        <li><strong>逐 token 的模块</strong>（embedding、RMSNorm、MLP、QKV 投影、输出投影、LM head、交叉熵）：每个 token 的计算只依赖它自己，所以每张卡用完整的权重处理自己的 \(s/N\) 个 token，<strong>前向不需要任何通信</strong>。这些模块的激活自然都缩小到 \(1/N\)。</li>
+        <li><strong>权重是复制的。</strong>CP 不切权重，每张卡都有完整的（或 TP 切开的那一份）参数。每张卡用不同的 token 算出不同的梯度，所以反向结束后要在 CP 组内 All-Reduce 梯度，和数据并行完全一样。实践中 CP 组和 DP 组合在一起做一次梯度同步（梯度 All-Reduce 的组是 DP×CP）。</li>
+        <li><strong>注意力</strong>是唯一的例外：第 \(i\) 段的 query 需要和第 \(1..i\) 段（因果）或所有段（双向）的 key/value 交互。</li>
+        <li><strong>loss</strong>：每张卡算出自己那段 token 的 loss 之和，归一化时要用全局 token 数（所有 CP rank 的有效 token 加起来），否则 padding 或不同长度会让平均值偏掉。</li>
+      </ul>
+      <p>所以 CP 的全部难点就是：怎么在 query、key、value 都分散在不同卡上的情况下，精确地算出注意力。</p>
+
+      <h2 id="lse">分块注意力：online softmax 与 log-sum-exp 合并</h2>
+      <p>对一个 query 向量 \(q\)（省略头的下标），注意力输出是</p>
+      $$o = \sum_{j} \frac{e^{x_j}}{\sum_{k} e^{x_k}}\, v_j,\qquad x_j = \frac{q\cdot k_j}{\sqrt{d_h}}$$
+      <p>softmax 的分母要对<strong>所有</strong> key 求和，看起来必须先拿到全部 key 才能开始。但其实可以先对一部分 key 算一个「局部结果」，再把局部结果合并。设 key 被分成两块 \(\mathcal{B}_1, \mathcal{B}_2\)。对每一块定义：</p>
+      $$m_b = \max_{j\in\mathcal{B}_b} x_j,\qquad \ell_b = \sum_{j\in\mathcal{B}_b} e^{x_j - m_b},\qquad o_b = \frac{1}{\ell_b}\sum_{j\in\mathcal{B}_b} e^{x_j-m_b}\,v_j$$
+      <p>\(o_b\) 就是「假如只有这一块 key」时的注意力输出，\(m_b\) 是为了数值稳定减掉的最大值。把 \(m_b\) 和 \(\ell_b\) 合成一个数更方便：</p>
+      $$\mathrm{lse}_b = \log\sum_{j\in\mathcal{B}_b} e^{x_j} = m_b + \log \ell_b$$
+      <p>这就是这一块的 log-sum-exp。现在推导完整结果。完整的分母是</p>
+      $$\sum_{j} e^{x_j} = \sum_{j\in\mathcal{B}_1} e^{x_j} + \sum_{j\in\mathcal{B}_2} e^{x_j} = e^{\mathrm{lse}_1} + e^{\mathrm{lse}_2}$$
+      <p>所以全局 \(\mathrm{lse} = \log\left(e^{\mathrm{lse}_1}+e^{\mathrm{lse}_2}\right)\)。完整的分子是</p>
+      $$\sum_j e^{x_j} v_j = \sum_{j\in\mathcal{B}_1} e^{x_j} v_j + \sum_{j\in\mathcal{B}_2} e^{x_j} v_j = e^{\mathrm{lse}_1} o_1 + e^{\mathrm{lse}_2} o_2$$
+      <p>（因为 \(o_b = \sum_{j\in\mathcal{B}_b} e^{x_j}v_j / e^{\mathrm{lse}_b}\)。）两式相除：</p>
+      $$\boxed{\;o = e^{\mathrm{lse}_1-\mathrm{lse}}\,o_1 + e^{\mathrm{lse}_2-\mathrm{lse}}\,o_2,\qquad \mathrm{lse}=\log\left(e^{\mathrm{lse}_1}+e^{\mathrm{lse}_2}\right)\;}$$
+      <p>两个权重 \(e^{\mathrm{lse}_b - \mathrm{lse}}\) 之和恰好是 1，可以理解成「这一块 key 在总 softmax 质量中所占的比例」。实际计算时用稳定的写法：\(\mathrm{lse} = M + \log(e^{\mathrm{lse}_1-M}+e^{\mathrm{lse}_2-M})\)，\(M=\max(\mathrm{lse}_1,\mathrm{lse}_2)\)，所有指数都不超过 0。几个性质让它适合分布式：</p>
+      <ul>
+        <li><strong>可交换、可结合</strong>：多块就反复两两合并，顺序无关。Ring Attention 论文正是利用这一点：query 块和一组 key/value 块的注意力「可以按任意顺序计算，只要正确地合并每块的统计量」。</li>
+        <li><strong>每个 query 只需要多存一个标量</strong>（lse），而不是 \(s\) 个分数。</li>
+        <li><strong>完全被掩码的块</strong>：所有 \(x_j=-\infty\)，\(\mathrm{lse}_b = -\infty\)，权重为 0，等价于跳过。所以因果掩码下上三角的整块可以直接不算。</li>
+      </ul>
+      <p>FlashAttention 在单卡内部用的是同一个恒等式（在 SRAM 里按块扫过 K/V，边扫边更新 \(m\)、\(\ell\) 和未归一化的输出），只是把合并写成了增量形式。CP 把它搬到了卡与卡之间：每张卡用 FlashAttention 算出本地 Q 对某个 KV 块的 \((o_b, \mathrm{lse}_b)\)，再和之前的累积结果合并。Playbook 也特别指出了 CP 和 FlashAttention 共享 online softmax 这一点。</p>
+      <p><strong>反向</strong>同样只需要 lse。对一个 key \(j\)，softmax 概率是 \(p_j = e^{x_j - \mathrm{lse}}\)，用<em>全局</em>的 lse 就能在任何一块上单独重算出正确的 \(p_j\)，然后算 \(dv_j = \sum_q p_j\, do\)、\(dx_j = p_j(do\cdot v_j - D)\)，其中 \(D = do\cdot o\) 是每个 query 一个标量（也是全局的）。所以前向结束时每张卡把本地 query 的全局 \(o\) 和 lse 存下来，反向时再把 KV 块转一圈，每一步都能独立算出这一块对 \(dQ\)（累加在本地）以及对 \(dK, dV\) 的贡献。</p>
+
+      <h2 id="ring">Ring Attention</h2>
+      <p>有了合并规则，算法就很自然了。\(N\) 张卡排成一个环，卡 \(i\) 一开始持有第 \(i\) 段的 \(Q_i, K_i, V_i\)。一共 \(N\) 步，每一步每张卡做三件事：</p>
+      <ol>
+        <li>把手里当前的 K/V 块<strong>异步</strong>发给下一张卡（最后一步不用发）；</li>
+        <li>用本地的 \(Q_i\) 和手里当前的 K/V 块算局部注意力 \((o, \mathrm{lse})\)，合并进累积结果；</li>
+        <li>等上一张卡发来的 K/V 块到达，作为下一步的「当前块」。</li>
+      </ol>
+      <p>第 \(r\) 步（从 0 开始），卡 \(i\) 手里的是卡 \((i-r)\bmod N\) 原来的 K/V。\(N\) 步之后，每个 \(Q_i\) 都见过了全部 K/V，Q 和输出 O 自始至终没离开过本卡。</p>
+      <pre><code>def ring_attention_fwd(q, k, v, rank, N):           # q,k,v: 本卡的 [s/N, heads, d]
+    out, lse = None, None
+    for r in range(N):
+        if r &lt; N - 1:
+            nxt = async_sendrecv(k, v, to=(rank+1) % N, frm=(rank-1) % N)
+        src = (rank - r) % N                             # 当前 k,v 原属于哪张卡
+        o_b, lse_b = flash_attn(q, k, v, mask=causal_mask(rank, src))
+        out, lse = merge(out, lse, o_b, lse_b)           # 上一节的合并公式
+        if r &lt; N - 1:
+            k, v = nxt.wait()
+    return out, lse</code></pre>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 720 234" role="img" aria-label="Ring Attention 示意">
+          <defs>
+            <marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--accent-2)"/></marker>
+          </defs>
+          <g font-size="13">
+            <rect x="40" y="40" width="130" height="64" rx="10" class="box-a"/>
+            <text x="105" y="64" text-anchor="middle" class="svg-text">GPU 0</text>
+            <text x="105" y="86" text-anchor="middle" class="svg-mono" font-size="12">Q₀ · KV₃</text>
+            <rect x="215" y="40" width="130" height="64" rx="10" class="box-a"/>
+            <text x="280" y="64" text-anchor="middle" class="svg-text">GPU 1</text>
+            <text x="280" y="86" text-anchor="middle" class="svg-mono" font-size="12">Q₁ · KV₀</text>
+            <rect x="390" y="40" width="130" height="64" rx="10" class="box-a"/>
+            <text x="455" y="64" text-anchor="middle" class="svg-text">GPU 2</text>
+            <text x="455" y="86" text-anchor="middle" class="svg-mono" font-size="12">Q₂ · KV₁</text>
+            <rect x="565" y="40" width="130" height="64" rx="10" class="box-a"/>
+            <text x="630" y="64" text-anchor="middle" class="svg-text">GPU 3</text>
+            <text x="630" y="86" text-anchor="middle" class="svg-mono" font-size="12">Q₃ · KV₂</text>
+          </g>
+          <line x1="170" y1="72" x2="213" y2="72" stroke="var(--accent-2)" stroke-width="2" marker-end="url(#ar3)"/>
+          <line x1="345" y1="72" x2="388" y2="72" stroke="var(--accent-2)" stroke-width="2" marker-end="url(#ar3)"/>
+          <line x1="520" y1="72" x2="563" y2="72" stroke="var(--accent-2)" stroke-width="2" marker-end="url(#ar3)"/>
+          <path d="M630,104 C630,160 105,160 105,106" stroke="var(--accent-2)" stroke-width="2" fill="none" marker-end="url(#ar3)"/>
+          <text x="368" y="174" text-anchor="middle" class="svg-soft" font-size="12">KV 块沿环传递（与计算重叠）</text>
+          <text x="360" y="200" text-anchor="middle" class="svg-soft" font-size="13">第 r = 1 步：GPU i 持有 KV₍ᵢ₋₁₎，Q 和累积输出 O 始终留在本卡</text>
+          <text x="360" y="222" text-anchor="middle" class="svg-soft" font-size="12">每张卡同时收发：用的是全双工链路的两个方向，没有中心节点</text>
+        </svg>
+        <figcaption>4 卡的 Ring Attention。每一步只有相邻卡之间的点对点通信。</figcaption>
+      </figure>
+
+      <h3>显存</h3>
+      <p>每张卡在注意力里只需要：本地 Q（和累积的 O、lse）、当前计算用的 K/V 块、正在接收的下一个 K/V 块（双缓冲）。所以额外开销是一个 KV 块的大小，与总序列长度无关。Ring Attention 论文按每个 host 存 6 个块（Q、当前 K/V、接收中的 K/V、输出）来估计，显存只和块大小线性相关。</p>
+      <h3>能否把通信藏住</h3>
+      <p>每一步的计算是一个 \(c\times c\) 的注意力块（\(c = s/N\) 是每卡的 token 数），通信是一个 K/V 块。设单卡算力 \(C\)，单向带宽 \(W\)，按一个 micro-batch 算：</p>
+      $$T_\text{math} = \frac{4\,b\,c^2 h}{C}\quad(QK^\top \text{ 和 } PV \text{ 各 } 2bc^2h),\qquad T_\text{comm} = \frac{2\cdot 2\,b\,c\,n_{kv}d_h}{W}\quad(K,V\text{，bf16})$$
+      <p>要 \(T_\text{math}\ge T_\text{comm}\)：</p>
+      $$c \;\ge\; \frac{C}{W}\cdot\frac{n_{kv}d_h}{h} = \frac{C}{W}\cdot\frac{n_{kv}}{n_h}$$
+      <p>多头注意力时（\(n_{kv}=n_h\)）就是 Ring Attention 论文里的条件：块大小要大于「FLOPs / 带宽」。几个数：H100 节点内 \(C/W\approx 990\times10^{12}/450\times10^9\approx 2200\)，MHA 需要每卡至少约 2200 个 token；GQA 8/64（Llama-3 70B）只要约 275。跨节点每卡约 50 GB/s，\(C/W\approx 19800\)，MHA 需要约 2 万 token，GQA 8/64 约 2500。因果掩码会让每步有用计算大约减半，要求再翻倍。这也解释了为什么 GQA 让 CP 变得容易：K/V 比 Q 小得多，要搬的东西少了 \(n_h/n_{kv}\) 倍。反向时每步要计算的量约为前向的 2 倍多，而要传的除了 K/V 还有累积的 \(dK, dV\)（也绕环走），通信也大约翻倍，比例差不多。</p>
+
+      <h2 id="causal">因果掩码带来的负载不均</h2>
+      <p>语言模型用因果注意力：token \(p\) 只能看 \(\le p\) 的 key。把 \(s\times s\) 的分数矩阵画出来，只有下三角（含对角线）需要算。如果按顺序切（卡 \(i\) 拿第 \(i\) 段连续的 token），在 Ring Attention 的第 \(r\) 步，卡 \(i\) 处理的是 \(Q_i\) 和 \(K_{(i-r)\bmod N}\)：</p>
+      <ul>
+        <li>第 0 步：每张卡都在算对角块，下三角一半，大家一样忙。</li>
+        <li>第 \(r\ge 1\) 步：若 \(i\ge r\)，KV 来自更早的段，整块都要算（\(c^2\)）；若 \(i\lt r\)，KV 来自更晚的段，整块被掩掉，这张卡<strong>无事可做</strong>。</li>
+      </ul>
+      <p>每一步的耗时取决于最慢的那张卡，所以第 1 到 \(N-1\) 步每步都要 \(c^2\) 的时间。总耗时约 \(c^2/2 + (N-1)c^2\)，而总的有用工作量约 \(N^2c^2/2\)，平摊到 \(N\) 张卡是 \(Nc^2/2\)。效率</p>
+      $$\eta_\text{naive} \approx \frac{Nc^2/2}{(N-\tfrac12)c^2} = \frac{N}{2N-1}\;\to\;\frac12$$
+      <p>\(N=4\) 时约 57%，\(N=8\) 时约 53%：差不多一半的时间在空等。Playbook 用 attention 矩阵上色说明了同一件事：卡 1 一开始就能算完它的行，卡 2 要等到第二轮收到 1–4 号 token 才能完成，卡 1 的总工作量也远少于其他卡。（这和「谁先算完」无关紧要，关键是每一步都被最忙的那张卡拖住。）</p>
+
+      <h2 id="zigzag">Zig-zag 与 Striped：重新分配 token</h2>
+      <p>解决办法是不按连续段分配 token，让每张卡都拿到一些「早」的 token 和一些「晚」的 token。</p>
+      <h3>Zig-zag</h3>
+      <p>把序列切成 \(2N\) 个块 \(C_0, \dots, C_{2N-1}\)（每块 \(c/2\) 个 token），卡 \(i\) 拿 \(C_i\) 和 \(C_{2N-1-i}\)：卡 0 拿第一块和最后一块，卡 \(N-1\) 拿中间两块。Llama 3 的 CP 正是这样切的：「把输入序列切成 \(2\times\text{CP}\) 块，第 \(i\) 个 CP rank 拿第 \(i\) 块和第 \(2\times\text{CP}-1-i\) 块」。</p>
+      <p>验证一下为什么平衡。卡 \(i\) 的 query 块是 \(\{i,\;2N-1-i\}\)，它在某一步拿到的 KV 来自卡 \(j\)，KV 块是 \(\{j,\;2N-1-j\}\)。四个（query 块，key 块）组合：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th>key 块 \(j\)（早）</th><th>key 块 \(2N-1-j\)（晚）</th></tr></thead>
+          <tbody>
+            <tr><td>query 块 \(i\)（早）</td><td>\(j\lt i\)：全算；\(j=i\)：对角；\(j\gt i\)：跳过</td><td>\(2N-1-j\ge N\gt i\)：总是跳过</td></tr>
+            <tr><td>query 块 \(2N-1-i\)（晚）</td><td>\(j\le N-1\lt 2N-1-i\)：总是全算</td><td>\(j\gt i\)：全算；\(j=i\)：对角；\(j\lt i\)：跳过</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>当 \(j\ne i\)（第 1 到 \(N-1\) 步）时，恰好有两个组合要全算、两个跳过，工作量是 \(2\times(c/2)^2 = c^2/2\)，<strong>每张卡、每一步都一样</strong>。当 \(j=i\)（第 0 步）时，一个全块加两个对角半块，也约是 \(c^2/2\)。总耗时约 \(Nc^2/2\)，正好等于理想值。相比朴素切法快了约 \(2-1/N\) 倍。</p>
+      <p>表格还揭示了一个实现上的巧合：\(j\lt i\) 时要算的两个组合都用 key 块 \(j\)，即「全部 Q × KV 的前一半」；\(j\gt i\) 时都用 query 块 \(2N-1-i\)，即「Q 的后一半 × 全部 KV」。两种情况都是没有掩码的矩形，直接调一次不带 causal 的 FlashAttention 即可，只有第 0 步需要带掩码。开源实现 ring-flash-attention 的 zigzag 版本就是这样做的。</p>
+      <h3>Striped</h3>
+      <p>Striped Attention（Brandon 等人）走得更彻底：token \(p\) 分给卡 \(p \bmod N\)，每张卡拿到均匀散布在整条序列上的一组 token。这样每一步每张卡面对的掩码都近似是一个「上三角掉一半」的块，各卡工作量只差对角线上的那几个元素。论文报告在 A100 和 TPUv4 上比 Ring Attention 端到端快了最多 1.45 倍（256K 序列）和 1.65 倍（16 块 TPUv4、786K 序列），并指出在块大小和设备数趋于无穷时理论加速趋近 2 倍。和 zig-zag 相比，Striped 的掩码在每一步都不是全满或全空的矩形，实现上需要带偏移的掩码；Playbook 提到两者的细微差别可以看 ring-flash-attention 的讨论。</p>
+      <h3>重排 token 的代价</h3>
+      <p>注意力对 token 顺序是「置换等变」的：只要掩码按 token 在原序列里的位置来判断，重排不影响结果。所以 zig-zag 或 striped 只需要在模型入口重排一次 token，整个前向和反向都保持这个布局。但要同时重排三样东西：输入 token id、位置编码用的 position id（RoPE 必须用原始位置），以及计算 loss 用的目标 token。逐 token 的模块本来就不关心顺序。</p>
+
+      <h2 id="demo-ring">演示：Ring Attention 逐步执行</h2>
+      <p>左边是 \(T\) 个 token 的因果注意力矩阵（行是 query，列是 key，只画下三角），上方和左侧色带的深浅表示每个 token 分给了哪张卡（越深编号越大）。当前这一步正在计算的格子用实心橙色，之前步骤算过的用浅紫色。右边是每张卡这一步的工作量（按格子数）、空等的部分，以及累计的效率。这里假设掩码可以按元素精确跳过；真实的 kernel 按 tile 跳过，对角块的收益会打折扣。</p>
+
+      <div class="demo" id="ringdemo">
+        <div class="demo-label">Ring Attention：朴素 / Zig-zag / Striped</div>
+        <div class="ring-top">
+          <span><span class="lbl">切分方式</span><span class="seg" id="rd-lay"><button data-v="naive" aria-pressed="true">朴素连续</button><button data-v="zigzag" aria-pressed="false">Zig-zag</button><button data-v="striped" aria-pressed="false">Striped</button></span></span>
+          <span><span class="lbl">卡数 N</span><span class="seg" id="rd-n"><button data-v="2" aria-pressed="false">2</button><button data-v="4" aria-pressed="true">4</button><button data-v="8" aria-pressed="false">8</button></span></span>
+        </div>
+        <div class="ring-top">
+          <button class="btn" id="rd-prev">◀ 上一步</button>
+          <button class="btn primary" id="rd-play">▶ 播放</button>
+          <button class="btn" id="rd-next">下一步 ▶</button>
+          <span class="lbl" id="rd-steplbl"></span>
+        </div>
+        <div class="ring-grid">
+          <div>
+            <div class="panel-title">注意力矩阵（原始 token 顺序）</div>
+            <div id="rd-mat"></div>
+          </div>
+          <div>
+            <div class="panel-title">环上的 KV 位置</div>
+            <div id="rd-ring"></div>
+            <div class="panel-title" style="margin-top:8px">本步每卡工作量（格子数）</div>
+            <div class="bars" id="rd-bars"></div>
+          </div>
+        </div>
+        <div class="legend-row">
+          <span><i style="background:var(--accent-2)"></i>本步计算</span>
+          <span><i style="background:var(--accent);opacity:.35"></i>已完成</span>
+          <span><i style="background:var(--bg-soft);border:1px solid var(--border)"></i>尚未计算</span>
+          <span><i style="background:var(--accent-2);opacity:.35"></i>空等（本步比最忙的卡少做的部分）</span>
+        </div>
+        <div class="step-note" id="rd-note"></div>
+        <div class="readout">
+          <div><span class="k">本步耗时（最忙的卡）</span><span class="v" id="rd-stept"></span></div>
+          <div><span class="k">累计耗时 / 理想耗时</span><span class="v" id="rd-cum"></span></div>
+          <div><span class="k">全部 N 步的效率</span><span class="v" id="rd-eff"></span></div>
+        </div>
+      </div>
+      <p>切到「朴素连续」，按几下「下一步」：从第 1 步开始，编号小的卡整块空闲，编号大的卡整块满载。换成 Zig-zag，每一步每张卡的工作量都相同。Striped 下各卡只差几个对角元素。把 \(N\) 调到 8，朴素切法的效率接近 53%。</p>
+
+      <h2 id="allgather">All-Gather 式 CP</h2>
+      <p>Ring 不是唯一的实现。另一种做法是：每层注意力之前，在 CP 组内对 K 和 V 做一次 All-Gather，每张卡拿到完整序列的 K/V，然后用本地的 Q 算注意力；反向时对 \(dK,dV\) 做 Reduce-Scatter。Playbook 把两者对比为：</p>
+      <ul>
+        <li><strong>All-Gather 实现</strong>：一步完成，简单；但需要临时放下全部 K/V。</li>
+        <li><strong>环形实现</strong>：每次只多存一个块，通信分散在 \(N\) 步里并与计算重叠；代价是多步通信带来的额外延迟和更复杂的调度。</li>
+      </ul>
+      <p>Llama 3 选的是 All-Gather 式（同样配合 \(2\times\text{CP}\) 块的负载均衡切法），并给了两个理由：一是更容易支持各种注意力掩码，比如文档掩码（一条序列里拼了多篇文档，跨文档不可见），环形实现要在每一步为不同的 KV 块计算正确的掩码；二是 GQA 让 K/V 比 Q 小得多，而注意力的计算是 \(O(S^2)\)、All-Gather 是 \(O(S)\)，暴露在关键路径上的通信可以忽略。</p>
+      <p>完整 K/V 的大小：每层 \(2\cdot 2\,b\,s\,n_{kv}d_h\) 字节（TP 下再除以 \(t\)），对 Llama-3 70B、\(s=128\text{K}\) 是 512 MiB，TP=8 后 64 MiB。这是一层的临时缓冲，算完就可以释放（反向重算时再 gather），所以完全可以接受。对 MHA 模型或者 KV 头很多的模型，这个账就不那么好看了。</p>
+
+      <h2 id="ulysses">DeepSpeed-Ulysses：按头的 All-to-All</h2>
+      <p>换一个角度：注意力在序列维上纠缠，但在<strong>头</strong>维上完全独立。DeepSpeed-Ulysses 利用这一点在注意力前后各转置一次切分维度：</p>
+      <ol>
+        <li>注意力之外，和 CP 一样，每张卡持有 \(s/P\) 个 token 的完整隐藏向量（\(P\) 是序列并行度），逐 token 的模块本地计算。</li>
+        <li>QKV 投影后，每张卡有 \([s/P,\; n_h,\; d_h]\) 的 Q（K/V 类似）。做一次 <strong>All-to-All</strong>：把头维切成 \(P\) 份发给不同的卡，同时收集别的卡的序列段。结束后每张卡有 \([s,\; n_h/P,\; d_h]\)：完整序列、部分头。</li>
+        <li>每张卡对自己的 \(n_h/P\) 个头算普通的（单卡）注意力，可以直接用 FlashAttention，掩码怎么复杂都行。</li>
+        <li>输出 \([s, n_h/P, d_h]\) 再做一次 All-to-All，换回 \([s/P, n_h, d_h]\)，接输出投影。</li>
+      </ol>
+
+      <figure class="diagram">
+        <svg viewBox="0 0 720 200" role="img" aria-label="Ulysses all-to-all">
+          <defs>
+            <marker id="ar4" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          </defs>
+          <text x="110" y="22" text-anchor="middle" class="svg-soft" font-size="12">每卡：s/P 个 token × 全部头</text>
+          <text x="360" y="22" text-anchor="middle" class="svg-soft" font-size="12">每卡：全部 token × n_h/P 个头</text>
+          <text x="610" y="22" text-anchor="middle" class="svg-soft" font-size="12">换回：s/P 个 token × 全部头</text>
+          <g>
+            <rect x="28" y="40" width="156" height="30" class="box-a"/><text x="106" y="60" text-anchor="middle" class="svg-mono" font-size="11">GPU0: tok 0–¼ · h1–h4</text>
+            <rect x="28" y="74" width="156" height="30" class="box-b"/><text x="106" y="94" text-anchor="middle" class="svg-mono" font-size="11">GPU1: tok ¼–½ · h1–h4</text>
+            <rect x="28" y="108" width="156" height="30" class="box"/><text x="106" y="128" text-anchor="middle" class="svg-mono" font-size="11">GPU2: tok ½–¾ · h1–h4</text>
+            <rect x="28" y="142" width="156" height="30" class="box"/><text x="106" y="162" text-anchor="middle" class="svg-mono" font-size="11">GPU3: tok ¾–1 · h1–h4</text>
+          </g>
+          <line x1="190" y1="106" x2="248" y2="106" class="line" marker-end="url(#ar4)"/>
+          <text x="219" y="98" text-anchor="middle" class="svg-soft" font-size="11">All-to-All</text>
+          <g>
+            <rect x="255" y="40" width="50" height="132" class="box-a"/><text x="280" y="110" text-anchor="middle" class="svg-mono" font-size="11">h1</text>
+            <rect x="309" y="40" width="50" height="132" class="box-b"/><text x="334" y="110" text-anchor="middle" class="svg-mono" font-size="11">h2</text>
+            <rect x="363" y="40" width="50" height="132" class="box"/><text x="388" y="110" text-anchor="middle" class="svg-mono" font-size="11">h3</text>
+            <rect x="417" y="40" width="50" height="132" class="box"/><text x="442" y="110" text-anchor="middle" class="svg-mono" font-size="11">h4</text>
+            <text x="361" y="190" text-anchor="middle" class="svg-soft" font-size="11">各卡对自己的头做完整序列的注意力</text>
+          </g>
+          <line x1="475" y1="106" x2="533" y2="106" class="line" marker-end="url(#ar4)"/>
+          <text x="504" y="98" text-anchor="middle" class="svg-soft" font-size="11">All-to-All</text>
+          <g>
+            <rect x="532" y="40" width="156" height="30" class="box-a"/><text x="610" y="60" text-anchor="middle" class="svg-mono" font-size="11">O: tok 0–¼</text>
+            <rect x="532" y="74" width="156" height="30" class="box-b"/><text x="610" y="94" text-anchor="middle" class="svg-mono" font-size="11">O: tok ¼–½</text>
+            <rect x="532" y="108" width="156" height="30" class="box"/><text x="610" y="128" text-anchor="middle" class="svg-mono" font-size="11">O: tok ½–¾</text>
+            <rect x="532" y="142" width="156" height="30" class="box"/><text x="610" y="162" text-anchor="middle" class="svg-mono" font-size="11">O: tok ¾–1</text>
+          </g>
+        </svg>
+        <figcaption>4 卡、4 个头的 Ulysses。All-to-All 本质上是一次分布式转置：把切分维从序列换成头，再换回来。</figcaption>
+      </figure>
+
+      <p><strong>通信量。</strong>All-to-All 里每张卡把本地张量的 \((P-1)/P\) 发出去。Ulysses 论文按「聚合消息大小 \(M\) 在 \(P\) 张卡上做 All-to-All，每条链路传 \(M/P\)」来算：QKV 的聚合大小 \(3Nh\)、输出 \(Nh\)（\(N\) 为序列长度），每条链路共 \(4Nh/P\)，所以序列长度和卡数同比例增长时通信量不变。论文对比的是 Megatron 的 SP：它的 All-Gather / Reduce-Scatter 每卡通信量是 \(O(N)\)，不随 \(P\) 下降。</p>
+      <p>上面的 \(3Nh\) 是 MHA。对 GQA，K/V 只有 \(n_{kv}d_h\) 宽，把每卡发送的字节数（bf16，单层前向）写准确一点：</p>
+      $$\text{Ulysses：}\;\frac{P-1}{P}\cdot 2b\frac{s}{P}\,(2h + 2n_{kv}d_h)\qquad \text{Ring / All-Gather：}\;\frac{P-1}{P}\cdot 2b\,s\cdot 2n_{kv}d_h$$
+      <p>两者之比是 \(\frac{h+n_{kv}d_h}{P\cdot n_{kv}d_h}\)。MHA 下是 \(2/P\)，Ulysses 在 \(P\ge 3\) 时就更省；但 GQA 8/64 下是 \(9/P\)，要 \(P\gt 9\) Ulysses 才更省。也就是说 GQA 越激进，环形或 All-Gather 式 CP 越占便宜：它们只搬 K/V，而 Ulysses 还要搬 Q 和 O。</p>
+      <p><strong>限制。</strong></p>
+      <ul>
+        <li>并行度受头数约束：\(P\) 要整除 \(n_h\)；对 GQA，\(P\gt n_{kv}\) 时 K/V 头不够分，只能复制，通信量随之增大。和 TP 叠加时更紧：TP 已经按头切了 \(t\) 份，剩下给 Ulysses 的只有 \(n_{kv}/t\)。Llama 3 这类 8 个 KV 头、TP=8 的配置，几乎没有给 Ulysses 留空间。Ring Attention 论文也把「受头数限制、并且要在每张卡上收集完整序列」列为 Ulysses 的局限。</li>
+        <li>All-to-All 是阻塞的，不像 ring 那样自然地与注意力计算重叠；跨节点的 All-to-All 对网络拓扑也更敏感。</li>
+        <li>好处是注意力 kernel 完全不用改：每张卡看到的是完整序列上的普通注意力，任意掩码、稀疏注意力都能直接用。</li>
+      </ul>
+      <p>两者也可以叠加：USP（Unified Sequence Parallelism，Fang 与 Zhao）把序列并行组拆成两维，一维做 Ulysses、另一维做 Ring，比如节点内用 Ulysses 的 All-to-All，节点间用 Ring 的点对点传递。</p>
+
+      <h2 id="compare">通信量对比与选择</h2>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th></th><th>Ring Attention</th><th>All-Gather CP</th><th>Ulysses</th></tr></thead>
+          <tbody>
+            <tr><td>注意力时每卡持有</td><td>本地 Q + 1–2 个 KV 块</td><td>本地 Q + 完整 K/V</td><td>完整序列的 \(n_h/P\) 个头</td></tr>
+            <tr><td>每卡前向发送（单层）</td><td>\(\frac{P-1}{P}\cdot 4bs\,n_{kv}d_h\)</td><td>同左</td><td>\(\frac{P-1}{P}\cdot\frac{4bs}{P}(h+n_{kv}d_h)\)</td></tr>
+            <tr><td>通信方式</td><td>相邻点对点，\(P-1\) 步</td><td>一次集合通信</td><td>两次 All-to-All</td></tr>
+            <tr><td>与计算重叠</td><td>天然重叠（块够大时）</td><td>暴露在关键路径上</td><td>暴露在关键路径上</td></tr>
+            <tr><td>并行度上限</td><td>无硬上限（受 \(s/P\) 够不够大约束）</td><td>同左</td><td>\(\le n_h\)（GQA 时实际 \(\le n_{kv}\)）</td></tr>
+            <tr><td>复杂掩码</td><td>每步要算对应掩码</td><td>容易</td><td>容易</td></tr>
+            <tr><td>因果负载均衡</td><td>需要 zig-zag / striped</td><td>需要 \(2\times\)CP 切法</td><td>不需要（每卡都是完整序列）</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>大致的选择：KV 头少（GQA/MQA）且需要文档掩码，All-Gather 式最省事；序列极长、跨节点、想把通信完全藏住，用 Ring + zig-zag；头多、节点内带宽高、想复用现成的注意力 kernel，Ulysses 或 Ulysses + Ring 的混合。</p>
+
+      <h2 id="demo-mem">演示：激活显存 vs 序列长度</h2>
+      <p>下面用和上一篇相同的记账模型（Llama 结构，FlashAttention，TP + SP），看每卡显存随序列长度怎么增长，以及 CP 能把能训练的最长序列推到多远。CP 下所有激活（包括 logits）都按 \(s/N\) 计；模型状态假设优化器状态用 ZeRO-1 在 DP×CP 上切（DP 取 8）。全重计算时，每层只存层输入，再加上反向时临时重算一层的激活。这是近似模型，真实框架里还有通信缓冲、碎片、CUDA context 等开销，实际能放下的长度会更短。</p>
+
+      <div class="demo" id="memdemo">
+        <div class="demo-label">每卡显存 vs 序列长度</div>
+        <div class="calc-row">
+          <label>模型 <select id="m-model"><option value="8b">Llama-3 8B</option><option value="70b" selected>Llama-3 70B</option><option value="405b">Llama-3 405B</option></select></label>
+          <label>HBM <select id="m-hbm"><option value="80" selected>80 GB（H100）</option><option value="141">141 GB（H200）</option><option value="192">192 GB（B200）</option></select></label>
+          <span>TP（+SP） <span class="seg" id="m-tp"><button data-v="1">1</button><button data-v="2">2</button><button data-v="4">4</button><button data-v="8" aria-pressed="true">8</button></span></span>
+        </div>
+        <div class="calc-row">
+          <span>CP 度 N <span class="seg" id="m-cp"><button data-v="1">1</button><button data-v="2">2</button><button data-v="4">4</button><button data-v="8" aria-pressed="true">8</button><button data-v="16">16</button><button data-v="32">32</button></span></span>
+          <span>重计算 <span class="seg" id="m-rc"><button data-v="none" aria-pressed="true">无（FlashAttn）</button><button data-v="full" aria-pressed="false">全层</button></span></span>
+        </div>
+        <div class="chart-wrap" id="m-chart"></div>
+        <div class="legend-row">
+          <span><i style="background:var(--text-faint)"></i>CP = 1</span>
+          <span><i style="background:var(--accent)"></i>CP = N（选中）</span>
+          <span><i style="background:none;border-top:2px dashed var(--text)"></i>HBM 容量</span>
+        </div>
+        <div class="table-wrap" style="margin-top:10px">
+          <table class="fit-table">
+            <thead><tr><th>CP 度</th><th>模型状态 / 卡</th><th>能放下的最长序列（2 的幂）</th><th>该长度下 GPU 总数（TP×CP）</th></tr></thead>
+            <tbody id="m-fit"></tbody>
+          </table>
+        </div>
+      </div>
+      <p>试试：70B、TP=8、80 GB、无重计算时，CP=1 只能放下 8K，每翻倍一次 CP 能放下的长度也翻倍，CP=8 到 64K。打开全重计算，CP=1 就能到 64K、CP=8 到 1M，但要付出约 1/3 的额外前向计算。405B 的模型状态本身就很大，留给激活的空间少，必须靠 CP 才能做长上下文。</p>
+
+      <h2 id="combine">和其他并行组合</h2>
+      <ul>
+        <li><strong>CP × TP。</strong>两者切的是不同的维度（CP 切 \(s\)，TP 切头和 \(F\)），可以直接叠加：一个 \(t\times N\) 的网格，TP 组内是 SP/TP 的那套通信，CP 组内是注意力里的 K/V 交换。CP 组的 K/V 只是本 TP rank 的那几个头，所以 CP 的通信量也被 \(t\) 除了。Llama 3 把维度顺序排成 [TP, CP, PP, DP]：TP 在最内层（同一台服务器），CP 其次。</li>
+        <li><strong>CP × DP。</strong>CP 组内权重复制，梯度要同步，所以梯度 All-Reduce / Reduce-Scatter 在 DP×CP 的大组上进行；ZeRO 的分片也可以在这个大组上做。从优化器的角度看，CP 就是「每个样本被拆给了几张卡」的数据并行。</li>
+        <li><strong>CP × PP。</strong>流水线各级之间传的激活也是 \([b, s/N, h]\)，变小了，没有冲突。</li>
+        <li><strong>变长与打包。</strong>把多篇文档打包进一条长序列时，CP 的切分是对打包后的整条序列做的；掩码按文档边界计算。All-Gather 式实现在这里最省心，这也是 Llama 3 给出的理由之一。</li>
+      </ul>
+      <p>回到全局：TP+SP 解决「单层太大」，CP 解决「序列太长」，二者在 NVLink 域内外的位置不同。下一篇是<a href="/posts/scaling-pipeline/">流水线并行</a>，解决「模型太深、一个节点放不下」。</p>
+
+      <h2 id="refs">参考</h2>
+      <ul>
+        <li>Nanotron 团队，<a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#context_parallelism">The Ultra-Scale Playbook</a>：Context Parallelism（Ring Attention、Zig-Zag Ring Attention、All-Gather 与 All-to-All 两种实现）以及 <a href="https://huggingface.co/spaces/nanotron/ultrascale-playbook#memory_usage_in_transformers">Memory usage in transformers</a>（激活显存公式与重计算）。</li>
+        <li>Liu, Zaharia, Abbeel, <a href="https://arxiv.org/abs/2310.01889">Ring Attention with Blockwise Transformers for Near-Infinite Context</a>（环形算法、块大小与带宽的条件、显存分析），2023。</li>
+        <li>Brandon et al., <a href="https://arxiv.org/abs/2311.09431">Striped Attention: Faster Ring Attention for Causal Transformers</a>，2023。</li>
+        <li>Jacobs et al., <a href="https://arxiv.org/abs/2309.14509">DeepSpeed Ulysses: System Optimizations for Enabling Training of Extreme Long Sequence Transformer Models</a>，2023。</li>
+        <li>Fang, Zhao, <a href="https://arxiv.org/abs/2405.07719">USP: A Unified Sequence Parallelism Approach for Long Context Generative AI</a>，2024。</li>
+        <li>Llama Team, <a href="https://arxiv.org/abs/2407.21783">The Llama 3 Herd of Models</a>，第 3.3.2 节（Context parallelism for long sequences），2024。</li>
+        <li>Korthikanti et al., <a href="https://arxiv.org/abs/2205.05198">Reducing Activation Recomputation in Large Transformer Models</a>（激活显存记账），2022。</li>
+        <li>zhuzilin, <a href="https://github.com/zhuzilin/ring-flash-attention">ring-flash-attention</a>（ring / zigzag / stripe 的开源实现）。</li>
+      </ul>
+    </article>
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const segInit = (id, cb) => {
+      const el = document.getElementById(id);
+      el.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b ? 'true' : 'false'));
+        cb(b.dataset.v);
+      });
+    };
+    const $ = (id) => document.getElementById(id);
+
+    /* ---------------- Ring attention step-through ---------------- */
+    (() => {
+      const st = { lay: 'naive', N: 4, r: 0 };
+      let timer = null;
+      const T = () => (st.N === 8 ? 32 : st.N === 4 ? 24 : 16);
+      function owner(p, N, Tn) {
+        if (st.lay === 'naive') return Math.floor(p / (Tn / N));
+        if (st.lay === 'striped') return p % N;
+        const cs = Tn / (2 * N), ch = Math.floor(p / cs);
+        return ch < N ? ch : 2 * N - 1 - ch;
+      }
+      function work(N, Tn) {
+        // w[r][i] = cells device i computes at step r
+        const own = Array.from({ length: Tn }, (_, p) => owner(p, N, Tn));
+        const w = Array.from({ length: N }, () => new Array(N).fill(0));
+        for (let q = 0; q < Tn; q++) for (let k = 0; k <= q; k++) {
+          const i = own[q], j = own[k];
+          const r = ((i - j) % N + N) % N;
+          w[r][i]++;
+        }
+        return { own, w };
+      }
+      function render() {
+        const N = st.N, Tn = T();
+        const { own, w } = work(N, Tn);
+        const r = st.r;
+        // matrix
+        const S = 300, pad = 22, cell = (S - pad) / Tn;
+        let g = '';
+        for (let p = 0; p < Tn; p++) {
+          const o = own[p];
+          const op = 0.25 + 0.75 * (o / Math.max(1, N - 1));
+          g += `<rect x="${pad + p * cell}" y="2" width="${cell - 0.6}" height="10" fill="var(--accent)" opacity="${op.toFixed(2)}"/>`;
+          g += `<rect x="2" y="${pad + p * cell}" width="10" height="${cell - 0.6}" fill="var(--accent)" opacity="${op.toFixed(2)}"/>`;
+        }
+        for (let q = 0; q < Tn; q++) for (let k = 0; k <= q; k++) {
+          const i = own[q], j = own[k];
+          const rr = ((i - j) % N + N) % N;
+          let fill, opa = 1;
+          if (rr === r) fill = 'var(--accent-2)';
+          else if (rr < r) { fill = 'var(--accent)'; opa = 0.35; }
+          else fill = 'var(--bg-soft)';
+          g += `<rect x="${pad + k * cell + 0.3}" y="${pad + q * cell + 0.3}" width="${cell - 0.9}" height="${cell - 0.9}" fill="${fill}" opacity="${opa}"/>`;
+        }
+        g += `<line x1="${pad}" y1="${pad}" x2="${S}" y2="${S}" stroke="var(--border)" stroke-width="1"/>`;
+        $('rd-mat').innerHTML = `<svg viewBox="0 0 ${S + 2} ${S + 2}" role="img" aria-label="因果注意力矩阵">${g}</svg>`;
+        // ring diagram
+        const R = 78, cx = 130, cy = 100;
+        let rg = `<circle cx="${cx}" cy="${cy}" r="${R}" fill="none" stroke="var(--border)" stroke-width="1.5" stroke-dasharray="4 4"/>`;
+        for (let i = 0; i < N; i++) {
+          const a = -Math.PI / 2 + 2 * Math.PI * i / N;
+          const x = cx + R * Math.cos(a), y = cy + R * Math.sin(a);
+          const src = ((i - r) % N + N) % N;
+          rg += `<rect x="${x - 28}" y="${y - 17}" width="56" height="34" rx="7" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5"/>`;
+          rg += `<text x="${x}" y="${y - 3}" text-anchor="middle" font-size="11" fill="var(--text)" font-family="var(--font-sans)">G${i}: Q${i}</text>`;
+          rg += `<text x="${x}" y="${y + 11}" text-anchor="middle" font-size="10.5" fill="var(--accent-2)" font-family="var(--font-mono)">KV${src}</text>`;
+        }
+        $('rd-ring').innerHTML = `<svg viewBox="0 0 260 200" role="img" aria-label="环形拓扑">${rg}</svg>`;
+        // bars
+        const stepMax = Math.max(...w[r]);
+        const globalMax = Math.max(...w.map((x) => Math.max(...x)));
+        $('rd-bars').innerHTML = w[r].map((v, i) => {
+          const pct = v / globalMax * 100, idle = (stepMax - v) / globalMax * 100;
+          return `<div class="bar-row"><span class="lab">G${i}</span><div class="bar-track"><div class="bar-fill" style="width:${pct}%"></div><div class="bar-fill idle" style="left:${pct}%;width:${idle}%"></div></div><span class="num">${v}</span></div>`;
+        }).join('');
+        // readouts
+        const total = Tn * (Tn + 1) / 2, ideal = total / N;
+        let cum = 0, cumIdeal = 0, all = 0;
+        for (let k = 0; k < N; k++) { const mx = Math.max(...w[k]); all += mx; if (k <= r) { cum += mx; cumIdeal += w[k].reduce((a, b) => a + b, 0) / N; } }
+        $('rd-stept').textContent = stepMax;
+        $('rd-cum').textContent = cum + ' / ' + cumIdeal.toFixed(1);
+        $('rd-eff').textContent = (ideal / all * 100).toFixed(1) + '%';
+        $('rd-steplbl').textContent = `第 ${r} 步 / 共 ${N} 步（T = ${Tn} 个 token，每卡 ${Tn / N} 个）`;
+        const idleDev = w[r].map((v, i) => [v, i]).filter(([v]) => v === 0).map(([, i]) => 'G' + i);
+        let note;
+        if (r === 0) note = '第 0 步：每张卡用本地的 KV 算对角部分。';
+        else note = `第 ${r} 步：G<i>i</i> 持有原属于 G<i>(i−${r}) mod ${N}</i> 的 KV。`;
+        if (idleDev.length) note += ` 本步完全空闲：${idleDev.join('、')}。`;
+        else if (stepMax !== Math.min(...w[r])) note += ` 各卡工作量从 ${Math.min(...w[r])} 到 ${stepMax} 不等。`;
+        else note += ' 各卡工作量完全相同。';
+        $('rd-note').innerHTML = note;
+      }
+      segInit('rd-lay', (v) => { st.lay = v; render(); });
+      segInit('rd-n', (v) => { st.N = +v; st.r = Math.min(st.r, st.N - 1); render(); });
+      const playBtn = $('rd-play');
+      function stop() { if (timer) { clearInterval(timer); timer = null; } playBtn.textContent = '▶ 播放'; }
+      $('rd-prev').addEventListener('click', () => { stop(); st.r = Math.max(0, st.r - 1); render(); });
+      $('rd-next').addEventListener('click', () => { stop(); st.r = Math.min(st.N - 1, st.r + 1); render(); });
+      playBtn.addEventListener('click', () => {
+        if (timer) { stop(); return; }
+        if (st.r >= st.N - 1) st.r = 0; else st.r++;
+        render();
+        playBtn.textContent = '❚❚ 暂停';
+        timer = setInterval(() => { if (st.r >= st.N - 1) { stop(); return; } st.r++; render(); }, reduceMotion ? 2200 : 1200);
+      });
+      render();
+    })();
+
+    /* ---------------- activation memory vs sequence length ---------------- */
+    (() => {
+      const MODELS = {
+        '8b':   { h: 4096,  F: 14336, nh: 32,  nkv: 8, L: 32,  V: 128256 },
+        '70b':  { h: 8192,  F: 28672, nh: 64,  nkv: 8, L: 80,  V: 128256 },
+        '405b': { h: 16384, F: 53248, nh: 128, nkv: 8, L: 126, V: 128256 },
+      };
+      const st = { model: '70b', hbm: 80, tp: 8, cp: 8, rc: 'none' };
+      const DP = 8;
+      const GiB = 2 ** 30;
+      function paramsOf(m) {
+        const hkv = m.nkv * m.h / m.nh;
+        return m.L * (m.h * (m.h + 2 * hkv) + m.h * m.h + 3 * m.h * m.F + 2 * m.h) + 2 * m.V * m.h + m.h;
+      }
+      function mem(s, cp) {
+        const m = MODELS[st.model], t = st.tp, b = 1;
+        const hkv = m.nkv * m.h / m.nh;
+        const sl = s / cp;
+        const P = paramsOf(m);
+        const ms = (4 * P + 12 * P / (DP * cp)) / t;
+        const lay = sl * b * (12 * m.h + 6 * m.F) / t + 4 * sl * b * hkv / Math.min(t, m.nkv);
+        const act = st.rc === 'full' ? m.L * 2 * sl * b * m.h / t + lay : m.L * lay;
+        const logits = 4 * sl * b * m.V / t;
+        return { ms, act, logits, total: ms + act + logits };
+      }
+      const xs = []; for (let e = 12; e <= 21; e++) xs.push(2 ** e);
+      const fmtS = (s) => (s >= 2 ** 20 ? s / 2 ** 20 + 'M' : s / 1024 + 'K');
+      function draw() {
+        const wrap = $('m-chart');
+        const Wd = Math.max(300, Math.round(wrap.clientWidth || 680)), Ht = 280, ml = 52, mr = 14, mt = 14, mb = 34;
+        const pw = Wd - ml - mr, ph = Ht - mt - mb;
+        // log y axis
+        const series = [1, st.cp].filter((v, i, a) => a.indexOf(v) === i).map((cp) => ({ cp, pts: xs.map((s) => ({ s, v: mem(s, cp).total / 1e9 })) }));
+        const all = series.flatMap((x) => x.pts.map((p) => p.v)).concat([st.hbm]);
+        const yMin = Math.pow(10, Math.floor(Math.log10(Math.min(...all)))), yMax = Math.pow(10, Math.ceil(Math.log10(Math.max(...all))));
+        const X = (s) => ml + (Math.log2(s) - 12) / 9 * pw;
+        const Y = (v) => mt + ph - (Math.log10(v) - Math.log10(yMin)) / (Math.log10(yMax) - Math.log10(yMin)) * ph;
+        let g = '';
+        for (let d = Math.log10(yMin); d <= Math.log10(yMax); d++) {
+          const v = Math.pow(10, d), y = Y(v);
+          g += `<line x1="${ml}" x2="${Wd - mr}" y1="${y}" y2="${y}" stroke="var(--border)"/>`;
+          g += `<text x="${ml - 6}" y="${y + 4}" text-anchor="end" font-size="11" fill="var(--text-faint)" font-family="var(--font-mono)">${v >= 1000 ? v / 1000 + 'k' : v}</text>`;
+        }
+        g += `<text x="12" y="${mt + ph / 2}" font-size="11" fill="var(--text-faint)" transform="rotate(-90 12 ${mt + ph / 2})" text-anchor="middle">GB / 卡（对数）</text>`;
+        xs.forEach((s, i) => { if (Wd < 480 && i % 2) return; g += `<text x="${X(s)}" y="${Ht - 12}" text-anchor="middle" font-size="11" fill="var(--text-soft)" font-family="var(--font-mono)">${fmtS(s)}</text>`; });
+        const yh = Y(st.hbm);
+        g += `<line x1="${ml}" x2="${Wd - mr}" y1="${yh}" y2="${yh}" stroke="var(--text)" stroke-width="1.5" stroke-dasharray="6 4"/>`;
+        g += `<text x="${Wd - mr - 4}" y="${yh + 14}" text-anchor="end" font-size="11" fill="var(--text-soft)">HBM ${st.hbm} GB</text>`;
+        series.forEach((sr) => {
+          const col = sr.cp === 1 ? 'var(--text-faint)' : 'var(--accent)';
+          const d = sr.pts.map((p, i) => (i ? 'L' : 'M') + X(p.s).toFixed(1) + ',' + Y(p.v).toFixed(1)).join(' ');
+          g += `<path d="${d}" fill="none" stroke="${col}" stroke-width="2"/>`;
+          sr.pts.forEach((p) => { g += `<circle cx="${X(p.s)}" cy="${Y(p.v)}" r="4" fill="${col}" stroke="var(--surface)" stroke-width="2"/>`; });
+          const last = sr.pts[sr.pts.length - 1];
+          g += `<text x="${X(last.s) - 4}" y="${Y(last.v) - 9}" text-anchor="end" font-size="11.5" fill="var(--text-soft)">CP=${sr.cp}</text>`;
+        });
+        xs.forEach((s, i) => { g += `<rect class="hit" data-i="${i}" x="${X(s) - pw / 18}" y="${mt}" width="${pw / 9}" height="${ph}" fill="transparent"/>`; });
+        g += `<line id="m-cross" x1="0" x2="0" y1="${mt}" y2="${mt + ph}" stroke="var(--text-faint)" stroke-width="1" visibility="hidden"/>`;
+        wrap.innerHTML = `<svg viewBox="0 0 ${Wd} ${Ht}" width="${Wd}" height="${Ht}" role="img" aria-label="显存随序列长度">${g}</svg>`;
+        let tip = wrap.querySelector('.tip'); if (!tip) { tip = document.createElement('div'); tip.className = 'tip'; wrap.appendChild(tip); }
+        const cross = wrap.querySelector('#m-cross');
+        wrap.querySelectorAll('.hit').forEach((h) => {
+          const s = xs[+h.dataset.i];
+          h.addEventListener('mousemove', (e) => {
+            const a = mem(s, 1), c = mem(s, st.cp);
+            tip.innerHTML = `<b>s = ${fmtS(s)}</b><br>CP=1：${(a.total / 1e9).toFixed(1)} GB（激活 ${(a.act / 1e9).toFixed(1)}）` + (st.cp > 1 ? `<br>CP=${st.cp}：${(c.total / 1e9).toFixed(1)} GB（激活 ${(c.act / 1e9).toFixed(1)}）` : '');
+            tip.style.display = 'block';
+            const r = wrap.getBoundingClientRect();
+            let x = e.clientX - r.left + 12; if (x + tip.offsetWidth > r.width) x = e.clientX - r.left - tip.offsetWidth - 12;
+            tip.style.left = Math.max(0, x) + 'px'; tip.style.top = (e.clientY - r.top + 12) + 'px';
+            cross.setAttribute('x1', X(s)); cross.setAttribute('x2', X(s)); cross.setAttribute('visibility', 'visible');
+          });
+          h.addEventListener('mouseleave', () => { tip.style.display = 'none'; cross.setAttribute('visibility', 'hidden'); });
+        });
+        // fit table
+        const rows = [1, 2, 4, 8, 16, 32].map((cp) => {
+          let best = 0;
+          for (let e = 10; e <= 24; e++) { const s = 2 ** e; if (mem(s, cp).total / 1e9 <= st.hbm) best = s; }
+          const msv = mem(4096, cp).ms / 1e9;
+          const sel = cp === st.cp ? ' style="font-weight:700;color:var(--text)"' : '';
+          return `<tr${sel}><td>${cp}</td><td>${msv.toFixed(1)} GB</td><td>${best ? fmtS(best) : '放不下'}</td><td>${st.tp * cp}</td></tr>`;
+        });
+        $('m-fit').innerHTML = rows.join('');
+      }
+      $('m-model').addEventListener('change', (e) => { st.model = e.target.value; draw(); });
+      $('m-hbm').addEventListener('change', (e) => { st.hbm = +e.target.value; draw(); });
+      segInit('m-tp', (v) => { st.tp = +v; draw(); });
+      segInit('m-cp', (v) => { st.cp = +v; draw(); });
+      segInit('m-rc', (v) => { st.rc = v; draw(); });
+      draw();
+      let rz; window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(draw, 150); });
+    })();
+  })();
+  </script>
+</body>
+</html>
