@@ -1,0 +1,976 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transformer 推理的数学 · Zunzhe Zhang</title>
+  <meta name="description" content="从 KV cache 到投机解码：推导解码为什么受带宽限制、延迟下界、吞吐与延迟的权衡，以及 LLaMA-3-70B 的服务账本。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
+    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <style>
+    :root { --c3: #0f9d75; --hatch: rgba(0,0,0,0.06); }
+    @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --c3: #3ccf9f; --hatch: rgba(255,255,255,0.06); } }
+    :root[data-theme="dark"] { --c3: #3ccf9f; --hatch: rgba(255,255,255,0.06); }
+
+    .fig { margin: 1.4em 0; }
+    .fig svg { width: 100%; height: auto; display: block; }
+    .fig figcaption { margin-top: 6px; font-size: 13.5px; color: var(--text-faint); line-height: 1.6; }
+    svg text { font-family: var(--font-sans); fill: var(--text); }
+    svg .soft { fill: var(--text-soft); }
+    svg .faint { fill: var(--text-faint); }
+    svg .mono { font-family: var(--font-mono); }
+
+    .demo .row { display: flex; flex-wrap: wrap; gap: 8px 16px; align-items: center; margin: 8px 0; font-size: 14.5px; }
+    .demo .row > label { display: inline-flex; align-items: center; gap: 6px; }
+    .demo input[type="number"] { width: 6.2em; }
+    .demo .sub { font-size: 13px; color: var(--text-faint); margin-top: 6px; line-height: 1.6; }
+    .demo .grp { margin-top: 14px; padding-top: 10px; border-top: 1px dashed var(--border); }
+    .demo .grp-title { font-size: 13px; font-weight: 600; color: var(--text-soft); }
+    .readout .v small { font-size: 12px; font-weight: 400; color: var(--text-faint); }
+    .readout .hl { outline: 2px solid var(--accent); }
+    .regime { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 600; }
+    .regime.mem { background: var(--accent-soft); color: var(--accent); }
+    .regime.cmp { background: color-mix(in srgb, var(--c3) 16%, transparent); color: var(--c3); }
+    .regime.oom { background: color-mix(in srgb, var(--accent-2) 16%, transparent); color: var(--accent-2); }
+    .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 14px; }
+    @media (max-width: 700px) { .charts { grid-template-columns: 1fr; } }
+    .charts svg { width: 100%; height: auto; display: block; background: var(--bg-soft); border-radius: 10px; }
+    .legend { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 12.5px; color: var(--text-soft); margin-top: 6px; }
+    .legend i { display: inline-block; width: 14px; height: 3px; border-radius: 2px; vertical-align: middle; margin-right: 5px; }
+
+    .kvbars { display: grid; gap: 8px; margin-top: 12px; }
+    .kvbar { display: grid; grid-template-columns: 4.2em 1fr; gap: 10px; align-items: center; font-size: 14px; }
+    .kvbar .track { position: relative; height: 14px; background: var(--bg-soft); border-radius: 6px; overflow: hidden; }
+    .kvbar .fill { position: absolute; inset: 0 auto 0 0; background: var(--accent); border-radius: 6px; transition: width .3s; }
+    .kvbar.mla .fill { background: var(--accent-2); }
+    .kvbar .lab { margin-top: 3px; font-family: var(--font-mono); font-size: 12.5px; color: var(--text-soft); line-height: 1.45; }
+    .hist { display: flex; align-items: flex-end; gap: 4px; height: 140px; margin-top: 10px; padding: 0 2px; border-bottom: 1px solid var(--border); }
+    .hist .col { flex: 1; position: relative; height: 100%; display: flex; align-items: flex-end; justify-content: center; }
+    .hist .emp { width: 70%; background: var(--accent); border-radius: 3px 3px 0 0; transition: height .3s; }
+    .hist .th { position: absolute; left: 6%; right: 6%; border-top: 2px dashed var(--accent-2); }
+    .hist-x { display: flex; gap: 4px; padding: 0 2px; font-size: 12px; color: var(--text-faint); font-family: var(--font-mono); }
+    .hist-x span { flex: 1; text-align: center; }
+    pre.code { background: var(--code-bg); padding: 12px 14px; border-radius: 10px; overflow-x: auto; font-size: 13px; line-height: 1.55; }
+  </style>
+</head>
+<body>
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/projects/">Projects</a>
+      <a href="/blog/">Blog</a>
+    </nav>
+  </header>
+
+  <main class="wrap">
+    <header class="post-header">
+      <h1>Transformer 推理的数学</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+    </header>
+    <nav class="series" data-series="scaling"></nav>
+
+    <article class="prose">
+      <p>训练时我们只关心一件事：每秒每张卡处理多少 token。推理多了一个维度——<strong>延迟</strong>。用户在等第一个字出来，在等后面的字一个个往外冒。这篇文章把推理拆成可以算的东西：每一步要从显存里搬多少字节、做多少 FLOPs、什么时候受带宽限制、什么时候受算力限制，然后用这套账本解释 KV cache 压缩、张量并行、预填充/解码分离、continuous batching、PagedAttention、前缀缓存、投机解码和量化各自在解决什么问题。最后用 LLaMA-3-70B 把所有公式串一遍。</p>
+      <p>主要材料是 Google DeepMind 的 <a href="https://jax-ml.github.io/scaling-book/">How To Scale Your Model</a> 第 7、8 章（以及第 4 章关于 KV cache 的部分），MLA 和投机解码的细节来自对应论文。书里用 TPU v5e 举例，我在文中也沿用它，同时给出 H100 的对应数字。前置知识是本系列的 <a href="/posts/scaling-roofline/">Roofline</a> 一篇：算术强度、硬件强度这两个概念下面会反复用到，我会简单回顾。</p>
+
+      <div class="toc">
+        <b>目录</b>
+        <ol>
+          <li><a href="#gen">自回归生成与 KV cache</a></li>
+          <li><a href="#goal">推理在优化什么</a></li>
+          <li><a href="#linear">线性层：解码为什么受带宽限制</a></li>
+          <li><a href="#attn">注意力：一个永远受带宽限制的算子</a></li>
+          <li><a href="#kv">KV cache 有多大：MHA、MQA、GQA、MLA</a></li>
+          <li><a href="#bound">延迟下界与吞吐上界</a></li>
+          <li><a href="#calc">解码计算器</a></li>
+          <li><a href="#shard">推理的分片：为什么只剩张量并行</a></li>
+          <li><a href="#engine">推理引擎：分离、continuous batching、分页与前缀缓存</a></li>
+          <li><a href="#spec">投机解码</a></li>
+          <li><a href="#quant">量化：权重与 KV</a></li>
+          <li><a href="#llama">实例：在 TPU v5e 上服务 LLaMA-3-70B</a></li>
+          <li><a href="#sum">小结</a></li>
+          <li><a href="#ref">参考</a></li>
+        </ol>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="gen">1. 自回归生成与 KV cache</h2>
+      <p>语言模型做的事情是：给定前缀 \(x_{\lt t}\)，输出下一个 token 的分布 \(p(x_t \mid x_{\lt t})\)。生成就是循环：从分布里采一个 token，拼到序列末尾，再把整个序列送回模型。</p>
+      <p>最朴素的实现每一步都把完整前缀重新跑一遍前向。生成 \(n\) 个 token，第 \(t\) 步要处理 \(t\) 个 token：MLP 部分总共 \(\sum_t t = O(n^2)\) 的工作量，注意力部分每步是 \(O(t^2)\)，合起来 \(O(n^3)\)。这显然浪费——第 \(t\) 步重新算的前 \(t-1\) 个位置的结果和上一步完全一样，因为因果注意力里位置 \(j\) 只看得到 \(\le j\) 的位置，后面追加的 token 不会改变它。</p>
+      <p>真正被后续 token 需要的，只有每一层里每个历史位置的 <strong>key 和 value 向量</strong>：新 token 的 query 要和所有历史 key 做内积、再对所有历史 value 加权求和。把它们存下来，就是 <strong>KV cache</strong>。有了它，第 \(t\) 步只需要把一个新 token 跑过网络：线性层只算这一个位置，注意力用新 query 去读缓存。总代价降到 MLP \(O(n)\)、注意力 \(O(n^2)\)。</p>
+      <p>于是推理自然分成两个阶段：</p>
+      <ul>
+        <li><strong>预填充（prefill）</strong>：把整个 prompt 一次性跑一遍前向（和训练的前向一样，所有位置并行），把每层每个位置的 K、V 写进缓存，同时得到最后一个位置的 logits。</li>
+        <li><strong>解码（decode / generation）</strong>：从 logits 采一个 token，把这一个 token 送进模型，读 KV cache 做注意力，把它自己的 K、V 追加进缓存，得到下一组 logits。重复直到遇到结束符或长度上限。</li>
+      </ul>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 250" role="img" aria-label="预填充与解码示意图">
+          <defs>
+            <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker>
+          </defs>
+          <text x="20" y="24" font-size="14" font-weight="600">预填充：prompt 的 T 个 token 一次并行</text>
+          <g>
+            <rect x="20" y="40" width="300" height="34" rx="6" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <text x="170" y="62" font-size="13" text-anchor="middle">x₁ x₂ … x_T  →  [T, D] 的矩阵乘</text>
+            <path d="M170 76 V100" stroke="var(--text-faint)" marker-end="url(#ar)"/>
+          </g>
+          <text x="420" y="24" font-size="14" font-weight="600">解码：每步只喂 1 个 token</text>
+          <g font-size="12">
+            <rect x="420" y="40" width="58" height="34" rx="6" fill="var(--surface)" stroke="var(--accent-2)"/><text x="449" y="62" text-anchor="middle">y₁</text>
+            <rect x="500" y="40" width="58" height="34" rx="6" fill="var(--surface)" stroke="var(--accent-2)"/><text x="529" y="62" text-anchor="middle">y₂</text>
+            <rect x="580" y="40" width="58" height="34" rx="6" fill="var(--surface)" stroke="var(--accent-2)"/><text x="609" y="62" text-anchor="middle">y₃</text>
+            <text x="665" y="62" class="faint">…</text>
+            <path d="M478 57 H498" stroke="var(--text-faint)" marker-end="url(#ar)"/>
+            <path d="M558 57 H578" stroke="var(--text-faint)" marker-end="url(#ar)"/>
+            <path d="M449 76 V100" stroke="var(--text-faint)" marker-end="url(#ar)"/>
+            <path d="M529 76 V100" stroke="var(--text-faint)" marker-end="url(#ar)"/>
+            <path d="M609 76 V100" stroke="var(--text-faint)" marker-end="url(#ar)"/>
+          </g>
+          <!-- cache -->
+          <text x="20" y="122" font-size="13" class="soft">每层的 KV cache（形状 [2, S, K, H]，S 随解码增长）</text>
+          <g>
+            <rect x="20" y="132" width="300" height="40" fill="var(--accent)" opacity="0.75"/>
+            <rect x="320" y="132" width="80" height="40" fill="var(--accent)" opacity="0.15" stroke="var(--accent)" stroke-dasharray="4 3"/>
+            <rect x="420" y="132" width="20" height="40" fill="var(--accent-2)"/>
+            <rect x="500" y="132" width="20" height="40" fill="var(--accent-2)"/>
+            <rect x="580" y="132" width="20" height="40" fill="var(--accent-2)"/>
+            <text x="170" y="157" font-size="12" text-anchor="middle" fill="#fff">prompt 的 K、V（预填充写入）</text>
+            <text x="610" y="157" font-size="12" class="soft">← 每步追加 1 列</text>
+          </g>
+          <text x="20" y="200" font-size="13" class="soft">预填充：一次读权重，喂 T 个 token → 算术强度高，受算力限制</text>
+          <text x="20" y="222" font-size="13" class="soft">解码：每步都要读全部权重 + 全部 KV cache，只换来 1 个 token（每条序列）→ 受带宽限制</text>
+        </svg>
+        <figcaption>图 1：推理的两个阶段。预填充像训练的前向；解码是一串串行的小前向，每一步都在重读同样的权重和越来越长的缓存。</figcaption>
+      </figure>
+
+      <p>两个阶段的性质截然不同，这一点是整篇文章的主线：预填充一次处理成百上千个 token，权重读一次能用很多次；解码每条序列每步只有一个 token，而且步与步之间有串行依赖，没法在时间维度上并行，只能靠<strong>把很多条请求拼成一个 batch</strong>来摊薄读权重的成本。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="goal">2. 推理在优化什么</h2>
+      <p>先定几个量：</p>
+      <ul>
+        <li><strong>TTFT（time to first token）</strong>：从请求到达到第一个输出 token 的时间，主要由排队和预填充决定。</li>
+        <li><strong>每 token 延迟</strong>（也叫 TPOT / ITL）：解码阶段相邻两个 token 的间隔，约等于一次解码步（step）的时间。每用户的生成速度就是它的倒数。</li>
+        <li><strong>吞吐</strong>：整个系统每秒生成多少 token；除以芯片数就是每芯片吞吐，直接决定每 token 的成本。</li>
+      </ul>
+      <p>不同场景要的东西不一样：离线批量推理（跑评测、合成数据）只看总成本，单条延迟无所谓；聊天要在成本可控的前提下让 TTFT 短、生成速度高于人的阅读速度；端侧推理（笔记本上跑 llama.cpp）只服务一个用户，追求最低延迟。训练里"提高硬件利用率"总是好事，推理里它往往要拿延迟去换——下面会精确地看到这个交换是怎么发生的。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="linear">3. 线性层：解码为什么受带宽限制</h2>
+      <h3>回顾：roofline 与临界 batch</h3>
+      <p>一次运算要花的时间至少是两样东西的较大者（假设二者能完全重叠）：算 FLOPs 的时间 \(T_\text{math}=\text{FLOPs}/C\)，以及把数据从 HBM 搬进计算单元的时间 \(T_\text{mem}=\text{Bytes}/W\)。其中 \(C\) 是芯片的峰值算力（FLOPs/s），\(W\) 是 HBM 带宽（Bytes/s）。<strong>算术强度</strong> = FLOPs / Bytes；当它超过<strong>硬件强度</strong> \(C/W\) 时，算子受算力限制（compute-bound），否则受带宽限制（memory-bound）。</p>
+      <p>看一个线性层：bf16 激活 \(X[B, D]\) 乘 bf16 权重 \(W[D, F]\)。\(B\) 是这一步里送进来的 token 数。</p>
+      $$T_\text{math}=\frac{2BDF}{C},\qquad T_\text{mem}=\frac{2BD+2DF+2BF}{W}$$
+      <p>（每个乘加算 2 FLOPs；bf16 每个数 2 字节，分别是读 \(X\)、读权重、写输出。）推理时 \(B\) 通常最多几百，而 \(D, F\) 上万，所以分母里 \(2DF\)（读权重）占绝对主导：</p>
+      $$\frac{2BDF}{2DF}=B \;\ge\; \frac{C}{W}\quad\Longrightarrow\quad B \ge B_\text{crit}=\frac{C}{W}$$
+      <p>TPU v5e 的 bf16 算力是 \(1.97\times10^{14}\) FLOPs/s，HBM 带宽 \(8.2\times10^{11}\) B/s，\(B_\text{crit}\approx 240\)。H100 SXM 按 989 TFLOPs（bf16 稠密）和 3.35 TB/s 算是 \(\approx 295\)（书里给的是"约 280"，量级一样）。</p>
+      <div class="callout">
+        <p><strong>结论</strong>：一个矩阵乘只有在一次送进来的 token 数超过 \(B_\text{crit}\)（几百）时才受算力限制。预填充时一个 prompt 就有几百上千个 token，天然满足；解码时每条序列只贡献 1 个 token，<strong>必须同时有几百条请求在解码</strong>才能把算力用满。这在大多数在线服务里很难做到——240 条并发请求意味着 240 份独立的 KV cache。</p>
+      </div>
+      <h3>精度如何改变临界 batch</h3>
+      <p>如果权重用 int8/fp8 存（每参数 1 字节），读权重的字节数减半，而计算仍用 bf16，那么条件变成 \(2BDF/DF=2B\ge C/W\)，即 \(B_\text{crit}\) 减半到 120。如果连计算也用 int8（v5e 的 int8 算力是 \(3.94\times10^{14}\)，翻倍），\(C\) 翻倍，\(B_\text{crit}\) 又回到 240。一般地：</p>
+      $$B_\text{crit}=\frac{\text{每参数字节数}}{2}\cdot\frac{C_\text{所用精度}}{W}$$
+      <p>（书里写作 \(\beta\cdot\alpha_\text{hbm}\)，\(\beta\) 是参数位宽与激活位宽之比。）这个式子后面在量化一节还会用到。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="attn">4. 注意力：一个永远受带宽限制的算子</h2>
+      <p>线性层的权重是所有序列共享的，batch 越大、每字节权重被复用的次数越多。注意力不一样：每条序列有<strong>自己的</strong> KV cache。看一个头的标准多头注意力（用 FlashAttention 融合，不把注意力矩阵写回 HBM），query 长度 \(T\)，key/value 长度 \(S\)：</p>
+      <ul>
+        <li>读 \(Q\)：\(\text{bf16}[B,T,D]\)；读 \(K, V\)：两个 \(\text{bf16}[B,S,D]\)；写输出 \(\text{bf16}[B,T,D]\)。</li>
+        <li>\(QK^\top\) 做 \(2BSTD\) FLOPs，乘 \(V\) 再做 \(2BSTD\)。</li>
+      </ul>
+      $$\text{强度}=\frac{4BSTD}{4BSD+4BTD}=\frac{ST}{S+T}$$
+      <p>预填充时 \(S=T\)，强度 \(=T/2\)，序列长到几百就受算力限制。解码时 \(T=1\)、\(S\gg1\)，强度 \(\approx 1\)——而且 \(B\) 和 \(D\) 都约掉了，<strong>增大 batch 完全无济于事</strong>，因为 batch 每多一条，要读的 KV 也多一份。</p>
+      <p>GQA 会把它稍微抬高。设 \(N\) 个 query 头共享 \(K\) 个 KV 头，组大小 \(G=N/K\)。同一个 KV 头被 \(G\) 个 query 头读，解码时强度变成</p>
+      $$\frac{SG}{S+G}\;\xrightarrow{S\gg G}\;G$$
+      <p>LLaMA-3 的 \(G=8\)，离 240 差得远。所以解码时注意力基本永远受带宽限制，它的耗时就是"读一遍 KV cache"的时间。这也说明了一个关键的不对称：batch 增大时，权重读取被摊薄，KV 读取不会。当一条序列的 KV cache 字节数和参数字节数可比时，增大 batch 带来的吞吐收益会迅速递减。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="kv">5. KV cache 有多大：MHA、MQA、GQA、MLA</h2>
+      <h3>基本公式</h3>
+      <p>每层、每个 token 要存一个 key 和一个 value，各是 \(K\) 个头 × 每头 \(H\) 维。于是</p>
+      $$\text{KV 字节数}=2\cdot L\cdot K\cdot H\cdot T\cdot \text{bytes}$$
+      <p>2 是 K 和 V 两份，\(L\) 是层数，\(T\) 是 token 数。几种注意力变体的区别只在 \(K\)：</p>
+      <ul>
+        <li><strong>MHA</strong>（多头注意力）：\(K=N\)，每个 query 头有自己的 KV 头。</li>
+        <li><strong>MQA</strong>（多查询注意力，Shazeer 2019）：\(K=1\)，所有 query 头共享一个 KV 头，缓存缩小 \(N\) 倍，但质量会掉一些。</li>
+        <li><strong>GQA</strong>（分组查询注意力，Ainslie et al. 2023）：\(1\lt K\lt N\)，每 \(G=N/K\) 个 query 头共享一组 KV。实践中质量接近 MHA、速度接近 MQA，已经是开源模型的默认选择。</li>
+      </ul>
+      <p>几个具体数字（bf16）：LLaMA-2-13B 是 MHA，\(L=40, K=40, H=128\)，每 token \(2\cdot2\cdot40\cdot40\cdot128=819{,}200\) 字节 ≈ 0.82 MB，一条 8192 长的序列就是 6.7 GB，四条就超过了 26 GB 的参数。LLaMA-3-70B 用 GQA，\(L=80, K=8, H=128\)，每 token 327,680 字节 = 320 KiB；如果按 MHA（\(K=64\)）就是 8 倍。</p>
+
+      <h3>MLA：存一个低秩隐向量</h3>
+      <p>DeepSeek-V2 提出的多头隐注意力（Multi-head Latent Attention）换了一个思路：不减少头数，而是把 K、V 联合压缩成一个低维向量再缓存。记第 \(t\) 个位置的隐状态为 \(h_t\in\mathbb{R}^{d}\)，\(n_h\) 个头、每头 \(d_h\) 维：</p>
+      $$c_t^{KV}=W^{DKV}h_t\in\mathbb{R}^{d_c},\qquad k_{t,i}^{C}=W^{UK}_i\,c_t^{KV},\qquad v_{t,i}^{C}=W^{UV}_i\,c_t^{KV}$$
+      <p>\(W^{DKV}\) 是下投影，\(W^{UK}, W^{UV}\) 是把隐向量上投影回每个头的 key/value。推理时只缓存 \(c_t^{KV}\)。妙处在于根本不需要把 key、value 显式算出来：第 \(i\) 个头的注意力分数是</p>
+      $$q_{t,i}^\top k_{j,i}^C=q_{t,i}^\top W_i^{UK}c_j^{KV}=\big(W_i^{UK\top}q_{t,i}\big)^\top c_j^{KV}$$
+      <p>所以可以把 \(W^{UK}\) "吸收"进 query 一侧：先把每个头的 query 映射到 \(d_c\) 维隐空间，再直接和缓存里的 \(c_j\) 做内积。value 同理，\(W^{UV}\) 可以吸收进输出投影 \(W^O\)。</p>
+      <p>麻烦出在 RoPE 上。RoPE 在 query 和 key 上各乘一个依赖位置的旋转矩阵，分数变成 \(q_{t,i}^\top R_t^\top R_j W_i^{UK}c_j\)，中间夹着依赖 \(j-t\) 的 \(R_{j-t}\)，无法预先合并成一个固定矩阵，吸收就失效了。DeepSeek 的做法是<strong>解耦 RoPE</strong>：额外算一个很小的、所有头共享的带位置 key \(k_t^R=\text{RoPE}(W^{KR}h_t)\in\mathbb{R}^{d_h^R}\)，每个头的 query 也拆出一段带 RoPE 的 \(q_{t,i}^R\)，分数是两部分之和：</p>
+      $$\text{score}_{t,j,i}=q_{t,i}^{C\top}k_{j,i}^{C}+q_{t,i}^{R\top}k_j^{R}$$
+      <p>缓存里每层每 token 存 \(c^{KV}_t\)（\(d_c\) 维）和 \(k_t^R\)（\(d_h^R\) 维）。DeepSeek-V2 和 V3 的配置相同：\(d_c=512\)，\(d_h^R=64\)，\(n_h=128\)，\(d_h=128\)（我核对了论文和 Hugging Face 上两个模型的 <code>config.json</code>：<code>kv_lora_rank=512</code>、<code>qk_rope_head_dim=64</code>、<code>num_attention_heads=128</code>、<code>v_head_dim=128</code>）。于是每层每 token 是 \(512+64=576\) 个元素。论文的说法是 \(d_c=4d_h\)、\(d_h^R=d_h/2\)，缓存量等价于只有 \(2.25\) 组的 GQA（\(2\cdot2.25\cdot128=576\)）。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 230" role="img" aria-label="MLA 缓存示意图">
+          <defs><marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+          <rect x="20" y="90" width="80" height="44" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+          <text x="60" y="117" text-anchor="middle" font-size="14">h_t</text>
+          <text x="60" y="152" text-anchor="middle" font-size="11" class="faint">d = 7168</text>
+          <path d="M100 104 L180 62" stroke="var(--text-faint)" marker-end="url(#ar2)"/>
+          <path d="M100 122 L180 164" stroke="var(--text-faint)" marker-end="url(#ar2)"/>
+          <text x="120" y="68" font-size="11" class="faint">W^DKV</text>
+          <text x="96" y="186" font-size="11" class="faint">W^KR + RoPE</text>
+          <rect x="185" y="40" width="150" height="40" rx="6" fill="var(--accent-2)" opacity="0.85"/>
+          <text x="260" y="65" text-anchor="middle" font-size="13" fill="#fff">c_t^KV · 512 维</text>
+          <rect x="185" y="146" width="60" height="40" rx="6" fill="var(--accent-2)" opacity="0.85"/>
+          <text x="215" y="171" text-anchor="middle" font-size="12" fill="#fff">k^R · 64</text>
+          <rect x="175" y="28" width="172" height="168" rx="10" fill="none" stroke="var(--accent-2)" stroke-dasharray="5 4"/>
+          <text x="261" y="214" text-anchor="middle" font-size="12" class="soft">缓存：576 元素 / 层 / token</text>
+          <path d="M347 60 L420 60" stroke="var(--text-faint)" marker-end="url(#ar2)"/>
+          <text x="383" y="80" font-size="11" class="faint" text-anchor="middle">W^UK, W^UV</text>
+          <text x="383" y="94" font-size="11" class="faint" text-anchor="middle">（可吸收）</text>
+          <g font-size="11">
+            <rect x="425" y="30" width="270" height="60" rx="8" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <text x="560" y="55" text-anchor="middle">128 个头的 key（192 维）与 value（128 维）</text>
+            <text x="560" y="75" text-anchor="middle" class="soft">若用 MHA 要缓存：每层 40960 元素</text>
+          </g>
+          <text x="425" y="125" font-size="12" class="soft">解码时：q_i 先乘 W_i^UK⊤ 映射到 512 维，</text>
+          <text x="425" y="145" font-size="12" class="soft">与缓存里的 c_j 做内积，再加上与 k^R 的内积；</text>
+          <text x="425" y="165" font-size="12" class="soft">128 个头读同一份缓存 → 像 G=128 的 MQA，</text>
+          <text x="425" y="185" font-size="12" class="soft">每字节 KV 被复用的次数远多于 GQA。</text>
+        </svg>
+        <figcaption>图 2：MLA 只缓存压缩后的隐向量 \(c^{KV}\) 和一个共享的 RoPE key。维度取自 DeepSeek-V3 的配置。</figcaption>
+      </figure>
+
+      <p>以 DeepSeek-V3（61 层）为例，bf16 下每 token 的缓存是 \(61\times576\times2=70{,}272\) 字节 ≈ 69 KiB，比 LLaMA-3-70B 的 320 KiB 还小得多，而它有 128 个注意力头。如果同样的头配置用 MHA（key 是 128+64=192 维，value 128 维），每层每 token 要存 \(128\times320=40{,}960\) 个元素，是 MLA 的 71 倍。DeepSeek-V2 论文报告相对 DeepSeek 67B 把 KV cache 减少了 93.3%、最大生成吞吐提高到 5.76 倍。</p>
+      <p>MLA 还有一个常被忽略的好处：吸收之后，解码时 128 个头都在读同一份 576 维的缓存，相当于 \(G=n_h\) 的 MQA，注意力的算术强度随头数增长，而不是停在 GQA 的 \(G=8\)。代价是每个头的 query 要先做一次到 512 维的投影，注意力里的 FLOPs 变多。</p>
+
+      <h3>其他减小 KV 的办法</h3>
+      <ul>
+        <li><strong>局部（滑动窗口）注意力</strong>：一部分层只看最近 \(w\) 个 token，这些层的缓存上限是 \(w\)，与上下文长度无关。和少量全局层交错使用，长上下文时总缓存能大幅缩小。</li>
+        <li><strong>跨层共享 KV</strong>：相邻几层共用一份 KV。缓存变小，batch 能开更大；但如果共享的缓存要被不同层各读一次，<strong>读取字节数不一定减少</strong>，单步时间未必变快。</li>
+        <li><strong>量化 KV</strong>（见第 11 节）和<strong>分页/只读有效部分</strong>（见第 9 节）是运行时手段，与架构无关。</li>
+      </ul>
+      <p>这些手段叠起来，可以把 KV cache 比标准 MHA 缩小一个数量级以上。下面的计算器按公式比较四种变体：</p>
+
+      <div class="demo" id="kv-demo">
+        <div class="demo-label">KV cache 大小：MHA / GQA / MQA / MLA</div>
+        <div class="row">
+          <span>形状预设</span>
+          <span class="seg" id="kv-preset">
+            <button data-p="l70" aria-pressed="true">LLaMA-3-70B 形状</button>
+            <button data-p="dsv3">DeepSeek-V3 形状</button>
+            <button data-p="l13">LLaMA-2-13B 形状</button>
+          </span>
+        </div>
+        <div class="row">
+          <label>层数 L <input type="number" id="kv-L" min="1" max="200" value="80"></label>
+          <label>query 头数 N <input type="number" id="kv-N" min="1" max="256" value="64"></label>
+          <label>头维度 H <input type="number" id="kv-H" min="16" max="512" value="128"></label>
+          <label>GQA 的 KV 头数 K <input type="number" id="kv-K" min="1" max="256" value="8"></label>
+        </div>
+        <div class="row">
+          <label>MLA 隐维度 d_c <input type="number" id="kv-dc" min="16" max="4096" value="512"></label>
+          <label>MLA RoPE 维度 d_R <input type="number" id="kv-dr" min="0" max="512" value="64"></label>
+          <span style="display:inline-flex;gap:8px;align-items:center">KV 精度
+          <span class="seg" id="kv-dt"><button data-b="2" aria-pressed="true">bf16</button><button data-b="1">int8 / fp8</button></span></span>
+        </div>
+        <div class="ctrls">
+          <div class="ctrl"><span>上下文长度</span><input type="range" id="kv-S" min="9" max="17" step="0.5" value="13"><output id="kv-So"></output></div>
+          <div class="ctrl"><span>并发序列数</span><input type="range" id="kv-B" min="0" max="8" step="1" value="5"><output id="kv-Bo"></output></div>
+        </div>
+        <div class="kvbars" id="kv-bars"></div>
+        <div class="readout" id="kv-read"></div>
+        <p class="sub">公式：MHA / GQA / MQA 每层每 token 存 \(2KH\) 个元素（K 分别取 N、你填的 K、1）；MLA 存 \(d_c+d_R\) 个元素。条长按 MHA 归一。"MLA 等效 GQA 组数" = \((d_c+d_R)/(2H)\)。这里只算缓存本身，不含分页元数据和对齐。</p>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="bound">6. 延迟下界与吞吐上界</h2>
+      <h3>推理时显存里都有什么</h3>
+      <p>训练要存参数、梯度、优化器状态和用于反向的激活检查点；推理只存一份参数，没有梯度和优化器状态，激活也很小（不需要为反向保留；8k token 的预填充一份激活只有 \(8192\times5120\times2\) 字节 ≈ 80 MB 量级，长的预填充还可以切块做）。剩下的大头就是 KV cache，它的总量是 batch × 上下文 × 每 token 大小，上限只取决于你允许多长的上下文、多大的 batch。</p>
+      <h3>一步解码要多久</h3>
+      <p>把前两节合起来。设参数量 \(P\)、每参数字节 \(b_w\)，每 token 的 KV 字节 \(k\)，batch \(B\)、上下文 \(S\)，\(N\) 张芯片完全分片（每张卡读 \(1/N\) 的权重和缓存）。一步解码：</p>
+      <ul>
+        <li>注意力：读全部 KV，永远受带宽限制：\(T_\text{KV}=\dfrac{B\cdot S\cdot k}{N W}\)。</li>
+        <li>线性层：读一遍权重，或者算 \(2BP\) FLOPs，取较大者：\(\max\!\Big(\dfrac{P b_w}{NW},\ \dfrac{2BP}{NC}\Big)\)。</li>
+      </ul>
+      $$T_\text{step}\approx\underbrace{\frac{B S k}{NW}}_{\text{KV 读取}}+\max\!\Big(\underbrace{\frac{P b_w}{NW}}_{\text{权重读取}},\ \underbrace{\frac{2BP}{NC}}_{\text{矩阵 FLOPs}}\Big)$$
+      <p>这是书里说"如果只记住这一章的一件事"的那个公式。小 batch 时 max 取权重读取，得到<strong>理论最小步时</strong>：</p>
+      $$T_\text{min}=\frac{B\cdot\text{KV 大小}+\text{参数大小}}{\text{总 HBM 带宽}},\qquad \text{吞吐上界}=\frac{B}{T_\text{min}}$$
+      <p>这里忽略了注意力本身的 FLOPs（它只占小头）、非矩阵运算、通信和"读与算不能完美重叠"等因素，所以它是下界；实际系统一般在它的 1.5 倍以内就算不错。</p>
+      <p>书里的一个小测：30B 稠密模型，int8 权重、bf16 计算，16 张 v5e，上下文 8192，每 token KV 100 kB。batch 4 时 \((4\times819\text{MB}+30\text{GB})/(16\times8.2\times10^{11})\approx2.5\) ms；batch 256 时 MLP 已经受算力限制，\(256\times819\text{MB}/(16\times8.2\times10^{11})+2\times256\times30\times10^9/(16\times1.97\times10^{14})\approx16+4.9\approx21\) ms。batch 扩大 64 倍，步时只涨 8 倍左右——这就是吞吐和延迟的交换。</p>
+
+      <h3>什么时候解码才受算力限制</h3>
+      <p>只看线性层：\(2BP/(NC)\ge Pb_w/(NW)\iff B\ge b_w C/(2W)\)，正是第 3 节的 \(B_\text{crit}\)，和芯片数无关——<strong>是每个模型副本的 batch</strong>，不是每张卡的。但注意 KV 那一项永远在：即使线性层进了算力区，步时里还有一块纯带宽的时间，所以<strong>整体 MFU 达不到 100%</strong>，上下文越长、KV 那块越大，MFU 天花板越低。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 300" role="img" aria-label="生成的 roofline 图">
+          <line x1="70" y1="250" x2="690" y2="250" stroke="var(--border)"/>
+          <line x1="70" y1="30" x2="70" y2="250" stroke="var(--border)"/>
+          <text x="380" y="285" text-anchor="middle" font-size="12" class="soft">算术强度（FLOPs / 字节，对数轴）</text>
+          <text x="22" y="140" font-size="12" class="soft" transform="rotate(-90 22 140)" text-anchor="middle">可达 FLOPs/s</text>
+          <!-- roofline: log axis 1..10000 mapped 70..690; intensity 240 at x = 70 + log10(240)/4*620 = 70+369=439 -->
+          <path d="M70 230 L439 60 L690 60" fill="none" stroke="var(--accent)" stroke-width="2.5"/>
+          <line x1="439" y1="60" x2="439" y2="250" stroke="var(--text-faint)" stroke-dasharray="4 4"/>
+          <text x="444" y="244" font-size="12" class="soft">C/W ≈ 240（v5e, bf16）</text>
+          <text x="560" y="52" font-size="12" class="soft">峰值算力 C</text>
+          <text x="140" y="175" font-size="12" class="soft" transform="rotate(-24.7 140 175)">斜率 = 带宽 W</text>
+          <g font-size="12">
+            <!-- decode attention ~ G=8 -> x=70+log10(8)/4*620=70+140=210; y on line: 230 - (210-70)/(369)*170 = 230-64.5=165.5 -->
+            <circle cx="210" cy="165.5" r="6" fill="var(--accent-2)"/>
+            <text x="218" y="190" class="soft">解码注意力 ≈ G</text>
+            <!-- decode MLP batch 32 -> x=70+log10(32)/4*620=70+233=303; y=230-(233/369)*170=230-107=123 -->
+            <circle cx="303" cy="123" r="6" fill="var(--accent-2)"/>
+            <text x="250" y="105" class="soft">解码 MLP, B=32</text>
+            <!-- prefill 4096 -> x=70+log10(4096)/4*620=70+560=630; y=60 -->
+            <circle cx="630" cy="60" r="6" fill="var(--c3)"/>
+            <text x="590" y="88" class="soft">预填充 T=4096</text>
+            <!-- decode B=1 -> x=70 ; y=230 -->
+            <circle cx="72" cy="229" r="6" fill="var(--accent-2)"/>
+            <text x="82" y="222" class="soft">B=1</text>
+          </g>
+        </svg>
+        <figcaption>图 3：生成的 roofline（v5e、bf16 权重，示意位置）。解码时线性层的强度约等于 batch，注意力的强度约等于 GQA 的组大小 G；只有预填充轻松越过拐点。</figcaption>
+      </figure>
+
+      <!-- ============================================================ -->
+      <h2 id="calc">7. 解码计算器</h2>
+      <p>下面这个计算器就是第 6 节的公式。选模型、硬件、精度、芯片数，拖 batch 和上下文，看每一步时间怎么分解、处在哪个区。左图是步时随 batch 变化（对数横轴），绿色底色是 MLP 受算力限制的区域，灰色是显存放不下的区域；右图是每芯片吞吐对每 token 延迟的帕累托曲线，沿曲线 batch 从 1 增大。</p>
+
+      <div class="demo" id="dec-demo">
+        <div class="demo-label">解码延迟 / 吞吐计算器</div>
+        <div class="row">
+          <span>模型</span>
+          <span class="seg" id="dc-model">
+            <button data-m="l70" aria-pressed="true">LLaMA-3-70B</button>
+            <button data-m="l8">LLaMA-3-8B</button>
+            <button data-m="l13">LLaMA-2-13B</button>
+          </span>
+        </div>
+        <div class="row">
+          <label>参数量（十亿） <input type="number" id="dc-P" step="0.1" min="0.1" value="70"></label>
+          <label>KV 元素 / 层 / token <input type="number" id="dc-kvel" min="1" value="2048"></label>
+          <label>层数 <input type="number" id="dc-L" min="1" value="80"></label>
+        </div>
+        <p class="sub" style="margin-top:0">"KV 元素 / 层 / token" 对 GQA 是 \(2KH\)（LLaMA-3-70B：2×8×128 = 2048）；想试 MLA 就填 \(d_c+d_R\)（例如 576）。</p>
+        <div class="row">
+          <span>硬件</span>
+          <span class="seg" id="dc-hw">
+            <button data-h="v5e" aria-pressed="true">TPU v5e</button>
+            <button data-h="h100">H100 SXM</button>
+            <button data-h="h200">H200</button>
+          </span>
+        </div>
+        <div class="row">
+          <label>bf16 TFLOP/s <input type="number" id="dc-C" min="1" value="197"></label>
+          <label>8-bit TFLOP/s <input type="number" id="dc-C8" min="1" value="394"></label>
+          <label>HBM TB/s <input type="number" id="dc-W" step="0.01" min="0.01" value="0.82"></label>
+          <label>HBM GB/卡 <input type="number" id="dc-M" min="1" value="16"></label>
+        </div>
+        <div class="row">
+          <span>芯片数</span>
+          <span class="seg" id="dc-N">
+            <button data-v="1">1</button><button data-v="2">2</button><button data-v="4">4</button><button data-v="8">8</button><button data-v="16" aria-pressed="true">16</button><button data-v="32">32</button><button data-v="64">64</button>
+          </span>
+        </div>
+        <div class="row">
+          <span>权重</span>
+          <span class="seg" id="dc-wd"><button data-v="2">bf16</button><button data-v="1" aria-pressed="true">8-bit</button><button data-v="0.5">4-bit</button></span>
+          <span>KV</span>
+          <span class="seg" id="dc-kd"><button data-v="2">bf16</button><button data-v="1" aria-pressed="true">8-bit</button></span>
+          <span>矩阵计算</span>
+          <span class="seg" id="dc-cd"><button data-v="16" aria-pressed="true">bf16</button><button data-v="8">8-bit</button></span>
+        </div>
+        <div class="ctrls">
+          <div class="ctrl"><span>batch（并发序列）</span><input type="range" id="dc-B" min="0" max="100" step="1" value="50"><output id="dc-Bo"></output></div>
+          <div class="ctrl"><span>上下文长度</span><input type="range" id="dc-S" min="9" max="17" step="0.25" value="13"><output id="dc-So"></output></div>
+        </div>
+        <div class="row" id="dc-regime"></div>
+        <div class="readout" id="dc-read"></div>
+        <div class="charts">
+          <div><svg id="dc-chart1" viewBox="0 0 360 240"></svg>
+            <div class="legend"><span><i style="background:var(--accent)"></i>权重读取</span><span><i style="background:var(--accent-2)"></i>KV 读取</span><span><i style="background:var(--c3)"></i>矩阵 FLOPs</span><span><i style="background:var(--text)"></i>步时</span></div></div>
+          <div><svg id="dc-chart2" viewBox="0 0 360 240"></svg>
+            <div class="legend"><span><i style="background:var(--accent)"></i>沿 batch 的帕累托曲线</span><span><i style="background:var(--accent-2)"></i>当前配置</span></div></div>
+        </div>
+        <p class="sub">模型：\(T=BSk/(NW)+\max(Pb_w/(NW),\,2BP/(NC))\)，假设权重与 KV 在 \(N\) 张卡上完全分片、读与算完美重叠、无通信开销，忽略注意力 FLOPs 和激活显存。显存只算参数 + KV。硬件数字是厂商标称峰值（v5e 取自 Scaling Book；H100/H200 取 NVIDIA 的稠密 bf16 / fp8 标称值），实际可达约为其 60–80%。</p>
+      </div>
+
+      <p>值得拖一拖的几个地方：</p>
+      <ul>
+        <li>默认配置（LLaMA-3-70B、int8 权重和 KV、16 张 v5e、batch 32、8k 上下文）给出约 8.6 ms/步，和书里 4×4 切片的 8.5 ms 一致。把芯片数改成 8，步时翻倍，每芯片吞吐不变——加卡只买延迟，不买单卡效率。</li>
+        <li>把上下文拉到 32k 以上，KV 那条线很快压过权重线，而显存上限让 batch 根本到不了绿区。这就是书里说的"LLaMA-3-70B 在几乎所有配置下都受 KV cache 带宽（和容量）限制"。</li>
+        <li>把权重换成 bf16：权重读取时间翻倍，\(B_\text{crit}\) 从 120 回到 240；把计算换成 8-bit：\(B_\text{crit}\) 翻倍，但只在 batch 很大时才有意义。</li>
+        <li>换到 H100：带宽是 v5e 的约 4 倍、显存 5 倍，同样 batch 的步时大幅下降，但 \(B_\text{crit}\) 也更大（\(C/W\) 更高），想吃满算力需要更大的 batch。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="shard">8. 推理的分片：为什么只剩张量并行</h2>
+      <h3>预填充：和训练几乎一样</h3>
+      <p>预填充是受算力限制的大矩阵乘，训练里能用的分片几乎都能用：先做张量（模型）并行，直到通信成为瓶颈（书里第 5 章推出的单轴界约为 \(F/2200\)，一般是 4–8 路）；再往上做序列并行（沿序列维切，注意力部分用 ring attention 之类的方式交换 KV），长上下文时它的额外通信相对较小。增加芯片换来更低的 TTFT，代价是通信开销、每卡吞吐略降。</p>
+      <h3>解码：FSDP 不行，数据并行没用，没有序列可切</h3>
+      <ul>
+        <li><strong>FSDP 不可行</strong>：解码本来就卡在"把权重从 HBM 读进计算单元"上。FSDP 要在每一步把权重通过芯片间互联（ICI / NVLink）AllGather 过来，而互联带宽比 HBM 低一个数量级以上。正确的做法是让权重和 KV 待在原地不动（weight-stationary），只搬小得多的激活。书里特别提到：训练完忘了关 FSDP 直接拿去推理，是导致数量级性能倒退的常见错误。</li>
+        <li><strong>数据并行没意义</strong>：它复制参数，并不能让每份参数读得更快。与其做模型内的数据并行，不如直接起多个独立的服务副本。</li>
+        <li><strong>没有序列维可切</strong>：每条序列每步只有 1 个 token。</li>
+      </ul>
+      <p>剩下的就是各种形式的<strong>张量并行</strong>：MLP 权重按隐藏维 \(F\) 切（Megatron 风格），激活在各卡复制；注意力的 \(W_Q, W_O\) 按头切，KV 投影很小，KV 头数不够切时直接复制往往更便宜。</p>
+      <h3>为了延迟，可以切得比训练更多</h3>
+      <p>训练里张量并行的上限来自"通信时间不能超过计算时间"。解码时我们本来就不受算力限制，受的是权重读取。所以要比较的是：每张卡读自己那份权重的时间 vs 每层的激活通信时间。对一个 \([D,F]\) 的矩阵，切 \(Y\) 路：</p>
+      $$T_\text{HBM}=\frac{2DF}{Y\,W_\text{hbm}},\qquad T_\text{ICI}\approx\frac{2BD}{W_\text{ici}}$$
+      <p>\(T_\text{ICI}\gt T_\text{HBM}\iff Y\gt F/(B\beta)\)，其中 \(\beta=W_\text{hbm}/W_\text{ici}\)，在 v5e/v6e 上约为 8。例如 \(F=16384\)、\(B=32\)，理论上可以切到 \(16384/(32\cdot8)=64\) 路而不明显损失吞吐。batch 越小，能切得越多——小 batch 的低延迟服务可以靠堆卡继续降延迟。</p>
+      <h3>KV cache 也要分片</h3>
+      <p>KV cache 是注意力时间的主要来源，绝不能复制。先按 KV 头切（Megatron 风格），但最多只能切 \(K\) 路（LLaMA-3 只有 8 个 KV 头，MQA 只有 1 个）；再多的卡就沿 batch 维切：缓存形状记为 \(\text{KV}[2, B_Z, S, K_Y, H]\)，完全分布。代价是每层注意力前后各一次 AllToAll：把按头切的 query 转成按 batch 切，算完注意力再转回来。这些通信作用在小小的激活上，换来的是不用搬巨大的、原地不动的 KV。上下文特别长、batch 又小时，还可以沿序列维切 KV：先 AllGather query，各卡算局部注意力，再像 FlashAttention 那样用 log-sum-exp 合并。</p>
+      <h3>两个细节</h3>
+      <ul>
+        <li><strong>延迟受限的集合通信</strong>：小 batch 时激活非常小，一次集合通信的耗时被每跳的固定开销（TPU 上约 1 μs 量级）主导，而不是带宽。书里的例子：8 路张量并行时缓冲区小于约 360 kB 就进入这个区，而 batch 16、\(D=8192\) 的 int8 激活只有 131 kB。</li>
+        <li><strong>2D 权重驻留分片</strong>（来自 <em>Efficiently Scaling Transformer Inference</em>）：权重同时沿 \(D\) 和 \(F\) 切成接近方形的块，通信量随总芯片数 \(\sqrt{N}\) 下降。书里推出在 \(F=4D\) 时芯片数超过约 72 就优于 1D 张量并行。</li>
+      </ul>
+      <p>MoE 顺带一提：每个 token 只激活 \(k\) 个专家，但要读的是被任何 token 选中的专家权重。书里的例子（\(E=16, k=2\)）中，参数多了 \(E\) 倍、FLOPs 只多 \(k\) 倍，所以受算力限制所需的 batch 要乘 \(E/k\)：v5e 上约 \(240\times8=1920\) 个 token。MoE 的解码比稠密模型更难吃满算力。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="engine">9. 推理引擎：分离、continuous batching、分页与前缀缓存</h2>
+      <p>上面讨论的是单次预填充和单步解码各自怎么做快。真实服务要把源源不断、长短不一的请求喂给这两个函数，在延迟-吞吐曲线上停在我们想要的位置。</p>
+      <h3>从最朴素的方案说起</h3>
+      <p>攒一批请求，一起做预填充，然后一起解码到全部结束，再处理下一批。问题很多：TTFT 被整批预填充拖慢；短的生成要等长的生成，batch 里越来越多空槽；预填充要 pad 到最长的 prompt，浪费算力；预填充和解码被迫用同一种分片（解码想要更多张量并行，预填充不需要）。</p>
+      <p>改进一步是<strong>交错（interleaved）</strong>：预填充一条一条做（单条就已经受算力限制），解码则把很多请求拼成 batch，一有空槽就插入新请求的预填充。这对离线批量生成很好，但在线服务有个问题：做某个用户的预填充时，所有正在解码的用户都要停下来等，生成速度变得一顿一顿的。</p>
+      <h3>预填充 / 解码分离（disaggregation）</h3>
+      <p>把两个阶段放到两组不同的芯片上：预填充服务器算出 KV cache，经网络发给解码服务器，后者把它插进自己的解码 batch。好处：</p>
+      <ul>
+        <li>一个用户的请求不会被另一个用户的预填充阻塞；两组服务器的数量可以按负载各自扩缩。</li>
+        <li>两边可以用各自最优的分片和拓扑；预填充服务器除了正在处理的那条，不用常驻 KV，空出的显存可以拿来做前缀缓存。</li>
+      </ul>
+      <p>代价是 KV cache 要过网络——又一个让 KV 变小的理由。DistServe、Splitwise 等系统在 GPU 上做了同样的事。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 200" role="img" aria-label="预填充解码分离">
+          <defs><marker id="ar3" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="var(--text-faint)"/></marker></defs>
+          <g font-size="13">
+            <rect x="20" y="70" width="90" height="56" rx="8" fill="var(--surface)" stroke="var(--border)"/>
+            <text x="65" y="95" text-anchor="middle">请求队列</text><text x="65" y="113" text-anchor="middle" font-size="11" class="faint">prompt</text>
+            <path d="M110 98 H160" stroke="var(--text-faint)" marker-end="url(#ar3)"/>
+            <rect x="165" y="30" width="180" height="136" rx="10" fill="color-mix(in srgb, var(--c3) 12%, transparent)" stroke="var(--c3)"/>
+            <text x="255" y="54" text-anchor="middle" font-weight="600">预填充池</text>
+            <text x="255" y="78" text-anchor="middle" font-size="12" class="soft">batch 1，受算力限制</text>
+            <text x="255" y="98" text-anchor="middle" font-size="12" class="soft">分片：TP + 序列并行</text>
+            <text x="255" y="118" text-anchor="middle" font-size="12" class="soft">空闲显存 → 前缀缓存</text>
+            <text x="255" y="148" text-anchor="middle" font-size="12" class="soft">产出：KV cache + 首 token</text>
+            <path d="M345 98 H425" stroke="var(--accent-2)" stroke-width="2" marker-end="url(#ar3)"/>
+            <text x="385" y="88" text-anchor="middle" font-size="11" class="soft">传输 KV</text>
+            <rect x="430" y="30" width="180" height="136" rx="10" fill="var(--accent-soft)" stroke="var(--accent)"/>
+            <text x="520" y="54" text-anchor="middle" font-weight="600">解码池</text>
+            <text x="520" y="78" text-anchor="middle" font-size="12" class="soft">大 batch，受带宽限制</text>
+            <text x="520" y="98" text-anchor="middle" font-size="12" class="soft">分片：更多路张量并行</text>
+            <text x="520" y="118" text-anchor="middle" font-size="12" class="soft">continuous batching</text>
+            <text x="520" y="148" text-anchor="middle" font-size="12" class="soft">产出：逐 token 流式输出</text>
+            <path d="M610 98 H660" stroke="var(--text-faint)" marker-end="url(#ar3)"/>
+            <text x="690" y="102" text-anchor="middle">用户</text>
+          </g>
+        </svg>
+        <figcaption>图 4：预填充 / 解码分离。两池的数量按"预填充速率 = 解码消耗速率"来配（第 12 节有一个算例）。</figcaption>
+      </figure>
+
+      <h3>continuous batching</h3>
+      <p>解决"短请求等长请求"的办法是以<strong>解码步</strong>为调度粒度（Orca 论文称为 iteration-level scheduling）。引擎编译两个函数：一个能处理变长 prompt、把结果插入 KV 缓冲区某个槽位的预填充；一个对当前所有活跃槽位各走一步的解码。调度器维护请求队列：每步之后，结束的序列立刻释放槽位，排队的请求立刻被预填充并插入。这样 batch 始终是满的，不用等最慢的那条。</p>
+      <p>和"交错"的问题相关，还有一种折中叫 <strong>chunked prefill</strong>（SARATHI）：把长 prompt 的预填充切成小块，每个解码步里顺带算一块，把预填充的算力"捎带"在受带宽限制的解码步上，同时避免长时间阻塞解码。它和分离是同一个问题的两种答案。</p>
+      <h3>PagedAttention：像操作系统一样管理 KV</h3>
+      <p>如果给每个槽位预留"最大上下文"长度的连续 KV 缓冲区，大部分请求根本用不到那么长，显存被大量浪费，batch 开不大；读取时如果也按最大长度读，还浪费带宽。第一步改进是"不规则读取"：注意力内核只读每条序列有效的那段。PagedAttention（vLLM）更进一步：把 KV 切成固定大小的块（比如每块 16 个 token），像虚拟内存的页一样按需分配，每条序列有一张<strong>块表</strong>把逻辑块映射到物理块。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 210" role="img" aria-label="PagedAttention 块表">
+          <g font-size="12">
+            <text x="20" y="22" font-weight="600" font-size="13">逻辑视图（每条序列连续）</text>
+            <text x="20" y="50" class="soft">序列 A</text>
+            <rect x="80" y="36" width="60" height="22" fill="var(--accent)" opacity=".8"/><rect x="142" y="36" width="60" height="22" fill="var(--accent)" opacity=".8"/><rect x="204" y="36" width="30" height="22" fill="var(--accent)" opacity=".8"/><rect x="234" y="36" width="30" height="22" fill="none" stroke="var(--accent)" stroke-dasharray="3 3"/>
+            <text x="20" y="84" class="soft">序列 B</text>
+            <rect x="80" y="70" width="60" height="22" fill="var(--accent-2)" opacity=".8"/><rect x="142" y="70" width="40" height="22" fill="var(--accent-2)" opacity=".8"/><rect x="182" y="70" width="20" height="22" fill="none" stroke="var(--accent-2)" stroke-dasharray="3 3"/>
+            <text x="80" y="112" class="faint">每格 = 一个块（如 16 token）</text><text x="80" y="128" class="faint">最后一块可能半满</text>
+            <text x="20" y="150" font-weight="600" font-size="13">块表</text>
+            <text x="20" y="172" class="mono soft">A: [7, 1, 4]</text>
+            <text x="20" y="192" class="mono soft">B: [2, 6]</text>
+            <text x="330" y="22" font-weight="600" font-size="13">物理 KV 池（不连续，按需分配）</text>
+          </g>
+          <g font-size="12">
+            <!-- 8 physical blocks in 2 rows -->
+            <g transform="translate(330,40)">
+              <rect x="0" y="0" width="84" height="40" fill="var(--bg-soft)" stroke="var(--border)"/><text x="6" y="14" class="faint">0</text>
+              <rect x="90" y="0" width="84" height="40" fill="var(--accent)" opacity=".8"/><text x="96" y="14" fill="#fff">1 · A₂</text>
+              <rect x="180" y="0" width="84" height="40" fill="var(--accent-2)" opacity=".8"/><text x="186" y="14" fill="#fff">2 · B₁</text>
+              <rect x="270" y="0" width="84" height="40" fill="var(--bg-soft)" stroke="var(--border)"/><text x="276" y="14" class="faint">3</text>
+              <rect x="0" y="50" width="42" height="40" fill="var(--accent)" opacity=".8"/><rect x="42" y="50" width="42" height="40" fill="none" stroke="var(--border)"/><text x="6" y="64" fill="#fff">4 · A₃</text>
+              <rect x="90" y="50" width="84" height="40" fill="var(--bg-soft)" stroke="var(--border)"/><text x="96" y="64" class="faint">5</text>
+              <rect x="180" y="50" width="56" height="40" fill="var(--accent-2)" opacity=".8"/><rect x="236" y="50" width="28" height="40" fill="none" stroke="var(--border)"/><text x="186" y="64" fill="#fff">6 · B₂</text>
+              <rect x="270" y="50" width="84" height="40" fill="var(--accent)" opacity=".8"/><text x="276" y="64" fill="#fff">7 · A₁</text>
+            </g>
+            <text x="330" y="160" class="soft">浪费只发生在每条序列最后一块的空位里；</text>
+            <text x="330" y="180" class="soft">共享前缀的两条序列可以让块表指向同一物理块（引用计数，</text>
+            <text x="330" y="200" class="soft">写时复制），并行采样、beam search 和前缀缓存都受益。</text>
+          </g>
+        </svg>
+        <figcaption>图 5：PagedAttention 的块表。注意力内核按块表间接寻址读取 KV。</figcaption>
+      </figure>
+
+      <p>这样每条序列只占用它实际需要的显存（浪费最多是最后一块没填满的部分），而且多条序列可以共享物理块（引用计数 + 写时复制），并行采样多个回答时共享 prompt 的 KV 不用复制。vLLM 论文报告在相同延迟下吞吐比 FasterTransformer、Orca 等系统高 2–4 倍。代价是实现复杂度：内核要按块表做间接寻址。它是纯运行时的优化，与模型架构无关。</p>
+      <h3>前缀缓存</h3>
+      <p>预填充受算力限制、很贵，最好的优化是少做。两个 prompt 只要前缀相同，那段前缀的 KV 就完全相同（因果注意力，前面的位置看不到后面）。于是：</p>
+      <ul>
+        <li><strong>多轮对话</strong>：每一轮都是在上一轮后面追加。保存上一轮的 KV，新一轮只需预填充新增的 token。</li>
+        <li><strong>系统提示 / few-shot 示例</strong>：大量请求共用同一段开头，算一次、反复用。</li>
+      </ul>
+      <p>实现上，缓存的 KV 很自然地组织成一棵按 token 序列索引的前缀树（trie），共享前缀共享节点，按 LRU 淘汰。难点在容量：KV 动辄几 GB，要等到下一轮请求到来才有用。常见做法是用预填充服务器上空闲的 HBM，再加上主机内存（书里的例子：8 张 v5e 的主机有 128 GiB HBM，但主机 DRAM 约 450 GiB）——主机内存对解码来说太慢，但对"读回一份缓存"足够。另外 KV 只存在处理过初始请求的那组卡上，所以需要<strong>亲和路由</strong>把同一会话的后续请求送回同一副本，这会和负载均衡冲突。KV 越小，能缓存的会话越多、读回越快——又是那个主题。</p>
+      <p>书里还介绍了 Google 开源的 JetStream：一组"预填充引擎"和"解码引擎"（通常在不同的 TPU 切片上）由一个控制器编排；预填充线程、解码线程和负责把 KV 从预填充切片复制到解码切片的传输线程各司其职。引擎接口只有三个方法：<code>prefill</code>（输入 token，产出 KV cache）、<code>insert</code>（把一份 KV 插入解码 batch）、<code>generate</code>（对 batch 里每条序列各生成一个 token 并追加其 KV）。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="spec">10. 投机解码</h2>
+      <p>解码受带宽限制，意味着在小 batch 时芯片的算力大量闲置：把 1 个 token 和把 5 个 token 送过模型，要读的权重是一样的，时间几乎相同。投机解码就利用这一点：用一个便宜的<strong>草稿模型</strong>先猜 \(k\) 个 token，再让大模型（目标模型）一次前向同时验证这 \(k\) 个位置。</p>
+      <h3>贪心版本</h3>
+      <ol>
+        <li>草稿模型贪心生成 \(k\) 个 token \(\tilde x_1,\dots,\tilde x_k\)。</li>
+        <li>目标模型对"前缀 + 这 \(k\) 个 token"跑一次前向，得到 \(k+1\) 个位置的 logits。</li>
+        <li>从左往右检查：第 \(i\) 个草稿 token 是不是目标模型在该位置的 argmax。找到第一个不一致的位置，前面都接受，这个位置换成目标模型的 argmax；如果全部一致，再用最后一个位置的 logits 免费多出一个 token。</li>
+      </ol>
+      <p>输出和直接用目标模型贪心解码完全一样，只是一次验证可能前进多个 token。</p>
+
+      <figure class="fig">
+        <svg viewBox="0 0 720 150" role="img" aria-label="投机解码一次验证">
+          <g font-size="13">
+            <text x="20" y="22" font-weight="600">一次验证（k = 5）</text>
+            <text x="20" y="58" class="soft">草稿</text>
+            <g transform="translate(80,40)">
+              <rect x="0" width="70" height="28" rx="5" fill="var(--c3)" opacity=".8"/><text x="35" y="19" text-anchor="middle" fill="#fff">x̃₁ ✓</text>
+              <rect x="78" width="70" height="28" rx="5" fill="var(--c3)" opacity=".8"/><text x="113" y="19" text-anchor="middle" fill="#fff">x̃₂ ✓</text>
+              <rect x="156" width="70" height="28" rx="5" fill="var(--c3)" opacity=".8"/><text x="191" y="19" text-anchor="middle" fill="#fff">x̃₃ ✓</text>
+              <rect x="234" width="70" height="28" rx="5" fill="var(--accent-2)" opacity=".85"/><text x="269" y="19" text-anchor="middle" fill="#fff">x̃₄ ✗</text>
+              <rect x="312" width="70" height="28" rx="5" fill="none" stroke="var(--border)" stroke-dasharray="4 3"/><text x="347" y="19" text-anchor="middle" class="faint">x̃₅</text>
+            </g>
+            <text x="20" y="108" class="soft">输出</text>
+            <g transform="translate(80,90)">
+              <rect x="0" width="70" height="28" rx="5" fill="var(--accent)" opacity=".85"/><text x="35" y="19" text-anchor="middle" fill="#fff">x̃₁</text>
+              <rect x="78" width="70" height="28" rx="5" fill="var(--accent)" opacity=".85"/><text x="113" y="19" text-anchor="middle" fill="#fff">x̃₂</text>
+              <rect x="156" width="70" height="28" rx="5" fill="var(--accent)" opacity=".85"/><text x="191" y="19" text-anchor="middle" fill="#fff">x̃₃</text>
+              <rect x="234" width="70" height="28" rx="5" fill="var(--accent)" stroke="var(--accent-2)" stroke-width="2"/><text x="269" y="19" text-anchor="middle" fill="#fff">修正</text>
+            </g>
+            <text x="480" y="62" class="soft" font-size="12">目标模型一次前向给出 6 个位置的分布</text>
+            <text x="480" y="84" class="soft" font-size="12">第 4 个被拒：丢弃 x̃₄、x̃₅，</text>
+            <text x="480" y="106" class="soft" font-size="12">在第 4 位从修正分布重采样</text>
+            <text x="480" y="128" class="soft" font-size="12">本次前进 4 个 token</text>
+          </g>
+        </svg>
+        <figcaption>图 6：一次验证产生"接受的前缀 + 1 个修正或奖励 token"。</figcaption>
+      </figure>
+
+      <h3>采样版本：修正的拒绝采样</h3>
+      <p>非贪心时要保证输出分布严格等于目标模型的分布 \(p\)。设草稿模型在该位置的分布是 \(q\)，草稿 token \(x\sim q\)。Leviathan et al. 和 Chen et al. 同时给出了做法：</p>
+      <ul>
+        <li>以概率 \(\min\!\big(1, p(x)/q(x)\big)\) 接受 \(x\)；</li>
+        <li>否则拒绝，并从修正分布 \(p'(x)=\dfrac{\max(0,\,p(x)-q(x))}{\sum_y \max(0,\,p(y)-q(y))}\) 重新采一个。</li>
+      </ul>
+      <p>证明只需一行。接受的总概率 \(\beta=\sum_x q(x)\min(1,p(x)/q(x))=\sum_x\min(p(x),q(x))\)，拒绝概率 \(1-\beta=\sum_x\big(p(x)-\min(p,q)\big)=\sum_x\max(0,p(x)-q(x))\)。于是输出 \(x\) 的概率是</p>
+      $$\underbrace{\min(p(x),q(x))}_{\text{直接接受}}+\underbrace{(1-\beta)\cdot\frac{\max(0,p(x)-q(x))}{1-\beta}}_{\text{拒绝后重采}}=\min(p,q)+\max(0,p-q)=p(x).$$
+      <p>所以 \(\alpha=\mathbb{E}[\beta]=\mathbb{E}\big[\sum_x\min(p,q)\big]=1-\mathbb{E}[\text{TV}(p,q)]\) 就是草稿和目标"有多像"的度量。贪心是它的特例。</p>
+
+      <h3>每次验证期望前进几个 token</h3>
+      <p>做一个简化假设：每个草稿 token 被接受的概率都是 \(\alpha\)，彼此独立。一次验证产生的 token 数 \(N\)：若第一个被拒的是第 \(i\) 个（\(1\le i\le k\)），产生 \(i\) 个（\(i-1\) 个接受 + 1 个修正）；若全部接受，产生 \(k+1\) 个。所以 \(P(N\ge n)=\alpha^{n-1}\)（前 \(n-1\) 个都被接受），\(n=1,\dots,k+1\)。用 \(\mathbb{E}[N]=\sum_{n\ge1}P(N\ge n)\)：</p>
+      $$\mathbb{E}[N]=\sum_{n=1}^{k+1}\alpha^{n-1}=\frac{1-\alpha^{k+1}}{1-\alpha}$$
+      <p>这是一个截断几何分布，\(k\to\infty\) 时趋于 \(1/(1-\alpha)\)。例如 \(\alpha=0.8\)、\(k=4\) 时 \(\mathbb{E}[N]=(1-0.8^5)/0.2\approx3.36\)。</p>
+      <p>时间上，每次验证要跑 \(k\) 次草稿模型和 1 次目标模型。记草稿一次前向与目标一次前向的耗时比为 \(c\)，并假设目标模型验证 \(k+1\) 个 token 的耗时约等于普通解码一步（受带宽限制时成立），则期望加速比为</p>
+      $$\text{加速比}=\frac{1-\alpha^{k+1}}{(1-\alpha)(kc+1)}$$
+      <p>它在 \(k\) 上有一个最优值：\(k\) 太小浪费了验证的并行度，太大时后面的草稿 token 几乎总被拒，草稿的成本白付。代价是总 FLOPs 增加——每次验证目标模型都算了 \(k+1\) 个位置，平均只留下 \(\mathbb{E}[N]\) 个。</p>
+      <div class="callout">
+        <p><strong>什么时候划算</strong>：投机解码用多余的算力换延迟。小 batch、受带宽限制时，验证多几个 token 几乎免费，是净赚；batch 已经大到线性层受算力限制时，多验证的 token 要实打实地花 FLOPs，收益就消失甚至为负。另外它在长上下文时还能省 KV 读取：一次读 KV 服务多个 token。书里引用 Chinchilla 70B + 4B 草稿模型的实验：自然语言摘要（XSum）上最优的前瞻是 3–4 个 token，代码（HumanEval）更可预测，可以猜得更激进。</p>
+      </div>
+      <p>草稿从哪里来：可以是同系列的小模型（最好蒸馏过），也可以是 n-gram 或从上下文里查找匹配；也可以把草稿器做进主模型里，例如在主模型后几层加几个额外的预测头（Medusa、EAGLE 一类），它们共享大部分参数，跑得快、分布也更接近。</p>
+
+      <div class="demo" id="spec-demo">
+        <div class="demo-label">投机解码：期望接受长度与蒙特卡洛</div>
+        <div class="ctrls">
+          <div class="ctrl"><span>草稿长度 k</span><input type="range" id="sp-k" min="1" max="12" step="1" value="4"><output id="sp-ko"></output></div>
+          <div class="ctrl"><span>接受率 α</span><input type="range" id="sp-a" min="0" max="0.98" step="0.01" value="0.8"><output id="sp-ao"></output></div>
+          <div class="ctrl"><span>草稿/目标耗时比 c</span><input type="range" id="sp-c" min="0" max="0.5" step="0.01" value="0.05"><output id="sp-co"></output></div>
+        </div>
+        <div class="readout" id="sp-read"></div>
+        <div class="charts">
+          <div><svg id="sp-chart" viewBox="0 0 360 220"></svg>
+            <div class="legend"><span><i style="background:var(--accent)"></i>E[N]</span><span><i style="background:var(--accent-2)"></i>加速比</span></div></div>
+          <div>
+            <div class="row"><button class="btn primary" id="sp-run">模拟 2000 次验证</button><span id="sp-mc" class="sub" style="margin:0"></span></div>
+            <div class="hist" id="sp-hist"></div>
+            <div class="hist-x" id="sp-hx"></div>
+            <div class="legend"><span><i style="background:var(--accent)"></i>模拟频率</span><span><i style="background:var(--accent-2)"></i>理论 P(N=n)</span></div>
+          </div>
+        </div>
+        <div class="grp">
+          <div class="grp-title">拒绝采样确实不改变分布（玩具分布，6 个 token，数字是编的）</div>
+          <div class="ctrls">
+            <div class="ctrl"><span>草稿与目标的差异</span><input type="range" id="rs-t" min="0" max="1" step="0.05" value="0.5"><output id="rs-to"></output></div>
+          </div>
+          <div class="row"><button class="btn" id="rs-run">采 20000 个 token</button><span id="rs-info" class="sub" style="margin:0"></span></div>
+          <div class="hist" id="rs-hist"></div>
+          <div class="hist-x" id="rs-hx"></div>
+          <div class="legend"><span><i style="background:var(--accent)"></i>投机采样得到的频率</span><span><i style="background:var(--accent-2)"></i>目标分布 p</span><span><i style="background:var(--text-faint)"></i>草稿分布 q（灰点）</span></div>
+        </div>
+        <p class="sub">上半部分用 i.i.d. 接受率模型：每次验证从左到右以概率 α 接受每个草稿 token。下半部分做真实的修正拒绝采样：q 是 p 与一个错位分布的混合，滑块控制混合比例；理论接受率 \(\alpha=\sum\min(p,q)\)。</p>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="quant">11. 量化：权重与 KV</h2>
+      <p>推理对参数和 KV 的精度通常没有训练那么敏感，而且量化可以在训练后直接做。按第 6 节的公式，它影响三件事：</p>
+      <ol>
+        <li><strong>权重量化</strong>（int8 / fp8 / int4）：参数字节数 \(Pb_w\) 减半或减到四分之一。小 batch 时步时几乎就是权重读取时间，<strong>延迟直接按比例下降</strong>；参数占的显存变少，KV 可用的空间变多，batch 能开更大；同时 \(B_\text{crit}=b_wC/(2W)\) 下降，更小的 batch 就能进入算力区。书里 PaLM 的帕累托图显示：int8 权重带来更好的延迟-吞吐前沿，但并不提高最大吞吐——在算力区，速度由 FLOPs 决定，和权重存成什么无关。</li>
+        <li><strong>低精度计算</strong>（W8A8：权重和激活都是 int8 / fp8，用 8-bit 张量核心）：\(C\) 翻倍（v5e int8 394 TOPS，H100 fp8 约 1979 TFLOPs 稠密），提高的是算力区的速度，也就是最大吞吐和预填充速度；\(B_\text{crit}\) 随之回升。权重 int8 + bf16 计算是更常见的组合，因为无损地量化权重比做低精度算术容易得多。</li>
+        <li><strong>KV 量化</strong>（int8 / fp8）：\(T_\text{KV}\) 减半，同样显存能放两倍的序列。长上下文时 KV 才是大头，这一项往往比权重量化更值。</li>
+      </ol>
+      <p>实现上，量化就是 \(x\approx s\cdot\text{round}(x/s)\)，关键在缩放因子 \(s\) 的粒度：权重常按输出通道或按每 64/128 个元素一组取 \(s\)（int4 必须分组，否则离群值会吃掉精度）；KV 常按头、按 token 取 \(s\)。反量化在内核里和矩阵乘融合，所以带宽节省是真实的。int4 这类激进量化一般需要 GPTQ、AWQ 之类利用校准数据的方法来控制误差。在上面的计算器里切换"权重 / KV / 矩阵计算"三个精度，就能看到这三种效果分别作用在哪条线上。</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>做法</th><th>权重读取</th><th>KV 读取</th><th>算力区速度</th><th>B_crit（v5e）</th></tr></thead>
+          <tbody>
+            <tr><td>bf16 权重，bf16 计算</td><td>1×</td><td>—</td><td>1×</td><td class="num">240</td></tr>
+            <tr><td>int8 权重，bf16 计算</td><td>½</td><td>—</td><td>1×</td><td class="num">120</td></tr>
+            <tr><td>int8 权重，int8 计算</td><td>½</td><td>—</td><td>2×</td><td class="num">240</td></tr>
+            <tr><td>int4 权重，bf16 计算</td><td>¼</td><td>—</td><td>1×</td><td class="num">60</td></tr>
+            <tr><td>int8 / fp8 KV</td><td>—</td><td>½</td><td>—</td><td>—</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- ============================================================ -->
+      <h2 id="llama">12. 实例：在 TPU v5e 上服务 LLaMA-3-70B</h2>
+      <p>最后用书第 8 章的例子把账算一遍。LLaMA-3-70B：\(L=80\)、\(D=8192\)、\(F=28672\)、\(N=64\)、\(K=8\)、\(H=128\)、\(V=128256\)（与 Hugging Face 配置一致）。硬件选 TPU v5e，理由是每美元的 FLOPs 最多：书里按 2025 年 2 月的 Google Cloud 价格，H100 约 \(3.3\times10^{17}\)、v5p 约 \(3.9\times10^{17}\)、v5e 约 \(5.8\times10^{17}\) FLOPs/美元。代价是每张 v5e 只有 16 GB HBM，必须切得很碎。</p>
+      <h3>KV 有多大</h3>
+      <p>int8 下每 token \(2\cdot K\cdot H\cdot L=2\cdot8\cdot128\cdot80=163{,}840\) 字节（书里记作 160 kB，下面沿用书的取整）。一条 32k 的序列约 5.3 GB；batch 240 就是 1.3 TB，光装下这些就要约 \((70\text{GB}+1.3\text{TB})/16\text{GB}\approx86\) 张 v5e——比 70 GB 的参数大得多。</p>
+      <h3>batch 32、上下文 8k、全 int8</h3>
+      <p>KV 总量 \(160\text{kB}\times8192\times32\approx41.9\) GB，加上 70 GB 参数共约 112 GB，最少要 7 张卡，取偶数拓扑就是 4×2（8 张），会很紧，算上其他开销可能得 4×4。</p>
+      <p>步时：int8 权重 + bf16 计算，\(B_\text{crit}\approx120\)，batch 32 远在带宽区。所以 \(T\approx112\text{GB}/(8\times8.2\times10^{11})\approx17\) ms，吞吐 \(32/0.017\approx1882\) token/s，即每芯片约 235 token/s。还要检查张量并行有没有撞上通信界：用两个轴做模型并行，界约为 \(2F/2200\approx26\) 路，8 路没问题。换成 4×4：通信仍然不是瓶颈，步时减半到约 8.5 ms，每芯片吞吐不变。</p>
+      <h3>最小拓扑与最大 batch</h3>
+      <p>如果不在乎 batch，能装下参数就行。8k 上下文下：</p>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>精度</th><th class="num">参数</th><th class="num">KV / token</th><th>最小切片</th><th class="num">剩余给 KV</th><th class="num">8k 序列数</th></tr></thead>
+          <tbody>
+            <tr><td>bf16</td><td class="num">140 GB</td><td class="num">324 kB</td><td>4×4 = 16 卡</td><td class="num">116 GB</td><td class="num">43</td></tr>
+            <tr><td>int8</td><td class="num">70 GB</td><td class="num">162 kB</td><td>4×2 = 8 卡</td><td class="num">58 GB</td><td class="num">43</td></tr>
+            <tr><td>int4</td><td class="num">35 GB</td><td class="num">81 kB</td><td>2×2 = 4 卡</td><td class="num">29 GB</td><td class="num">43</td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>（表中数字照录书中；按 163,840 字节精算差别在 1% 量级。）70B 模型能塞进 4 张 v5e，但 batch 只有 43，算力利用率很差。用满显存时，每步就是"把一整张卡的 HBM 读一遍"：\(16\text{GB}/8.2\times10^{11}\approx19\) ms。若中位生成长度 512，一次解码约 9.7 s，每芯片吞吐约 \(43/(0.019\times512\times N)\)：bf16 / int8 / int4 分别约 0.27 / 0.55 / 1.11 QPS/芯片。把拓扑各翻一倍，KV 空间多出来，batch 变大（bf16 在 4×8 上能到 140），步时不变，吞吐变成约 0.44 / 0.90 / 1.80。<strong>结论：受 KV 容量限制时，最小的拓扑不是最划算的拓扑。</strong></p>
+      <h3>分片能切多宽</h3>
+      <p>bf16 在 4×8 上能不能纯张量并行？按受算力限制的界 \(Y\gt F\cdot M_Y/2200\)（\(M_Y\) 是用于模型并行的轴数），两轴约 26 路，所以 4×4 可以、4×8 不行。但解码受带宽限制时可以放宽到 \(Y\approx F/(8B)\)：batch 64 时约 56 路。核对一下单个矩阵乘在 4×8 上的三个时间：\(T_\text{ICI}=2\cdot64\cdot8192/9\times10^{10}\approx11\) μs，\(T_\text{HBM}=2\cdot8192\cdot28672/(32\cdot8.2\times10^{11})\approx18\) μs，\(T_\text{math}\approx4\) μs——仍然受 HBM 带宽限制，可以用 4×8 换更低的延迟。int8、int4 配置则更轻松。量化在这里多了一个好处：在撞上通信界之前能开更大的 batch。</p>
+      <h3>预填充与两池配比</h3>
+      <p>8192 token 的预填充在 16 张 v5e 上、40% MFU：\(2\cdot70\times10^9\cdot8192/(16\cdot1.97\times10^{14}\cdot0.4)\approx0.91\) s。比起十几毫秒的解码步，这相当可观。</p>
+      <p>中位 prompt 8192、中位生成 4096、batch 32 时，平均每步有 \(32/4096\) 条序列结束，每步被淘汰的 KV 约 \(B(P+G)/G=32\times12288/4096=96\) 个 token。</p>
+      <p>分离式部署时，预填充池的产出速率是 \(P_\text{srv}/0.91\) 条/秒，解码池的消耗速率是 \(B\cdot G_\text{srv}/(0.019\times512)\)。取 batch 32、生成长度 512，令两者相等得 \(P_\text{srv}\approx3G_\text{srv}\)：长 prompt、短回答的负载需要三倍于解码的预填充服务器。</p>
+      <h3>延迟-吞吐前沿</h3>
+      <p>书里画了 int8 权重、16 路张量并行（4×4）时的前沿：每 token 延迟从小 batch 的约 5.5 ms 到大 batch 的约 20 ms，延迟翻倍左右就能换来每 token 成本约 100 倍的下降。2k 上下文时吞吐在 batch 120 附近饱和于约 1 token/ms/芯片；上下文更长时 batch 装不下，永远到不了饱和点。在所有超过 2048 的上下文长度下，KV 读取时间都超过 FLOPs 时间。上面的计算器可以复现这张图：选 LLaMA-3-70B、TPU v5e、16 卡、8-bit 权重，拖动上下文看右侧曲线。</p>
+
+      <!-- ============================================================ -->
+      <h2 id="sum">13. 小结</h2>
+      <ul>
+        <li>推理 = 预填充（像训练，受算力限制，优化 MFU 和 TTFT）+ 解码（串行，受带宽限制，优化每步字节数）。</li>
+        <li>解码一步的下界：\(\big(B\cdot\text{KV}+\text{参数}\big)/\text{总带宽}\)；线性层要 batch 超过 \(B_\text{crit}=b_wC/(2W)\)（v5e bf16 为 240）才进入算力区，注意力永远不会。</li>
+        <li>batch 是吞吐和延迟之间的旋钮；芯片数在带宽区买的是延迟，不是单卡效率；受 KV 容量限制时，加卡也能换来更大 batch 和更高单卡吞吐。</li>
+        <li>KV cache 是推理特有的主角：GQA / MQA / MLA / 局部注意力缩小它，量化压缩它，PagedAttention 不浪费它，前缀缓存复用它，分离式部署要传输它。</li>
+        <li>解码分片只剩张量并行（加上 KV 按头再按 batch 切）；FSDP 和数据并行在解码时没有意义。</li>
+        <li>投机解码用闲置算力换延迟，每次验证期望前进 \((1-\alpha^{k+1})/(1-\alpha)\) 个 token，在小 batch 时划算。</li>
+      </ul>
+
+      <!-- ============================================================ -->
+      <h2 id="ref">参考</h2>
+      <ul>
+        <li>Austin et al., <em>How To Scale Your Model</em>, Google DeepMind, 2025：<a href="https://jax-ml.github.io/scaling-book/inference/">Part 7. All About Transformer Inference</a>（<a href="https://jax-ml.github.io/scaling-book/inference/#linear-operations-what-bottlenecks-us">线性层</a>、<a href="https://jax-ml.github.io/scaling-book/inference/#what-about-attention">注意力</a>、<a href="https://jax-ml.github.io/scaling-book/inference/#theoretical-estimates-for-llm-latency-and-throughput">延迟与吞吐估计</a>、<a href="https://jax-ml.github.io/scaling-book/inference/#tricks-for-improving-generation-throughput-and-latency">KV 技巧</a>、<a href="https://jax-ml.github.io/scaling-book/inference/#distributing-inference-over-multiple-accelerators">分片</a>、<a href="https://jax-ml.github.io/scaling-book/inference/#designing-an-effective-inference-engine">推理引擎</a>、<a href="https://jax-ml.github.io/scaling-book/inference/#appendix-d-speculative-sampling">投机采样</a>）；<a href="https://jax-ml.github.io/scaling-book/applied-inference/">Part 8. Serving LLaMA 3-70B on TPUs</a>；<a href="https://jax-ml.github.io/scaling-book/transformers/#key-value-kv-caching">Part 4 的 KV caching 一节</a>。</li>
+        <li>DeepSeek-AI, <a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>（MLA，§2.1）；模型配置见 Hugging Face 上 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V3/blob/main/config.json">DeepSeek-V3</a> 与 <a href="https://huggingface.co/deepseek-ai/DeepSeek-V2/blob/main/config.json">DeepSeek-V2</a> 的 config.json。</li>
+        <li>Shazeer, <a href="https://arxiv.org/abs/1911.02150">Fast Transformer Decoding: One Write-Head is All You Need</a>（MQA）；Ainslie et al., <a href="https://arxiv.org/abs/2305.13245">GQA</a>。</li>
+        <li>Pope et al., <a href="https://arxiv.org/abs/2211.05102">Efficiently Scaling Transformer Inference</a>（2D 权重驻留分片、PaLM 推理前沿）。</li>
+        <li>Kwon et al., <a href="https://arxiv.org/abs/2309.06180">Efficient Memory Management for LLM Serving with PagedAttention</a>（vLLM）。</li>
+        <li>Agrawal et al., <a href="https://arxiv.org/abs/2308.16369">SARATHI</a>（chunked prefill）；Zhong et al., <a href="https://arxiv.org/abs/2401.09670">DistServe</a>；Patel et al., <a href="https://arxiv.org/abs/2311.18677">Splitwise</a>（预填充/解码分离）。</li>
+        <li>Leviathan et al., <a href="https://arxiv.org/abs/2211.17192">Fast Inference from Transformers via Speculative Decoding</a>（期望 token 数与加速比公式）；Chen et al., <a href="https://arxiv.org/abs/2302.01318">Accelerating LLM Decoding with Speculative Sampling</a>；Cai et al., <a href="https://arxiv.org/abs/2401.10774">Medusa</a>；Li et al., <a href="https://arxiv.org/abs/2401.15077">EAGLE</a>。</li>
+        <li><a href="https://github.com/AI-Hypercomputer/JetStream">JetStream</a>（Google 的 TPU 推理引擎）。</li>
+      </ul>
+    </article>
+
+    <nav class="series-pager" data-series="scaling"></nav>
+  </main>
+
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+
+  <script src="/assets/series.js"></script>
+  <script>
+  (() => {
+    const $ = (id) => document.getElementById(id);
+    const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+    const fmtB = (b) => {
+      const u = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+      let i = 0; while (b >= 1000 && i < u.length - 1) { b /= 1000; i++; }
+      return (b >= 100 ? b.toFixed(0) : b >= 10 ? b.toFixed(1) : b.toFixed(2)) + ' ' + u[i];
+    };
+    const fmtTok = (n) => n >= 1024 ? (n / 1024).toFixed(n % 1024 ? 1 : 0) + 'k' : String(n);
+    const fmtMs = (s) => { const ms = s * 1e3; return ms >= 100 ? ms.toFixed(0) : ms >= 10 ? ms.toFixed(1) : ms.toFixed(2); };
+    const fmtN = (x) => x >= 1e6 ? (x / 1e6).toFixed(2) + 'M' : x >= 1e4 ? (x / 1e3).toFixed(1) + 'k' : x >= 100 ? x.toFixed(0) : x.toFixed(1);
+    function seg(id, cb) {
+      const el = $(id);
+      el.addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return;
+        el.querySelectorAll('button').forEach((x) => x.setAttribute('aria-pressed', x === b));
+        cb(b);
+      });
+      return () => el.querySelector('[aria-pressed="true"]');
+    }
+
+    /* ---------------- KV cache calculator ---------------- */
+    const KVP = {
+      l70: { L: 80, N: 64, H: 128, K: 8, dc: 512, dr: 64 },
+      dsv3: { L: 61, N: 128, H: 128, K: 8, dc: 512, dr: 64 },
+      l13: { L: 40, N: 40, H: 128, K: 8, dc: 512, dr: 64 },
+    };
+    let kvBytes = 2;
+    seg('kv-preset', (b) => { const p = KVP[b.dataset.p]; for (const k in p) $('kv-' + k).value = p[k]; kvUpdate(); });
+    seg('kv-dt', (b) => { kvBytes = +b.dataset.b; kvUpdate(); });
+    ['kv-L', 'kv-N', 'kv-H', 'kv-K', 'kv-dc', 'kv-dr', 'kv-S', 'kv-B'].forEach((id) => $(id).addEventListener('input', kvUpdate));
+    function kvUpdate() {
+      const L = +$('kv-L').value || 1, N = +$('kv-N').value || 1, H = +$('kv-H').value || 1;
+      const K = Math.min(+$('kv-K').value || 1, N), dc = +$('kv-dc').value || 0, dr = +$('kv-dr').value || 0;
+      const S = Math.round(Math.pow(2, +$('kv-S').value)), B = Math.pow(2, +$('kv-B').value);
+      $('kv-So').textContent = fmtTok(S); $('kv-Bo').textContent = B;
+      const rows = [
+        ['MHA', 2 * N * H, 'K=' + N],
+        ['GQA', 2 * K * H, 'K=' + K],
+        ['MQA', 2 * H, 'K=1'],
+        ['MLA', dc + dr, 'd_c+d_R'],
+      ];
+      const mha = rows[0][1];
+      $('kv-bars').innerHTML = rows.map(([n, el, note]) => {
+        const per = el * L * kvBytes;
+        const w = Math.max(0.4, 100 * el / mha);
+        return '<div class="kvbar' + (n === 'MLA' ? ' mla' : '') + '"><span>' + n + '</span><div><div class="track"><div class="fill" style="width:' + w + '%"></div></div>' +
+          '<div class="lab">' + fmtB(per) + '/token · 总计 ' + fmtB(per * S * B) + ' · ' + (100 * el / mha).toFixed(el / mha < 0.1 ? 2 : 1) + '%（' + note + '）</div></div></div>';
+      }).join('');
+      const gqa = 2 * K * H * L * kvBytes, mla = (dc + dr) * L * kvBytes;
+      $('kv-read').innerHTML =
+        '<div><span class="k">GQA 每条序列</span><span class="v">' + fmtB(gqa * S) + '</span></div>' +
+        '<div><span class="k">MLA 每条序列</span><span class="v">' + fmtB(mla * S) + '</span></div>' +
+        '<div><span class="k">MLA 等效 GQA 组数</span><span class="v">' + ((dc + dr) / (2 * H)).toFixed(2) + '</span></div>' +
+        '<div><span class="k">MHA / MLA</span><span class="v">' + (mha / Math.max(1, dc + dr)).toFixed(1) + '×</span></div>';
+    }
+    kvUpdate();
+
+    /* ---------------- Decode calculator ---------------- */
+    const MODELS = {
+      l70: { P: 70, kvel: 2 * 8 * 128, L: 80 },
+      l8: { P: 8.0, kvel: 2 * 8 * 128, L: 32 },
+      l13: { P: 13, kvel: 2 * 40 * 128, L: 40 },
+    };
+    const HW = {
+      v5e: { C: 197, C8: 394, W: 0.82, M: 16 },
+      h100: { C: 989, C8: 1979, W: 3.35, M: 80 },
+      h200: { C: 989, C8: 1979, W: 4.8, M: 141 },
+    };
+    const st = { N: 16, wb: 1, kb: 1, cbits: 16 };
+    seg('dc-model', (b) => { const m = MODELS[b.dataset.m]; $('dc-P').value = m.P; $('dc-kvel').value = m.kvel; $('dc-L').value = m.L; dcUpdate(); });
+    seg('dc-hw', (b) => { const h = HW[b.dataset.h]; $('dc-C').value = h.C; $('dc-C8').value = h.C8; $('dc-W').value = h.W; $('dc-M').value = h.M; dcUpdate(); });
+    seg('dc-N', (b) => { st.N = +b.dataset.v; dcUpdate(); });
+    seg('dc-wd', (b) => { st.wb = +b.dataset.v; dcUpdate(); });
+    seg('dc-kd', (b) => { st.kb = +b.dataset.v; dcUpdate(); });
+    seg('dc-cd', (b) => { st.cbits = +b.dataset.v; dcUpdate(); });
+    ['dc-P', 'dc-kvel', 'dc-L', 'dc-C', 'dc-C8', 'dc-W', 'dc-M', 'dc-B', 'dc-S'].forEach((id) => $(id).addEventListener('input', dcUpdate));
+    const sliderToB = (v) => Math.max(1, Math.round(Math.pow(2, v / 10)));
+
+    function cfg() {
+      const P = (+$('dc-P').value || 1) * 1e9;
+      const kTok = (+$('dc-kvel').value || 1) * (+$('dc-L').value || 1) * st.kb;
+      const C = (st.cbits === 8 ? +$('dc-C8').value : +$('dc-C').value) * 1e12 || 1e12;
+      const W = (+$('dc-W').value || 0.1) * 1e12;
+      const M = (+$('dc-M').value || 1) * 1e9;
+      const S = Math.round(Math.pow(2, +$('dc-S').value));
+      return { P, kTok, C, W, M, S, N: st.N, wb: st.wb };
+    }
+    function step(c, B) {
+      const tw = c.P * c.wb / (c.N * c.W);
+      const tk = B * c.S * c.kTok / (c.N * c.W);
+      const tf = 2 * B * c.P / (c.N * c.C);
+      return { tw, tk, tf, t: tk + Math.max(tw, tf) };
+    }
+    function dcUpdate() {
+      const c = cfg();
+      const B = sliderToB(+$('dc-B').value);
+      $('dc-Bo').textContent = B; $('dc-So').textContent = fmtTok(c.S);
+      const r = step(c, B);
+      const bcrit = c.wb * c.C / (2 * c.W);
+      const mem = c.P * c.wb + B * c.S * c.kTok, cap = c.N * c.M;
+      const bmax = Math.floor((cap - c.P * c.wb) / (c.S * c.kTok));
+      const oom = mem > cap;
+      const cmp = r.tf > r.tw;
+      let html;
+      if (oom) html = '<span class="regime oom">显存不足</span><span class="sub" style="margin:0">需要 ' + fmtB(mem) + '，只有 ' + fmtB(cap) + (bmax >= 1 ? '；此上下文下最大 batch ≈ ' + bmax : '；连参数都放不下') + '</span>';
+      else if (cmp) html = '<span class="regime cmp">MLP 受算力限制</span><span class="sub" style="margin:0">batch ' + B + ' ≥ B_crit ≈ ' + bcrit.toFixed(0) + '；注意力仍受带宽限制</span>';
+      else html = '<span class="regime mem">受带宽限制</span><span class="sub" style="margin:0">batch ' + B + ' &lt; B_crit ≈ ' + bcrit.toFixed(0) + '；步时 = 读 KV + 读权重</span>';
+      $('dc-regime').innerHTML = html;
+      const tps = B / r.t;
+      const mfu = 2 * B * c.P / (c.N * c.C) / r.t;
+      $('dc-read').innerHTML =
+        '<div><span class="k">权重读取</span><span class="v">' + fmtMs(r.tw) + ' <small>ms</small></span></div>' +
+        '<div><span class="k">KV 读取</span><span class="v">' + fmtMs(r.tk) + ' <small>ms</small></span></div>' +
+        '<div><span class="k">矩阵 FLOPs</span><span class="v">' + fmtMs(r.tf) + ' <small>ms</small></span></div>' +
+        '<div class="hl"><span class="k">每步时间</span><span class="v">' + fmtMs(r.t) + ' <small>ms</small></span></div>' +
+        '<div><span class="k">每用户速度</span><span class="v">' + fmtN(1 / r.t) + ' <small>tok/s</small></span></div>' +
+        '<div><span class="k">总吞吐</span><span class="v">' + fmtN(tps) + ' <small>tok/s</small></span></div>' +
+        '<div><span class="k">每芯片吞吐</span><span class="v">' + fmtN(tps / c.N) + ' <small>tok/s</small></span></div>' +
+        '<div><span class="k">MFU（理论）</span><span class="v">' + (100 * mfu).toFixed(1) + ' <small>%</small></span></div>' +
+        '<div><span class="k">显存 参数+KV / 总</span><span class="v">' + fmtB(mem).replace(' ', '') + ' <small>/ ' + fmtB(cap) + '</small></span></div>';
+      drawDc(c, B, bmax);
+    }
+
+    function drawDc(c, Bcur, bmax) {
+      const W = 360, H = 240, l = 44, rr = 10, t = 24, b = 34;
+      const Bs = []; for (let v = 0; v <= 100; v++) { const B = sliderToB(v); if (!Bs.length || Bs[Bs.length - 1] !== B) Bs.push(B); }
+      const pts = Bs.map((B) => ({ B, ...step(c, B) }));
+      const ymax = Math.max(...pts.map((p) => p.t)) * 1.05;
+      const xs = (B) => l + (W - l - rr) * Math.log2(B) / 10;
+      const ys = (v) => H - b - (H - t - b) * v / ymax;
+      const ac = css('--accent'), a2 = css('--accent-2'), c3 = css('--c3'), tx = css('--text'), soft = css('--text-faint'), bd = css('--border');
+      let s = '';
+      // compute-bound shading
+      const bc = c.wb * c.C / (2 * c.W);
+      if (bc < 1024) s += '<rect x="' + xs(Math.max(1, bc)) + '" y="' + t + '" width="' + (W - rr - xs(Math.max(1, bc))) + '" height="' + (H - t - b) + '" fill="' + c3 + '" opacity="0.12"/>';
+      if (bmax < 1024) { const x0 = xs(Math.max(1, bmax + 0.5)); s += '<rect x="' + x0 + '" y="' + t + '" width="' + Math.max(0, W - rr - x0) + '" height="' + (H - t - b) + '" fill="' + soft + '" opacity="0.25"/>'; }
+      // axes
+      s += '<line x1="' + l + '" y1="' + (H - b) + '" x2="' + (W - rr) + '" y2="' + (H - b) + '" stroke="' + bd + '"/>';
+      s += '<line x1="' + l + '" y1="' + t + '" x2="' + l + '" y2="' + (H - b) + '" stroke="' + bd + '"/>';
+      [1, 4, 16, 64, 256, 1024].forEach((B) => { s += '<text x="' + xs(B) + '" y="' + (H - b + 14) + '" font-size="10" text-anchor="middle" fill="' + soft + '">' + B + '</text>'; });
+      s += '<text x="' + ((W + l) / 2) + '" y="' + (H - 4) + '" font-size="11" text-anchor="middle" fill="' + soft + '">batch</text>';
+      for (let k = 0; k <= 4; k++) { const v = ymax * k / 4; s += '<text x="' + (l - 4) + '" y="' + (ys(v) + 3) + '" font-size="10" text-anchor="end" fill="' + soft + '">' + (v * 1e3).toFixed(v * 1e3 < 10 ? 1 : 0) + '</text>'; }
+      s += '<text x="' + l + '" y="12" font-size="10" fill="' + soft + '">步时（ms）</text>';
+      const line = (key, col, w, dash) => '<polyline fill="none" stroke="' + col + '" stroke-width="' + w + '"' + (dash ? ' stroke-dasharray="4 3"' : '') + ' points="' + pts.map((p) => xs(p.B).toFixed(1) + ',' + ys(p[key]).toFixed(1)).join(' ') + '"/>';
+      s += line('tw', ac, 1.6) + line('tk', a2, 1.6) + line('tf', c3, 1.6) + line('t', tx, 2.4);
+      const cur = step(c, Bcur);
+      s += '<line x1="' + xs(Bcur) + '" y1="' + t + '" x2="' + xs(Bcur) + '" y2="' + (H - b) + '" stroke="' + tx + '" stroke-dasharray="2 3" opacity="0.6"/>';
+      s += '<circle cx="' + xs(Bcur) + '" cy="' + ys(cur.t) + '" r="4" fill="' + tx + '"/>';
+      $('dc-chart1').innerHTML = s;
+
+      // Pareto: x = latency per step (ms), y = tokens/s/chip
+      const fit = pts.filter((p) => p.B <= bmax);
+      let s2 = '';
+      const use = fit.length ? fit : pts.slice(0, 1);
+      const xmax = Math.max(...use.map((p) => p.t)) * 1.08, xmin = 0;
+      const tpc = (p) => p.B / p.t / c.N;
+      const y2max = Math.max(...use.map(tpc)) * 1.1;
+      const X = (v) => l + (W - l - rr) * (v - xmin) / (xmax - xmin);
+      const Y = (v) => H - b - (H - t - b) * v / y2max;
+      s2 += '<line x1="' + l + '" y1="' + (H - b) + '" x2="' + (W - rr) + '" y2="' + (H - b) + '" stroke="' + bd + '"/>';
+      s2 += '<line x1="' + l + '" y1="' + t + '" x2="' + l + '" y2="' + (H - b) + '" stroke="' + bd + '"/>';
+      for (let k = 0; k <= 4; k++) {
+        const vx = xmin + (xmax - xmin) * k / 4, vy = y2max * k / 4;
+        s2 += '<text x="' + X(vx) + '" y="' + (H - b + 14) + '" font-size="10" text-anchor="middle" fill="' + soft + '">' + (vx * 1e3).toFixed(vx * 1e3 < 10 ? 1 : 0) + '</text>';
+        s2 += '<text x="' + (l - 4) + '" y="' + (Y(vy) + 3) + '" font-size="10" text-anchor="end" fill="' + soft + '">' + fmtN(vy) + '</text>';
+      }
+      s2 += '<text x="' + ((W + l) / 2) + '" y="' + (H - 4) + '" font-size="11" text-anchor="middle" fill="' + soft + '">每 token 延迟（ms）</text>';
+      s2 += '<text x="' + l + '" y="12" font-size="10" fill="' + soft + '">每芯片吞吐（tok/s）</text>';
+      if (fit.length) s2 += '<polyline fill="none" stroke="' + ac + '" stroke-width="2.2" points="' + fit.map((p) => X(p.t).toFixed(1) + ',' + Y(tpc(p)).toFixed(1)).join(' ') + '"/>';
+      else s2 += '<text x="' + ((W + l) / 2) + '" y="' + (H / 2) + '" font-size="12" text-anchor="middle" fill="' + soft + '">这个配置连 batch 1 都放不下</text>';
+      if (Bcur <= bmax) s2 += '<circle cx="' + X(cur.t) + '" cy="' + Y(Bcur / cur.t / c.N) + '" r="5" fill="' + a2 + '"/>';
+      $('dc-chart2').innerHTML = s2;
+    }
+    dcUpdate();
+
+    /* ---------------- Speculative decoding ---------------- */
+    const EN = (k, a) => a >= 1 ? k + 1 : (1 - Math.pow(a, k + 1)) / (1 - a);
+    ['sp-k', 'sp-a', 'sp-c'].forEach((id) => $(id).addEventListener('input', spUpdate));
+    let lastMC = null;
+    function spUpdate() {
+      const k = +$('sp-k').value, a = +$('sp-a').value, c = +$('sp-c').value;
+      $('sp-ko').textContent = k; $('sp-ao').textContent = a.toFixed(2); $('sp-co').textContent = c.toFixed(2);
+      const e = EN(k, a), sp = e / (k * c + 1);
+      let bestK = 1, best = 0;
+      for (let kk = 1; kk <= 12; kk++) { const v = EN(kk, a) / (kk * c + 1); if (v > best) { best = v; bestK = kk; } }
+      $('sp-read').innerHTML =
+        '<div><span class="k">E[N] 每次验证产出</span><span class="v">' + e.toFixed(2) + '</span></div>' +
+        '<div class="hl"><span class="k">期望加速比</span><span class="v">' + sp.toFixed(2) + '×</span></div>' +
+        '<div><span class="k">最优 k（1–12）</span><span class="v">' + bestK + ' <small>(' + best.toFixed(2) + '×)</small></span></div>' +
+        '<div><span class="k">目标模型 FLOPs / 产出 token</span><span class="v">' + ((k + 1) / e).toFixed(2) + '×</span></div>';
+      // chart
+      const W = 360, H = 220, l = 34, r = 10, t = 12, b = 30;
+      const ks = Array.from({ length: 12 }, (_, i) => i + 1);
+      const ymax = Math.max(...ks.map((kk) => EN(kk, a)), ...ks.map((kk) => EN(kk, a) / (kk * c + 1))) * 1.1;
+      const X = (kk) => l + (W - l - r) * (kk - 1) / 11, Y = (v) => H - b - (H - t - b) * v / ymax;
+      const ac = css('--accent'), a2 = css('--accent-2'), soft = css('--text-faint'), bd = css('--border'), tx = css('--text');
+      let s = '<line x1="' + l + '" y1="' + (H - b) + '" x2="' + (W - r) + '" y2="' + (H - b) + '" stroke="' + bd + '"/><line x1="' + l + '" y1="' + t + '" x2="' + l + '" y2="' + (H - b) + '" stroke="' + bd + '"/>';
+      ks.forEach((kk) => { s += '<text x="' + X(kk) + '" y="' + (H - b + 13) + '" font-size="10" text-anchor="middle" fill="' + soft + '">' + kk + '</text>'; });
+      for (let i = 0; i <= 4; i++) { const v = ymax * i / 4; s += '<text x="' + (l - 4) + '" y="' + (Y(v) + 3) + '" font-size="10" text-anchor="end" fill="' + soft + '">' + v.toFixed(1) + '</text>'; }
+      s += '<text x="' + ((W + l) / 2) + '" y="' + (H - 3) + '" font-size="11" text-anchor="middle" fill="' + soft + '">草稿长度 k</text>';
+      s += '<line x1="' + X(k) + '" y1="' + t + '" x2="' + X(k) + '" y2="' + (H - b) + '" stroke="' + tx + '" stroke-dasharray="2 3" opacity="0.5"/>';
+      s += '<polyline fill="none" stroke="' + ac + '" stroke-width="2" points="' + ks.map((kk) => X(kk) + ',' + Y(EN(kk, a)).toFixed(1)).join(' ') + '"/>';
+      s += '<polyline fill="none" stroke="' + a2 + '" stroke-width="2" points="' + ks.map((kk) => X(kk) + ',' + Y(EN(kk, a) / (kk * c + 1)).toFixed(1)).join(' ') + '"/>';
+      s += '<circle cx="' + X(k) + '" cy="' + Y(e) + '" r="4" fill="' + ac + '"/><circle cx="' + X(k) + '" cy="' + Y(sp) + '" r="4" fill="' + a2 + '"/>';
+      $('sp-chart').innerHTML = s;
+      drawHist(lastMC && lastMC.k === k && lastMC.a === a ? lastMC.counts : null, k, a);
+    }
+    function theory(k, a) { const p = []; for (let n = 1; n <= k; n++) p.push(Math.pow(a, n - 1) * (1 - a)); p.push(Math.pow(a, k)); return p; }
+    function drawHist(counts, k, a) {
+      const th = theory(k, a);
+      const tot = counts ? counts.reduce((x, y) => x + y, 0) : 1;
+      const emp = counts ? counts.map((x) => x / tot) : th.map(() => 0);
+      const m = Math.max(...th, ...emp) * 1.1 || 1;
+      $('sp-hist').innerHTML = th.map((p, i) => '<div class="col"><div class="emp" style="height:' + (100 * emp[i] / m) + '%"></div><div class="th" style="bottom:' + (100 * p / m) + '%"></div></div>').join('');
+      $('sp-hx').innerHTML = th.map((_, i) => '<span>' + (i + 1) + '</span>').join('');
+      if (!counts) $('sp-mc').textContent = '横轴是一次验证产出的 token 数 N';
+    }
+    $('sp-run').addEventListener('click', () => {
+      const k = +$('sp-k').value, a = +$('sp-a').value;
+      const counts = new Array(k + 1).fill(0);
+      let sum = 0; const R = 2000;
+      for (let r = 0; r < R; r++) {
+        let n = 0; while (n < k && Math.random() < a) n++;
+        const produced = n + 1; counts[produced - 1]++; sum += produced;
+      }
+      lastMC = { k, a, counts };
+      drawHist(counts, k, a);
+      $('sp-mc').textContent = '模拟均值 ' + (sum / R).toFixed(3) + '，理论 ' + EN(k, a).toFixed(3);
+    });
+    spUpdate();
+
+    /* rejection sampling with toy distributions */
+    const pT = [0.38, 0.24, 0.16, 0.11, 0.07, 0.04];
+    const pAlt = [0.04, 0.07, 0.11, 0.16, 0.24, 0.38];
+    const qOf = (m) => pT.map((p, i) => (1 - m) * p + m * pAlt[i]);
+    const sample = (d) => { let r = Math.random(); for (let i = 0; i < d.length; i++) { r -= d[i]; if (r < 0) return i; } return d.length - 1; };
+    function rsDraw(freq) {
+      const m = +$('rs-t').value; $('rs-to').textContent = m.toFixed(2);
+      const q = qOf(m);
+      const alpha = pT.reduce((s, p, i) => s + Math.min(p, q[i]), 0);
+      const mx = Math.max(...pT, ...q, ...(freq || [0])) * 1.1;
+      $('rs-hist').innerHTML = pT.map((p, i) => '<div class="col"><div class="emp" style="height:' + (freq ? 100 * freq[i] / mx : 0) + '%"></div><div class="th" style="bottom:' + (100 * p / mx) + '%"></div>' +
+        '<div style="position:absolute;left:50%;bottom:' + (100 * q[i] / mx) + '%;width:8px;height:8px;margin:0 0 -4px -4px;border-radius:50%;background:var(--text-faint)"></div></div>').join('');
+      $('rs-hx').innerHTML = pT.map((_, i) => '<span>t' + (i + 1) + '</span>').join('');
+      if (!freq) $('rs-info').textContent = '理论接受率 α = Σmin(p,q) = ' + alpha.toFixed(3);
+      return { q, alpha };
+    }
+    $('rs-t').addEventListener('input', () => rsDraw(null));
+    $('rs-run').addEventListener('click', () => {
+      const { q, alpha } = rsDraw(null);
+      const resid = pT.map((p, i) => Math.max(0, p - q[i])); const rs = resid.reduce((a, b) => a + b, 0);
+      const resN = resid.map((x) => rs > 0 ? x / rs : 0);
+      const cnt = new Array(6).fill(0); let acc = 0; const R = 20000;
+      for (let r = 0; r < R; r++) {
+        const x = sample(q);
+        if (Math.random() < Math.min(1, pT[x] / q[x])) { cnt[x]++; acc++; } else cnt[sample(resN)]++;
+      }
+      const freq = cnt.map((c) => c / R);
+      rsDraw(freq);
+      const tv = freq.reduce((s, f, i) => s + Math.abs(f - pT[i]), 0) / 2;
+      $('rs-info').textContent = '实测接受率 ' + (acc / R).toFixed(3) + '（理论 ' + alpha.toFixed(3) + '）；输出与 p 的总变差距离 ' + tv.toFixed(4);
+    });
+    rsDraw(null);
+
+    // Re-draw SVG charts when the color scheme changes (they bake in token colors).
+    const mq = matchMedia('(prefers-color-scheme: dark)');
+    (mq.addEventListener ? mq.addEventListener('change', () => { dcUpdate(); spUpdate(); }) : null);
+    new MutationObserver(() => { dcUpdate(); spUpdate(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
+  })();
+  </script>
+</body>
+</html>
