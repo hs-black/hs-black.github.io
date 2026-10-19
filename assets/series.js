@@ -54,6 +54,7 @@
         ['cuda-graph', 'CUDA Graph'],
         ['rmsnorm-kernel', 'RMSNorm 与 GPU 算子优化'],
         ['gradient-checkpointing', 'Gradient checkpointing'],
+        ['optimizers', '优化器：从 SGD 到 Muon'],
         ['deepseek-v4-runtime', 'DeepSeek-V4 运行时：每张 GPU 里装着什么'],
       ],
     },
@@ -68,6 +69,8 @@
       ],
     },
   };
+
+  window.SERIES = SERIES;
 
   const slug = location.pathname.split('/').filter(Boolean).pop();
   const link = (s) => '/posts/' + s + '/';

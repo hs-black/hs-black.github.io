@@ -13,7 +13,8 @@ index.html            home: profile card + "Now" (sidebar), intro, experience ti
                       selected papers, writing (series cards + newest 3 posts), awards
 papers/index.html     full publication list (abstract + BibTeX toggles)
 projects/index.html   projects and tools
-blog/index.html       archive of all posts, grouped by year, filter by kind
+blog/index.html       archive: timeline / category / series / tag views + search,
+                      rendered from assets/posts.js
 posts/<slug>/index.html   one folder per post
 tools/<name>/index.html   standalone interactive tools (linked from projects)
 feed.xml              RSS; hand-maintained, one <item> per post
@@ -22,6 +23,8 @@ feed.xml              RSS; hand-maintained, one <item> per post
 assets/site.css       shared styles + color tokens (light/dark)
 assets/slides.css     slide-deck styles (load after site.css)
 assets/slides.js      slide engine (navigation, fragments, slidechange event)
+assets/posts.js       list of all posts (category, tags, desc) + tags/related box on posts
+assets/post-links.js  generated cross-reference index (scripts/post-links.py)
 assets/series.js      series list + nav for multi-part posts
 assets/anim.js        timeline animation engine (smooth, scrubbable, step-able)
 assets/img/           avatar and other shared images
@@ -41,15 +44,22 @@ folder and are referenced relatively.
    template to `posts/<slug>/index.html`.
 2. Fill in `<title>` (`标题 · Zunzhe Zhang`), `<meta name="description">`, the
    `<h1>`, the kind label and the date.
-3. Add an entry at the **top** of the current year in `blog/index.html`
-   (start a new `<section class="archive-year">` for a new year), with the
-   right `data-kind`.
+3. Add an entry at the **top** of `POSTS` in `assets/posts.js` (slug, title,
+   date, kind, cat, tags, desc). The blog page renders from it; reuse
+   existing categories and tags where possible. Load
+   `/assets/post-links.js` and `/assets/posts.js` before `</body>` (the
+   templates already do); post pages then show their category and tags under
+   the header, a 相关文章 box at the end, and preview cards on links to
+   other posts.
 4. Update the post list under "Writing" on `index.html`: it shows the newest
    **3** posts, so add the new one on top and drop the fourth. If the post
    belongs to a series, also add it to `assets/series.js` (and bump the count
    on the series card under "Writing").
 5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
-6. Preview locally (below), then commit and push.
+6. Link related posts to each other in the text where a concept is
+   explained elsewhere, then run `python3 scripts/post-links.py` to refresh
+   the cross-reference index.
+7. Preview locally (below), then commit and push.
 
 The header nav (Home / Papers / Projects / Blog) is copied into every page;
 mark the current section with `aria-current="page"`. If the nav changes,

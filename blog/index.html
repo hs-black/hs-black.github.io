@@ -4,10 +4,52 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Blog · Zunzhe Zhang</title>
-  <meta name="description" content="全部文章、交互演示和幻灯片，按年份归档。">
+  <meta name="description" content="全部文章、交互演示和幻灯片：按时间轴、分类、系列和标签浏览。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
   <link rel="stylesheet" href="/assets/site.css">
+  <style>
+    .blog-tools { display: grid; gap: 12px; margin: 8px 0 8px; }
+    .views { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); width: max-content; max-width: 100%; overflow-x: auto; }
+    .views button { padding: 5px 14px; border: 0; border-radius: 7px; background: none; color: var(--text-soft); font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; }
+    .views button[aria-pressed="true"] { background: var(--accent); color: #fff; }
+    .search { width: 100%; padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); color: var(--text); font: inherit; font-size: 15px; }
+    .search:focus { outline: 2px solid var(--accent-soft); border-color: var(--accent); }
+    .filter-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    .active-filters { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; min-height: 0; font-size: 14px; color: var(--text-faint); }
+    .active-filters button { padding: 1px 10px; border: 1px solid var(--accent); border-radius: 999px; background: var(--accent-soft); color: var(--accent); font: inherit; font-size: 13px; cursor: pointer; }
+    .count { color: var(--text-faint); font-size: 14px; }
+
+    /* timeline */
+    .tl { position: relative; margin-top: 24px; padding-left: 26px; }
+    .tl::before { content: ""; position: absolute; left: 5px; top: 6px; bottom: 6px; width: 2px; background: var(--border); }
+    .tl-group { position: relative; margin-bottom: 18px; }
+    .tl-group::before { content: ""; position: absolute; left: -26px; top: 7px; width: 12px; height: 12px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft); }
+    .tl-date { margin: 0; font-size: 15px; font-weight: 650; font-variant-numeric: tabular-nums; }
+    .tl-date small { margin-left: 8px; font-weight: 400; color: var(--text-faint); }
+
+    .entry { padding: 14px 0; border-bottom: 1px solid var(--border); }
+    .entry:last-child { border-bottom: 0; }
+    .entry-title { font-weight: 600; font-size: 17px; color: var(--text); }
+    .entry-title:hover { color: var(--accent); text-decoration: none; }
+    .entry-meta { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; margin-top: 4px; font-size: 13px; color: var(--text-faint); }
+    .entry-meta .cat { color: var(--accent); cursor: pointer; }
+    .entry-meta .tag { cursor: pointer; }
+    .entry-desc { margin: 4px 0 0; color: var(--text-soft); font-size: 15px; line-height: 1.6; }
+
+    .group-title { display: flex; justify-content: space-between; align-items: baseline; margin: 36px 0 4px; font-size: 18px; }
+    .group-title .count { font-weight: 400; }
+    .series-list { margin: 0; padding-left: 1.6em; }
+    .series-list li { padding: 8px 0; border-bottom: 1px solid var(--border); }
+    .series-list li::marker { color: var(--text-faint); font-variant-numeric: tabular-nums; }
+
+    .tag-cloud { display: flex; flex-wrap: wrap; gap: 8px 10px; margin-top: 20px; }
+    .tag-cloud button { padding: 3px 12px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); color: var(--text); font: inherit; cursor: pointer; line-height: 1.5; }
+    .tag-cloud button:hover, .tag-cloud button[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+    .tag-cloud sup { margin-left: 3px; color: var(--text-faint); font-size: 11px; }
+    .empty { margin-top: 32px; color: var(--text-faint); }
+    .tl .entry-meta time { display: none; }
+  </style>
 </head>
 <body>
   <header class="site-header wrap">
@@ -26,222 +68,155 @@
       <p class="post-meta">文章、交互演示和幻灯片。每一页都是手写的 HTML。 · <a href="/feed.xml">RSS</a></p>
     </header>
 
-    <div class="filters" role="group" aria-label="按类型筛选">
-      <button type="button" data-kind="all" aria-pressed="true">全部</button>
-      <button type="button" data-kind="article" aria-pressed="false">文章</button>
-      <button type="button" data-kind="interactive" aria-pressed="false">交互</button>
-      <button type="button" data-kind="deck" aria-pressed="false">幻灯片</button>
+    <div class="blog-tools">
+      <div class="views" role="group" aria-label="浏览方式">
+        <button type="button" data-view="timeline">时间轴</button>
+        <button type="button" data-view="category">分类</button>
+        <button type="button" data-view="series">系列</button>
+        <button type="button" data-view="tags">标签</button>
+      </div>
+      <input class="search" type="search" placeholder="搜索标题、简介或标签…" aria-label="搜索">
+      <div class="filter-row">
+        <div class="filters" role="group" aria-label="按类型筛选">
+          <button type="button" data-kind="all">全部</button>
+          <button type="button" data-kind="article">文章</button>
+          <button type="button" data-kind="interactive">交互</button>
+          <button type="button" data-kind="deck">幻灯片</button>
+        </div>
+        <span class="count" id="count"></span>
+      </div>
+      <div class="active-filters" id="active"></div>
     </div>
 
-    <!-- Archive: one <section> per year, newest first. Each <li> carries
-         data-kind="article|interactive|deck" for the filter buttons. -->
-    <section class="archive-year">
-      <h2 class="year">2026</h2>
-      <ul class="post-list">
-        <li data-kind="interactive">
-          <a href="/posts/deepseek-v4/">
-            <span class="post-title">DeepSeek-V4 技术报告精读</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">拆解 DeepSeek-V4：CSA/HCA 注意力、mHC、Muon、FP4 QAT 与多教师蒸馏，附成本计算器。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/qwen3-next/">
-            <span class="post-title">Qwen3-Next：混合线性注意力与超稀疏 MoE</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从线性注意力推到 Gated DeltaNet、门控注意力、3:1 混合、512 专家 MoE 与 MTP。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/kimi-k3/">
-            <span class="post-title">Kimi K3：KDA、注意力残差与 Stable LatentMoE</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">精读 Kimi K3：有下界的 KDA、注意力残差、Stable LatentMoE 与分位数均衡，以及 1M 上下文系统。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/kimi-k2/">
-            <span class="post-title">Kimi K2：MuonClip 与万亿参数 Agent 模型</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">精读 Kimi K2：Muon 与 QK-Clip 推导、数据改写、超稀疏 MoE、训练基础设施、Agent 数据合成与 RL。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/kimi-linear/">
-            <span class="post-title">Kimi Linear：Kimi Delta Attention</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从线性注意力、DeltaNet 到 KDA：通道级门控、分块并行算法、3:1 混合与 NoPE、效率实验。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/smol-decisions/">
-            <span class="post-title">从目标到决策：训练什么、怎么做消融</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">该不该训、训什么、怎样用小规模消融做决策，以及评测噪声与消融成本。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/smol-architecture/">
-            <span class="post-title">架构选择：注意力、位置编码、MoE 与混合模型</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">MHA/GQA/MLA 与 KV cache、文档掩码、RoPE/NoPE、稳定性技巧、MoE 设计与混合模型。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/smol-optim-data/">
-            <span class="post-title">分词器、优化器、超参与数据配比</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">BPE 与分词器评估、AdamW 与 Muon、学习率调度、batch size 与超参 scaling law、数据配比。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/smol-marathon/">
-            <span class="post-title">训练马拉松：吞吐、loss spike 与中途调整</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">SmolLM3 长跑实录：起跑清单、四个谜案、loss spike 诊断、多阶段 mid-training 与长上下文扩展。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/smol-post-training/">
-            <span class="post-title">后训练：SFT、偏好优化与 RL</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">后训练全流程：评测先行、chat template 与掩码、SFT 调参、推理 mid-training、DPO/APO 推导、GRPO 与长度惩罚。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/smol-infrastructure/">
-            <span class="post-title">基础设施：GPU 集群、通信与存储</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">H100 内部、PCIe/NVLink/EFA 实测带宽、nccl-tests、存储分层、节点健康与 checkpoint，以及该用多少卡。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-memory/">
-            <span class="post-title">训练的账本：显存、FLOPs 与 MFU</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">一步训练里显存花在哪、FLOPs 怎么数、MFU 怎么算：从 16 字节/参数推到 6ND，附显存计算器与训练时长估算器。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-roofline/">
-            <span class="post-title">Roofline：算力、带宽与算术强度</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">一个运算到底卡在算力、显存带宽还是网络上：算术强度、roofline 图、矩阵乘法的临界 batch，以及 TPU 与 GPU 的硬件结构。</span>
-          </a>
-        </li>
-        <li data-kind="deck">
-          <a href="/posts/scaling-collectives/">
-            <span class="post-title">集合通信与分片矩阵乘法</span>
-            <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从 broadcast 到 all-to-all，推导环形集合通信的代价，再用分片记号讲清分片矩阵乘法。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-data-parallel/">
-            <span class="post-title">数据并行、ZeRO 与 FSDP</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从朴素数据并行讲到 ZeRO-1/2/3 与 FSDP：通信重叠、分桶、no_sync、显存公式与通信瓶颈。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-tensor-parallel/">
-            <span class="post-title">张量并行与序列并行</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从矩阵乘法的两种切法讲起：Megatron 张量并行、f/g 算子、词表并行、序列并行与通信量。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-context-parallel/">
-            <span class="post-title">上下文并行与 Ring Attention</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">长序列训练怎么切激活：online softmax 合并、Ring Attention、zig-zag 负载均衡与 Ulysses。</span>
-          </a>
-        </li>
-        <li data-kind="deck">
-          <a href="/posts/scaling-pipeline/">
-            <span class="post-title">流水线并行：从 GPipe 到 DualPipe</span>
-            <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">交互幻灯片：推导 AFAB、1F1B、交错、Zero Bubble 与 DualPipe 的气泡与显存，附调度模拟器。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-moe/">
-            <span class="post-title">MoE 与专家并行</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从路由器、容量、负载均衡损失到无辅助损失偏置，再到专家并行的 all-to-all 与通信成本。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-5d/">
-            <span class="post-title">5D 并行：组合与选型</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">DP、TP、CP、PP、EP 各切什么、通信放在网络哪层、怎么组合，附配置规划器与设备网格演示。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-jax/">
-            <span class="post-title">JAX 分片编程与 Profiling</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">用 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 与 profile，分清计算、通信与空闲。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-gpu-kernels/">
-            <span class="post-title">GPU 内核与 FlashAttention</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从 SM、warp、内存层级讲起，到访存合并、分块、融合、Triton，再到 FlashAttention 1–3 的推导与实现。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-mixed-precision/">
-            <span class="post-title">混合精度与 FP8 训练</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">浮点格式、舍入、损失缩放、FP32 主权重，到 FP8 的缩放策略、DeepSeek-V3 的细粒度量化与 MX/NVFP4 微缩放。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/scaling-inference/">
-            <span class="post-title">Transformer 推理的数学</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">从 KV cache 到投机解码：推导解码为什么受带宽限制、延迟下界、吞吐与延迟的权衡，以及 LLaMA-3-70B 的服务账本。</span>
-          </a>
-        </li>
-        <li data-kind="deck">
-          <a href="/posts/next-token/">
-            <span class="post-title">一次只猜一个 token</span>
-            <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。</span>
-          </a>
-        </li>
-        <li data-kind="interactive">
-          <a href="/posts/hello-world/">
-            <span class="post-title">新博客，从零开始</span>
-            <span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">10-19</time></span>
-            <span class="post-desc">这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。</span>
-          </a>
-        </li>
-      </ul>
-    </section>
+    <div id="list"></div>
+    <noscript><p>这个页面需要 JavaScript 来列出文章；也可以订阅 <a href="/feed.xml">RSS</a>。</p></noscript>
   </main>
 
   <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
 
+  <script src="/assets/series.js"></script>
+  <script src="/assets/posts.js"></script>
   <script>
     (() => {
-      const buttons = document.querySelectorAll('.filters button');
-      buttons.forEach((b) => b.addEventListener('click', () => {
-        const kind = b.dataset.kind;
-        buttons.forEach((x) => x.setAttribute('aria-pressed', String(x === b)));
-        document.querySelectorAll('.archive-year').forEach((year) => {
-          let shown = 0;
-          year.querySelectorAll('li[data-kind]').forEach((li) => {
-            const show = kind === 'all' || li.dataset.kind === kind;
-            li.hidden = !show;
-            if (show) shown++;
-          });
-          year.hidden = shown === 0;
-        });
-      }));
+      const { POSTS, CATEGORIES, KINDS } = window.SITE;
+      const SERIES = window.SERIES || {};
+      const list = document.getElementById('list');
+      const search = document.querySelector('.search');
+      const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+
+      // State lives in the URL so filtered views can be shared.
+      const params = new URLSearchParams(location.search);
+      const st = {
+        view: params.get('view') || 'timeline',
+        kind: params.get('kind') || 'all',
+        cat: params.get('cat') || '',
+        tag: params.get('tag') || '',
+        q: params.get('q') || '',
+      };
+      search.value = st.q;
+
+      function sync() {
+        const p = new URLSearchParams();
+        if (st.view !== 'timeline') p.set('view', st.view);
+        if (st.kind !== 'all') p.set('kind', st.kind);
+        if (st.cat) p.set('cat', st.cat);
+        if (st.tag) p.set('tag', st.tag);
+        if (st.q) p.set('q', st.q);
+        history.replaceState(null, '', location.pathname + (p.toString() ? '?' + p : ''));
+      }
+
+      function matches(p) {
+        if (st.kind !== 'all' && p.kind !== st.kind) return false;
+        if (st.cat && p.cat !== st.cat) return false;
+        if (st.tag && !p.tags.includes(st.tag)) return false;
+        if (st.q) {
+          const hay = (p.title + ' ' + p.desc + ' ' + p.tags.join(' ') + ' ' + CATEGORIES[p.cat]).toLowerCase();
+          if (!st.q.toLowerCase().split(/\s+/).every((w) => hay.includes(w))) return false;
+        }
+        return true;
+      }
+
+      function entry(p) {
+        const [label, cls] = KINDS[p.kind];
+        return '<article class="entry">' +
+          '<a class="entry-title" href="/posts/' + p.slug + '/">' + esc(p.title) + '</a>' +
+          '<div class="entry-meta"><span class="' + cls + '">' + label + '</span>' +
+          '<a class="cat" data-cat="' + p.cat + '">' + esc(CATEGORIES[p.cat]) + '</a>' +
+          p.tags.map((t) => '<a class="tag" data-tag="' + esc(t) + '">#' + esc(t) + '</a>').join('') +
+          '<time datetime="' + p.date + '">' + p.date + '</time></div>' +
+          '<p class="entry-desc">' + esc(p.desc) + '</p></article>';
+      }
+
+      function timeline(posts) {
+        const groups = new Map();
+        posts.forEach((p) => { if (!groups.has(p.date)) groups.set(p.date, []); groups.get(p.date).push(p); });
+        return '<div class="tl">' + [...groups].sort((a, b) => (a[0] < b[0] ? 1 : -1)).map(([d, ps]) =>
+          '<section class="tl-group"><h2 class="tl-date">' + d + '<small>' + ps.length + ' 篇</small></h2>' + ps.map(entry).join('') + '</section>'
+        ).join('') + '</div>';
+      }
+
+      function byCategory(posts) {
+        return Object.entries(CATEGORIES).map(([k, name]) => {
+          const ps = posts.filter((p) => p.cat === k);
+          return ps.length ? '<h2 class="group-title">' + esc(name) + '<span class="count">' + ps.length + ' 篇</span></h2>' + ps.map(entry).join('') : '';
+        }).join('');
+      }
+
+      function bySeries(posts) {
+        const ok = new Set(posts.map((p) => p.slug));
+        const inSeries = new Set();
+        let html = Object.values(SERIES).map((s) => {
+          const items = s.posts.filter(([slug]) => ok.has(slug));
+          items.forEach(([slug]) => inSeries.add(slug));
+          if (!items.length) return '';
+          return '<h2 class="group-title">' + esc(s.title) + '<span class="count">' + items.length + ' / ' + s.posts.length + ' 篇</span></h2><ol class="series-list">' +
+            items.map(([slug]) => '<li>' + entry(POSTS.find((p) => p.slug === slug) || { slug, title: slug, desc: '', tags: [], kind: 'article', cat: 'basics', date: '' }) + '</li>').join('') + '</ol>';
+        }).join('');
+        const rest = posts.filter((p) => !inSeries.has(p.slug));
+        if (rest.length) html += '<h2 class="group-title">单篇<span class="count">' + rest.length + ' 篇</span></h2>' + rest.map(entry).join('');
+        return html;
+      }
+
+      function tagsView(posts) {
+        const counts = new Map();
+        POSTS.forEach((p) => p.tags.forEach((t) => counts.set(t, (counts.get(t) || 0) + 1)));
+        const max = Math.max(...counts.values());
+        const cloud = '<div class="tag-cloud">' + [...counts].sort((a, b) => b[1] - a[1]).map(([t, n]) =>
+          '<button type="button" data-tag="' + esc(t) + '" aria-pressed="' + (st.tag === t) + '" style="font-size:' + (13 + 7 * (n / max)).toFixed(1) + 'px">' + esc(t) + '<sup>' + n + '</sup></button>').join('') + '</div>';
+        return cloud + (st.tag || st.q || st.cat || st.kind !== 'all' ? timeline(posts) : '');
+      }
+
+      function render() {
+        document.querySelectorAll('.views button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.view === st.view)));
+        document.querySelectorAll('.filters button').forEach((b) => b.setAttribute('aria-pressed', String(b.dataset.kind === st.kind)));
+        const active = [];
+        if (st.cat) active.push('<button type="button" data-clear="cat">分类：' + esc(CATEGORIES[st.cat] || st.cat) + ' ×</button>');
+        if (st.tag) active.push('<button type="button" data-clear="tag">#' + esc(st.tag) + ' ×</button>');
+        document.getElementById('active').innerHTML = active.join('');
+        const posts = POSTS.filter(matches);
+        document.getElementById('count').textContent = posts.length + ' / ' + POSTS.length + ' 篇';
+        const views = { timeline, category: byCategory, series: bySeries, tags: tagsView };
+        list.innerHTML = posts.length || st.view === 'tags' ? views[st.view](posts) : '<p class="empty">没有符合条件的文章。</p>';
+        sync();
+      }
+
+      document.querySelector('.views').addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return; st.view = b.dataset.view; render();
+      });
+      document.querySelector('.filters').addEventListener('click', (e) => {
+        const b = e.target.closest('button'); if (!b) return; st.kind = b.dataset.kind; render();
+      });
+      search.addEventListener('input', () => { st.q = search.value.trim(); render(); });
+      document.getElementById('active').addEventListener('click', (e) => {
+        const b = e.target.closest('[data-clear]'); if (!b) return; st[b.dataset.clear] = ''; render();
+      });
+      list.addEventListener('click', (e) => {
+        const c = e.target.closest('[data-cat]');
+        const t = e.target.closest('[data-tag]');
+        if (c) { e.preventDefault(); st.cat = st.cat === c.dataset.cat ? '' : c.dataset.cat; render(); window.scrollTo({ top: 0, behavior: 'smooth' }); }
+        else if (t) { e.preventDefault(); st.tag = st.tag === t.dataset.tag ? '' : t.dataset.tag; render(); if (st.view !== 'tags') window.scrollTo({ top: 0, behavior: 'smooth' }); }
+      });
+      render();
     })();
   </script>
 </body>
