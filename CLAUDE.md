@@ -26,6 +26,8 @@ assets/slides.js      slide engine (navigation, fragments, slidechange event)
 assets/posts.js       list of all posts (category, tags, desc) + tags/related box on posts
 assets/post-links.js  generated cross-reference index (scripts/post-links.py)
 assets/series.js      series list + nav for multi-part posts
+assets/curriculum.js  nine-stage LLM engineering map + per-post route links
+assets/curriculum.css shared learning-map styles
 assets/anim.js        timeline animation engine (smooth, scrubbable, step-able)
 assets/img/           avatar and other shared images
 assets/favicon.svg
@@ -123,6 +125,16 @@ Multi-part posts belong to a series defined in `assets/series.js`
 `<nav class="series" data-series="…">` under its header and
 `<nav class="series-pager" data-series="…">` after the article, and loads
 `/assets/series.js`; titles in that file must match the posts' `<h1>`.
+
+The LLM engineering learning path is `/posts/llm-engineering/`, an ordinary
+entry in the blog list. `assets/curriculum.js` defines the nine stages, their
+prerequisites, completion tasks, main lessons (`core`) and further reading
+(`extra`). The archive also has a 学习路径 view using that same data. Register
+new engineering lessons there and keep the `systems` series in main-path
+order. Load `curriculum.js` after the post/player scripts on participating
+pages; it adds a link back to the relevant stage. Course completion is an
+explicit learner checkbox stored locally in the browser. Do not add a
+separate promotional block to the home or archive pages.
 
 `site.css` has helpers for long technical posts: `.toc`, `.table-wrap` (wide
 tables scroll inside it), `.callout` / `.callout.warn`, `details`, and demo

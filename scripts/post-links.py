@@ -40,7 +40,12 @@ def version_assets(page, names):
     page.write_text(html, encoding='utf-8')
 
 
-version_assets(root / 'blog' / 'index.html', ('posts.js', 'series.js'))
+version_assets(root / 'blog' / 'index.html', ('posts.js', 'series.js', 'curriculum.js', 'curriculum.css'))
 for page in sorted((root / 'posts').glob('*/index.html')):
-    if '/assets/course.css' in page.read_text(encoding='utf-8'):
-        version_assets(page, ('course.css', 'slides.css', 'slides.js', 'anim.js'))
+    html = page.read_text(encoding='utf-8')
+    names = ['posts.js', 'series.js', 'post-links.js', 'curriculum.js', 'curriculum.css']
+    if '/assets/slides.css' in html:
+        names += ['slides.css', 'slides.js', 'anim.js']
+    if '/assets/course.css' in html:
+        names += ['course.css']
+    version_assets(page, names)

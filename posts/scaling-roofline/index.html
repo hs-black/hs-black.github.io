@@ -38,6 +38,7 @@
     .fig svg .link { stroke: var(--accent); stroke-width: 2; fill: none; }
     .fig svg .link2 { stroke: var(--accent-2); stroke-width: 2; fill: none; }
     .row-ctrl { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin-top: 10px; font-size: 15px; }
+    .row-ctrl select { min-width: 0; max-width: 100%; }
     .row-ctrl > span:first-child { min-width: 4.5em; color: var(--text-soft); }
     .chart svg { display: block; width: 100%; height: auto; }
     .chart svg text { font-family: var(--font-sans); font-size: 12px; fill: var(--text-soft); }
@@ -566,7 +567,7 @@
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js"></script>
+  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
   <script>
   (() => {
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -915,7 +916,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js"></script>
-  <script src="/assets/posts.js"></script>
+  <script src="/assets/post-links.js?v=1c9122c90486"></script>
+  <script src="/assets/posts.js?v=0644ef627f82"></script>
+<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

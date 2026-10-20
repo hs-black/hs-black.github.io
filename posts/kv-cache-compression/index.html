@@ -7,7 +7,7 @@
 <meta name="description" content="推导 GQA 与 MLA 的缓存形状，计算量化误差、分组元数据和残差区预算；附性能诊断、课后习题与可运行压缩实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
+<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
 <style>
 .slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
@@ -304,4 +304,5 @@ function numberSteps(id,frames,captions){
 }
 numberSteps("quantization-worked",[{"value": 0, "label": "正在检查的数", "detail": "s = 1 / 7"}, {"value": -1, "label": "x = −0.2 的整数码", "detail": "round(−1.4) = −1", "digits": 0, "stop": "编码"}, {"value": -0.14285714285714285, "label": "x = −0.2 的重建值", "detail": "−1 × (1 / 7)", "digits": 6, "stop": "反量化"}, {"value": 0.05714285714285714, "label": "整组最大绝对误差", "detail": "来自 −0.2 → −0.142857", "digits": 6, "stop": "检查误差"}],["只存整数码还不够；恢复数值必须同时知道 scale。", "这里 4 bit 编码只使用 −7…7，便于对称量化。", "误差已经进入 attention 的 K 或 V。", "非饱和、就近舍入时单元素误差上界为 s / 2 ≈ 0.07143。"]);
 numberSteps("residual-budget",[{"value": 0, "label": "单层累计占用", "detail": "基线 BF16 = 32 MiB", "digits": 3}, {"value": 7.875, "label": "单层累计占用 / MiB", "detail": "INT4 载荷 7.875 MiB", "digits": 3, "stop": "加整数载荷"}, {"value": 8.859375, "label": "单层累计占用 / MiB", "detail": "+ scale / zero 0.984375 MiB", "digits": 3, "stop": "加元数据"}, {"value": 9.359375, "label": "单层累计占用 / MiB", "detail": "+ BF16 残差区 0.500 MiB", "digits": 3, "stop": "加近期残差"}],["保留最近一段高精度数据会减小误差，也会占用空间。", "旧 token 是 8192 − 128 = 8064 个。", "元数据不能按位宽一起除以 4。", "32 层合计 299.5 MiB；基线 1024 MiB，压缩约 3.419×。"]);
-</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
+</script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body></html>

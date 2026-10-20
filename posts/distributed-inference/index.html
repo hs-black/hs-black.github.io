@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>分布式推理：数据怎样走过每张卡 · Zunzhe Zhang</title><meta name="description" content="从张量形状和手算 MLP 推导 TP、PP、EP，计算每卡显存、ring 通信与流水线空泡，用诊断案例、习题和 Python 实验分析部署方案。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68"><style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>分布式推理：数据怎样走过每张卡 · Zunzhe Zhang</title><meta name="description" content="从张量形状和手算 MLP 推导 TP、PP、EP，计算每卡显存、ring 通信与流水线空泡，用诊断案例、习题和 Python 实验分析部署方案。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef"><style>
 .slide.infra { padding: 32px 64px 88px; gap: 9px; justify-content: flex-start; }
 .slide.infra h2 { font-size: 39px; line-height: 1.2; }
 .slide.center h1 { font-size: 69px; }
@@ -63,4 +63,5 @@ setup('ep',[{name:'Dispatch 到专家',run:(t,a)=>{move(t,'#ep0',150,-70,a);move
   for(let tick=0;tick<7;tick++){const a=t.duration;for(let st=0;st<4;st++){const mb=tick-st;if(mb>=0&&mb<4)t.to('#pipe-'+st+'-'+mb,{opacity:1},{at:a,dur:.45});}
   t.to('#pipe-count',{text:Math.max(0,tick-2),fmt:v=>'完成 '+Math.round(v)+' / 4 批'},{at:a,dur:.45}).label('第 '+(tick+1)+' 拍');}
   Anim.slide(s,t,{steps:true,controls:true,delay:0}); }
-</script><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
+</script><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body></html>

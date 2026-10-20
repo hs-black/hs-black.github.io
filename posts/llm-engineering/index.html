@@ -1,0 +1,125 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LLM 工程学习路径：从张量到推理服务 · Zunzhe Zhang</title>
+  <meta name="description" content="九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/curriculum.css?v=dd0ca17259f8">
+</head>
+<body>
+<header class="site-header wrap">
+  <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+  <nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav>
+</header>
+<main class="wrap">
+  <header class="post-header">
+    <h1>LLM 工程学习路径：从张量到推理服务</h1>
+    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></div>
+  </header>
+  <p class="course-intro">一个请求变慢了，是 prompt 太长、KV 读得太多、CPU 没有及时提交，还是请求排在队列里？把这些问题拆开，需要同时看懂模型的计算、数据的存放和系统的时间线。</p>
+  <p class="course-intro">每一阶段都有三件事：用动画跟踪数据，亲手算一遍，再运行实验验证判断。主线按先修关系排列；“延伸阅读”用于继续深挖。完成练习并解释实验结果后，再勾选对应课程。</p>
+  <div class="course-summary">
+    <p><b>起点：</b>能读 Python，知道矩阵乘法和概率。训练分支还需要链式法则。</p>
+    <p><b>共同练习对象：</b>一个两层 Transformer，逐步接上分页 KV、连续调度和采样器。</p>
+    <p><a href="/posts/mini-inference-engine/">打开综合项目 →</a><a href="/posts/mini-inference-engine/lab.py" download>下载引擎代码</a><a href="/posts/mini-inference-engine/WORKBOOK.md" download>下载实验记录模板</a></p>
+  </div>
+  <div class="course-tools">
+    <label for="course-route">学习方向</label>
+    <select id="course-route">
+      <option value="all">完整体系 · 九个阶段</option>
+      <option value="inference">推理工程 · 基础到综合项目</option>
+      <option value="kernels">算子与运行时 · 基础 + GPU</option>
+      <option value="adapters">微调与多租户 · 基础到训练分支</option>
+      <option value="multimodal">多模态与 VLA · 基础到动作生成</option>
+    </select>
+    <span class="course-progress" id="course-progress" aria-live="polite"></span>
+  </div>
+  <p class="course-storage" id="course-storage">勾选记录保存在当前浏览器。它表示你完成了练习与验证。</p>
+  <nav class="course-nav" id="course-nav" aria-label="阶段导航"></nav>
+  <div id="course-map"></div>
+  <noscript><p>启用 JavaScript 可以查看分阶段课程与保存学习记录。也可以直接打开 <a href="/blog/">博客列表</a> 或 <a href="/posts/mini-inference-engine/">综合项目</a>。</p></noscript>
+  <article class="prose">
+    <h2>每次实验留下什么</h2>
+    <ol class="course-path-list">
+      <li><b>预测：</b>先写下公式、单位与假设。改变 batch、长度或页大小，会改变哪个成本？</li>
+      <li><b>证据：</b>记录命令、环境、正确性误差、延迟分布和内存。模拟 tick、CPU 秒和 GPU 毫秒分开写。</li>
+      <li><b>解释：</b>观察与预测不一致时，缩小输入，检查 tensor、mask、位置、队列与生命周期。</li>
+      <li><b>验收：</b>换一组输入仍然成立；优化后输出正确；能够说明适用条件和代价。</li>
+    </ol>
+    <h2>综合项目的交付标准</h2>
+    <p>让不同到达时间、不同 prompt 长度的请求完成生成；输出与逐请求完整前向一致。改页大小和 batch，结果不变，页面能全部回收。分别注入位置错位、padding mask 遗漏和页面泄漏，展示检查在哪一步捕获它们。</p>
+    <p>最后写一页实验记录：一个明确问题、一份容量估算、一个受控变量、正确性证据和测量结果。有 GPU 时，再把 NumPy 算子换成 PyTorch / Triton，沿相同检查路径继续优化。</p>
+  </article>
+</main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a> · <a href="/blog/?view=curriculum">按学习路径浏览博客</a></footer>
+<script src="/assets/post-links.js?v=1c9122c90486"></script>
+<script src="/assets/posts.js?v=0644ef627f82"></script>
+<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+<script>
+(() => {
+  const stages = window.CURRICULUM.stages;
+  const posts = new Map(window.SITE.POSTS.map(p => [p.slug, p]));
+  const key = 'llm-engineering-completed-v1';
+  const all = new Set(stages.flatMap(s => s.core));
+  let done = new Set();
+  try {
+    const saved = JSON.parse(localStorage.getItem(key) || '[]');
+    if (Array.isArray(saved)) done = new Set(saved.filter(s => all.has(s)));
+  } catch (_) {}
+  const paths = {
+    all: stages.map(s => s.id),
+    inference: ['foundations', 'kernels', 'memory', 'engine', 'serving', 'capstone'],
+    kernels: ['foundations', 'kernels'],
+    adapters: ['foundations', 'kernels', 'memory', 'engine', 'adaptation'],
+    multimodal: ['foundations', 'kernels', 'memory', 'engine', 'serving', 'multimodal'],
+  };
+  const route = document.getElementById('course-route');
+  const initial = new URLSearchParams(location.search).get('route');
+  if (paths[initial]) route.value = initial;
+  const esc = text => String(text).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+  const link = slug => '<a href="/posts/' + slug + '/">' + esc(posts.get(slug)?.title || slug) + '</a>';
+  function progress() {
+    const lessons = stages.filter(s => paths[route.value].includes(s.id)).flatMap(s => s.core);
+    document.getElementById('course-progress').textContent = lessons.filter(s => done.has(s)).length + ' / ' + lessons.length + ' 门主线已完成';
+  }
+  function render() {
+    const selected = stages.filter(s => paths[route.value].includes(s.id));
+    document.getElementById('course-nav').innerHTML = selected.map(s =>
+      '<a href="#' + s.id + '">' + (stages.indexOf(s)+1) + ' · ' + esc(s.title) + '</a>').join('');
+    document.getElementById('course-map').innerHTML = selected.map(s => {
+      const n = stages.indexOf(s) + 1;
+      return '<section class="course-stage" id="' + s.id + '"><h2><span>阶段 ' + n + '</span>' + esc(s.title) + '</h2>' +
+        '<p>' + esc(s.goal) + '</p><p><b>先修：</b>' + esc(s.prerequisite) + '</p><p class="course-check"><b>过关任务：</b>' + esc(s.check) + '</p>' +
+        '<ol class="course-lessons">' + s.core.map(slug =>
+          '<li class="' + (done.has(slug) ? 'lesson-done' : '') + '"><input type="checkbox" data-slug="' + slug + '" id="done-' + slug + '"' + (done.has(slug) ? ' checked' : '') +
+          ' aria-label="已完成练习与验证：' + esc(posts.get(slug)?.title || slug) + '"><div>' + link(slug) + '<small>' + esc(posts.get(slug)?.desc || '') + '</small></div></li>').join('') + '</ol>' +
+        (s.extra.length ? '<details class="course-extras"><summary>延伸阅读 · ' + s.extra.length + ' 篇</summary><ul>' + s.extra.map(slug => '<li>' + link(slug) + '</li>').join('') + '</ul></details>' : '') + '</section>';
+    }).join('');
+    progress();
+  }
+  route.addEventListener('change', () => {
+    const url = new URL(location.href);
+    route.value === 'all' ? url.searchParams.delete('route') : url.searchParams.set('route', route.value);
+    url.hash = '';
+    history.replaceState(null, '', url);
+    render();
+  });
+  document.getElementById('course-map').addEventListener('change', e => {
+    const slug = e.target.dataset.slug;
+    if (!all.has(slug)) return;
+    e.target.checked ? done.add(slug) : done.delete(slug);
+    e.target.closest('li').classList.toggle('lesson-done', e.target.checked);
+    try { localStorage.setItem(key, JSON.stringify([...done])); }
+    catch (_) { document.getElementById('course-storage').textContent = '当前浏览器无法保存记录；本次页面内仍可勾选。'; }
+    progress();
+  });
+  render();
+  // The map is generated before load; align deep links after it exists.
+  if (location.hash) requestAnimationFrame(() => document.getElementById(location.hash.slice(1))?.scrollIntoView());
+})();
+</script>
+</body>
+</html>

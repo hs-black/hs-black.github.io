@@ -7,7 +7,7 @@
 <meta name="description" content="从 QKV 张量、增量位置与 causal mask 到 GQA 分片、显存和带宽预算；附数值动画、工程诊断、计算题与 NumPy 正确性实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
+<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
 <style>
 .slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
@@ -312,4 +312,5 @@ function numberSteps(id,frames,captions){
 }
 numberSteps("softmax-arithmetic",[{"value": 0, "label": "累计 attention 输出", "detail": "权重之和 = 1"}, {"value": 0.3333333333333333, "label": "累计 attention 输出", "detail": "2 / 6", "stop": "读第一个 V"}, {"value": 1.6666666666666667, "label": "累计 attention 输出", "detail": "(2 + 8) / 6", "stop": "读第二个 V"}, {"value": 5.666666666666667, "label": "最终 attention 输出", "detail": "(2 + 8 + 24) / 6", "stop": "读第三个 V"}],["QKᵀ / √d 先得到 logits，再做稳定 softmax。", "分子只积累第一个 value 的贡献。", "加权求和；不是把三个 value 等权平均。", "得到 5.6667；新 Q 会改变这些权重，所以旧输出通常不能复用。"]);
 numberSteps("position-arithmetic",[{"value": 4, "label": "最后处理的位置", "detail": "下一次 position = 5", "digits": 0}, {"value": 5, "label": "当前 RoPE 位置", "detail": "槽位 1；窗口 [2, 3, 4, 5]", "digits": 0, "stop": "写入位置 5"}, {"value": 6, "label": "当前 RoPE 位置", "detail": "槽位 2；窗口 [3, 4, 5, 6]", "digits": 0, "stop": "写入位置 6"}, {"value": 7, "label": "当前 RoPE 位置", "detail": "槽位 3；窗口 [4, 5, 6, 7]", "digits": 0, "stop": "写入位置 7"}],["物理容量不会告诉你语义上的绝对位置。", "先旋转当前 Q/K，再写入槽位；槽位编号不是 position id。", "窗口滑动淘汰旧 KV，但位置不能重新从 0 编号。", "只有模型本来就使用窗口 attention 时，才能这样淘汰历史。"]);
-</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
+</script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body></html>

@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CUDA Graph：把一轮计算录下来 · Zunzhe Zhang</title><meta name="description" content="从固定存储与输出别名到真实 PyTorch capture/replay，计算形状桶、显存预算和回本次数，配习题、CPU 模拟及可下载 CUDA 实验。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68"><style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CUDA Graph：把一轮计算录下来 · Zunzhe Zhang</title><meta name="description" content="从固定存储与输出别名到真实 PyTorch capture/replay，计算形状桶、显存预算和回本次数，配习题、CPU 模拟及可下载 CUDA 实验。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef"><style>
 .slide.infra { padding: 32px 64px 88px; gap: 9px; justify-content: flex-start; }
 .slide.infra h2 { font-size: 39px; line-height: 1.2; }
 .slide.center h1 { font-size: 69px; }
@@ -93,4 +93,5 @@ setup('graph-memory',[{name:'graph 保留自己的存储',run:(t,a)=>{fade(t,'#p
  .to('#bucket-time',{text:8,fmt:v=>'bucket 计算：'+v.toFixed(1)+' μs'},{dur:.8}).label('计入 padding')
  .to('#bucket-total',{text:10,fmt:v=>'graph 总时间：'+v.toFixed(1)+' μs'},{dur:.8}).label('加提交与 copy：1+8+1=10');
  Anim.slide(s,t,{steps:true,controls:true,delay:0}); }
-</script><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
+</script><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body></html>

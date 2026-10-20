@@ -125,6 +125,7 @@ body.deck-page {
 }
 .deck-bar a { pointer-events: auto; color: var(--text-faint); }
 .deck-bar a:hover { color: var(--text); text-decoration: none; }
+.deck-course-links { display: flex; flex-direction: column; gap: 3px; font-size: 12px; white-space: nowrap; }
 .deck-navigation { display: flex; align-items: center; gap: 10px; pointer-events: auto; }
 .deck-navigation button, .deck-jump {
   color: var(--text-soft); background: var(--surface); border: 1px solid var(--border);

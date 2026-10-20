@@ -7,6 +7,104 @@
     <description>Zunzhe Zhang 的博客：大模型、具身智能、实验与想法。</description>
     <language>zh-CN</language>
     <item>
+      <title>LLM 工程学习路径：从张量到推理服务</title>
+      <link>https://hs-black.github.io/posts/llm-engineering/</link>
+      <guid>https://hs-black.github.io/posts/llm-engineering/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。</description>
+    </item>
+    <item>
+      <title>从零写一个最小推理引擎</title>
+      <link>https://hs-black.github.io/posts/mini-inference-engine/</link>
+      <guid>https://hs-black.github.io/posts/mini-inference-engine/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>用可运行的 NumPy Transformer 串起正确前向、GQA、RoPE、分页 KV、连续调度、采样和测量；含独立参考检查、三种故障注入、四道习题与实验记录模板。</description>
+    </item>
+    <item>
+      <title>张量布局、stride 与 GPU 访存</title>
+      <link>https://hs-black.github.io/posts/tensor-layouts/</link>
+      <guid>https://hs-black.github.io/posts/tensor-layouts/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从逻辑索引推导真实地址，拆解 transpose、reshape、合并访存与 shared memory bank；含逐步动画、复制成本计算、排错习题和 NumPy 实验。</description>
+    </item>
+    <item>
+      <title>GEMM：从三重循环到 Tensor Core</title>
+      <link>https://hs-black.github.io/posts/gemm-optimization/</link>
+      <guid>https://hs-black.github.io/posts/gemm-optimization/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从矩阵乘法的 FLOPs 与字节账本推导分块复用、shared memory、寄存器与 Tensor Core，含尾块动画、性能诊断、计算题、CPU 实验和完整 Triton 示例。</description>
+    </item>
+    <item>
+      <title>CUDA streams、events 与异步流水</title>
+      <link>https://hs-black.github.io/posts/cuda-streams/</link>
+      <guid>https://hs-black.github.io/posts/cuda-streams/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从命令队列、跨流依赖与双缓冲到存储寿命、关键路径和正确计时；含可回放时间线、计算题、CPU 调度实验与 CUDA 示例。</description>
+    </item>
+    <item>
+      <title>torch.compile：从 Python 到 GPU kernel</title>
+      <link>https://hs-black.github.io/posts/torch-compile/</link>
+      <guid>https://hs-black.github.io/posts/torch-compile/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从 FX 图、算子融合与 guards 到动态形状、重编译、分桶和冷启动摊销；含内存流量动画、计算题、缓存模型与真实 PyTorch 实验。</description>
+    </item>
+    <item>
+      <title>RoPE 与长上下文扩展</title>
+      <link>https://hs-black.github.io/posts/rope-long-context/</link>
+      <guid>https://hs-black.github.io/posts/rope-long-context/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从二维旋转推导相对位置，逐步计算频率、插值与 YaRN，排查 KV cache 位置和精度问题；含旋转动画、计算题与 NumPy 实验。</description>
+    </item>
+    <item>
+      <title>采样器与结构化解码</title>
+      <link>https://hs-black.github.io/posts/sampling-structured-decoding/</link>
+      <guid>https://hs-black.github.io/posts/sampling-structured-decoding/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从 logits、temperature、top-k/top-p 到 token 级语法约束、状态回滚与投机验证，结合概率动画、JSON 栈、计算题和可运行采样实验。</description>
+    </item>
+    <item>
+      <title>推理压测与 SLO：测出真正可用的容量</title>
+      <link>https://hs-black.github.io/posts/inference-benchmarking/</link>
+      <guid>https://hs-black.github.io/posts/inference-benchmarking/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从请求时间戳、开放负载与尾延迟到 goodput：用排队动画、容量计算、诊断案例和 CPU 实验建立可复现的压测方法。</description>
+    </item>
+    <item>
+      <title>Prefill / Decode 分离：把计算与缓存交接清楚</title>
+      <link>https://hs-black.github.io/posts/prefill-decode-disaggregation/</link>
+      <guid>https://hs-black.github.io/posts/prefill-decode-disaggregation/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从逐卡数据流与 KV 传输算起，推导排队、资源配比、缓存生命周期和多轮一致性；配计算题与可运行的交接实验。</description>
+    </item>
+    <item>
+      <title>LoRA / QLoRA：参数高效微调</title>
+      <link>https://hs-black.github.io/posts/lora-qlora/</link>
+      <guid>https://hs-black.github.io/posts/lora-qlora/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从低秩更新、梯度与初始化到 NF4、double quant 和完整显存账本；含数值动画、工程诊断、计算题与 NumPy 微调实验。</description>
+    </item>
+    <item>
+      <title>多 Adapter 推理服务</title>
+      <link>https://hs-black.github.io/posts/multi-adapter-serving/</link>
+      <guid>https://hs-black.github.io/posts/multi-adapter-serving/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从共享底座与异构 rank 分组到 adapter 驻留、原子准入、预取、版本和 KV 隔离；含数据流动画、计算题与 CPU 服务实验。</description>
+    </item>
+    <item>
+      <title>图像与视频推理：token、计算与显存账本</title>
+      <link>https://hs-black.github.io/posts/multimodal-inference/</link>
+      <guid>https://hs-black.github.io/posts/multimodal-inference/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从图像 patch、视频时间网格到视觉编码、语言 KV、调度与缓存，逐项计算多模态推理成本，附动画、计算题和可运行 CPU 实验。</description>
+    </item>
+    <item>
+      <title>VLA：从视觉 token 到机器人动作</title>
+      <link>https://hs-black.github.io/posts/vla-inference/</link>
+      <guid>https://hs-black.github.io/posts/vla-inference/</guid>
+      <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从视觉语言输入到动作 token、flow matching 与 action chunk，推导单位、坐标、时延和闭环误差，附动画、习题与纯 CPU 仿真。</description>
+    </item>
+    <item>
       <title>DeepSeek-V4-Flash 架构：一个 token 的旅程</title>
       <link>https://hs-black.github.io/posts/deepseek-v4-flash/</link>
       <guid>https://hs-black.github.io/posts/deepseek-v4-flash/</guid>

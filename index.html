@@ -140,28 +140,9 @@
 
         <!-- The newest 3 posts from /blog/. -->
         <ul class="post-list">
-          <li>
-            <a href="/posts/deepseek-v4-flash/">
-              <span class="post-title">DeepSeek-V4-Flash 架构：一个 token 的旅程</span>
-              <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span>
-              <span class="post-desc">从张量形状、mHC、逐通道压缩、因果边界和 MoE 路由深入理解 V4-Flash，含数值动画、工程分析、习题解答与可运行实验。</span>
-            </a>
-          </li>
-          <li>
-            <a href="/posts/deepseek-v4-flash-inference/">
-              <span class="post-title">DeepSeek-V4-Flash 推理：一枚 token，4 张卡</span>
-              <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span>
-              <span class="post-desc">逐卡推导 V4-Flash 推理的权重与缓存容量、FP4 scale、prefill 峰值、FP32 通信和关键路径，含计算题、排错案例与 CPU 实验。</span>
-            </a>
-          </li>
-          <li>
-            <a href="/posts/deepseek-v4-pro/">
-              <span class="post-title">DeepSeek-V4-Pro 架构：一个 token 的旅程</span>
-              <span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span>
-              <span class="post-desc">从张量形状、mHC、逐通道压缩、因果边界和 MoE 路由深入理解 V4-Pro，含数值动画、工程分析、习题解答与可运行实验。</span>
-            </a>
-          </li>
-
+          <li><a href="/posts/llm-engineering/"><span class="post-title">LLM 工程学习路径：从张量到推理服务</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。</span></a></li>
+          <li><a href="/posts/mini-inference-engine/"><span class="post-title">从零写一个最小推理引擎</span><span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">用可运行的 NumPy Transformer 串起正确前向、GQA、RoPE、分页 KV、连续调度、采样和测量；含独立参考检查、三种故障注入、四道习题与实验记录模板。</span></a></li>
+          <li><a href="/posts/tensor-layouts/"><span class="post-title">张量布局、stride 与 GPU 访存</span><span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">从逻辑索引推导真实地址，拆解 transpose、reshape、合并访存与 shared memory bank；含逐步动画、复制成本计算、排错习题和 NumPy 实验。</span></a></li>
         </ul>
       </section>
 

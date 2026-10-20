@@ -7,7 +7,7 @@
 <meta name="description" content="推导递推、并行与分块等价，分析状态容量、门控权重与 delta rule 稳定性；附数值动画、计算题和 NumPy 实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
 <link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68">
+<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
 <style>
 .slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
 .slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
@@ -321,4 +321,5 @@ function numberSteps(id,frames,captions){
 }
 numberSteps("gate-weights",[{"value": 0, "label": "当前归一化输出", "detail": "S0 = z0 = 0"}, {"value": 2, "label": "当前归一化输出", "detail": "2 / 1 = 2", "stop": "第一个 token"}, {"value": 3.3333333333333335, "label": "当前归一化输出", "detail": "5 / 1.5 = 3.3333", "stop": "第二个 token"}, {"value": 6, "label": "当前归一化输出", "detail": "10.5 / 1.75 = 6", "stop": "第三个 token"}],["旧信息每经过一步都乘 0.5。", "当前 token 的权重系数为 1。", "两个 token 的未归一化系数是 [0.5, 1]。", "三个 token 的系数为 [0.25, 0.5, 1]；归一化后 [1/7, 2/7, 4/7]。"]);
 numberSteps("delta-repeat",[{"value": 2, "label": "key = 1 对应的记忆", "detail": "初始 S = 2"}, {"value": 3.5, "label": "key = 1 对应的记忆", "detail": "剩余误差 1.5", "stop": "第一次纠错"}, {"value": 4.25, "label": "key = 1 对应的记忆", "detail": "剩余误差 0.75", "stop": "第二次纠错"}, {"value": 4.625, "label": "key = 1 对应的记忆", "detail": "剩余误差 0.375", "stop": "第三次纠错"}],["这是不带 z 分母的 delta memory。", "误差减半，而不是把 value 5 整份叠加到 S。", "对同一个目标反复纠错，会逐渐逼近 5。", "β = 1 且 key 为单位向量时，一次即可把该方向改为目标值。"]);
-</script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
+</script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body></html>

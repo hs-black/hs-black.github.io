@@ -39,30 +39,165 @@
       ],
     },
     systems: {
-      title: '动画图解 LLM 系统',
-      posts: [
-        ["kv-cache", "KV cache：记住已经算过的历史"],
-        ["paged-attention", "PagedAttention：让 KV cache 按需生长"],
-        ["continuous-batching", "Continuous batching：每一轮重新组队"],
-        ["prefix-caching", "Prefix caching：相同的开头，只算一次"],
-        ["sparse-attention", "Sparse attention：只看需要的历史"],
-        ["linear-attention", "Linear attention：把历史写进状态"],
-        ["kv-cache-compression", "KV cache 压缩：把历史装得更小"],
-        ["flash-attention", "FlashAttention 1、2、3"],
-        ["speculative-decoding", "投机解码"],
-        ["dspark", "DSpark"],
-        ["llm-quantization", "LLM 量化"],
-        ["distributed-inference", "分布式推理：数据怎样走过每张卡"],
-        ["cpu-overhead", "CPU overhead：GPU 为什么在等"],
-        ["cuda-graph", "CUDA Graph：把一轮计算录下来"],
-        ["rmsnorm-kernel", "RMSNorm 与 GPU 算子优化"],
-        ["gradient-checkpointing", "Gradient checkpointing"],
-        ["optimizers", "优化器：从 SGD 到 Muon"],
-        ["deepseek-v4-flash", "DeepSeek-V4-Flash 架构：一个 token 的旅程"],
-        ["deepseek-v4-flash-inference", "DeepSeek-V4-Flash 推理：一枚 token，4 张卡"],
-        ["deepseek-v4-pro", "DeepSeek-V4-Pro 架构：一个 token 的旅程"],
-        ["deepseek-v4-pro-inference", "DeepSeek-V4-Pro 推理：一枚 token，8 张卡"],
-      ],
+      "title": "LLM 工程：从张量到推理服务",
+      "posts": [
+        [
+          "llm-engineering",
+          "LLM 工程学习路径：从张量到推理服务"
+        ],
+        [
+          "next-token",
+          "一次只猜一个 token"
+        ],
+        [
+          "scaling-inference",
+          "Transformer 推理的数学"
+        ],
+        [
+          "tensor-layouts",
+          "张量布局、stride 与 GPU 访存"
+        ],
+        [
+          "rope-long-context",
+          "RoPE 与长上下文扩展"
+        ],
+        [
+          "kv-cache",
+          "KV cache：记住已经算过的历史"
+        ],
+        [
+          "scaling-roofline",
+          "Roofline：算力、带宽与算术强度"
+        ],
+        [
+          "gemm-optimization",
+          "GEMM：从三重循环到 Tensor Core"
+        ],
+        [
+          "cuda-streams",
+          "CUDA streams、events 与异步流水"
+        ],
+        [
+          "rmsnorm-kernel",
+          "RMSNorm 与 GPU 算子优化"
+        ],
+        [
+          "flash-attention",
+          "FlashAttention 1、2、3"
+        ],
+        [
+          "torch-compile",
+          "torch.compile：从 Python 到 GPU kernel"
+        ],
+        [
+          "cpu-overhead",
+          "CPU overhead：GPU 为什么在等"
+        ],
+        [
+          "cuda-graph",
+          "CUDA Graph：把一轮计算录下来"
+        ],
+        [
+          "paged-attention",
+          "PagedAttention：让 KV cache 按需生长"
+        ],
+        [
+          "kv-cache-compression",
+          "KV cache 压缩：把历史装得更小"
+        ],
+        [
+          "sparse-attention",
+          "Sparse attention：只看需要的历史"
+        ],
+        [
+          "linear-attention",
+          "Linear attention：把历史写进状态"
+        ],
+        [
+          "llm-quantization",
+          "LLM 量化"
+        ],
+        [
+          "continuous-batching",
+          "Continuous batching：每一轮重新组队"
+        ],
+        [
+          "prefix-caching",
+          "Prefix caching：相同的开头，只算一次"
+        ],
+        [
+          "sampling-structured-decoding",
+          "采样器与结构化解码"
+        ],
+        [
+          "speculative-decoding",
+          "投机解码"
+        ],
+        [
+          "dspark",
+          "DSpark"
+        ],
+        [
+          "distributed-inference",
+          "分布式推理：数据怎样走过每张卡"
+        ],
+        [
+          "inference-benchmarking",
+          "推理压测与 SLO：测出真正可用的容量"
+        ],
+        [
+          "prefill-decode-disaggregation",
+          "Prefill / Decode 分离：把计算与缓存交接清楚"
+        ],
+        [
+          "scaling-memory",
+          "训练的账本：显存、FLOPs 与 MFU"
+        ],
+        [
+          "optimizers",
+          "优化器：从 SGD 到 Muon"
+        ],
+        [
+          "gradient-checkpointing",
+          "Gradient checkpointing"
+        ],
+        [
+          "lora-qlora",
+          "LoRA / QLoRA：参数高效微调"
+        ],
+        [
+          "multi-adapter-serving",
+          "多 Adapter 推理服务"
+        ],
+        [
+          "deepseek-v4-flash",
+          "DeepSeek-V4-Flash 架构：一个 token 的旅程"
+        ],
+        [
+          "deepseek-v4-flash-inference",
+          "DeepSeek-V4-Flash 推理：一枚 token，4 张卡"
+        ],
+        [
+          "deepseek-v4-pro",
+          "DeepSeek-V4-Pro 架构：一个 token 的旅程"
+        ],
+        [
+          "deepseek-v4-pro-inference",
+          "DeepSeek-V4-Pro 推理：一枚 token，8 张卡"
+        ],
+        [
+          "multimodal-inference",
+          "图像与视频推理：token、计算与显存账本"
+        ],
+        [
+          "vla-inference",
+          "VLA：从视觉 token 到机器人动作"
+        ],
+        [
+          "mini-inference-engine",
+          "从零写一个最小推理引擎"
+        ]
+      ]
     },
     reports: {
       title: '模型技术报告精读',

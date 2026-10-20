@@ -15,6 +15,13 @@ window.POST_LINKS = {
   "cpu-overhead",
   "rmsnorm-kernel"
  ],
+ "cuda-streams": [
+  "cpu-overhead",
+  "cuda-graph",
+  "distributed-inference",
+  "paged-attention",
+  "torch-compile"
+ ],
  "deepseek-v4": [
   "deepseek-v4-flash",
   "deepseek-v4-flash-inference",
@@ -56,6 +63,13 @@ window.POST_LINKS = {
   "kv-cache",
   "rmsnorm-kernel"
  ],
+ "gemm-optimization": [
+  "cuda-graph",
+  "flash-attention",
+  "rmsnorm-kernel",
+  "scaling-roofline",
+  "tensor-layouts"
+ ],
  "gradient-checkpointing": [
   "flash-attention",
   "scaling-data-parallel",
@@ -64,6 +78,12 @@ window.POST_LINKS = {
  ],
  "hello-world": [
   "next-token"
+ ],
+ "inference-benchmarking": [
+  "continuous-batching",
+  "cpu-overhead",
+  "kv-cache",
+  "prefill-decode-disaggregation"
  ],
  "kimi-k2": [
   "kimi-linear"
@@ -94,10 +114,49 @@ window.POST_LINKS = {
   "qwen3-next",
   "sparse-attention"
  ],
+ "llm-engineering": [
+  "mini-inference-engine"
+ ],
  "llm-quantization": [
   "kv-cache-compression",
   "scaling-mixed-precision",
   "scaling-roofline"
+ ],
+ "lora-qlora": [
+  "gradient-checkpointing",
+  "kv-cache",
+  "llm-quantization",
+  "multi-adapter-serving",
+  "optimizers"
+ ],
+ "mini-inference-engine": [
+  "continuous-batching",
+  "cuda-streams",
+  "inference-benchmarking",
+  "kv-cache",
+  "llm-engineering",
+  "paged-attention",
+  "prefix-caching",
+  "rope-long-context",
+  "sampling-structured-decoding",
+  "torch-compile"
+ ],
+ "multi-adapter-serving": [
+  "continuous-batching",
+  "cuda-streams",
+  "gemm-optimization",
+  "inference-benchmarking",
+  "lora-qlora",
+  "paged-attention",
+  "prefix-caching"
+ ],
+ "multimodal-inference": [
+  "kv-cache",
+  "multi-adapter-serving",
+  "paged-attention",
+  "prefix-caching",
+  "tensor-layouts",
+  "vla-inference"
  ],
  "next-token": [
   "hello-world"
@@ -112,6 +171,13 @@ window.POST_LINKS = {
   "prefix-caching",
   "scaling-memory"
  ],
+ "prefill-decode-disaggregation": [
+  "cuda-streams",
+  "distributed-inference",
+  "inference-benchmarking",
+  "kv-cache",
+  "prefix-caching"
+ ],
  "prefix-caching": [
   "continuous-batching",
   "paged-attention"
@@ -121,6 +187,21 @@ window.POST_LINKS = {
   "flash-attention",
   "scaling-gpu-kernels",
   "scaling-roofline"
+ ],
+ "rope-long-context": [
+  "flash-attention",
+  "kv-cache",
+  "kv-cache-compression",
+  "paged-attention",
+  "sampling-structured-decoding",
+  "sparse-attention"
+ ],
+ "sampling-structured-decoding": [
+  "continuous-batching",
+  "cpu-overhead",
+  "kv-cache",
+  "prefix-caching",
+  "speculative-decoding"
  ],
  "scaling-5d": [
   "scaling-collectives",
@@ -215,5 +296,23 @@ window.POST_LINKS = {
   "continuous-batching",
   "dspark",
   "kv-cache-compression"
+ ],
+ "tensor-layouts": [
+  "flash-attention",
+  "gemm-optimization",
+  "rmsnorm-kernel"
+ ],
+ "torch-compile": [
+  "cpu-overhead",
+  "cuda-graph",
+  "cuda-streams",
+  "gemm-optimization",
+  "gradient-checkpointing",
+  "scaling-roofline",
+  "tensor-layouts"
+ ],
+ "vla-inference": [
+  "kv-cache",
+  "multimodal-inference"
  ]
 };

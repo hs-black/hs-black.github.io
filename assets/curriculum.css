@@ -1,0 +1,33 @@
+/* Learning-map UI shared by the ordinary blog archive and its roadmap post. */
+.course-intro { color: var(--text-soft); line-height: 1.7; margin: 20px 0; }
+.course-stage { padding: 26px 0; border-top: 1px solid var(--border); scroll-margin-top: 24px; }
+.course-stage h2 { margin: 0 0 12px; font-size: 23px; line-height: 1.4; }
+.course-stage h2 span { color: var(--accent); font-size: 14px; margin-right: 12px; }
+.course-stage p { margin: 8px 0; color: var(--text-soft); line-height: 1.7; }
+.course-stage .course-check { padding-left: 14px; border-left: 3px solid var(--accent); }
+.course-lessons { list-style: none; padding: 0; margin: 18px 0 0; }
+.course-lessons li { display: grid; grid-template-columns: 24px minmax(0, 1fr); gap: 10px; padding: 12px 0; border-bottom: 1px solid var(--border); align-items: start; }
+.course-lessons input { accent-color: var(--accent); width: 18px; height: 18px; margin-top: 5px; cursor: pointer; }
+.course-lessons label { cursor: pointer; }
+.course-lessons a { font-weight: 600; }
+.course-lessons small { display: block; color: var(--text-soft); line-height: 1.6; margin-top: 5px; font-size: 14px; }
+.course-lessons .lesson-done a { color: var(--text-faint); }
+.course-extras { margin-top: 16px; }
+.course-extras summary { color: var(--accent); cursor: pointer; }
+.course-extras ul { margin: 10px 0; line-height: 1.9; }
+.course-tools { display: flex; flex-wrap: wrap; align-items: center; gap: 12px; margin: 24px 0; }
+.course-tools select, .course-tools button { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; color: var(--text); font: inherit; padding: 7px 10px; max-width: 100%; }
+.course-tools button { cursor: pointer; }
+.course-progress { font-variant-numeric: tabular-nums; color: var(--text-soft); }
+.course-storage { font-size: 14px; line-height: 1.6; color: var(--text-faint); }
+.course-summary { border: 1px solid var(--border); border-radius: 12px; padding: 18px 22px; line-height: 1.7; background: var(--surface); }
+.course-summary p { margin: 4px 0; }
+.course-summary a { margin-right: 14px; }
+.course-nav { display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 18px 0; font-size: 14px; }
+.course-path-list { padding-left: 1.5em; }
+.course-path-list > li { padding: 8px 0; }
+.course-context { margin-top: 12px; }
+@media (max-width: 600px) {
+  .course-stage h2 { font-size: 21px; }
+  .course-summary { padding: 14px 16px; }
+}

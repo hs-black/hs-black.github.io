@@ -8,8 +8,9 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
   <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/curriculum.css?v=dd0ca17259f8">
   <style>
-    .blog-tools { display: grid; gap: 12px; margin: 8px 0 8px; }
+    .blog-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 8px 0 8px; }
     .views { display: inline-flex; gap: 4px; padding: 3px; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); width: max-content; max-width: 100%; overflow-x: auto; }
     .views button { padding: 5px 14px; border: 0; border-radius: 7px; background: none; color: var(--text-soft); font: inherit; font-size: 14px; cursor: pointer; white-space: nowrap; }
     .views button[aria-pressed="true"] { background: var(--accent); color: #fff; }
@@ -71,6 +72,7 @@
     <div class="blog-tools">
       <div class="views" role="group" aria-label="浏览方式">
         <button type="button" data-view="timeline">时间轴</button>
+        <button type="button" data-view="curriculum">学习路径</button>
         <button type="button" data-view="category">分类</button>
         <button type="button" data-view="series">系列</button>
         <button type="button" data-view="tags">标签</button>
@@ -94,8 +96,9 @@
 
   <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
 
-  <script src="/assets/series.js?v=75f19829cdf3"></script>
-  <script src="/assets/posts.js?v=554228955524"></script>
+  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
   <script>
     (() => {
       const { POSTS, CATEGORIES, KINDS } = window.SITE;
@@ -113,6 +116,7 @@
         tag: params.get('tag') || '',
         q: params.get('q') || '',
       };
+      if (!['timeline', 'curriculum', 'category', 'series', 'tags'].includes(st.view)) st.view = 'timeline';
       search.value = st.q;
 
       function sync() {
@@ -177,6 +181,23 @@
         return html;
       }
 
+      function byCurriculum(posts) {
+        const ok = new Map(posts.map(p => [p.slug, p]));
+        const stages = window.CURRICULUM.stages;
+        let html = '<p class="course-intro"><a href="/posts/llm-engineering/">完整学习路径、先修关系与阶段验收 →</a><br>主线按学习顺序排列；每门课仍然保留在时间轴与分类列表中。</p>';
+        stages.forEach((s, i) => {
+          const core = s.core.filter(slug => ok.has(slug));
+          const extra = s.extra.filter(slug => ok.has(slug));
+          if (!core.length && !extra.length) return;
+          html += '<section class="course-stage"><h2><span>阶段 ' + (i + 1) + '</span>' + esc(s.title) +
+            '</h2><p>' + esc(s.goal) + '</p>' + core.map(slug => entry(ok.get(slug))).join('');
+          if (extra.length) html += '<details class="course-extras"' + (st.q ? ' open' : '') +
+            '><summary>延伸阅读 · ' + extra.length + ' 篇</summary>' + extra.map(slug => entry(ok.get(slug))).join('') + '</details>';
+          html += '</section>';
+        });
+        return html;
+      }
+
       function tagsView(posts) {
         const counts = new Map();
         POSTS.forEach((p) => p.tags.forEach((t) => counts.set(t, (counts.get(t) || 0) + 1)));
@@ -193,9 +214,10 @@
         if (st.cat) active.push('<button type="button" data-clear="cat">分类：' + esc(CATEGORIES[st.cat] || st.cat) + ' ×</button>');
         if (st.tag) active.push('<button type="button" data-clear="tag">#' + esc(st.tag) + ' ×</button>');
         document.getElementById('active').innerHTML = active.join('');
-        const posts = POSTS.filter(matches);
+        const curriculumSlugs = new Set(window.CURRICULUM.stages.flatMap(s => [...s.core, ...s.extra]));
+        const posts = POSTS.filter(p => matches(p) && (st.view !== 'curriculum' || curriculumSlugs.has(p.slug)));
         document.getElementById('count').textContent = posts.length + ' / ' + POSTS.length + ' 篇';
-        const views = { timeline, category: byCategory, series: bySeries, tags: tagsView };
+        const views = { timeline, curriculum: byCurriculum, category: byCategory, series: bySeries, tags: tagsView };
         list.innerHTML = posts.length || st.view === 'tags' ? views[st.view](posts) : '<p class="empty">没有符合条件的文章。</p>';
         sync();
       }

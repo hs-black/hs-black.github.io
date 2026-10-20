@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CPU overhead：GPU 为什么在等 · Zunzhe Zhang</title><meta name="description" content="用异步队列递推、CUDA 计时、Nsight trace 和 Amdahl 定律定位 CPU 开销，分析吞吐与尾延迟，配计算题和可运行的提交队列实验。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/slides.css?v=7cec810cdc68"><style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>CPU overhead：GPU 为什么在等 · Zunzhe Zhang</title><meta name="description" content="用异步队列递推、CUDA 计时、Nsight trace 和 Amdahl 定律定位 CPU 开销，分析吞吐与尾延迟，配计算题和可运行的提交队列实验。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css"><link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef"><style>
 .slide.infra { padding: 32px 64px 88px; gap: 9px; justify-content: flex-start; }
 .slide.infra h2 { font-size: 39px; line-height: 1.2; }
 .slide.center h1 { font-size: 69px; }
@@ -81,4 +81,5 @@ setup('replay',[{name:'一次发起整段工作',run:(t,a)=>{fade(t,'#one',a);fa
   .to('#amdahl-gpu',{attr:{x:v[1]}},{at:a,dur:1}).to('#amdahl-total',{text:v[2],fmt:v=>'总计 '+v.toFixed(2)+' ms'},{at:a,dur:1})
   .to('#amdahl-speed',{text:10/v[2],fmt:v=>'加速 '+v.toFixed(2)+'×'},{at:a,dur:1}).label(i?'主机快 4 倍':'主机快 2 倍');});
   Anim.slide(s,t,{steps:true,controls:true,delay:0}); }
-</script><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/post-links.js"></script><script src="/assets/posts.js"></script></body></html>
+</script><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body></html>
