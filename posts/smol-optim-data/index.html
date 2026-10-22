@@ -322,7 +322,7 @@
         <p class="note-small">上半：McCandlish 的模型 S = S<sub>min</sub>(1 + 𝓑/B)、E = E<sub>min</sub>(1 + B/𝓑)。下半：默认是 SmolLM3（3.08B、11T）。注意 DeepSeek 的 C 用的是「非 embedding FLOPs/token × token 数」，这里用 6ND 近似；公式是在他们的数据和设置上拟合的，迁移到别处只能当起点。代入 7B、2T 会得到约 4.2e-4 和 9.2M token，和 DeepSeek LLM 7B 实际用的 4.2e-4、9.4M 吻合；代入 SmolLM3 得到约 3.8e-4、12M，而 SmolLM3 实际用了 2e-4 和 2.36M。</p>
       </div>
 
-      <p><strong>μP</strong>：调超参还有另一条路。μP（Maximal Update Parametrization）通过按宽度缩放初始化方差和每层学习率，让最优超参在模型变宽时基本不变，于是可以在小模型上调好直接迁移到大模型，和上面「拟合超参随 C 的幂律」是两种思路。Cohere 的 Command A 用了 μP；怎么把它用到 MoE 上，目前还是开放问题。</p>
+      <p><strong>μP</strong> 通过协调初始化、前向乘数和各类参数的学习率，让模型变宽时的特征更新保持可比，从而在小模型上寻找可迁移的超参。迁移实验需要固定深度、优化器和训练任务；改变 MoE 路由或专家形状时，还要重新检查各类参数的缩放。<a href="/posts/pretraining-mup/">μP 与超参数迁移</a>从一次更新的量级推导这些规则，并用宽度扫描检验实现。</p>
 
       <h2 id="smolhp">SmolLM3 的选择与守则</h2>
       <p>优化器：在 1B、100B token 上比较了 AdamW、AdEMAMix 和 Muon。调好的 Muon 能胜过 AdamW，但对学习率敏感、容易发散；AdEMAMix 的 loss 和 Muon 相近，敏感度更低；AdamW 最稳，但最终 loss 高于调好的两个。扩到 3B 后，Muon 和 AdEMAMix 发散更频繁。原因可能是后来才发现的一个并行 bug，但这一点没有再验证。最终选了非常「香草」的设置：AdamW（\(\beta_1=0.9,\beta_2=0.95\)），权重衰减 0.1，梯度裁剪 1。</p>
@@ -375,9 +375,10 @@
         <figcaption>两种数据消融（横轴不按比例）。</figcaption>
       </figure>
 
-      <p><strong>自动找配比的方法</strong>：<a href="https://arxiv.org/abs/2305.10429">DoReMi</a> 用一个小代理模型学习各领域的权重，以最小化验证 loss；<a href="https://arxiv.org/abs/2206.07137">RHO-LOSS</a> 按 holdout loss 挑单个训练样本，优先选「可学、值得学、还没学会」的；<a href="https://arxiv.org/abs/2407.01492">RegMix</a> 把配比当回归问题，用正则化回归在多个评测目标和数据域之间平衡。HF 在以前的项目里试过 DoReMi 和 RHO-LOSS，发现它们倾向于收敛到大致等于各数据集自然大小比例的分布——基本是在说「哪个多就多用哪个」，没有胜过仔细的手动消融。近期的 SOTA 模型仍靠系统消融和退火实验手动调配比，SmolLM3 也是。</p>
+      <p><strong>自动找配比的方法</strong>各自选择了不同的学习信号。DoReMi 用固定参考模型衡量各领域尚可降低的损失，再通过小模型的鲁棒优化学习领域权重；DoGE 用训练域梯度与目标梯度的对齐程度调整采样；RegMix 则训练一批不同配比的小模型，拟合“配比 → 目标验证损失”，搜索后将候选配比迁移到大模型。<a href="/posts/pretraining-data-mixture/">数据配比怎样学出来</a>给出三者的更新公式、手算例子与迁移实验。实际选型要把搜寻配比消耗的训练预算也算进去，并在目标规模保留一次验证。</p>
 
       <h2 id="smoldata">SmolLM3 的数据配比</h2>
+      <p>进入配比实验前，可以先沿<a href="/posts/pretraining-data-curation/">数据筛选与去重</a>检查每个数据源的保留率、重复簇和质量分布。过滤策略改变后，同一个采样比例可能对应完全不同的有效数据量。</p>
       <p>目标：英文和多语言都能处理，数学和代码要强。方法对低资源语言或金融、医疗等特定领域同样适用：找候选数据集、做消融、设计平衡所有目标领域的配比。高质量数据集本身怎么造，FineWeb、FineWeb2、Stack-Edu 和 FineMath 的报告里有详细记录；配比要做的是把这些现有数据集组合起来。起点是 SmolLM2 在 1.7B 上已经验证过的英文网页配方，以及当时能拿到的最好的数学和代码数据。</p>
       <ul>
         <li><strong>英文网页</strong>：FineWeb-Edu 和 DCLM 是当时最强的开放英文网页数据，合计 5.1T token。FineWeb-Edu 帮教育和 STEM 类基准，DCLM 帮常识推理。在 3B、100B token 上扫了 20/80、40/60、50/50、60/40、80/20，60/40 或 50/50 最平衡（和 SmolLM2 的发现一致），stage 1 用 50/50。另加了 pes2o、Wikipedia & Wikibooks、StackExchange，对表现没影响，为了多样性。</li>
@@ -423,7 +424,7 @@
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script src="/assets/anim.js?v=499c11838720"></script>
   <script>
     (() => {
@@ -804,8 +805,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

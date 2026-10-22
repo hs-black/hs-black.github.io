@@ -1,0 +1,127 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>深层 Transformer 怎样稳定训练 · Zunzhe Zhang</title>
+<meta name="description" content="从残差 Jacobian、Pre-LN 与 DeepNorm 推导深度稳定性，再用注意力熵理解 QK normalization 和 σReparam，建立包含梯度裁剪、参数更新和低精度计算的诊断实验。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.stability-controls{display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin-bottom:16px}.stability-controls label{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.stability-controls select{font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:4px}.stability-controls input{accent-color:var(--accent);max-width:160px}.gradient-rows{display:grid;gap:6px}.gradient-row{display:grid;grid-template-columns:36px 1fr 1fr;gap:8px;padding:6px;border-radius:6px;border:1px solid transparent;align-items:center;font-size:12px}.gradient-row.active{border-color:var(--accent);background:var(--bg-soft)}.gradient-row.head{color:var(--text-soft)}.gradient-value{display:flex;gap:6px;align-items:center;min-width:0}.gradient-track{width:100%;height:9px;background:var(--bg-soft);border-radius:3px}.gradient-fill{height:100%;background:var(--accent);border-radius:3px;transition:width .25s}.gradient-fill.forward{background:#5b9c87}.gradient-value output{min-width:44px;text-align:right;font-variant-numeric:tabular-nums}.stability-readout{padding:12px;background:var(--bg-soft);border-radius:8px;font-size:14px;line-height:1.8}.score-row{display:grid;grid-template-columns:36px 48px 1fr 55px;gap:7px;align-items:center;margin:10px 0;font:13px var(--font-mono)}.score-track{height:24px;background:var(--bg-soft);border-radius:5px;overflow:hidden}.score-fill{height:100%;background:var(--accent);transition:width .25s}.entropy-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}.entropy-stats .article-stat{padding:10px;font-size:12px}.entropy-stats output{display:block;font-size:18px;font-weight:600;color:var(--text);margin-top:5px;font-variant-numeric:tabular-nums}.math-block{max-width:100%;overflow-x:auto}.stability-table{overflow-x:auto}.stability-table table{min-width:560px}@media(max-width:520px){.gradient-row{grid-template-columns:25px 1fr 1fr;gap:5px;font-size:11px;padding:4px}.gradient-value{gap:3px}.gradient-value output{min-width:38px}.entropy-stats{grid-template-columns:1fr}.entropy-stats .article-stat{display:flex;align-items:center;justify-content:space-between}.entropy-stats output{margin:0;font-size:16px}.score-row{grid-template-columns:23px 43px 1fr 44px;gap:4px;font-size:11px}}@media(prefers-reduced-motion:reduce){.gradient-fill,.score-fill{transition:none}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>深层 Transformer 怎样稳定训练</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header><nav class="series" data-series="pretraining"></nav>
+<article class="prose">
+<p>一个 12 层模型能正常训练，换成 96 层后，loss 在某一步突然抬升。把学习率调小，曲线平稳了，收敛却慢了许多。此时最有用的问题是：变化最先发生在残差流、注意力分数，还是参数更新中？</p>
+<p>这些位置控制不同的量。残差结构决定信息怎样跨过深度；归一化决定输入尺度和局部导数；注意力把分数差变成概率；优化器把梯度转换成实际参数位移。稳定训练需要这些环节的尺度相互匹配。只记录一个总 gradient norm，会把许多不同机制混在一起。</p>
+
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#jacobian">梯度怎样跨过深度</a></li><li><a href="#normalization">Pre-LN 与 Post-LN</a></li><li><a href="#deepnorm">DeepNorm：残差与初始化</a></li><li><a href="#entropy">分数尺度与注意力熵</a></li><li><a href="#qknorm">QK 归一化与谱尺度</a></li><li><a href="#monitoring">监控与受控实验</a></li><li><a href="#connections">多路残差</a></li><li><a href="#exercises">习题与实验</a></li></ol></nav>
+
+<h2 id="jacobian">深度把局部导数连乘起来</h2>
+<p>记第 \(\ell\) 层的输入为 \(x_\ell\in\mathbb R^d\)，输出为 \(x_{\ell+1}=F_\ell(x_\ell)\)。对固定的一次前向，局部 Jacobian \(J_\ell=\partial x_{\ell+1}/\partial x_\ell\) 是一个 \(d\times d\) 矩阵。这是单向量推导；处理整段 attention 时，把 \(T\) 个 token 的特征一起展平为 \(Td\) 维，Jacobian 也包含跨 token 的导数块，链式法则保持相同形式。若 \(g_L=\nabla_{x_L}\mathcal L\) 是顶层传回的梯度，便有：</p>
+<div class="math-block">\[g_0=\htmlData{symbol=jac}{J_0}^{\!\top}J_1^\top\cdots J_{L-1}^\top g_L,\qquad \|g_0\|_2\le\Big(\prod_{\ell=0}^{L-1}\|J_\ell\|_2\Big)\|g_L\|_2.\]</div>
+<p>矩阵的 \(\|J_\ell\|_2\) 是最大奇异值，表示它对某个方向最多能放大多少。这个上界把每层最坏方向连在一起；实际梯度还取决于各层方向如何旋转。一个标量例子已足够说明深度的敏感性：每层导数只有 1.02，连乘 100 次就是 7.24；每层为 0.98，则剩下约 0.133。</p>
+<p>残差层把 \(F_\ell\) 写成 \(x_\ell+f_\ell(x_\ell)\)，于是局部 Jacobian 是 \(I+J_{f_\ell}\)。恒等项为梯度提供直接通路，而分支的大小、方向和层数继续决定整个乘积。因此，初始化让残差分支处在合适尺度，以及训练中保持可控的更新，都是结构设计的一部分。</p>
+
+<h2 id="normalization">Pre-LN 与 Post-LN：归一化放在了哪条路径上？</h2>
+<p>用 \(N\) 表示归一化，\(f\) 表示 attention 或 FFN 子层。Post-LN 在相加后归一化，Pre-LN 在进入分支前归一化：</p>
+<div class="math-block">\[\begin{aligned}
+\text{Post-LN:}\quad y&=N(x+f(x)),&J&=J_N(I+J_f),\\
+\text{Pre-LN:}\quad y&=x+f(N(x)),&J&=I+J_fJ_N.
+\end{aligned}\]</div>
+<p>各 Jacobian 在对应的前向输入处求值。Post-LN 的所有路径都会经过相加之后的归一化；Pre-LN 的恒等通路直接连到下一层。常用 Pre-LN 模型还在整叠网络输出处添加 final norm，它会作用于最终输出及传回来的梯度。</p>
+<p>为了看清尺度作用，把归一化具体化为不带可学习缩放的 RMSNorm。对当前向量 \(x\in\mathbb R^d\)，定义 \(r=\sqrt{\|x\|_2^2/d+\varepsilon}\)，于是：</p>
+<div class="math-block">\[N(x)=\frac{x}{r},\qquad J_N=\frac{I}{r}-\frac{xx^\top}{dr^3}.\]</div>
+<p>与 \(x\) 正交的方向被缩放为 \(1/r\)，沿 \(x\) 的方向被缩放为 \(\varepsilon/r^3\)。当 \(\varepsilon\) 很小时，沿径向改变输入长度几乎不改变归一化输出。LayerNorm 还会先减去均值，因此也去掉全体分量同时平移的方向。这种几何变化说明，观察输出 RMS 约等于 1，只能说明前向尺度受控；还需要检查梯度方向的变化。作用于整段序列时，逐 token 归一化的 Jacobian 由这些局部块组成块对角矩阵，attention 则在 token 之间继续传递信息。完整算子推导与低精度归约可看<a href="/posts/rmsnorm-kernel/">RMSNorm 的计算与优化</a>。</p>
+<p><em>On Layer Normalization in the Transformer Architecture</em> 从初始化处的梯度尺度解释了 Post-LN 对 warmup 的敏感性，并分析 Pre-LN 为什么更容易在初始化阶段获得平稳梯度。实际训练中的学习率、数据难度、优化器状态仍会继续变化。Warmup 给这些量一个逐步适应的过程；是否缩短它，应当由相同数据和更新预算下的对照来决定。</p>
+
+<figure class="article-figure" id="gradient-flow">
+<h3>沿六层网络反传同一个梯度</h3>
+<div class="stability-controls"><label>归一化位置 <select id="norm-placement"><option value="pre">Pre · x + W N(x)</option><option value="post">Post · N(x + W x)</option></select></label><label>分支尺度 <select id="branch-scale"><option value="0">0</option><option value="0.15" selected>0.15</option><option value="0.5">0.5</option><option value="1">1</option></select></label></div>
+<div class="gradient-row head"><span>层</span><span>前向 RMS · 绿色</span><span>梯度 L2 范数 · 紫色</span></div><div id="gradient-rows" class="gradient-rows"></div><p id="gradient-readout" class="stability-readout" aria-live="polite"></p>
+<figcaption>四维输入 x₀ = [0.3, −0.9, 1.2, 0.6]，顶层梯度 g₆ = [1, −0.5, 0.2, 0.7]。每层用确定的线性分支与 RMSNorm（ε = 10⁻⁴）；进度逐层展示真实 Jacobian 的反向乘法。每一列的条长按该列最大值缩放，数字给出原始数值。这是局部六层堆叠的方向探针。</figcaption>
+</figure>
+
+<h2 id="deepnorm">深度增加时，分支和残差怎样共同缩放？</h2>
+<p>Pre-LN 的残差流在连续相加。记 \(r(x)^2=\|x\|_2^2/d\) 为均方幅值，对一次残差相加有精确关系：</p>
+<div class="math-block">\[r(x+f)^2=r(x)^2+r(f)^2+\frac{2x^\top f}{d}.\]</div>
+<p>最后一项衡量分支与残差的对齐程度。若两者近似不相关，许多层的分支方差会累积；若经常同向，增长会更快。当残差 RMS 越来越大，而分支更新规模大致固定时，深层新增信息的相对比例也会下降。这解释了为什么同时记录残差 RMS、分支 RMS 和二者夹角，比单看归一化后的数值更有用。</p>
+<p>DeepNet 的 DeepNorm 从 Post-LN 出发，同时调整残差系数与参数初始化：</p>
+<div class="math-block">\[x_{\ell+1}=\operatorname{LN}(\htmlData{symbol=alpha}{\alpha}\,x_\ell+f_\ell(x_\ell;\theta_\ell)).\]</div>
+<p>对于含 \(L\) 个 Transformer block、每个 block 含 self-attention 与 FFN 的 encoder-only 或 decoder-only 架构，系数取：</p>
+<div class="math-block">\[\alpha=(2L)^{1/4},\qquad \htmlData{symbol=beta}{\beta}=(8L)^{-1/4}.\]</div>
+<p>其中 \(\alpha\) 乘在每个子层的残差支路上；\(\beta\) 是初始化的缩放因子，应用于 FFN 权重、attention 的 value 投影与 output 投影。Q、K 投影保留基础初始化尺度。以 64 个 block 为例，\(\alpha\approx3.364\)，\(\beta\approx0.210\)。增大残差相对贡献，并减小特定分支权重的初始尺度，使一次参数更新对深层输出的影响更可控。</p>
+<p>这里的成对设计很关键：attention 分支包含 V 与 output 两次投影，FFN 也包含前后两次线性变换，初始化缩放会沿计算路径共同起作用。Encoder–decoder 架构还包含 cross-attention，原方法对它给出了依赖 encoder／decoder 深度的另一组系数。迁移设计时，应当先数清楚每个 block 的子层和投影路径，再选择对应的初始化。控制宽度变化时的参数与学习率尺度，则是 <a href="/posts/pretraining-mup/">μP 与超参数迁移</a>处理的相关问题。</p>
+
+<h2 id="entropy">注意力熵：分数尺度怎样改变信息流？</h2>
+<p>训练中还可能出现另一条链：Q、K 范数变大，注意力分数差被放大，概率突然集中在少数位置。对一个 query，令基础分数为 \(z_i\)，共有 \(n\) 个可见 key，用正数 \(a\) 调整整体尺度：</p>
+<div class="math-block">\[p_i(a)=\frac{e^{az_i}}{\sum_j e^{az_j}},\qquad \htmlData{symbol=entropy}{H(a)}=-\sum_{i=1}^{n}p_i(a)\log p_i(a).\]</div>
+<p>熵的单位是 nats，均匀分配时为 \(\log n\)，集中在一个位置时趋近于 0。为得到尺度变化的结果，记 \(Z(a)=\sum_i e^{az_i}\)，把熵写成 \(H(a)=\log Z(a)-a\,\mathbb E_p[z]\)。利用 \(d\log Z/da=\mathbb E_p[z]\) 与 \(d\mathbb E_p[z]/da=\operatorname{Var}_p(z)\)，可得：</p>
+<div class="math-block">\[\boxed{\frac{dH}{da}=-a\operatorname{Var}_p(z)\le0}\qquad(a\ge0).\]</div>
+<p>基础分数的相对次序保持不变时，放大它们就会降低熵。Softmax 的导数是 \(\operatorname{diag}(p)-pp^\top\)；接近 one-hot 的概率使许多方向上的局部导数变小，模型调整这些注意力选择的速度随之改变。</p>
+
+<figure class="article-figure" id="entropy-flow">
+<h3>保持分数方向，只改变温度</h3>
+<div class="stability-controls"><label>尺度 a <input id="attention-scale" type="range" min="0" max="8" step="0.1" value="1"><output id="attention-scale-value">1.0</output></label></div>
+<div class="score-row"><span>key</span><span>a · z</span><span>注意力概率 · 0 到 1</span><span>p</span></div><div id="entropy-bars"></div>
+<div class="entropy-stats"><div class="article-stat">熵 H · nats<output id="entropy-value"></output></div><div class="article-stat">最大概率<output id="max-probability"></output></div><div class="article-stat">dH / da<output id="entropy-derivative"></output></div></div><p id="entropy-readout" class="stability-readout" aria-live="polite"></p>
+<figcaption>三个基础分数固定为 [1, 0, −1]。滑块立即计算对应的 softmax、熵与熵的导数；下方进度展开从分数到熵的四步计算。概率条使用固定的 0～1 刻度，改变 a 时可以直接比较集中程度。</figcaption>
+</figure>
+
+<p>在缩放点积注意力中，分数为 \(q^\top k_i/\sqrt{d_h}\)，\(d_h\) 是单头维度。两项分数差满足：</p>
+<div class="math-block">\[\left|\frac{q^\top(k_i-k_j)}{\sqrt{d_h}}\right|\le\frac{\|q\|_2\,\|k_i-k_j\|_2}{\sqrt{d_h}}.\]</div>
+<p>因此，Q／K 范数以及它们的方向共同决定 softmax 的集中程度。某些负责复制、定位的头会自然形成尖锐分布。更有诊断价值的模式是：在相同验证样本、相同可见长度下，一批头的熵突然下降，并伴随 QK 范数、更新比例或 loss 的跃升。<em>Stabilizing Transformer Training by Preventing Attention Entropy Collapse</em> 对这类关联作了系统研究，并用谱尺度控制改善训练稳定性。</p>
+
+<h2 id="qknorm">从向量长度到矩阵谱尺度</h2>
+<p>QK normalization 直接处理注意力入口。Henry 等人的 QKNorm 沿每个头的向量维度做 L2 归一化，再使用可学习的尺度 \(s\) 乘余弦相似度：</p>
+<div class="math-block">\[\widehat q=\frac{q}{\|q\|_2},\quad\widehat k_i=\frac{k_i}{\|k_i\|_2},\quad z_i=s\,\widehat q^\top\widehat k_i.\]</div>
+<p>单位向量的内积落在 \([-1,1]\)，所以分数的绝对值由 \(|s|\) 控制。实现中给向量范数设置正的数值下限，并监测可学习尺度。这个 L2 定义与使用 RMSNorm 的 QK 归一化有不同的尺度约定：忽略 epsilon 时，RMS 归一化后的向量长度为 \(\sqrt{d_h}\)。在不同实现间迁移配置，需要把归一化定义与 attention scaling 一起换算。</p>
+<p>σReparam 则作用于线性层权重，把矩阵方向与谱尺度拆开：</p>
+<div class="math-block">\[\widehat W=\htmlData{symbol=gamma}{\gamma}\frac{W}{\sigma(W)},\qquad \sigma(W)=\|W\|_2.\]</div>
+<p>若谱范数计算精确，则 \(\|\widehat W\|_2=|\gamma|\)。矩阵 \(W\) 提供方向和相对结构，可学习标量 \(\gamma\) 提供整体尺度。原方法将这种重参数化应用到线性层，并使用 power iteration 估计最大奇异值；一次迭代主要是两个矩阵向量乘法。推理时可以把有效矩阵 \(\widehat W\) 预先算好。</p>
+<p>Power iteration 用上一轮的奇异向量估计热启动，在训练中跟踪谱尺度。若权重方向变化较快，少量迭代会存在估计误差；可定期对抽样层用更多迭代复核。谱估计、归一化和较敏感的注意力计算使用合适的高精度归约，再结合实际 profiler 衡量成本。QK 向量归一化控制每个 token 的分数入口，σReparam 调整参数化及权重尺度的学习速度；选择时可以先观察异常最早出现在哪一层、哪一种量上。</p>
+
+<h2 id="monitoring">把稳定性变成一组可以复现实验的量</h2>
+<p>最小监控单元可以是“层 × attention head × 固定验证 batch”。同时记录残差 RMS、分支 RMS、QK 范数分位数、可见位置的注意力熵、梯度范数，以及参数的实际更新比例：</p>
+<div class="math-block">\[\htmlData{symbol=update}{u_\ell}=\frac{\|\theta_\ell^{(t+1)}-\theta_\ell^{(t)}\|_2}{\|\theta_\ell^{(t)}\|_2+\epsilon_u}.\]</div>
+<p>这里 \(\epsilon_u\) 是避免零分母的小常数，参数更新包括优化器与 weight decay 的作用。接近零初始化的参数组需要同时报告绝对更新范数。分片训练中，各组范数由分片平方和汇总得到。不同上下文长度比较熵时，可同时报告 \(H/\log n\)，其中 \(n\) 是该 query 实际可见的 key 数；只有一个可见 key 的位置单独处理。</p>
+<p>FlashAttention 的优势来自分块计算和避免保存完整注意力矩阵。为了监控熵而把每层的 \(S\times S\) 概率全量导出，会改变显存与吞吐。实践中可以每隔一段步数，在固定小样本、少量层和 query 上重算注意力分布，训练主路径持续记录便宜的 QK 范数统计。抽样范围、mask、位置编码与实际 attention scaling 保持一致，诊断数据才能对应真实计算。</p>
+<div class="stability-table"><table><thead><tr><th>先出现的变化</th><th>待验证的机制</th><th>控制一个变量的探针</th></tr></thead><tbody>
+<tr><td>残差 RMS 随深度快速增长</td><td>分支尺度或同向累积过大</td><td>固定初始化与 batch，改变残差／分支缩放，比较层间 Jacobian 和分支比例</td></tr>
+<tr><td>QK 范数上升，固定样本的熵骤降</td><td>注意力分数差放大</td><td>仅替换 QK 归一化或控制投影谱尺度，记录同一组头的分数与梯度</td></tr>
+<tr><td>梯度范数平稳，实际更新突然变大</td><td>优化器预条件、状态或参数组尺度发生变化</td><td>保存完整 optimizer state，逐组核对更新与二阶矩，再回放同一批数据</td></tr>
+<tr><td>特定长度或精度下首次出现非有限值</td><td>归约、softmax 或 mask 边界的数值路径</td><td>对同一张量用 FP32 参考计算，逐步定位第一个分歧的算子</td></tr>
+</tbody></table></div>
+<p>梯度裁剪也有明确的操作顺序。全局范数裁剪把梯度变成 \(g'=g\min(1,c/\|g\|_2)\)，其中 \(c\) 为阈值。使用 FP16 loss scaling 时，先累积完同一次更新的梯度，再 unscale，随后裁剪。若真实梯度范数为 5、loss scale 为 128、阈值为 1，正确结果范数为 1；先裁剪放大后的梯度，再除以 128，会只剩 \(1/128\)。PyTorch 的 AMP 示例明确展示了 unscale 后进行 clipping 的顺序。</p>
+<p>裁剪限制梯度，参数位移还受到优化器影响。以 Adam 的首次更新为例，忽略 epsilon 与 weight decay，偏差校正后 \(\widehat m=g\)、\(\widehat v=g^2\)，于是每个非零分量的更新约为 \(-\eta\operatorname{sign}(g)\)。一致缩小梯度会在分子分母中抵消，因此还要观察上面的实际更新比例。优化器的完整推导可看<a href="/posts/optimizers/">优化器</a>，训练计划中的 warmup、batch 与 checkpoint 回放可结合<a href="/posts/smol-marathon/">SmolLM3 训练过程</a>。</p>
+<p>保存异常发生前的权重、优化器状态、随机数状态与数据位置，才能在相同起点重放。先用 FP32 和单批数据定位数值路径，再一次只改学习率、归一化或某个分支系数。稳定性方案的收益最终要在同一训练预算下比较验证损失、吞吐和稳定步数；较平滑的曲线只是其中一项证据。</p>
+
+<h2 id="connections">残差连接还可以怎样设计？</h2>
+<p>Pre-LN 与 DeepNorm 调整的是一条残差流中的路径和尺度。若把状态扩展为多条流，就可以学习不同层之间怎样交换信息，见 <a href="/posts/hyper-connections/">Hyper-Connections</a>。多流的混合矩阵会再次带来跨层连乘问题，<a href="/posts/manifold-hyper-connections/">mHC</a> 用双随机约束控制这种传播；<a href="/posts/attention-residuals/">Attention Residuals</a> 则让当前层沿深度选择历史表示。这些设计共同面对同一个问题：新增的信息怎样写进去，早期的信息和梯度又怎样保留下来。</p>
+
+<h2 id="exercises">用数字检查稳定性判断</h2>
+<div class="article-exercise"><h3>练习一：归一化后的输出平稳，梯度会怎样？</h3><p>给定 \(x=[3,4]\)，RMSNorm 的 \(\varepsilon=0\)、缩放参数为 1。求输出 RMS，以及平行、垂直于 \(x\) 两个方向上的 Jacobian 特征值。</p><details><summary>推导与答案</summary><p>\(r=\sqrt{25/2}\approx3.536\)，输出为 \([0.849,1.131]\)，RMS 恰为 1。沿 \(x\) 的特征值是 0；沿与 \(x\) 垂直的方向，特征值为 \(1/r\approx0.283\)。对输入整体放大不会改变输出方向和长度，因此径向导数为零。串联时，下一层的线性变换还会旋转方向，需要使用完整 Jacobian 检查梯度传播。</p></details></div>
+<div class="article-exercise"><h3>练习二：为什么要同时改 DeepNorm 的两个系数？</h3><p>一个 decoder-only 模型有 64 个 block。计算 DeepNorm 的残差系数和初始化因子，并说明 attention 中哪些矩阵应用初始化缩放。</p><details><summary>推导与答案</summary><p>\(\alpha=(128)^{1/4}\approx3.364\)，\(\beta=(512)^{-1/4}\approx0.210\)。Value 与 output 投影、FFN 权重应用 \(\beta\)，Q 与 K 保留基础初始化。只增大 \(\alpha\) 会改变残差相对比例，却没有实现原方法对分支初始化的配套设计。验证时从同样的基础随机权重出发，分别只改 \(\alpha\)、只改 \(\beta\)、两者同时改，比较输出变化量、层间梯度与短程训练表现。</p></details></div>
+<div class="article-exercise"><h3>练习三：注意力熵为什么下降？</h3><p>基础分数为 \([1,0,-1]\)，分别计算尺度 \(a=0\)、\(a=1\) 的熵，并求 \(a=1\) 处的熵导数。</p><details><summary>推导与答案</summary><p>\(a=0\) 给出均匀分布，\(H=\log3\approx1.099\)。\(a=1\) 的概率约为 \([0.66524,0.24473,0.09003]\)，\(H\approx0.83240\)。分数均值为 \(0.57521\)，二阶矩为 \(0.75527\)，方差约为 \(0.42440\)，因此 \(dH/da\approx-0.42440\)。这个导数针对固定基础分数的尺度变化；真实训练中的方向变化可以通过同时记录原始分数与范数来区分。</p></details></div>
+<div class="article-exercise"><h3>练习四：裁剪后为什么更新仍然很大？</h3><p>Adam 首步遇到梯度 \([3,4]\)，先将其范数裁剪到 1。忽略 epsilon 与 weight decay，学习率为 0.01。求参数更新向量及其范数。</p><details><summary>推导与答案</summary><p>裁剪后梯度为 \([0.6,0.8]\)。Adam 首步经过偏差校正，两个分量都除以自己的绝对值，更新为 \([-0.01,-0.01]\)，范数约 0.01414。未裁剪的正梯度在这些假设下给出相同结果。之后的更新受到历史一、二阶矩影响，因此监控应同时保留梯度范数、裁剪比例、优化器状态统计和真实参数位移。</p></details></div>
+
+<h2 id="lab">CPU 实验：让导数公式接受有限差分检查</h2>
+<p><a href="/posts/pretraining-stability/lab.py" download>下载 lab.py</a>，在有 NumPy 的环境中运行 <code>python lab.py</code>。脚本对四维 RMSNorm 和六层 Pre／Post 堆叠计算解析 Jacobian，并分别用有限差分验证；对不同注意力尺度检查熵导数，再验证谱归一化的缩放不变性、loss scaling 的裁剪顺序与 Adam 首步的梯度缩放抵消。</p>
+<pre><code>pre: output RMS 1.0967, input-gradient norm 1.1659
+post: output RMS 1.0000, input-gradient norm 0.6297
+Attention entropy: scale 1 -&gt; 0.8324; scale 8 -&gt; 0.0030 nats
+100 scalar residual Jacobians of 1.02: gain 7.2446
+Unscale then clip: norm 1.000000; reversed: 0.007812
+PASS: RMSNorm/stack finite differences, entropy derivative, spectral scaling, clipping order, Adam probe</code></pre>
+<p>这个探针使用线性分支、固定随机种子和给定的顶层梯度，用来核对传播公式。可以把层数从 6 改到 24、分支尺度从 0.15 改到 0.5，再换一个顶层梯度方向，比较哪些结论随方向改变。也可以在栈顶加上 final norm，重新用链式法则和有限差分验证它的影响。把这些数值检查做完后，再将同样的记录量放进真实的小型 Transformer 训练中。</p>
+
+<h2 id="references">参考资料</h2><ul>
+<li><a href="https://arxiv.org/abs/2002.04745">On Layer Normalization in the Transformer Architecture</a>：Pre-LN、Post-LN 的初始化梯度分析与 warmup。</li>
+<li><a href="https://arxiv.org/abs/2203.00555">DeepNet: Scaling Transformers to 1,000 Layers</a>：DeepNorm、架构相关的残差系数与初始化缩放，尤其 Figure 2 与 Appendix C。</li>
+<li><a href="https://arxiv.org/abs/2010.04245">Query-Key Normalization for Transformers</a>：单头维度的 L2 归一化与可学习的注意力尺度。</li>
+<li><a href="https://arxiv.org/abs/2303.06296">Stabilizing Transformer Training by Preventing Attention Entropy Collapse</a>：注意力熵、σReparam 与谱范数估计。</li>
+<li><a href="https://github.com/apple/ml-sigma-reparam">σReparam 官方实现</a>：权重重参数化与实验配置。</li>
+<li><a href="https://docs.pytorch.org/docs/stable/notes/amp_examples.html#gradient-clipping">PyTorch AMP：Gradient clipping</a>：梯度 unscale、裁剪与累积的操作顺序。</li>
+</ul>
+</article><nav class="series-pager" data-series="pretraining"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global":{"jac":{"label":"局部 Jacobian Jℓ","description":"本层输出对本层输入的导数矩阵，反向传播使用它的转置。"},"alpha":{"label":"残差系数 α","description":"DeepNorm 中相加前乘在残差路径上的固定系数，依赖架构与深度。"},"beta":{"label":"初始化因子 β","description":"DeepNorm 对 FFN、attention value 与 output 权重施加的初始化缩放。"},"entropy":{"label":"注意力熵 H(a)","description":"固定基础分数 z 后，尺度 a 对应的注意力概率熵，−Σ pᵢ log pᵢ。","unit":"nats"},"gamma":{"label":"谱尺度 γ","description":"σReparam 中可学习的标量；使用精确谱范数时，有效矩阵的谱范数为 |γ|。"},"update":{"label":"参数更新比例 uℓ","description":"一组参数更新前后的差值范数，除以旧参数范数加数值稳定常数。"}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/pretraining-stability/figures.js"></script><script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+</body></html>

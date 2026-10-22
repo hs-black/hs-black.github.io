@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>从小模型调参到大模型：μP 与超参数迁移 · Zunzhe Zhang</title><meta name="description" content="从特征更新推导μP的初始化与SGD、Adam学习率缩放，串起Tensor Programs和后续参数化研究，用交互计算、工程诊断及NumPy实验学习宽度迁移。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.mup-figure{margin:1.8em 0;padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}.mup-figure h3{margin-top:0;font-size:18px}.mup-figure p,.mup-figure figcaption{font-size:14px;line-height:1.75}.mup-figure figcaption{color:var(--text-soft);margin-top:12px}.mup-figure svg{width:100%;height:auto;display:block}.mup-controls{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:14px;margin:12px 0}.mup-controls label{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.mup-controls select{font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:5px;border-radius:6px;max-width:100%}.mup-controls input[type=range]{width:150px;max-width:100%}.mup-result{padding:12px;background:var(--bg-soft);border-radius:8px;font-variant-numeric:tabular-nums;font-size:14px;line-height:1.8}.mup-figure table{font-size:14px;width:100%;min-width:0}.mup-figure th,.mup-figure td{padding:8px 4px;white-space:normal}.mup-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.mup-grid>div{min-width:0}.mup-exercise{border-top:1px solid var(--border);padding-top:14px;margin-top:24px}.mup-axis{stroke:var(--border);stroke-width:1}.mup-label{fill:var(--text-soft);font:14px var(--font-sans, sans-serif)}.mup-value{fill:var(--text);font:15px var(--font-mono,monospace)}.mup-cell{fill:var(--bg-soft);stroke:var(--border)}.mup-on{fill:var(--accent-soft);stroke:var(--accent)}.mup-base{fill:var(--text-soft)}.mup-scaled{fill:var(--accent)}.mup-curve{stroke:var(--accent);stroke-width:3;fill:none}.mup-dash{stroke:var(--text-soft);stroke-dasharray:5 5;fill:none}
+@media(max-width:480px){.mup-figure{padding:12px 9px}.mup-grid{grid-template-columns:1fr}.mup-controls{gap:9px}.mup-result{padding:9px}.mup-figure table{font-size:12px}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>从小模型调参到大模型：μP 与超参数迁移</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header><nav class="series" data-series="pretraining"></nav>
+<article class="prose">
+<p>在宽度 256 的模型上，学习率 0.001 训练得很好。把隐藏维度扩大到 2048，保留同一套超参数，loss 却开始震荡。每层都用了常见的随机初始化，初始激活也很正常，变化发生在哪里？</p>
+<p>线性层把更多输入加在一起。初始化时，随机项的正负会相互抵消；训练更新却沿着数据给出的方向对齐。宽度扩大以后，一次参数更新对特征造成的变化可能一起放大。要让小模型承担大模型的调参工作，需要同时规定初始化、前向计算和优化器怎样随宽度变化。这套规定叫做<strong>参数化</strong>。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#features">初始化稳定以后，特征怎样学习</a></li><li><a href="#scaling">把 μP 写成能执行的缩放表</a></li><li><a href="#coordinates">同一个读出层的两套坐标</a></li><li><a href="#transformer">Transformer 中哪些轴在变宽</a></li><li><a href="#diagnostics">从坐标检查到超参数迁移</a></li><li><a href="#epsilon">Adam 的数值尺度与工程检查</a></li><li><a href="#papers">三篇论文怎样连接起来</a></li><li><a href="#exercises">计算、诊断与实验</a></li></ol></nav>
+<section id="features" data-math-scope="features"><h2>1. 初始化稳定以后，特征怎样学习</h2>
+<p>先看一个输出坐标：\(z_i=\sum_{j=1}^{n}W_{ij}h_j\)。这里 \(n\) 是输入宽度，\(h_j\) 是输入特征，\(W_{ij}\) 是权重。若初始化权重独立、均值为零，并与输入独立，记输入的平均二阶矩为 \(q=\mathbb E[h_j^2]\)，就有</p>
+$$\operatorname{Var}(z_i)=\htmlData{symbol=width}{n}\operatorname{Var}(W_{ij})q.$$
+<p>取权重方差 \(1/n\)，便能让输出方差保持常数量级。这解决了前向信号的尺度。训练时，还要检查 \(\Delta z_i=\sum_j\Delta W_{ij}h_j\)：更新 \(\Delta W\) 本身来自输入 \(h\)，两者带有相关性。</p>
+<p>用一个样本做反向传播，记损失对 \(z_i\) 的导数为 \(\delta_i\)，那么梯度是 \(g_{ij}=\delta_i h_j\)。Adam 首步经过偏差修正，在梯度绝对值远大于 ε 时，更新近似为 \(\Delta W_{ij}=-\eta\operatorname{sign}(\delta_i h_j)\)。代回前向计算：</p>
+$$\Delta z_i\approx-\htmlData{symbol=lr}{\eta}\operatorname{sign}(\delta_i)\sum_{j=1}^{n}|h_j|.$$
+<p>若每个输入坐标平均绝对值保持常数，求和就随宽度 \(n\) 线性增长。隐藏矩阵的 Adam 学习率按 \(1/n\) 缩放，可以抵消这个增长。真实 mini-batch、动量和不同层会带来更复杂的相关性；这个单样本计算把最关键的原因露了出来：梯度与特征对齐后，求和具有不同的尺度。</p>
+<figure class="mup-figure" id="aligned-update"><h3>一次更新怎样沿输入累积</h3><p>取所有输入坐标为 1、上游导数为正，忽略 Adam 的 ε。基准宽度为 16，基准学习率为 0.01。16 格均分所有输入坐标；推进一步，就把这一组坐标对输出的变化加进去。</p><div class="mup-controls"><label>隐藏宽度 <select id="aligned-width"><option>16</option><option>32</option><option>64</option><option selected>128</option><option>256</option></select></label></div><svg id="aligned-svg" viewBox="0 0 640 260" role="img" aria-label="输入坐标依次累积；固定学习率与按宽度缩放的输出变化"></svg><div class="mup-result" id="aligned-result" aria-live="polite"></div><figcaption>灰色条使用固定学习率，紫色条使用 0.01 × 16 / 宽度。条长表示输出变化的绝对值；坐标从左到右累计。图中的数值来自这一组确定的输入与梯度。</figcaption></figure>
+<p>如果为了稳定而把所有层的更新压得很小，还会出现另一个极限：宽度增加后，隐藏特征几乎不再变化，预测主要依靠初始化附近的线性化模型。这类 kernel 极限很适合分析训练，却没有保留完整的特征学习。μP，即 maximal update parameterization，希望在前向与更新都稳定的前提下，让各隐藏层保留常数量级的特征变化。</p>
+<p>这里的“常数量级”是对宽度的描述：深度、输入输出维度和考察的训练步数保持固定，宽度持续增加时，相关量既不随宽度爆炸，也不因为宽度而消失。有限模型仍会受到样本噪声、激活函数和训练阶段的影响。</p></section>
+<section id="scaling" data-math-scope="scaling"><h2>2. 把 μP 写成能执行的缩放表</h2>
+<p>考虑两个隐藏层的 MLP。输入维度为 \(d_{\mathrm{in}}\)，隐藏宽度为 \(n\)，输出维度为 \(d_{\mathrm{out}}\)。输入、输出维度固定，只改变隐藏宽度。φ 表示逐坐标激活函数，例如 ReLU 或 tanh：</p>
+$$h_1=\phi(W_1x),\qquad h_2=\phi(W_2h_1),\qquad f=W_3h_2.$$
+<p>三个权重形状依次为 \(n\times d_{\mathrm{in}}\)、\(n\times n\)、\(d_{\mathrm{out}}\times n\)。取基准宽度 \(n_0\)，宽度倍率为 \(\htmlData{symbol=ratio}{r}=n/n_0\)，基准学习率为 η。先采用直接存储这些有效权重、前向不额外乘倍率的写法。表中初始化均值为零，列出的是<strong>方差</strong>：</p>
+<div class="table-wrap"><table><thead><tr><th>权重</th><th>通常的 SP 初始化</th><th>μP 初始化</th><th>μP / SGD 学习率</th><th>μP / Adam 学习率</th></tr></thead><tbody><tr><td>输入 \(W_1\)</td><td>\(1/d_{\mathrm{in}}\)</td><td>\(1/d_{\mathrm{in}}\)</td><td>\(\eta r\)</td><td>\(\eta\)</td></tr><tr><td>隐藏 \(W_2\)</td><td>\(1/n\)</td><td>\(1/n\)</td><td>\(\eta\)</td><td>\(\eta/r\)</td></tr><tr><td>读出 \(W_3\)</td><td>\(1/n\)</td><td>\(1/(nr)\)</td><td>\(\eta/r\)</td><td>\(\eta/r\)</td></tr></tbody></table></div>
+<p>这里 SP 指通常的 standard parameterization：按 fan-in 初始化，各层学习率相对基准值保持不变。μP 在基准宽度 \(r=1\) 与这份 SP 配置重合；区别出现在模型族如何变宽。常数因子仍可调，例如每层的初始化增益或学习率倍率。</p>
+<p>SGD 与 Adam 两列不同，是因为它们处理梯度尺度的方式不同。μP 的有效读出权重每个元素随宽度按 \(1/n\) 缩小；这会让传回隐藏层的单坐标梯度也变小。SGD 直接乘梯度，输入层需要用随宽度增长的学习率补偿。Adam 用二阶矩归一化梯度，抵消了很大一部分幅值变化，却仍需要控制隐藏矩阵沿输入轴累加的效果。</p>
+<p>对于方形隐藏矩阵，SGD 更新中的梯度缩小与输入求和可以平衡，学习率保持不变。隐藏 bias 的 SGD 学习率通常与输入层一样按 \(r\) 增长，Adam 则保持不变。矩形层若两个轴采用不同的增长倍率，应重新按 fan-in 与 fan-out 分析；直接复用方形表会丢掉形状信息。</p>
+<p>初始化时，μP 读出层也有一个可检查的结果：若输入特征坐标的二阶矩保持常数，随机读出的方差正比于 \(1/r\)，初始 logit 的 RMS 因而正比于 \(1/\sqrt r\)。训练之后的读出可以产生常数量级输出。坐标检查要区分“初始化的随机输出”与“训练产生的输出变化”。</p></section>
+<section id="coordinates" data-math-scope="coordinates"><h2>3. 同一个读出层的两套坐标</h2>
+<p>真实代码经常把缩放放进前向计算。设有效读出权重是 \(W\)，代码保存另一个张量 \(V=rW\)，前向写成 \(f=(V/r)h\)。固定基准宽度后，V 的初始化方差可以保持 \(1/n_0\)，有效权重的方差仍然是 \(1/(nr)\)。</p>
+<p>这样写可以让 embedding 与读出共享相容的存储尺度。microsoft/mup 的 <code>MuReadout</code> 使用这个思路：根据基准形状调整初始化，然后在前向除以宽度倍率。此时，优化器看到的参数是 V，学习率表也要一起换坐标。</p>
+<p>记 \(g_W=\partial\mathcal L/\partial W\)，链式法则给出 \(g_V=g_W/r\)。SGD 对 V 更新一次，换回有效权重后得到</p>
+$$\Delta W=\frac{\Delta V}{r}=-\frac{\eta_V}{r^2}g_W.$$
+<p>要等价于有效权重使用 \(\eta/r\)，存储权重 V 就应使用 \(\eta_V=\eta r\)。对于 ε 可以忽略的 Adam，梯度整体除以 r 会被矩归一化抵消，换回有效权重只留下外部的 \(1/r\)，所以 V 的学习率保持 η。<strong>读出层学习率的指数，必须和前向倍率一起读。</strong></p>
+<figure class="mup-figure" id="parameter-calculator"><h3>宽度、优化器与读出坐标一起换</h3><p>基准宽度 256，η = 0.001。输入维度固定为 64；隐藏矩阵两个轴一起增长。每项均显示当前实际数值。</p><div class="mup-controls"><label>目标宽度 <select id="param-width"><option>256</option><option>512</option><option>1024</option><option selected>2048</option></select></label><label>优化器 <select id="param-optimizer"><option value="adam">Adam</option><option value="sgd">SGD</option></select></label><label>读出存储 <select id="param-coordinates"><option value="effective">有效权重 W</option><option value="stored">V，前向除以 r</option></select></label></div><div class="table-wrap"><table><thead><tr><th>参数</th><th>形状</th><th>初始化标准差</th><th>实际学习率</th></tr></thead><tbody id="parameter-rows"></tbody></table></div><div class="mup-result" id="parameter-result" aria-live="polite"></div><figcaption>切换坐标后，存储参数的初始化和学习率一起改变，有效前向权重的尺度保持相同。Adam 一列使用 ε 相对梯度足够小的缩放规则；精确换坐标还要匹配 ε。</figcaption></figure>
+<p>初始化转换只能执行一次。恢复 checkpoint 时，存储权重已经处于训练使用的坐标；再次应用初始化缩放，会改变模型本身。官方实现为恢复流程提供 <code>set_base_shapes(..., rescale_params=False)</code>，把形状元信息补回来，并保留 checkpoint 数值。恢复后用固定输入比对 logits、再比对下一次更新，是很有价值的闭环检查。</p></section>
+<section id="transformer" data-math-scope="transformer"><h2>4. Transformer 中哪些轴在变宽</h2>
+<p>在 Transformer 中，hidden size、MLP 中间维度、attention 的 head 数与 head dimension 是不同的轴。要迁移超参数，先写清楚模型族：例如保持深度、词表、head 数固定，让 hidden size 和每头维度同时扩大；或者保持每头维度固定，通过增加 head 数扩宽。它们对 attention 点积的影响不同。</p>
+<p>固定词表大小时，embedding 的词表轴是有限轴，hidden size 是增长轴；隐藏投影矩阵通常有两个增长轴。mup 库比较 base 与 delta 两个模型的形状，标出哪些轴随宽度增长，再给优化器分配相应倍率。base model 只是指定倍率的参照物，delta model 用于识别增长轴，二者都可以只构造形状。</p>
+<pre><code>from mup import MuReadout, MuAdam, set_base_shapes
+
+# Model 的输出头使用 MuReadout；这里宽度改变，深度与词表固定。
+base = Model(width=256)
+delta = Model(width=512)
+model = Model(width=2048)
+set_base_shapes(model, base, delta=delta)
+optimizer = MuAdam(model.parameters(), lr=1e-3)</code></pre>
+<p>这个 API 假定相应线性权重采用通常的 <code>(fan_out, fan_in)</code> 布局。自定义转置存储、合并 QKV 或张量并行分片时，优化器仍然需要原来各轴的语义。可以把未分片模型的缩放表作为参考，逐参数打印 base shape、增长轴、初始化 RMS 与实际学习率，再比对分片实现。</p>
+<p>attention 还有一处独立的缩放。标准写法把 query 与 key 点积除以 \(\sqrt{d_h}\)，其中 \(d_h\) 是每个头的维度。它平衡随机独立坐标的初始方差。随着训练产生对齐，点积可能按 \(d_h\) 累积；μP 的一种 Transformer 配方在每头维度增长时使用</p>
+$$\mathrm{score}=\frac{\htmlData{symbol=attention-gain}{c}}{\htmlData{symbol=head-dim}{d_h}}q^\top k.$$
+<p>常数 c 可以在基准模型上选择。取 c = 8，在 \(d_h=64\) 时倍率与 \(1/\sqrt{64}\) 相同；维度增长到 256 时，前者为 \(1/32\)，标准缩放为 \(1/16\)。若扩宽只增加 head 数而保持 \(d_h\) 固定，这一项没有发生变化。注意力输出幅值、Q/K 初始化与归一化方式也应记录在配方中。</p>
+<p>深度、上下文长度、有效 batch 和训练 token 数都会改变优化问题。宽度迁移的可控起点是固定这些量；深度变化涉及残差累积，适合结合<a href="/posts/pretraining-stability/">深层 Transformer 的稳定训练</a>另外做实验。</p></section>
+<section id="diagnostics" data-math-scope="diagnostics"><h2>5. 从坐标检查到超参数迁移</h2>
+<p>最便宜的第一步是 coordinate check：选三四个宽度，在相同的一小批数据上运行几个更新，记录逐层激活的平均绝对值或 RMS。对比时使用每个坐标的统计量；直接比较向量范数会把坐标数量增加本身也算进去。</p>
+<p>记某层在固定 probe 数据上的特征为 \(h_t\)，下标 t 表示训练步数。除激活 RMS 外，再记录</p>
+$$\operatorname{RMS}(h_t-h_0)=\sqrt{\frac{1}{M}\sum_{i=1}^{M}(h_{t,i}-h_{0,i})^2}.$$
+<p>这里 M 是该 probe 张量的元素数。比较不同宽度时，每个模型都减去自己的初始化特征，并保持 probe 数据一致。这能区分两种现象：激活幅值保持稳定，但几乎没有学习；或者特征变化随着宽度扩大而持续增长。对 embedding、每个残差分支和最终 logits 分别观察，能把异常定位到具体缩放位置。</p>
+<p>通过检查后，再画学习率曲线。在宽度 256、512、1024 上，用相同数据分布、token 预算、有效 batch、调度比例和若干随机种子，搜索同一组<strong>基准学习率</strong>。每个模型内部的参数组学习率已经按 μP 换算。记录验证 loss 对基准学习率的曲线，观察最优区间是否接近，并选择一个更宽的模型验证该区间。</p>
+<p>宽度增加往往改善训练质量，迁移希望保存的是超参数的合适范围。比较最佳点的位置、附近曲线的平坦程度以及种子间变化，比只报一个最优学习率更有用。若最优点总在搜索边界，需要扩展搜索范围；若曲线随宽度偏移，先检查实现，再考虑有限宽度、相关性或其他训练条件。</p>
+<p>学习率调度器是一个容易绕过缩放规则的位置。MuAdam 可能已经为隐藏矩阵建立了 η/r 的参数组，某段训练代码又在每一步执行 <code>group['lr'] = current_lr</code>，各组就被写成同一个值。更稳妥的实现保存每组初始学习率，再统一乘时间倍率：</p>
+<pre><code>base_lrs = [group['lr'] for group in optimizer.param_groups]
+for group, base_lr in zip(optimizer.param_groups, base_lrs):
+    group['lr'] = base_lr * schedule_multiplier(step)</code></pre>
+<p>在 warmup 开始、峰值、衰减中段各打印一次参数组 LR 比值，可以确认整个训练过程中宽度倍率都被保留。权重衰减也要看实际的 ηλ 乘积，以及优化器采用耦合 L2 还是 AdamW 的解耦更新；参数坐标改变后，这些定义需要一起保持一致。具体更新可接着看<a href="/posts/optimizers/">优化器的状态与计算</a>。</p></section>
+<section id="epsilon" data-math-scope="epsilon"><h2>6. Adam 的数值尺度也参与迁移</h2>
+<p>Adam 的尺度抵消依赖分母。记偏差修正后的一阶矩为 \(\hat m\)，二阶矩为 \(\hat v\)，更新方向为 \(u=\hat m/(\sqrt{\hat v}+\varepsilon)\)。假设某种参数化把同一段梯度历史统一乘以正数 c，则一阶矩乘 c，二阶矩乘 c²，得到</p>
+$$u'=\frac{c\hat m}{c\sqrt{\hat v}+\htmlData{symbol=epsilon}{\varepsilon}}=\frac{\hat m}{\sqrt{\hat v}+\varepsilon/c}.$$
+<p>当 c 很小时，固定 ε 在新坐标中的相对作用变大，更新会被压小。如果要在这次纯粹的梯度缩放下保持精确等价，ε 也要乘 c。前面的读出换坐标有 \(g_V=g_W/r\)，因此配套关系为 \(\varepsilon_V=\varepsilon_W/r\)。这解释了为什么两份在理想 Adam 下等价的参数化，在实际代码中可能出现不同轨迹。</p>
+<figure class="mup-figure" id="epsilon-calculator"><h3>梯度变小以后，Adam 还走多远</h3><p>Adam 首步的绝对更新除以学习率，等于 |g| / (|g| + ε)。拖动梯度与 ε，观察该比例。实线是当前 ε 下的曲线，圆点对应当前梯度。</p><div class="mup-controls"><label>log₁₀ |g| <input id="eps-gradient" type="range" min="-14" max="-2" step="0.1" value="-9"><output id="eps-gradient-value"></output></label><label>log₁₀ ε <input id="eps-value" type="range" min="-14" max="-2" step="0.1" value="-8"><output id="eps-value-label"></output></label><button class="btn" id="eps-reset" type="button">重置</button></div><svg id="epsilon-svg" viewBox="0 0 640 290" role="img" aria-label="梯度幅值对 Adam 归一化更新比例的影响"></svg><div class="mup-result" id="epsilon-result" aria-live="polite"></div><figcaption>横轴为梯度绝对值的十进制对数，纵轴为实际步幅 / 学习率。灰色虚线标出比例 0.5，对应 |g| = ε；计算使用实数公式。</figcaption></figure>
+<p>例如梯度为 \(10^{-7}\)、ε 为 \(10^{-8}\)，首步幅值是学习率的 0.909 倍。把梯度缩小 1000 倍而保留 ε，比例降到 0.00990。即使所有运算使用高精度，这个变化也会发生。工程上应记录每层 \(\sqrt{\hat v}\) 的分位数，以及有多少坐标落到 ε 附近，再判断分母常数是否正在改变更新。</p>
+<p>低精度又带来一层独立约束：平方梯度与二阶矩比梯度更小，有限数值范围可能让它们下溢。检查 optimizer state 的 dtype、实际更新 kernel 和零值比例，可以区分 ε 主导与浮点下溢。常见设计是在较高精度中保存优化器状态，再用模型计算精度执行前后向；这与<a href="/posts/scaling-mixed-precision/">混合精度的数值范围</a>直接相连。</p>
+<p>跨参数化研究中，mean-field 等参数化的小梯度会明显放大这一问题；SP 与 μP 在该研究考察的规模上对相应 ε 调整较不敏感。实际配方应由梯度与状态的测量决定。过小的 ε 也会降低分母的保护作用，统一改成极小常数缺少逐层依据。</p></section>
+<section id="papers"><h2>7. 三篇论文怎样连接起来</h2>
+<p>Tensor Programs IV 把问题放在无限宽极限中：初始化稳定的网络，经过训练以后，是保留特征学习，还是退化为初始化附近的 kernel 动力学？μP 给出一组让隐藏特征保持有效更新的缩放规则。Tensor Programs V 进一步把它变成 μTransfer：在小模型上寻找超参数，再沿着宽度规则把这些常数搬到大模型。</p>
+<p>后续的 <em>Scaling Exponents Across Parameterizations and Optimizers</em> 把视角扩展到 SP、NTK、μP、mean-field 与多种优化器。更新与特征的 alignment 会随层、宽度和训练过程变化，因此可以在更一般的参数化下设计逐层学习率指数。实验也显示，合适的逐层缩放可以让 SP 获得超参数迁移；参数化名称本身不足以预测最终表现。</p>
+<div class="table-wrap"><table><thead><tr><th>研究</th><th>核心工具</th><th>工程上得到什么</th><th>需要继续验证什么</th></tr></thead><tbody><tr><td>Tensor Programs IV</td><td>无限宽训练动力学与特征学习</td><td>同时检查前向和更新的宽度尺度</td><td>有限宽度、有限数据与具体架构的行为</td></tr><tr><td>Tensor Programs V</td><td>μP 配方与 μTransfer 实验</td><td>用小模型搜索基准超参数，按层转换</td><td>目标模型是否处于相近的超参数最优区间</td></tr><tr><td>Scaling Exponents…</td><td>alignment、逐层指数与优化器比较</td><td>把优化器、梯度相关性和 ε 纳入缩放分析</td><td>不同训练阶段与数值实现下的最优配方</td></tr></tbody></table></div>
+<p>能迁移的首先是同一模型族内的宽度相关超参数，例如基础学习率和若干初始化、输出倍率。换优化器时，要重新处理其更新几何；同时改变深度、batch、数据分布和训练长度时，要把这些因素单独纳入实验。做好这一层控制，小模型实验就能成为大训练前的一次有效筛选。</p></section>
+<section id="exercises"><h2>8. 计算、诊断与实验</h2>
+<div class="mup-exercise"><h3>练习 1：计算一套实际学习率</h3><p>基准宽度 256，目标宽度 2048，η = 0.001。使用直接存储有效权重的 μP，求三层在 SGD、Adam 下的学习率，以及目标读出层的初始化标准差。</p><details><summary>展开参考解答</summary><p>宽度倍率 r = 8。SGD 的输入、隐藏、读出学习率依次为 0.008、0.001、0.000125；Adam 依次为 0.001、0.000125、0.000125。有效读出方差为 1/(2048 × 8) = 1/16384，标准差为 1/128 = 0.0078125。这里两种优化器共享初始化，但使用各自的学习率规则。</p></details></div>
+<div class="mup-exercise"><h3>练习 2：恢复同一个有效更新</h3><p>令 r = 4，η = 0.02，有效权重梯度 \(g_W=0.8\)。SGD 更新中，如果保存 \(V=4W\)，V 应使用什么学习率？求一次更新后的 \(\Delta V\) 与 \(\Delta W\)。</p><details><summary>展开参考解答</summary><p>有效权重的学习率为 η/r = 0.005，因此目标变化为 −0.005 × 0.8 = −0.004。存储坐标的梯度 \(g_V=0.8/4=0.2\)，学习率应为 ηr = 0.08。于是 ΔV = −0.016，除以 4 回到有效坐标，恰好得到 ΔW = −0.004。若误把有效权重的学习率 0.005 也用于 V，有效更新会缩小 16 倍。</p></details></div>
+<div class="mup-exercise"><h3>练习 3：诊断 Adam 更新突然变小</h3><p>首步梯度从 \(10^{-7}\) 变为 \(10^{-10}\)，ε 一直是 \(10^{-8}\)。分别计算实际步幅 / 学习率；为了保持纯坐标缩放下的等价性，新 ε 应是多少？还应记录什么来检查浮点下溢？</p><details><summary>展开参考解答</summary><p>两次比例分别为 10/11 ≈ 0.9091、1/101 ≈ 0.009901。梯度缩放了 0.001，ε 同样乘 0.001 得到 \(10^{-11}\)，比例恢复为 10/11。随后记录梯度、平方梯度、二阶矩的零值比例与分位数，并用高精度对照同一小段更新。高精度中仍存在的变化来自更新公式，低精度额外产生的零值才指向数值范围问题。</p></details></div>
+<div class="mup-exercise"><h3>练习 4：选择下一次昂贵实验</h3><p>三个宽度的坐标检查都正常。学习率搜索范围为 [0.0001, 0.0003, 0.001]，三个宽度的最小验证 loss 都落在 0.001。能否据此给更大模型确定最优学习率？下一轮怎样分配实验？</p><details><summary>展开参考解答</summary><p>当前结果只确定最优点在已测区间的上边界附近。先在便宜模型上补测 0.003、0.01，找到最优点两侧的曲线；若出现不稳定，也保留对应 loss 和更新尺度。选中间宽度验证这段范围，并对候选值增加随机种子。最后在目标宽度比较候选中心及一个邻近值，固定数据与训练协议。这样可以区分搜索范围不足、随机波动以及真正的跨宽度偏移。</p></details></div>
+<p><a href="/posts/pretraining-mup/lab.py">下载 lab.py</a>，运行一个双隐藏层 tanh 回归模型。输入维度 4，基准宽度 16，隐藏宽度依次为 16、32、64、128。脚本固定训练数据和 probe 数据，输出 loss 与 probe 特征变化的 RMS。</p>
+<pre><code>python3 -m pip install numpy
+OPENBLAS_NUM_THREADS=1 python3 lab.py
+OPENBLAS_NUM_THREADS=1 python3 lab.py --sweep</code></pre>
+<p>前五项检查应打印 PASS：中心差分验证手写反向传播；有效读出与存储读出分别在 SGD、Adam 下连续六步吻合；对齐输入的闭式更新与直接计算一致；ε 随梯度缩放后恢复相同的 Adam 更新。默认实验随后训练五步，观察特征变化随宽度的趋势。</p>
+<p><code>--sweep</code> 对三个基准学习率、两个随机种子运行 50 步。当前数据中，μP 的最佳候选在四个宽度上都为 0.003；它同时位于搜索下边界，因此下一步可以加入 0.001。这个小型回归实验检验当前网络的数值实现与局部迁移行为。增加数据量、替换激活函数、延长训练，并比较完整曲线，能看出结论对实验条件的依赖。</p></section>
+<h2 id="references">参考与延伸阅读</h2><ul><li><a href="https://arxiv.org/abs/2011.14522">Tensor Programs IV: Feature Learning in Infinite-Width Neural Networks</a>：特征学习与无限宽参数化。</li><li><a href="https://arxiv.org/abs/2203.03466">Tensor Programs V: Tuning Large Neural Networks via Zero-Shot Hyperparameter Transfer</a>：μTransfer、表 3 的有效权重写法、附录 B 的等价参数化。</li><li><a href="https://proceedings.mlr.press/v235/everett24a.html">Scaling Exponents Across Parameterizations and Optimizers</a>：alignment、逐层学习率指数与 Adam 的 ε；<a href="https://arxiv.org/abs/2407.05872">论文全文</a>。</li><li><a href="https://github.com/microsoft/mup">microsoft/mup</a>：base shape、coordinate check 与学习率调度约定；<a href="https://github.com/microsoft/mup/blob/19814971934ef91dd546f88e913fc963e096d11c/mup/optim.py">MuAdam / MuSGD</a>、<a href="https://github.com/microsoft/mup/blob/19814971934ef91dd546f88e913fc963e096d11c/mup/layer.py">MuReadout 与初始化转换</a>、<a href="https://github.com/microsoft/mup/blob/19814971934ef91dd546f88e913fc963e096d11c/mup/coord_check.py">坐标检查实现</a>。实现查阅日期：2026-10-22。</li></ul>
+</article><nav class="series-pager" data-series="pretraining"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global":{"width":{"label":"n：隐藏宽度","description":"当前线性层沿输入求和的坐标数；本文模型族让隐藏维度按比例增长。","unit":"坐标"},"lr":{"label":"η：学习率","description":"当前参数化的基准学习率；各参数组还要乘对应的宽度倍率。"},"ratio":{"label":"r：宽度倍率","description":"当前隐藏宽度 n 除以基准宽度 n₀。","unit":"无量纲"}},"scopes":{"transformer":{"head-dim":{"label":"dₕ：每头维度","description":"一个 attention head 中 query 和 key 向量的坐标数。","unit":"坐标 / 头"},"attention-gain":{"label":"c：attention 常数倍率","description":"基准模型上选择的 attention 点积增益；c/dₕ 是本节的总缩放。"}},"epsilon":{"epsilon":{"label":"ε：Adam 分母常数","description":"加在偏差修正后二阶矩平方根上的数值常数，与梯度具有相同单位。"}}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script>
+<script>
+(()=>{'use strict';
+const $=id=>document.getElementById(id), fmt=x=>Number(x.toPrecision(5)).toString();
+function alignedRender(step,index,progress){
+const n=+$('aligned-width').value,k=Math.min(16,index+progress),sp=.01*n*k/16,mu=.16*k/16;
+const small=$('aligned-update').clientWidth<480,w=small?320:640,columns=small?8:16,origin=small?94:104,end=w-20,top=small?152:110,bottom=top+96;
+$('aligned-svg').setAttribute('viewBox',`0 0 ${w} ${bottom+57}`);
+let svg='';for(let j=0;j<16;j++){const cx=16+(j%columns)*(w-32)/columns,cy=16+Math.floor(j/columns)*38;svg+=`<rect x="${cx}" y="${cy}" width="${(w-32)/columns-7}" height="30" rx="4" class="${j<Math.ceil(k)?'mup-on':'mup-cell'}"/><text x="${cx+((w-32)/columns-7)/2}" y="${cy+21}" text-anchor="middle" class="mup-label">${n/16}</text>`;}
+svg+=`<text x="16" y="${small?110:75}" class="mup-label">每格的坐标数；高亮表示已累加</text>`;
+(small?[0,1.28,2.56]:[0,.64,1.28,1.92,2.56]).forEach(v=>{const x=origin+v/2.56*(end-origin);svg+=`<line x1="${x}" y1="${top-10}" x2="${x}" y2="${bottom}" class="mup-axis"/><text x="${x}" y="${bottom+22}" text-anchor="middle" class="mup-label">${v}</text>`});
+svg+=`<text x="12" y="${top+21}" class="mup-label">固定 LR</text><rect x="${origin}" y="${top}" width="${sp/2.56*(end-origin)}" height="30" rx="3" class="mup-base"/><text x="12" y="${top+77}" class="mup-label">μP / Adam</text><rect x="${origin}" y="${top+56}" width="${mu/2.56*(end-origin)}" height="30" rx="3" class="mup-scaled"/><text x="${w/2}" y="${bottom+49}" text-anchor="middle" class="mup-label">输出变化的绝对值</text>`;
+$('aligned-svg').innerHTML=svg;$('aligned-result').textContent=`已累加 ${fmt(n*k/16)} / ${n} 个坐标。固定 LR = 0.01：Δz = −${fmt(sp)}；μP LR = ${fmt(.16/n)}：Δz = −${fmt(mu)}。`;
+}
+const steps=Array.from({length:17},(_,i)=>({title:i===0?'开始累加':`已加入 ${i} / 16 组`,caption:i===16?'完整输出变化等于每个坐标贡献的总和。改变宽度后，比较两种学习率规则。':'每个输入坐标为 1，Adam 更新方向相同，所以各坐标的贡献同向累加。'}));
+const player=ArticleSteps.mount('#aligned-update',{steps,duration:450,render:alignedRender});$('aligned-width').addEventListener('change',()=>player.render());
+function parameters(){const n=+$('param-width').value,r=n/256,sgd=$('param-optimizer').value==='sgd',stored=$('param-coordinates').value==='stored';const rows=[['输入 W₁',`${n} × 64`,1/8,sgd?.001*r:.001],['隐藏 W₂',`${n} × ${n}`,1/Math.sqrt(n),sgd?.001:.001/r],[stored?'读出 V':'读出 W₃',`1 × ${n}`,stored?1/16:1/Math.sqrt(n*r),stored?(sgd?.001*r:.001):.001/r]];$('parameter-rows').innerHTML=rows.map(row=>'<tr>'+row.map((x,i)=>`<td>${i<2?x:fmt(x)}</td>`).join('')+'</tr>').join('');$('parameter-result').textContent=`宽度倍率 r = ${r}；有效读出标准差 = ${fmt(1/Math.sqrt(n*r))}。${stored?'存储权重 V 的前向倍率为 1 / '+r+'。':'前向直接使用有效权重 W₃。'} 读出使用 ${sgd?'SGD':'Adam'}，实际 LR = ${fmt(rows[2][3])}。`;}
+['param-width','param-optimizer','param-coordinates'].forEach(id=>$(id).addEventListener('change',parameters));parameters();
+function epsilon(){
+const gl=+$('eps-gradient').value,el=+$('eps-value').value,g=10**gl,e=10**el,ratio=g/(g+e),small=$('epsilon-calculator').clientWidth<480,w=small?320:640,left=small?40:60,right=w-20,x=l=>left+(l+14)/12*(right-left),y=v=>237-v*195;
+$('epsilon-svg').setAttribute('viewBox',`0 0 ${w} 290`);let svg='';
+for(let l=-14;l<=-2;l+=small?4:2){svg+=`<line x1="${x(l)}" y1="42" x2="${x(l)}" y2="237" class="mup-axis"/><text x="${x(l)}" y="258" text-anchor="middle" class="mup-label">${l}</text>`;}
+[0,.5,1].forEach(v=>{svg+=`<line x1="${left}" y1="${y(v)}" x2="${right}" y2="${y(v)}" class="${v===.5?'mup-dash':'mup-axis'}"/><text x="${left-11}" y="${y(v)+5}" text-anchor="end" class="mup-label">${v}</text>`});
+const points=Array.from({length:241},(_,i)=>{const l=-14+i/20,val=10**l/(10**l+e);return `${i?'L':'M'}${x(l)},${y(val)}`}).join(' ');
+svg+=`<path d="${points}" class="mup-curve"/><line x1="${x(gl)}" y1="${y(ratio)}" x2="${x(gl)}" y2="237" class="mup-dash"/><circle cx="${x(gl)}" cy="${y(ratio)}" r="6" class="mup-scaled"/><text x="${left}" y="23" class="mup-label">实际步幅 / 学习率</text><text x="${w/2}" y="285" text-anchor="middle" class="mup-label">log₁₀ |g|</text>`;
+$('epsilon-svg').innerHTML=svg;$('eps-gradient-value').textContent=gl.toFixed(1);$('eps-value-label').textContent=el.toFixed(1);$('epsilon-result').textContent=`|g| = ${g.toExponential(2)}，ε = ${e.toExponential(2)}。实际步幅 / 学习率 = ${fmt(ratio)}；若学习率为 0.001，步幅为 ${(.001*ratio).toExponential(3)}。`;
+}
+['eps-gradient','eps-value'].forEach(id=>$(id).addEventListener('input',epsilon));$('eps-reset').addEventListener('click',()=>{$('eps-gradient').value=-9;$('eps-value').value=-8;epsilon();});epsilon();
+window.addEventListener('resize',()=>{player.render();epsilon();});
+})();
+</script><script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script></body></html>

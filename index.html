@@ -121,6 +121,16 @@
         </div>
         <!-- Series cards: first post of each series. -->
         <div class="series-cards">
+          <a class="series-card" href="/posts/pretraining-scaling/">
+            <span class="sc-count">6 篇</span>
+            <h3>预训练算法：从预算与数据到学习动态</h3>
+            <p>Scaling Laws、数据筛选与配比、μP、学习目标和训练稳定性，连接论文推导与实验。</p>
+          </a>
+          <a class="series-card" href="/posts/hyper-connections/">
+            <span class="sc-count">3 篇</span>
+            <h3>Hyper-Connections 与深层信息流</h3>
+            <p>多路残差、mHC 的双随机约束，以及 Attention Residuals 的深度选择与工程取舍。</p>
+          </a>
           <a class="series-card" href="/posts/scaling-memory/">
             <span class="sc-count">13 篇</span>
             <h3>大模型规模化训练</h3>
@@ -140,9 +150,9 @@
 
         <!-- The newest 3 posts from /blog/. -->
         <ul class="post-list">
-          <li><a href="/posts/llm-engineering/"><span class="post-title">LLM 工程学习路径：从张量到推理服务</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。</span></a></li>
-          <li><a href="/posts/mini-inference-engine/"><span class="post-title">从零写一个最小推理引擎</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">用可运行 NumPy Transformer 连起 GQA、RoPE、分页 KV、逐轮调度与采样，从独立 dense 参考、容量承诺和故障注入建立推理引擎的正确性。</span></a></li>
-          <li><a href="/posts/tensor-layouts/"><span class="post-title">张量布局、stride 与 GPU 访存</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">从索引与 stride 推导真实地址，解释转置、切片、复制与别名，再用 sector 和 bank 分析 GPU 访存；含交互图、工程排错、四道习题和 NumPy 实验。</span></a></li>
+          <li><a href="/posts/pretraining-scaling/"><span class="post-title">训练预算怎样分配：Scaling Laws 与模型、数据的取舍</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">从固定 FLOPs 的最优模型规模推导，到跨尺度拟合、重复数据与部署成本：用三个交互图、四道计算与诊断题和 NumPy 实验，学会制定预训练预算。</span></a></li>
+          <li><a href="/posts/pretraining-data-curation/"><span class="post-title">预训练数据怎样筛选：去重、质量与多样性</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">从 MinHash 与 SemDeDup 推导去重，再用 FineWeb、DCLM 理解质量过滤、快照分布和固定预算评估，附交互图、计算题与 CPU 实验。</span></a></li>
+          <li><a href="/posts/pretraining-data-mixture/"><span class="post-title">数据配比怎样学出来：DoReMi、DoGE 与 RegMix</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">推导参考相对 excess loss、梯度对齐与小模型回归，分析 token 归约、梯度累积和跨规模迁移，附交互图与 NumPy 实验。</span></a></li>
         </ul>
       </section>
 

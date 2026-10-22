@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Attention Residuals：沿深度选择信息 · Zunzhe Zhang</title>
+<meta name="description" content="从残差累加推导沿深度的 attention，理解 Full 与 Block AttnRes 的权重、梯度和状态生命周期，再用在线 softmax、重算与流水线缓存解释它怎样高效运行。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.attn-controls {display:flex;flex-wrap:wrap;gap:12px;margin:15px 0}.attn-controls label{display:flex;flex-wrap:wrap;align-items:center;gap:8px;font-size:14px;flex:1 1 190px;min-width:0}.attn-controls input{min-width:70px;max-width:100%;flex:1;accent-color:var(--accent)}.attn-controls select{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:5px;max-width:100%}.attn-controls output{font:12px var(--font-mono);min-width:38px}.source-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.source-card{padding:12px;border:1px solid var(--border);border-radius:9px;min-width:0}.source-card strong{font-size:14px}.source-card p{font:13px/1.7 var(--font-mono);margin:7px 0;overflow-wrap:anywhere}.source-card .weight-track{height:9px;border-radius:6px;background:var(--bg-soft);overflow:hidden}.source-card .weight-bar{height:100%;background:var(--accent);width:0}.stage-muted{opacity:.4}.attn-output{font:14px/1.8 var(--font-mono);padding:14px;background:var(--bg-soft);border-radius:8px;margin-top:12px;overflow-wrap:anywhere}.source-bank{display:flex;gap:8px;flex-wrap:wrap;min-height:70px;align-items:stretch}.bank-item{padding:9px 12px;background:var(--bg-soft);border:1px solid var(--border);border-radius:7px;font:13px/1.7 var(--font-mono);min-width:70px}.bank-item.active{border:2px solid var(--accent)}.layer-strip{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:5px;margin:18px 0}.layer-chip{text-align:center;padding:12px 0;border:1px solid var(--border);border-radius:5px;font:12px var(--font-mono)}.layer-chip.done{background:var(--bg-soft);color:var(--accent)}.layer-chip.current{border:2px solid var(--accent);font-weight:700}.layer-chip.boundary{border-right:3px solid var(--text-soft)}.phase-card{border:1px solid var(--border);padding:13px;border-radius:9px}.phase-card strong{font-size:14px}.phase-card p{font:13px/1.9 var(--font-mono);margin:8px 0;overflow-wrap:anywhere}.attn-note{font-size:14px;color:var(--text-soft)}.attn-metrics{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin-top:12px}.attn-metrics div{background:var(--bg-soft);padding:12px;border-radius:8px}.attn-metrics b{display:block;font-size:21px;font-variant-numeric:tabular-nums}.attn-metrics span{font-size:13px;color:var(--text-soft)}
+@media(max-width:520px){.source-cards{grid-template-columns:1fr}.source-card{display:block}.source-card p{margin:3px 0}.source-card .weight-track{margin-top:6px}.attn-metrics{grid-template-columns:1fr}.layer-chip{font-size:10px}.attn-output{font-size:12px}}
+</style>
+</head>
+<body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>Attention Residuals：沿深度选择信息</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header>
+<nav class="series" data-series="hyperconnections"></nav>
+<article class="prose">
+<p>读到一个代词时，浅层可能已经提取出候选实体，中层在组织句法关系，深层要决定它指向谁。标准 Transformer 把每个子层的新结果累加到同一条残差流里；到了深层，早期的信息仍在累加结果中，但读取它需要从混合表示里重新提取。Attention Residuals（AttnRes）保留沿途的表示，让当前子层按内容选择：这次需要多少 embedding、多少早期结果、多少刚算出的特征？</p>
+<p>这条路线与 <a href="/posts/hyper-connections/">Hyper-Connections</a>、<a href="/posts/manifold-hyper-connections/">mHC</a> 关注同一个问题——信息怎样穿过深度。HC 扩展同时运行的残差流，mHC 约束流之间的混合，AttnRes 选择历史深度上的来源。它们给出不同的状态组织方式，也带来不同的显存与通信需求。</p>
+<nav class="toc"><strong>目录</strong><ol><li><a href="#depth">把残差展开，看到深度轴</a></li><li><a href="#weights">一次深度 attention 怎样算</a></li><li><a href="#blocks">Block AttnRes 怎样管理历史</a></li><li><a href="#hardware">让历史只读一次</a></li><li><a href="#training">梯度、重算与跨卡状态</a></li><li><a href="#practice">实验与练习</a></li></ol></nav>
+
+<h2 id="depth">把残差展开，看到深度轴</h2>
+<p>以一个 token 的表示为观察对象，宽度为 \(d\)。用 \(l\) 编号 attention 或 MLP 子层，一个常见 decoder block 包含两个这样的子层。把子层内部的 normalization 也包含在函数 \(F_l\) 里，标准 PreNorm 残差写成：</p>
+$$x_{l+1}=x_l+F_l(x_l),\qquad x_1=e.$$
+<p>这里 \(e\in\mathbb R^d\) 是 embedding。设子层 \(i\) 的新输出为 \(v_i=F_i(x_i)\)，再令 \(v_0=e\)，反复展开便得到 \(x_l=\sum_{i=0}^{l-1}v_i\)。每个来源到当前残差流的直接系数都是 1。网络当然可以在 \(F_i\) 中学会缩放或抵消；从这条直达路径看，聚合规则始终是加法。</p>
+<p>当来源近似不相关、方差相近时，累加的方差随来源数增长，RMS 约按来源数的平方根增长。后续 RMSNorm 再把整个向量缩回固定尺度，一个新子层的增量在总和中的相对份额就会变小。真实模型的相关性和尺度会改变这个增长规律；诊断时可以逐层记录残差 RMS、分支输出 RMS，以及两者的比值。深层分支相对份额持续下降，是值得检查的信号。</p>
+<p>Full AttnRes 把输入改成历史输出的加权和。对子层 \(l\)，共有 \(l\) 个来源：embedding 和前面 \(l-1\) 个子层的输出。</p>
+$$\htmlData{symbol=h}{h_l}=\sum_{i=0}^{l-1}\htmlData{symbol=alpha}{\alpha_{i\to l}}\,\htmlData{symbol=v}{v_i},\qquad v_l=F_l(h_l),\qquad \sum_{i=0}^{l-1}\alpha_{i\to l}=1.$$
+<p>各来源保存独立表示；当前子层先选择，再计算自己的新输出。最后的输出聚合也可以用一个查询读取全部来源。沿深度重读同一 token 的表示保持了已有的因果关系：只要每个 \(F_l\) 的序列 attention 遵守 causal mask，聚合已有表示就继续遵守它。</p>
+
+<h2 id="weights">一次深度 attention 怎样算</h2>
+<p>选取一个 batch、一个 token，历史来源排成 \(V_l\in\mathbb R^{l\times d}\)。子层 \(l\) 有自己的可学习查询 \(q_l\in\mathbb R^d\)，同一子层的所有 token 共享这个参数。对每个来源做 RMSNorm 得到 key，点积形成分数，softmax 的归一化轴是<strong>来源深度</strong>：</p>
+$$\begin{aligned}
+\htmlData{symbol=k}{k_{i,l}}&=\gamma_l\odot\frac{v_i}{\sqrt{\frac1d\sum_{r=1}^{d}v_{i,r}^{\,2}+\varepsilon}},\\
+s_{i,l}&=\htmlData{symbol=q}{q_l}^{\mathsf T}k_{i,l},\\
+\alpha_{i\to l}&=\frac{\exp(s_{i,l}-m_l)}{\sum_{j=0}^{l-1}\exp(s_{j,l}-m_l)},\qquad m_l=\max_j s_{j,l},\\
+h_l&=\sum_i\alpha_{i\to l}v_i.
+\end{aligned}$$
+<p>\(\gamma_l\in\mathbb R^d\) 是这一聚合器的 RMSNorm 增益，\(\varepsilon\) 是小正数；\(m_l\) 是数值稳定用的最大分数。这里采用原始 AttnRes 的打分形式 \(q_l^{\mathsf T}k_{i,l}\)，查询自身学习合适尺度。keys 经过归一化，values 使用原来的 \(v_i\)：前者决定选谁，后者决定取回什么。放大一个来源时，它的归一化方向近似保持，而被取回的数值仍随之放大。</p>
+<p>扩展到批量计算，来源张量是 \([S,B,T,d]\)，其中 \(S\) 是当前来源数，\(B\) 是 batch 大小，\(T\) 是本次处理的 token 数。点积产生 \([S,B,T]\) 分数，对轴 0 做 softmax，最后沿轴 0 加权求和得到 \([B,T,d]\)。因此，同一个 \(q_l\) 遇到不同 token 的 keys，会产生不同权重。可以把查询理解为这一子层长期学习的“需求方向”，把每个 token 的 key 理解为本次输入携带的内容。</p>
+
+<figure class="article-figure" id="depth-figure"><h3>同一个查询，选择不同来源</h3>
+<p class="attn-note">二维算例：embedding = (1, 0)，浅层输出 = (0, 2)，近层输出 = (−1, 0)。图中归一化取增益 1、ε = 0；三个向量均非零。</p>
+<div class="attn-controls"><label for="query-angle">查询方向<input id="query-angle" type="range" min="0" max="180" value="0" step="15"><output id="angle-value"></output></label><label for="query-scale">查询长度<input id="query-scale" type="range" min="0" max="3" value="1" step=".25"><output id="scale-value"></output></label></div>
+<div class="source-cards" id="source-cards"></div><div class="attn-output" id="depth-output"></div>
+<figcaption>按步骤观察 raw value → 归一化 key → 分数 → 权重和输出。方向决定偏好，长度控制权重集中程度；查询长度为 0 时得到三个来源的平均值。</figcaption></figure>
+
+<p>把全部查询初始化为 0，会得到均匀权重 \(1/S\)，模型从来源的平均值开始训练。这改变了初始聚合尺度：三个来源得到的是三分之一的和。若把已有残差模型直接换成 AttnRes，需要把这种函数变化纳入转换与继续训练的评估。</p>
+<p>零初始化仍然能学习。暂时把来源当作固定输入，对查询求导：</p>
+$$\frac{\partial h_l}{\partial q_l}=\sum_i\alpha_{i\to l}(v_i-h_l)k_{i,l}^{\mathsf T}\in\mathbb R^{d\times d}.$$
+<p>右侧是 value 偏差与 key 的加权关联。只要不同来源提供不同内容，查询就可能得到非零梯度。对标量损失 \(\mathcal L\)，设上游梯度 \(g=\partial\mathcal L/\partial h_l\)，则 \(\partial\mathcal L/\partial q_l=\sum_i\alpha_{i\to l}[g^{\mathsf T}(v_i-h_l)]k_{i,l}\)。这给出了一个可直接做有限差分检查的公式。</p>
+
+<h2 id="blocks">Block AttnRes 怎样管理历史</h2>
+<p>Full AttnRes 给每个子层输出独立的选择权。代价是历史必须一直可读：对于 \(L\) 个子层，每个 token 的来源存储量按 \(Ld\) 增长，直接逐层聚合的运算量按 \(L^2d\) 增长。层函数内部通常更昂贵，但保留历史会改变重算和流水线通信的设计。</p>
+<p>Block AttnRes 把连续 \(K\) 个子层划为一块，共 \(N=\lceil L/K\rceil\) 块，末块可以较短。第 \(n\) 块保存原始分支输出的和：</p>
+$$\htmlData{symbol=block}{b_n}=\sum_{j\in\mathcal B_n}F_j(h_j),\qquad b_0=e.$$
+<p>\(\mathcal B_n\) 表示第 \(n\) 块中的子层索引。正在计算的块还有一个<strong>部分和</strong> \(p\)：它只包含这块已经完成的分支输出。块内第一个子层读取 embedding 与之前完成的块；之后的子层再把当前 \(p\) 当作一个来源。每算完一个子层，就把新输出加进 \(p\)；块结束时，将它转成不可变的 \(b_n\)，下一块从空的部分和开始。</p>
+<pre><code>completed = [embedding]
+partial = None
+for l in range(L):
+    sources = completed + ([] if partial is None else [partial])
+    h = depth_attention(q[l], sources)
+    v = F[l](h)
+    partial = v if partial is None else partial + v
+    if (l + 1) % K == 0 or l + 1 == L:
+        completed.append(partial)
+        partial = None
+output = depth_attention(q_out, completed)</code></pre>
+<p>这里的 <code>None</code> 表示当前块还没有输出。若把它换成一个额外的零向量，零向量也会参与 softmax 分母；例如两个来源的分数均为 0 时，加入第三个零来源就会把已有内容各自的系数从 \(1/2\) 改为 \(1/3\)。块边界的表示与来源数量，都是模型函数的一部分。</p>
+
+<figure class="article-figure" id="block-figure"><h3>历史块保留，当前部分和更新</h3>
+<div class="attn-controls"><label for="block-size">每块子层数<select id="block-size"><option value="1">1：Full 粒度</option><option value="2" selected>2</option><option value="3">3</option><option value="6">6</option></select></label></div>
+<div class="layer-strip" id="layer-strip"></div><p class="attn-note">本次聚合可读取的来源：</p><div class="source-bank" id="source-bank"></div><div class="attn-output" id="block-output"></div>
+<figcaption>为追踪加法，固定六个标量分支输出为 1、2、3、4、5、6，embedding 为 10。每一步停在一个子层计算前；紫色边框标出当前部分和，粗右边框标出块的末尾。这些数值用于展示状态更新。</figcaption></figure>
+
+<p>分块把选择粒度从“每个子层”变成“每个完成块”。块中两个分支若正好互相抵消，它们的和已经丢掉了区分两者的能力；后续 attention 只能选择这个和。缩小块可以保留更细的信息，同时增加来源数。\(K=1\) 时，每个块只含一个输出，便恢复 Full 的来源集合。\(K=L\) 时，整个网络只形成一块，块内持续在 embedding 与当前部分和之间学习归一化权重。</p>
+<p>对于固定深度 \(L\)，直接实现需要约 \(O(LNd)\) 聚合运算；保存的历史按 \(O(Nd)\) 增长。假设一个 prefill chunk 有 \(B\) 条、每条 \(T\) 个 token，每个元素占 \(u\) 字节，最终来源库包含 embedding 和全部块，则：</p>
+$$\htmlData{symbol=memory}{M_{\mathrm{sources}}}=(N+1)\,B\,T\,d\,u.$$
+<p>这个计数只统计来源库；实际峰值还包括当前分支、聚合工作区以及训练的反向激活。例如 \(L=96\)、\(K=12\) 得到 8 块；\(B=1,T=8192,d=4096\)，BF16 的 \(u=2\)。每个来源是 64 MiB，9 个来源为 576 MiB。Full 的 97 个来源则是 6208 MiB，约 6.06 GiB。块数减少带来的容量差异在长 prefill 中尤其明显。</p>
+
+<h2 id="hardware">让历史只读一次</h2>
+<p>逐层调用上面的伪代码很直接，但每层都重新 stack 来源、RMSNorm、计算 softmax，会生成多个小 kernel 和中间张量。模型变慢时，先用 profiler 观察这些 kernel 的时间、来源库读取字节量和分配次数，再决定融合范围。算子 FLOPs 小而时间随 token 数和块数明显增长，通常意味着数据搬运值得优先检查。</p>
+<p>AttnRes 的查询是层参数，这个设计给了调度机会。进入一块时，之前的块都已经完成，这一块中 \(K\) 个子层的查询也全部已知。可以把它们排成 \(Q\in\mathbb R^{K\times d}\)，一次读取来源，算好各查询对<strong>完成块</strong>的结果。当前块的部分和依赖前一个子层，随后逐层补入。这就是两阶段计算。</p>
+<p>怎样把后来产生的部分和补进一次已经算过的 softmax？对某个子层的已完成来源，保存三个统计量：</p>
+$$m=\max_i s_i,\qquad z=\sum_i e^{s_i-m},\qquad u=\sum_i e^{s_i-m}v_i.$$
+<p>这里 \(m,z\) 是标量，\(u\in\mathbb R^d\) 是尚未除以分母的加权和。新部分和为 \(p\in\mathbb R^d\)，它在同一查询下的分数为 \(a=q^{\mathsf T}\operatorname{RMSNorm}(p)\)。令 \(m'=\max(m,a)\)，把两组权重移到共同尺度：</p>
+$$\begin{aligned}z'&=e^{m-m'}z+e^{a-m'},\\u'&=e^{m-m'}u+e^{a-m'}p,\\h&=u'/z'.\end{aligned}$$
+<p>新旧两部分乘回相同的指数基准，所得结果与一次对所有来源做 softmax 相同。这个 <a href="/posts/flash-attention/">online softmax</a> 合并保留了模型函数；分块本身则改变了可选择的信息粒度。两种操作分别作用于执行顺序和网络结构。</p>
+
+<figure class="article-figure" id="merge-figure"><h3>晚到的部分和，怎样加入已有 softmax</h3>
+<p class="attn-note">固定完成来源的分数为 0、1，标量 values 为 2、−1；当前部分和的 value 为 3。滑杆直接指定其分数，用于隔离观察合并算法。</p>
+<div class="attn-controls"><label for="partial-score">部分和分数<input id="partial-score" type="range" min="-4" max="8" value="2" step=".5"><output id="score-value"></output></label></div>
+<div class="article-grid"><div class="phase-card"><strong>阶段 1 · 已完成来源</strong><p id="old-stats"></p></div><div class="phase-card"><strong>阶段 2 · 补入部分和</strong><p id="new-stats"></p></div></div><div class="attn-output" id="merge-output"></div>
+<figcaption>最大值改变时，旧分子与旧分母一起缩放。按步骤检查合并后的结果与三个来源直接 softmax 的结果。</figcaption></figure>
+
+<p>对于 \([K,B,T,d]\) 这一组查询结果，两阶段实现用批量操作摊薄重复读取。每个子层仍需要自己的统计量：查询不同，权重就不同。训练后 RMSNorm 的增益也可能因子层而异，可以利用 \(q_l^{\mathsf T}(\gamma_l\odot\widehat v)=(q_l\odot\gamma_l)^{\mathsf T}\widehat v\)，把增益吸收到查询，复用来源的单位 RMS 表示。</p>
+<p>第二阶段只处理一个部分和及对应统计量，适合与部分和更新、后续 normalization 融合。实现时让点积、平方和与 softmax 统计量使用 FP32 累加，再按计算精度写回输出。BF16 能减小来源库，但长加法链仍可能吞掉较小增量；可用同一批输入比较 FP32 和 BF16 部分和的误差，并记录每层的权重熵与最大分数。精度策略要覆盖 keys 的归一化与 raw values 的累加。</p>
+
+<h2 id="training">梯度、重算与跨卡状态</h2>
+<p>同一个历史来源会被很多后续子层读取，它的梯度要累加所有读取路径的贡献。单次读取就有两部分：\(v_i\) 作为 value 的直达梯度 \(\alpha_i g\)，以及它经过 RMSNorm 改变 key、进而改变权重的梯度。Full 的每个子层输出拥有独立路径；Block 内，\(b_n=\sum_{j\in\mathcal B_n}v_j\) 的块级梯度通过加法传给每个 \(v_j\)，每个输出还可能收到本块后续部分和读取产生的梯度。</p>
+<p>因此训练代码中的历史 buffer 必须保持 autograd 关系。推理可以复用已不再读取的工作区；训练时原地修改一个仍被后续计算引用的部分和，会改变反向传播需要的值。一个小而有用的检查是：固定随机种子，让简单 out-of-place 版本与优化实现分别计算损失、查询梯度和各来源梯度，再逐项比较。只比最终输出会漏掉错误的 detach 或缓存复用。</p>
+<p><a href="/posts/gradient-checkpointing/">Activation checkpointing</a> 通常通过丢弃中间值、反向时重算来节省显存。AttnRes 的历史有额外的<strong>前向存活期</strong>：后续层仍要读它。Full 保存每个来源，Block 保存块汇总；聚合的 scores、weights 和局部中间值可以重算。若一次优化只减少了 softmax 中间张量，而峰值几乎不变，可以把显存分解成来源库、层内激活和工作区，检查主要部分是否正是长期存活的来源。重算的粒度必须尊重这三种对象的用途。</p>
+<p>流水线并行中，下一 stage 除了当前部分和，还要拥有可读取的旧块。若每次都发送整个历史，越深的边界传得越多。交错流水线会让同一物理 rank 再次处理同一个 micro-batch 的后续虚拟 stage；把已经收到的块缓存在这个 rank 上，后面就只发送新增块。缓存键要区分 micro-batch 和块编号，反向完成后再释放该 micro-batch 的状态，反向也要合并对应的梯度贡献。这里节省的是重复传输，代价是延长本地缓存的存活期。</p>
+<p>长 prefill 还可以沿 token 轴分片来源库。深度 attention 对每个 token 独立，\(P\) 张 TP 卡各持有 \(T/P\) 个 token，就能独立计算自己的深度聚合。结合层输出的 reduce-scatter、局部聚合和 all-gather，来源存储按每卡 \((N+1)BTdu/P\) 缩小。前面的 576 MiB 算例在 8 卡均匀分片下是每卡 72 MiB；还需单独核算通信缓冲和两阶段中间结果。选择 chunked prefill 时，同一个公式也能估计 chunk 长度对额外显存的影响。</p>
+<p>比较这些残差设计时，质量与系统预算要放在一起。HC/mHC 的核心状态按多路残差宽度增长，AttnRes 按历史来源数增长；它们对 kernel 融合、重算和流水线的压力各不相同。训练实验可以同时记录验证 loss、逐层 RMS、梯度范数、聚合权重的熵、step 时间及显存峰值。改变块数时保持参数量、训练 token 数和数据顺序可比，再报告真实墙钟成本，才能判断信息选择带来的收益是否值得其状态开销。</p>
+
+<h2 id="practice">实验与练习</h2>
+<p><a href="./lab.py">下载 NumPy 实验</a>，运行 <code>python lab.py</code>。实验用双精度验证查询梯度，比较 online softmax 与直接计算，追踪块边界，并优化一个二维查询，让它从三个来源中选择目标信息。最后输出固定配置的来源库容量。训练对象是这个小型聚合器，输出可用于检查公式与状态语义。</p>
+<p>把实验里的查询初值改为零，可以观察查询仍然移动；把来源设置成三个完全相同的向量，查询梯度则变为零。再把 logits 整体增加 1000，稳定 softmax 与在线合并结果应保持一致。这些修改分别检验可学习性、不可区分来源和数值平移不变性。</p>
+
+<div class="article-exercise"><h3>练习 1：从方向算到输出</h3><p>三个二维来源为 \((1,0),(0,2),(-1,0)\)，RMSNorm 增益为 1，取 \(\varepsilon=0\)，查询为 \(q=(1,0)\)。求 keys、权重和输出。把第二个来源变为 \((0,20)\)，哪些量改变？</p><details><summary>展开解答</summary><p>三个 keys 是 \((\sqrt2,0),(0,\sqrt2),(-\sqrt2,0)\)，分数为 \(\sqrt2,0,-\sqrt2\)。归一化后权重约为 \((0.7679,0.1867,0.0454)\)，输出约为 \((0.7225,0.3734)\)。放大第二个来源后 key 和权重保持相同，输出第二维变成约 3.734；第一维保持约 0.7225。归一化控制打分尺度，value 保留内容幅度。</p></details></div>
+<div class="article-exercise"><h3>练习 2：零查询有没有梯度？</h3><p>只取 \(v_0=(1,0),v_1=(0,1)\)，令 \(q=0\)，增益为 1、\(\varepsilon=0\)。损失为输出的第一维 \(\mathcal L=h_1\)。求 \(\partial\mathcal L/\partial q\)，并写出梯度下降后查询偏向哪一个来源。</p><details><summary>展开解答</summary><p>初始权重均为 \(1/2\)，\(h=(1/2,1/2)\)，上游梯度为 \(g=(1,0)\)。两个 value 的第一维偏差分别为 \(1/2,-1/2\)，keys 为 \((\sqrt2,0),(0,\sqrt2)\)。</p>$$\frac{\partial\mathcal L}{\partial q}=\frac{\sqrt2}{4}(1,-1).$$<p>梯度下降使查询第一维变负、第二维变正，更多选择 \(v_1\)，从而减小输出第一维。把两个 values 都改为 \((1,0)\) 时，每项 \(v_i-h\) 为零，查询梯度也为零。</p></details></div>
+<div class="article-exercise"><h3>练习 3：来源库能否装下？</h3><p>96 个子层每 12 个一块，\(B=2,T=16384,d=4096\)，来源采用 BF16。包含 embedding 的最终来源库多大？均匀分到 8 张卡后每卡多少？若每卡只给来源库 128 MiB，batch 保持 2，每卡均匀分片时 chunk 最长多少 token？</p><details><summary>展开解答</summary><p>共有 9 个来源，字节数为 \(9\times2\times16384\times4096\times2\)，得到 2304 MiB，即 2.25 GiB。8 卡均分后为每卡 288 MiB。设 chunk 长为 \(T_c\)：</p>$$\frac{9\times2\times T_c\times4096\times2}{8}\le128\times2^{20},\qquad T_c\le7281.77\ldots$$<p>整数上界为 7281 token，实际可以选对齐友好的 7168 或 6144，再给工作区留出预算。若另有算子要求 chunk 被 8 整除，则这个约束下最大可取 7280。</p></details></div>
+<div class="article-exercise"><h3>练习 4：一次错误合并怎样改变结果？</h3><p>已完成来源的分数为 \((0,1)\)，values 为 \((2,-1)\)，新部分和的分数为 2、value 为 3。计算正确合并结果。工程师直接平均“旧 attention 输出”和 3，会得到什么？设计一个能发现该错误的测试。</p><details><summary>展开解答</summary><p>旧最大值 \(m=1\)，分母 \(z=e^{-1}+1\)，分子 \(u=2e^{-1}-1\)。新最大值为 2，所以：</p>$$h=\frac{e^{-1}(2e^{-1}-1)+3}{e^{-1}(e^{-1}+1)+1}=\frac{2-e+3e^2}{1+e+e^2}\approx1.9311.$$
+<p>旧输出约为 −0.1932，直接与 3 平均得到约 1.4034；这相当于强行把旧来源组和新来源各分一半权重。测试时应比较完整 softmax 与分组后合并，覆盖不同分组、极端分数以及整体平移 1000 的情况，并在训练实现中比较对应梯度。</p></details></div>
+
+<h2 id="references">参考与延伸阅读</h2>
+<ol><li><a href="https://arxiv.org/abs/2603.15031">Attention Residuals</a>（2026）：§3 给出 Full/Block 定义，§4 和 Algorithm 1 推导两阶段计算、pipeline 缓存与 prefill 分片；<a href="https://github.com/MoonshotAI/Attention-Residuals">官方仓库</a>提供报告与 PyTorch 风格伪代码。</li><li><a href="https://arxiv.org/abs/2409.19606">Hyper-Connections</a>（2024）：通过多路残差和层间读写扩展信息传递。</li><li><a href="https://arxiv.org/abs/2512.24880">mHC: Manifold-Constrained Hyper-Connections</a>（2025）：对残差混合施加双随机约束，讨论稳定性与高效实现。</li><li><a href="https://arxiv.org/abs/1805.02867">Online normalizer calculation for softmax</a>（2018）：最大值、分母的在线更新，构成分组合并的基础。</li><li><a href="https://arxiv.org/abs/1910.07467">Root Mean Square Layer Normalization</a>（2019）：RMSNorm 的定义及尺度性质。</li></ol>
+</article><nav class="series-pager" data-series="hyperconnections"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global":{"h":{"label":"当前子层输入 hₗ","description":"历史来源按深度权重聚合得到的 d 维向量，随后送入子层 Fₗ。"},"alpha":{"label":"深度权重 αᵢ→ₗ","description":"来源 i 对子层 l 的 softmax 权重；对同一 token 的全部来源求和为 1。"},"v":{"label":"来源 vᵢ","description":"i = 0 时是 embedding，其余为历史子层的原始分支输出；每个来源 d 维。"},"k":{"label":"来源 key kᵢ,ₗ","description":"来源 vᵢ 经目标子层 l 的 RMSNorm 得到的 d 维 key。"},"q":{"label":"可学习查询 qₗ","description":"目标子层 l 的 d 维参数向量，跨 token 共享；输入相关的 keys 让权重随 token 改变。"},"block":{"label":"完成块 bₙ","description":"第 n 块所有原始分支输出的和；b₀ 表示 embedding。"},"memory":{"label":"来源库容量 M_sources","description":"(N + 1) × B × T × d × 元素字节数，包含 embedding 与 N 个完成块。","unit":"字节"}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script>
+<script>
+(()=>{'use strict';
+const $=s=>document.querySelector(s),fmt=x=>Number(x).toFixed(4),vec=x=>'('+x.map(v=>Number(v).toFixed(3)).join(', ')+')';
+const vals=[[1,0],[0,2],[-1,0]],names=['embedding','浅层输出','近层输出'];
+$('#source-cards').innerHTML=names.map((n,i)=>'<div class="source-card"><strong>'+n+'</strong><p class="value">value '+vec(vals[i])+'</p><p class="key"></p><p class="score"></p><p class="weight"></p><div class="weight-track"><div class="weight-bar"></div></div></div>').join('');
+const depth=ArticleSteps.mount('#depth-figure',{duration:1600,steps:[{title:'保留 raw values',caption:'三个来源各自保存独立内容。修改查询方向或长度，再观察后续计算。'},{title:'只归一化 keys',caption:'向量的 RMS 变成 1；浅层 value 的长度 2 仍留在原值中。'},{title:'查询与 key 点积',caption:'朝查询方向的 key 得分更高；查询为零时所有分数为零。'},{title:'沿来源做 softmax',caption:'三个权重之和为 1，再加权原来的 values 得到当前子层输入。'}],render(_,i){let theta=Number($('#query-angle').value)*Math.PI/180,r=Number($('#query-scale').value),q=[r*Math.cos(theta),r*Math.sin(theta)],keys=vals.map(v=>{let z=Math.hypot(...v)/Math.sqrt(2);return v.map(x=>x/z)}),scores=keys.map(k=>k[0]*q[0]+k[1]*q[1]),m=Math.max(...scores),ex=scores.map(s=>Math.exp(s-m)),sum=ex.reduce((a,b)=>a+b,0),weights=ex.map(e=>e/sum),h=[0,1].map(j=>vals.reduce((a,v,k)=>a+weights[k]*v[j],0));$('#angle-value').textContent=$('#query-angle').value+'°';$('#scale-value').textContent=r.toFixed(2);document.querySelectorAll('.source-card').forEach((el,k)=>{el.querySelector('.key').textContent=i>=1?'key '+vec(keys[k]):'key 待计算';el.querySelector('.score').textContent=i>=2?'分数 '+fmt(scores[k]):'分数 待计算';el.querySelector('.weight').textContent=i>=3?'权重 '+(weights[k]*100).toFixed(2)+'%':'权重 待计算';el.querySelector('.weight-bar').style.width=i>=3?weights[k]*100+'%':'0%'});$('#depth-output').textContent='query = '+vec(q)+(i>=3?' → 输出 = '+vec(h):' · 下一步继续计算');$('#depth-figure').dataset.output=JSON.stringify(h);}});
+['query-angle','query-scale'].forEach(id=>document.getElementById(id).addEventListener('input',()=>{depth.pause();depth.render()}));
+const blockSteps=Array.from({length:7},(_,i)=>({title:i===6?'最终输出聚合':'计算子层 '+(i+1)+' 之前',caption:i===6?'六个子层均已完成。embedding 与全部完成块共同构成最终来源库。':'只读取已经产生的来源；计算后把子层 '+(i+1)+' 的输出加入当前部分和。'}));
+const block=ArticleSteps.mount('#block-figure',{duration:1700,steps:blockSteps,render(_,i){let k=Number($('#block-size').value),completed=[{name:'embedding',value:10}],partial=0;for(let j=1;j<=i;j++){partial+=j;if(j%k===0||j===6){completed.push({name:'块 '+completed.length,value:partial});partial=0}}$('#layer-strip').innerHTML=Array.from({length:6},(_,j)=>'<div class="layer-chip '+(j<i?'done':j===i?'current':'')+' '+((j+1)%k===0?'boundary':'')+'">子层 '+(j+1)+'</div>').join('');let bank=completed.map(b=>'<div class="bank-item">'+b.name+'<br>value = '+b.value+'</div>');if(partial)bank.push('<div class="bank-item active">当前部分和<br>value = '+partial+'</div>');$('#source-bank').innerHTML=bank.join('');$('#block-output').textContent='已完成 '+i+' / 6 个子层 · 可读来源 '+bank.length+' 个'+(partial?' · 部分和随本块继续增长':' · 下一块的部分和为空');$('#block-figure').dataset.sources=String(bank.length);}});
+$('#block-size').addEventListener('change',()=>{block.pause();block.render()});
+const merge=ArticleSteps.mount('#merge-figure',{duration:1800,steps:[{title:'先算完成来源',caption:'旧最大值为 1；分子与分母都相对于这个最大值保存。'},{title:'确定共同最大值',caption:'比较旧最大值与新分数，得到共同的指数基准。'},{title:'旧统计量一起缩放',caption:'分子与分母乘上相同系数，再把当前部分和贡献加入。'},{title:'除以合并分母',caption:'合并结果与三个来源一次计算的 softmax 一致。'}],render(_,i){let a=Number($('#partial-score').value),m=1,z=1+Math.exp(-1),u=2*Math.exp(-1)-1,m2=Math.max(m,a),c=Math.exp(m-m2),b=Math.exp(a-m2),z2=c*z+b,u2=c*u+3*b,direct=(2*Math.exp(-m2)-Math.exp(1-m2)+3*Math.exp(a-m2))/(Math.exp(-m2)+Math.exp(1-m2)+Math.exp(a-m2));$('#score-value').textContent=a.toFixed(1);$('#old-stats').textContent='m = 1\nz = '+fmt(z)+'\nu = '+fmt(u);$('#old-stats').style.whiteSpace='pre-line';$('#new-stats').style.whiteSpace='pre-line';$('#new-stats').textContent=i===0?'新分数 a = '+a+'\nvalue = 3':i===1?'共同最大值 m′ = '+m2+'\n旧缩放 = '+fmt(c)+'\n新缩放 = '+fmt(b):'z′ = '+fmt(z2)+'\nu′ = '+fmt(u2);$('#merge-output').textContent=i<3?'旧 attention 输出 = '+fmt(u/z)+' · 继续加入部分和':'在线合并 = '+fmt(u2/z2)+' · 直接计算 = '+fmt(direct)+' · 误差 = '+Math.abs(u2/z2-direct).toExponential(1);$('#merge-figure').dataset.error=String(Math.abs(u2/z2-direct));}});
+$('#partial-score').addEventListener('input',()=>{merge.pause();merge.render()});
+window.AttnResFigures={depth,block,merge};
+})();
+</script>
+<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+</body></html>

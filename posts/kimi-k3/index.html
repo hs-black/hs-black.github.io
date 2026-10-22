@@ -160,6 +160,7 @@
       <p>让每个 token 能调节它从全局注意力读出的通道。另一个细节：flash attention 在低精度下的舍入误差是有偏的，为了消除它，训练时注意力输出保持 FP32。这让输出 tile 的片上占用翻倍，于是他们重新设计了训练 kernel，让输出 tile 与 KV 暂存缓冲区复用（而不是与 query tile 复用），腾出共享内存给更深的 KV 流水线，反而提高了吞吐。</p>
 
       <h2 id="attnres">3. 注意力残差：在深度上做注意力</h2>
+      <p><a href="/posts/attention-residuals/">Attention Residuals：沿深度选择信息</a>从数值例子推导 Full 与 Block 形式，并计算历史状态、在线 softmax 和流水线通信的开销。</p>
       <h3>3.1 动机</h3>
       <p>标准的（PreNorm）残差连接 \(h_{l+1}=h_l+f_l(\cdot)\) 把之前所有层的输出以固定的单位权重累加到一个状态里。可以这样类比：这像是 RNN 在时间上把所有历史压进一个隐状态；Transformer 在序列维上用注意力替代了循环，AttnRes 就在<strong>深度</strong>维上做同样的事——每层按数据相关的权重，有选择地取用之前各层的输出。均匀累加还有一个具体问题：隐状态随深度不受控地增长，每一层的贡献被逐层稀释（PreNorm dilution）。</p>
       <h3>3.2 完整形式</h3>
@@ -490,7 +491,7 @@
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -701,8 +702,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

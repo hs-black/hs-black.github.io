@@ -8,6 +8,7 @@
 // the cross-reference index in assets/post-links.js.
 (() => {
   const CATEGORIES = {
+    pretraining: '预训练算法',
     training: '训练系统',
     inference: '推理系统',
     kernels: 'GPU 与算子',
@@ -18,7 +19,16 @@
   const KINDS = { article: ['文章', 'kind'], interactive: ['交互', 'kind interactive'] };
 
   const POSTS = [
-    {"slug": "llm-engineering", "title": "LLM 工程学习路径：从张量到推理服务", "kind": "interactive", "cat": "basics", "tags": ["学习路径", "LLM", "工程", "实验"], "date": "2026-10-20", "desc": "九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。"},
+    {"slug": "pretraining-scaling", "title": "训练预算怎样分配：Scaling Laws 与模型、数据的取舍", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "Scaling Laws", "实验", "数据"], "desc": "从固定 FLOPs 的最优模型规模推导，到跨尺度拟合、重复数据与部署成本：用三个交互图、四道计算与诊断题和 NumPy 实验，学会制定预训练预算。"},
+    {"slug": "pretraining-data-curation", "title": "预训练数据怎样筛选：去重、质量与多样性", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "数据", "去重", "实验"], "desc": "从 MinHash 与 SemDeDup 推导去重，再用 FineWeb、DCLM 理解质量过滤、快照分布和固定预算评估，附交互图、计算题与 CPU 实验。"},
+    {"slug": "pretraining-data-mixture", "title": "数据配比怎样学出来：DoReMi、DoGE 与 RegMix", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "数据", "优化", "实验"], "desc": "推导参考相对 excess loss、梯度对齐与小模型回归，分析 token 归约、梯度累积和跨规模迁移，附交互图与 NumPy 实验。"},
+    {"slug": "pretraining-mup", "title": "从小模型调参到大模型：μP 与超参数迁移", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "μP", "优化器", "超参数"], "desc": "从特征更新推导μP的初始化与SGD、Adam学习率缩放，串起Tensor Programs和后续参数化研究，用交互计算、工程诊断及NumPy实验学习宽度迁移。"},
+    {"slug": "pretraining-objectives", "title": "一段文本提供什么监督：从去噪、FIM 到多 token 预测", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "学习目标", "FIM", "MTP"], "desc": "把 T5、UL2、FIM 与多 token 预测放进同一套条件概率、标签和计算预算中，推导监督数量、梯度累积归一化与词表显存，并用 NumPy 检查目标是否写对。"},
+    {"slug": "pretraining-stability", "title": "深层 Transformer 怎样稳定训练", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "稳定性", "归一化", "优化器"], "desc": "从残差 Jacobian、Pre-LN 与 DeepNorm 推导深度稳定性，再用注意力熵理解 QK normalization 和 σReparam，建立包含梯度裁剪、参数更新和低精度计算的诊断实验。"},
+    {"slug": "hyper-connections", "title": "Hyper-Connections：从一条残差流到多路信息交换", "date": "2026-10-22", "kind": "interactive", "cat": "models", "tags": ["架构", "Hyper-Connections", "残差", "稳定性"], "desc": "从恒等残差出发推导 HC 的读取、混合、写回、动态参数化与梯度；分析信息路径、初始化、带宽成本，含交互图、习题与 NumPy 实验。"},
+    {"slug": "manifold-hyper-connections", "title": "mHC：用双随机约束稳定多路残差", "date": "2026-10-22", "kind": "interactive", "cat": "models", "tags": ["架构", "Hyper-Connections", "mHC", "稳定性"], "desc": "推导 mHC 的双随机约束、均值守恒与非扩张性，分析有限 Sinkhorn、动态梯度、FP32 归一化、融合与重算，含交互图、完整习题及 NumPy 实验。"},
+    {"slug": "attention-residuals", "title": "Attention Residuals：沿深度选择信息", "date": "2026-10-22", "kind": "interactive", "cat": "models", "tags": ["架构", "注意力", "残差", "显存"], "desc": "从残差累加推导沿深度的 attention，理解 Full 与 Block AttnRes 的权重、梯度和状态生命周期，再用在线 softmax、重算与流水线缓存解释它怎样高效运行。"},
+    {"slug": "llm-engineering", "title": "LLM 工程学习路径：从张量到推理服务", "kind": "interactive", "cat": "basics", "tags": ["学习路径", "LLM", "工程", "实验"], "date": "2026-10-20", "desc": "十个阶段串起模型计算、GPU 算子、缓存、推理服务、预训练算法、微调、深层信息流和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。"},
     {"slug": "mini-inference-engine", "title": "从零写一个最小推理引擎", "kind": "interactive", "cat": "inference", "tags": ["推理", "KV cache", "调度", "采样", "实验"], "date": "2026-10-20", "desc": "用可运行 NumPy Transformer 连起 GQA、RoPE、分页 KV、逐轮调度与采样，从独立 dense 参考、容量承诺和故障注入建立推理引擎的正确性。"},
     {"slug": "tensor-layouts", "title": "张量布局、stride 与 GPU 访存", "date": "2026-10-20", "kind": "interactive", "cat": "kernels", "tags": ["GPU", "算子优化", "张量布局", "访存"], "desc": "从索引与 stride 推导真实地址，解释转置、切片、复制与别名，再用 sector 和 bank 分析 GPU 访存；含交互图、工程排错、四道习题和 NumPy 实验。"},
     {"slug": "gemm-optimization", "title": "GEMM：从三重循环到 Tensor Core", "date": "2026-10-20", "kind": "interactive", "cat": "kernels", "tags": ["GPU", "算子优化", "GEMM", "Triton"], "desc": "从三重循环推导分块复用、shared memory 与寄存器预算，解释 Tensor Core、尾块和调度，再用实测证据定位性能问题；含动态图、计算题与 NumPy/Triton 实验。"},

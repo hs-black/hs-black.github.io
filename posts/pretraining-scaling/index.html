@@ -1,0 +1,345 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>训练预算怎样分配：Scaling Laws 与模型、数据的取舍 · Zunzhe Zhang</title>
+  <meta name="description" content="从固定 FLOPs 的最优模型规模推导，到跨尺度拟合、重复数据与部署成本：用三个交互图、四道计算与诊断题和 NumPy 实验，学会制定预训练预算。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+  <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+  <style>
+    .prose section { scroll-margin-top: 24px; }
+    .sc-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin: 18px 0; }
+    .sc-controls label { display: block; font-size: 14px; color: var(--text-soft); }
+    .sc-controls output { display: block; color: var(--text); font-variant-numeric: tabular-nums; margin: 5px 0; }
+    .sc-controls input { width: 100%; accent-color: var(--accent); }
+    .sc-controls button { font: inherit; padding: 7px 12px; border: 1px solid var(--border); background: var(--bg); color: var(--text); border-radius: 7px; cursor: pointer; }
+    .sc-controls :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .sc-chart { width: 100%; height: 260px; }
+    .article-figure .sc-chart { height: 260px; }
+    .sc-legend { display: flex; flex-wrap: wrap; gap: 7px 18px; font-size: 13px; margin: 10px 0; color: var(--text-soft); }
+    .sc-legend span::before { display: inline-block; content: ''; width: 18px; height: 3px; margin-right: 6px; background: var(--accent); vertical-align: middle; }
+    .sc-legend .green::before { background: var(--accent-2); }
+    .sc-legend .gray::before { background: var(--text-faint); }
+    .sc-stats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .sc-stats .article-stat { font-size: 13px; line-height: 1.7; overflow-wrap: anywhere; }
+    .sc-stats strong { display: block; color: var(--text); font: 17px/1.6 var(--font-mono); }
+    .sc-caption { min-height: 3.4em; font-size: 14px; line-height: 1.7; color: var(--text-soft); margin-bottom: 0; }
+    .sc-label { font-size: 13px; color: var(--text-soft); margin: 6px 0; }
+    .sc-download { display: inline-block; padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; }
+    @media(max-width:520px) { .sc-controls, .sc-stats { grid-template-columns: 1fr; } .sc-controls { gap: 8px; } .sc-stats strong { font-size: 16px; } }
+  </style>
+</head>
+<body>
+<header class="site-header wrap">
+  <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+  <nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav>
+</header>
+<main class="wrap">
+  <header class="post-header">
+    <h1>训练预算怎样分配：Scaling Laws 与模型、数据的取舍</h1>
+    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div>
+  </header>
+  <nav class="series" data-series="pretraining"></nav>
+  <article class="prose" data-math-scope="scaling">
+    <p>一笔训练预算，可以拿来训练 1B 参数模型、读 80B token，也可以训练 4B 参数模型、读 20B token。前者练得久，后者容量大。两者的主要矩阵计算量相同，最后谁的验证 loss 更低？如果模型上线后还要生成一万亿 token，选择又会怎样变化？</p>
+    <p>Scaling law 的用途是把这些选择变成可估计的曲线：先用小规模实验测量模型、数据与效果的关系，再沿预算允许的方向寻找收益。Kaplan 的幂律分析、Chinchilla 的模型与数据分配、有限数据下的重复训练，以及 Beyond Chinchilla 的部署成本，处理的是逐渐增加约束的同一个问题：<strong>下一单位资源放在哪里，能给目标带来最大的改善？</strong></p>
+    <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
+      <li><a href="#budget">先把预算写成约束</a></li>
+      <li><a href="#optimum">为什么会有一个最优模型规模</a></li>
+      <li><a href="#fitting">怎样让拟合值得信任</a></li>
+      <li><a href="#repetition">有限的数据，能重复用几次</a></li>
+      <li><a href="#deployment">模型上线后，最优点向哪里移动</a></li>
+      <li><a href="#decision">把曲线变成一次训练决策</a></li>
+      <li><a href="#practice">实验与练习</a></li>
+      <li><a href="#references">参考与延伸阅读</a></li>
+    </ol></nav>
+
+    <section id="budget">
+      <h2>先把预算写成约束</h2>
+      <p>记 \(\htmlData{symbol=params}{N}\) 为模型参数量，\(\htmlData{symbol=tokens}{D}\) 为训练过程实际处理的 token 总数。一个参数参与一次乘加，大约贡献 2 FLOPs；稠密 Transformer 的主要权重矩阵做一次前向，加上约两倍前向计算量的反向，给出常用的一阶估算：</p>
+      \[\htmlData{symbol=compute}{C}\approx 6\htmlData{symbol=params}{N}\htmlData{symbol=tokens}{D}.\]
+      <p>这里 \(C\) 的单位是 FLOPs，\(D\) 会累计每一次重复读取。序列很长时，attention 随长度增长的计算也要单独计入；模型宽深比、词表和重计算策略固定后，再用实际算子计数校准这个系数。<a href="/posts/scaling-memory/">训练计算与显存</a>解释了这个估算如何落到 Transformer 的矩阵形状。</p>
+      <p>要预测质量，可以在同一模型家族、数据分布和训练协议下，拟合最终验证集的平均交叉熵。它以 nats/token 为单位，越低越好。令 \(N_0=10^9\) 个参数、\(D_0=20\times10^9\) token，并把规模写成倍数：</p>
+      \[\htmlData{symbol=norm-n}{n}=N/N_0,\qquad \htmlData{symbol=norm-d}{d}=D/D_0.\]
+      \[\widehat L(n,d)=\htmlData{symbol=floor}{E}+\htmlData{symbol=model-a}{A}n^{-\htmlData{symbol=alpha}{\alpha}}+\htmlData{symbol=data-b}{B}d^{-\htmlData{symbol=beta}{\beta}}.\]
+      <p>\(E\) 是拟合中的渐近常数项；\(A n^{-\alpha}\) 描述模型容量有限所留下的 loss；\(B d^{-\beta}\) 描述有限训练数据和优化进度留下的 loss。\(A,B\) 的单位同样是 nats/token，\(\alpha,\beta\) 是正的、无量纲的衰减指数。把模型扩大两倍，模型项变为原来的 \(2^{-\alpha}\)；把训练 token 翻倍，数据项变为原来的 \(2^{-\beta}\)。幂律很适合描述这种持续改善、边际收益递减的趋势。</p>
+      <p>这些系数通过实验获得。固定 tokenizer、评测分布和训练配方，才能让各个点的 loss 可比。有限规模的拟合里，常数项与指数也会互相补偿，因此 \(E\) 首先是预测模型的一部分。改变数据质量、目标函数或架构以后，需要重新验证整条关系。</p>
+      <div class="callout"><p>接下来的数值图统一使用一组教学系数：\(E=1.5\)、\(A=B=0.8\)、\(\alpha=\beta=0.3\)。它们便于复算；实际训练的系数需要由自己的实验确定。</p></div>
+    </section>
+
+    <section id="optimum">
+      <h2>为什么会有一个最优模型规模</h2>
+      <p>固定计算预算后，扩大模型就必须缩短训练。把计算量也归一化为 \(\htmlData{symbol=norm-c}{c}=C/(6N_0D_0)\)，约束就成了 \(nd=c\)，也就是 \(d=c/n\)。代回 loss：</p>
+      \[\widehat L(n,c/n)=E+A n^{-\alpha}+B c^{-\beta}n^{\beta}.\]
+      <p>向右增大 \(n\) 时，第一项下降，第二项上升。一个极小模型可以读很多数据，但容量项居高不下；一个极大模型用很少的步数就花完预算，数据与优化项会升高。中间的低点是这两种收益的平衡。</p>
+      <p>对 \(\log n\) 求导，能直接比较“再把规模增加一个百分比”的边际影响。预算约束下，\(\log d\) 同时减少相同幅度：</p>
+      \[\frac{\partial\widehat L}{\partial\log n}=-\alpha A n^{-\alpha}+\beta B d^{-\beta}.\]
+      <p>最优点导数为零，所以<strong>模型项与数据项经过指数加权后的边际收益相等</strong>。沿 \(\log n\) 的二阶导数为两个正项之和，保证这条曲线上只有一个极小点。整理等式得到：</p>
+      \[\alpha A n_*^{-\alpha}=\beta B d_*^{-\beta},\]
+      \[\boxed{n_*=\left(\frac{\alpha A}{\beta B}\,c^{\beta}\right)^{1/(\alpha+\beta)}},\qquad d_*=c/n_*.\]
+      <p>于是最优参数量按 \(C^{\beta/(\alpha+\beta)}\) 增长，最优数据量按 \(C^{\alpha/(\alpha+\beta)}\) 增长。若两个指数接近，预算扩大四倍时，模型和数据分别扩大约两倍。在这组教学系数中，\(c=4\) 恰好对应 2B 参数与 40B token，计算量 \(4.8\times10^{20}\) FLOPs，预测 loss 为 2.7996。</p>
+
+      <figure class="article-figure" id="budget-figure">
+        <h3>同一笔 FLOPs，沿曲线移动模型规模</h3>
+        <p class="sc-label">纵轴：超出常数项 E 的 loss，单位 nats/token。横轴：参数量，单位 B，对数刻度。</p>
+        <div class="sc-controls">
+          <label for="budget-c">训练预算倍数 c<output id="budget-c-out"></output><input id="budget-c" type="range" min="-1" max="4" step="1" value="2"></label>
+          <label for="budget-n">选择参数量 N<output id="budget-n-out"></output><input id="budget-n" type="range" min="-2" max="4" step="0.05" value="1"></label>
+        </div>
+        <svg id="budget-chart" class="sc-chart" role="img" aria-label="固定预算下，模型项下降而数据项上升，合计 loss 存在最小值"></svg>
+        <div class="sc-legend"><span>两项合计 · 实心点为当前选择</span><span class="green">模型项 · 空心点为最优点</span><span class="gray">数据项</span></div>
+        <div class="sc-stats"><div class="article-stat">当前分配<strong id="budget-current"></strong><span id="budget-loss"></span></div><div class="article-stat">预算内的最优分配<strong id="budget-optimum"></strong><span id="budget-regret"></span></div></div>
+        <figcaption>增大参数量会自动减少训练 token，保持 N × D 不变。先固定预算，比较 1B、2B、4B；再把预算扩大四倍，观察最优点同时增加模型和数据。</figcaption>
+      </figure>
+      <p>“每个参数配多少 token”是这次优化的结果。一般情况下，\(D_*/N_*\) 还会随预算按 \(C^{(\alpha-\beta)/(\alpha+\beta)}\) 变化。Chinchilla 使近似同步增加模型与数据成为重要基线；真正落地时，数据分布、拟合范围和服务成本共同决定比例。以固定比例开始实验很方便，随后要用损失曲线判断是否值得偏离它。</p>
+    </section>
+
+    <section id="fitting" data-math-scope="fitting">
+      <h2>怎样让拟合值得信任</h2>
+      <p>五个参数的函数很容易画得平滑。训练决策真正需要的是：在尚未花钱的区域，它还能预测对吗？可以先选几档参数量与 token 数，形成二维网格；也可以固定几档 FLOPs，在每档里安排从“小模型长训练”到“大模型短训练”的多个点。前者有利于分辨两种衰减，后者直接观察预算线上的低点。只沿一条固定比例训练，会让模型和数据同时变化，难以分清收益来自哪一边。</p>
+      <p>用 \(L_i\) 表示第 \(i\) 次训练的观测 loss，\(\widehat L_i\) 表示拟合预测。一种实用目标是在对数 loss 上使用 Huber 损失：</p>
+      \[r_i=\log\widehat L_i-\log L_i,\qquad \min_{E,A,B,\alpha,\beta}\sum_i\htmlData{symbol=huber}{H_\delta}(r_i),\]
+      \[H_\delta(r)=\begin{cases}r^2/2,&|r|\le\delta,\\ \delta(|r|-\delta/2),&|r|\gt\delta.\end{cases}\]
+      <p>小残差按平方惩罚，大残差按线性惩罚，\(\delta\) 决定切换位置。对数残差近似衡量相对误差。Chinchilla 采用这类目标、多组初始值和数值优化；实际拟合还要检查收敛到的参数与残差分布。若较大模型的残差持续同号，单个低平均误差可能掩盖系统性外推偏差。</p>
+      <h3>一个会改变结论的工程细节：训练终点与学习率终点</h3>
+      <p>假设一条 100B token 的训练使用覆盖全程的 cosine decay。直接取它在 20B token 的 checkpoint，与专门训练到 20B、已经完成学习率衰减的模型比较，两个点的优化状态不同。前者仍处在较高学习率，后者经过低学习率收敛。把这些 checkpoint 一起当作“给定 token 预算的最佳 loss”，会把 schedule 的影响混入数据效率。</p>
+      <p>诊断实验很直接：固定初始化、数据顺序与 20B token 终点，只改变学习率 schedule 的终点。一组在 20B 完成衰减，一组仍按 100B 计划衰减；比较最后一段验证 loss。用于预算拟合的训练，应采用与各自预算相匹配的收敛策略。若为了节省成本共享训练前缀，可以在目标预算前分叉，分别跑自己的退火尾段，并记录额外分叉成本。<a href="/posts/pretraining-mup/">μP 与超参数迁移</a>进一步处理模型宽度改变时的调参可比性。</p>
+      <h3>留出的应该是将来要去的区域</h3>
+      <p>随机抽掉同一条训练轨迹的几个 checkpoint，仍然保留了相邻、强相关的点。更有意义的验证是留出最大的模型、最长的训练，或整条较高 FLOPs 曲线。在训练集拟合之后，预测这些完整 run 的最终 loss，比较绝对误差、相对排序，以及预测的最优配置是否位于真实低谷附近。评测文档也应与训练数据独立，并按文档来源处理近重复。</p>
+      <p>不确定性最终要传递到<strong>决策</strong>。对独立 run 做重采样，每次重新拟合，再计算目标预算下的 \(N_*\)，就能得到一组最优参数量。重复种子共享同一配置时，可以按配置分组重采样。这个区间描述观测波动；换数据分布、换函数形状带来的误差，要靠另一组实验检验。再比较若干区间内候选点的预测 loss：低谷很平时，便于部署的形状往往比精确追求一个拟合点更有价值。</p>
+      <p>长训练比例尤其需要单独留出验证。Beyond Chinchilla 在远高于常用 token/parameter 比例的训练区域发现，低比例区间拟合出的函数会高估继续加 token 的收益。可操作的诊断是画出残差随 \(D/N\) 的变化，再加入长训练锚点重拟合。残差出现持续弯曲，说明需要扩大实验范围或修改模型，而继续增加优化器迭代次数帮助有限。</p>
+    </section>
+
+    <section id="repetition" data-math-scope="repetition">
+      <h2>有限的数据，能重复用几次</h2>
+      <p>现在只有 \(\htmlData{symbol=unique}{U}\) 个去重后的可用 token。训练 \(D\) 个 token，经历的平均 epoch 数是 \(K=D/U\)。算力账单仍然累计全部 \(D\)，但第二遍、第五遍的学习价值会变化。为此，可以引入<strong>有效数据量</strong>：把重复训练带来的收益，换算成同一预测函数里等价的新鲜数据量。</p>
+      <p>对 \(D\ge U\)，记 \(R=D/U-1\) 为第一遍之后的额外遍数。一个平滑的饱和模型是：</p>
+      \[\htmlData{symbol=effective}{D_{\mathrm{eff}}}=U\left[1+\htmlData{symbol=repeat-scale}{R_*}\left(1-e^{-R/R_*}\right)\right].\]
+      <p>\(R_*\) 是额外重复收益衰减的尺度，单位是遍；它由重复训练实验拟合。只读一遍时 \(R=0\)，有效数据量等于 \(U\)。额外遍数远小于 \(R_*\) 时，展开指数可得 \(D_{\mathrm{eff}}\approx U(1+R)=D\)；重复很久后，有效数据量趋近 \(U(1+R_*)\)。对于尚未读完第一遍的 \(D\le U\)，取 \(D_{\mathrm{eff}}=D\)。</p>
+      <p>这也能从边际收益看得更清楚。在重复区间对实际处理量 \(D\) 求导：</p>
+      \[\frac{\mathrm dD_{\mathrm{eff}}}{\mathrm dD}=e^{-R/R_*}.\]
+      <p>多处理一个 token 的有效增量，从第一遍结束时的 1 逐渐降低。例如 \(R_*=3\)，训练到第四遍末尾时 \(R=3\)，下一个 token 的边际有效量约为 \(e^{-1}=0.368\)。已经累计的有效数据量是 \(2.896U\)。重复仍有收益，但每多花一单位计算得到的改善在缩小。</p>
+
+      <figure class="article-figure" id="repeat-figure">
+        <h3>计算按每遍收费，数据收益逐渐变缓</h3>
+        <p class="sc-label">固定可用数据 U = 20B token。横轴：已处理的遍数 K。纵轴：token 量相对 U 的倍数。</p>
+        <div class="sc-controls">
+          <label for="repeat-k">训练遍数 K<output id="repeat-k-out"></output><input id="repeat-k" type="range" min="1" max="12" step="0.25" value="4"></label>
+          <label for="repeat-r">衰减尺度 R*<output id="repeat-r-out"></output><input id="repeat-r" type="range" min="0.5" max="8" step="0.5" value="3"></label>
+        </div>
+        <svg id="repeat-chart" class="sc-chart" role="img" aria-label="实际 token 随训练遍数线性增加，有效数据量逐渐趋向饱和"></svg>
+        <div class="sc-legend"><span>有效数据量</span><span class="gray">实际处理量</span></div>
+        <div class="sc-stats"><div class="article-stat">实际计算所用的 D<strong id="repeat-actual"></strong></div><div class="article-stat">预测数据收益所用的 D_eff<strong id="repeat-effective"></strong></div></div>
+        <p class="sc-caption" id="repeat-caption" aria-live="polite"></p>
+        <figcaption>R* 越大，同一份数据在更多遍训练中仍有较高收益。图中的参数用于理解模型；固定去重规则、模型和数据分布后，才能用实验估计自己的 R*。</figcaption>
+      </figure>
+      <p>把有效量放回 loss 的数据项，即 \(B(D_{\mathrm{eff}}/D_0)^{-\beta}\)，同时仍用 \(6ND\) 计算成本，就能比较“继续重复”“扩大模型”和“收集更多数据”。Scaling Data-Constrained Language Models 的完整拟合还对过量参数的收益引入了饱和项；这里只隔离数据重复这一条机制，便于测量它如何改变预算分配。</p>
+      <p>在工程上，先记录数据池的实际规模，再记录采样器累计处理的量。一个高权重的小数据域可能已经被读了十遍，另一个大域只用了一小部分，总 epoch 数会隐藏这种差异。可以固定一份数据池，对 1、2、4、8 遍分别做预算匹配的训练，再用未参与训练的同分布文档评测；同时看各领域 loss 与下游任务。训练 loss 持续降低、验证改善逐渐变慢，正是需要重新估计重复收益的信号。<a href="/posts/pretraining-data-curation/">数据筛选</a>决定池中有哪些样本，<a href="/posts/pretraining-data-mixture/">数据配比</a>决定这些样本被看见多少次。</p>
+    </section>
+
+    <section id="deployment" data-math-scope="deployment">
+      <h2>模型上线后，最优点向哪里移动</h2>
+      <p>训练只付一次，推理会不断付费。假设产品要求达到目标验证 loss \(\htmlData{symbol=target}{\ell}\)，预计整个部署周期要处理 \(\htmlData{symbol=inference}{I}\) 个推理 token。在权重矩阵占主导的近似下，每个推理 token 需要约 \(2N\) FLOPs，因此可以最小化：</p>
+      \[\htmlData{symbol=total-cost}{C_{\mathrm{total}}}=6ND+2NI,\qquad \widehat L(N/N_0,D/D_0)\le\ell.\]
+      <p>在这个单调模型里，满足目标后再增加训练会提高成本，所以最优解位于 \(\widehat L=\ell\) 的边界。给定参数量 \(N\)，所需训练 token 可以直接解出来：</p>
+      \[D(N)=D_0\left[\frac{B}{\ell-E-A(N/N_0)^{-\alpha}}\right]^{1/\beta}.\]
+      <p>分母必须为正，即 \(N\gt N_0[A/(\ell-E)]^{1/\alpha}\)。越靠近这个容量下界，达到目标所需的数据越多。把 \(D(N)\) 代回总计算量，就得到只关于 \(N\) 的一维搜索：大模型训练容易，但每次服务更贵；小模型要多练一些，之后每个 token 更便宜。</p>
+      <p>仍用前面的教学系数，目标 \(\ell=3.1\)。只计算训练，最优选择是 1B 参数、20B token。当部署需要处理 100B token 时，最小化总 FLOPs 的选择约为 0.481B 参数、51.18B 训练 token。额外训练投入换来了每次推理的节省。</p>
+
+      <figure class="article-figure" id="deployment-figure">
+        <h3>质量相同，比较整个部署周期的计算</h3>
+        <p class="sc-label">所有候选都达到预测 loss 3.1。横轴：参数量 B，对数刻度。纵轴：计算量，单位 10²⁰ FLOPs。</p>
+        <div class="sc-controls">
+          <label for="deploy-i">部署期推理 token 量 I<output id="deploy-i-out"></output><input id="deploy-i" type="range" min="0" max="200" step="10" value="0"></label>
+          <label for="deploy-n">选择参数量 N<output id="deploy-n-out"></output><input id="deploy-n" type="range" min="-2" max="2" step="0.05" value="0"></label>
+        </div>
+        <svg id="deploy-chart" class="sc-chart" role="img" aria-label="固定质量下的训练和总计算曲线，推理需求增加会让最优参数量减小"></svg>
+        <div class="sc-legend"><span>训练 + 推理 · 实心点为当前选择</span><span class="gray">仅训练</span><span class="green">空心点为总量最优</span></div>
+        <div class="sc-stats"><div class="article-stat">当前模型及所需训练量<strong id="deploy-current"></strong><span id="deploy-total"></span></div><div class="article-stat">最小总 FLOPs 的模型<strong id="deploy-optimum"></strong><span id="deploy-saving"></span></div></div>
+        <figcaption>把 I 从 0 调到 100B，再移动参数量。训练曲线保持不变，推理部分随模型变大而更快增加，合计曲线的低点向左移动。</figcaption>
+      </figure>
+      <h3>FLOPs 最少的配置，怎样变成 GPU 账单最少</h3>
+      <p>训练的大矩阵、prefill 的长序列和 decode 的小 batch，硬件利用率不同。把三种阶段实测的有效吞吐记为 \(F_{\mathrm{tr}},F_{\mathrm{in}},F_{\mathrm{out}}\)，单位均为 FLOP/s；输入与输出 token 总量记为 \(I_{\mathrm{in}},I_{\mathrm{out}}\)。一个更贴近资源时间的预算是：</p>
+      \[T\approx\frac{6ND}{F_{\mathrm{tr}}}+\frac{2NI_{\mathrm{in}}}{F_{\mathrm{in}}}+\frac{2NI_{\mathrm{out}}}{F_{\mathrm{out}}}.\]
+      <p>为每种阶段再乘相应设备的每秒价格，就得到成本模型。吞吐测量需要匹配候选模型、精度、batch、上下文长度和延迟目标。小模型能否少用一张 GPU，量化后是否进入更高效的 kernel 形状，以及 KV cache 是否限制并发，都可能使账单出现阶梯变化。<a href="/posts/scaling-inference/">推理数学</a>给出了 prefill、decode 和带宽的估算方法。</p>
+      <p>因此可以先用平滑的 scaling law 缩小候选范围，再对几个可部署模型测量真实服务配置，更新成本函数。若平均吞吐很好但高分位延迟超标，目标函数还需要加入服务约束。这样训练质量、参数规模与硬件执行才能落在同一张预算表里。</p>
+    </section>
+
+    <section id="decision">
+      <h2>把曲线变成一次训练决策</h2>
+      <p>一份可执行的训练方案，至少包含目标质量、可用数据、训练预算和预期部署需求。先锁定评测分布与 tokenizer，明确主要 loss 和实际任务指标；再选择几档能稳定训练的模型形状，在模型量与 token 量两个方向安排小实验。每条 run 记录总 token、各域采样量、schedule 终点、验证 loss 与实测吞吐。</p>
+      <p>拟合以后，先用留出的较大规模验证预测；观察长训练是否偏离、重复数据是否饱和，并把这些偏差加入下一轮锚点。候选模型如果处于一个平缓低谷，可以让部署显存、并行切分和吞吐决定最终形状。数据量吃紧时，比较新增数据与继续重复的边际收益；服务量很大时，用固定质量的全周期成本重新求解。</p>
+      <p>一个很有用的停机判断是：新增预算带来的预测改善，是否大于当前外推误差？若两种方案只差 0.002 nats/token，而跨规模验证残差已有 0.02，下一笔钱更适合补能区分它们的实验。Scaling law 最有价值的输出，往往是明确下一次该测什么。</p>
+    </section>
+
+    <section id="practice">
+      <h2>实验与练习</h2>
+      <p><a class="sc-download" href="/posts/pretraining-scaling/lab.py" download>下载 NumPy 实验 lab.py</a></p>
+      <pre><code>python3 -m pip install numpy
+python3 lab.py
+python3 lab.py --noise 0.02 --bootstrap 120</code></pre>
+      <p>实验在 CPU 上生成一组已知幂律的合成观测，扫描两个指数，在每组指数下用线性最小二乘求 \(E,A,B\)。它使用平方残差，便于看清拟合过程。随后留出更大的模型和更长的训练做验证，对独立 run 重采样，并演示数据重复造成的模型偏差。程序还用数值搜索独立检查预算最优解，用有限差分检查有效数据量的导数。</p>
+      <p>默认种子下，较大规模的验证 RMSE 约为 0.0093 nats/token；预算 \(c=16\) 时预测 3.686B 参数，80 次重采样的 10%—90% 范围约为 3.38B—4.02B。真实生成函数的最优值是 4B。把噪声调大，观察决策区间怎样变化；再增加一档较大的训练点，比较区间是否缩小。将有限数据实验中的 \(U\) 从 80B 改为 40B，观察新鲜数据拟合在长训练区间的乐观误差怎样增长。最后应看到 <code>All checks PASS</code>。</p>
+
+      <div class="article-exercise">
+        <h3>练习 1：同一预算的三种分配</h3>
+        <p>使用 \(E=1.5,A=B=0.8,\alpha=\beta=0.3\)，以及 \(N_0=1\mathrm B,D_0=20\mathrm B\)。预算为 \(4.8\times10^{20}\) FLOPs。分别给 1B、2B、4B 参数分配训练 token，计算预测 loss。再把预算增至四倍，求最优配置。</p>
+        <details><summary>展开解答</summary><p>由 \(D=C/(6N)\)，三种模型分别能处理 80B、40B、20B token，对应 \((n,d)=(1,4),(2,2),(4,1)\)。</p>
+          \[\begin{aligned}L(1,4)&=1.5+0.8+0.8\times4^{-0.3}\approx2.8278,\\L(2,2)&=1.5+1.6\times2^{-0.3}\approx2.7996,\\L(4,1)&\approx2.8278.\end{aligned}\]
+          <p>归一化预算 \(c=4\)。两项系数与指数相同，最优解 \(n_*=d_*=\sqrt c=2\)。预算扩大四倍后 \(c=16\)，最优为 4B 参数、80B token，预测 loss 约 2.5556。计算量增长四倍，模型与数据各增长两倍。</p></details>
+      </div>
+      <div class="article-exercise">
+        <h3>练习 2：有限数据的下一遍值多少</h3>
+        <p>可用数据 \(U=20\mathrm B\) token，重复尺度 \(R_*=3\)。训练到第 4 遍结束时，实际处理量、有效数据量与边际有效量分别是多少？此时再完整训练一遍，增加多少有效 token？</p>
+        <details><summary>展开解答</summary><p>第 4 遍结束对应 \(D=80\mathrm B\)，额外遍数 \(R=3\)。</p>
+          \[D_{\mathrm{eff}}(80\mathrm B)=20[1+3(1-e^{-1})]\mathrm B\approx57.93\mathrm B.\]
+          <p>当前边际有效量为 \(e^{-1}\approx0.368\)。再训练一遍时，实际 token 从 80B 增至 100B，额外遍数从 3 增至 4，所以有效增量是：</p>
+          \[\Delta D_{\mathrm{eff}}=60(e^{-1}-e^{-4/3})\mathrm B\approx6.26\mathrm B.\]
+          <p>这 20B 次 token 处理，平均贡献约 0.313 份有效量。它低于第五遍起点的边际值，因为收益还在继续递减。若模型参数量为 1B，这一遍仍然要花约 \(1.2\times10^{20}\) FLOPs。</p></details>
+      </div>
+      <div class="article-exercise">
+        <h3>练习 3：多练一个小模型，多久回本</h3>
+        <p>目标 loss 为 2.7996，使用练习 1 的精确表达式 \(\ell=1.5+1.6\times2^{-0.3}\)。方案甲是 2B 参数、40B token；方案乙为 1B 参数，训练到相同预测 loss。求乙所需 token，以及两者全周期 FLOPs 相等时的推理 token 量。</p>
+        <details><summary>展开解答</summary><p>乙的归一化模型量 \(n=1\)，所以数据项要达到 \(\ell-1.5-0.8\)。</p>
+          \[D_{\text{乙}}=20\left(\frac{0.8}{\ell-2.3}\right)^{1/0.3}\mathrm B\approx96.07\mathrm B.\]
+          <p>甲训练约需 \(4.8\times10^{20}\) FLOPs，乙约需 \(5.7641\times10^{20}\) FLOPs，多投入 \(9.6406\times10^{19}\) FLOPs。乙每个推理 token 少用 \(2(2-1)\times10^9=2\times10^9\) FLOPs。因此回本点为：</p>
+          \[I_{\mathrm{break}}=\frac{9.6406\times10^{19}}{2\times10^9}\approx4.8203\times10^{10}\text{ token}.\]
+          <p>预计服务超过约 48.20B token 时，乙的总 FLOPs 更小。实际设备费用还要把训练、prefill、decode 的吞吐与单价代入，得到对应的成本回本点。</p></details>
+      </div>
+      <div class="article-exercise">
+        <h3>练习 4：拟合很好，外推为什么错了</h3>
+        <p>团队从 4 条长训练中各取 50 个 checkpoint，随机用 160 点拟合、40 点验证，验证误差只有 0.003。可是独立训练的短预算模型总比预测更好；长训练比的数据外推又越来越乐观。给出两条机制、对应的诊断实验，以及更合理的验证划分。</p>
+        <details><summary>展开解答</summary><p>第一条机制是学习率终点：长训练的中间 checkpoint 仍处于较高学习率，独立短训练已经完成退火。固定数据顺序与短预算，比较长 schedule 截断和预算匹配 schedule 的最终 loss，可以隔离这一因素。</p><p>第二条机制是数据收益曲线变化：固定数据池上的重复会衰减收益，长训练比例也可能超出原幂律的适用区域。固定可用 token 数，分别训练 1、2、4、8 遍，并记录去重后的池规模和每域采样次数；再与扩充数据池的对照比较，可以判断额外新数据与重复训练的差别。</p><p>验证按完整 run 划分，留出较大模型与较长训练比例，避免一条轨迹的相邻 checkpoint 分散到两边。分别画残差对参数量、token 数、训练遍数与 D/N 的关系；对完整 run 或配置组重采样。最后用新的独立实验验证目标预算附近的候选排序。</p></details>
+      </div>
+    </section>
+
+    <section id="references">
+      <h2>参考与延伸阅读</h2>
+      <ol>
+        <li><a href="https://arxiv.org/abs/2001.08361">Kaplan et al., Scaling Laws for Neural Language Models</a>：语言模型损失与规模、数据和计算的经验幂律，训练资源分配的早期系统分析。</li>
+        <li><a href="https://arxiv.org/abs/2203.15556">Hoffmann et al., Training Compute-Optimal Large Language Models</a>：比较预算分配的三种实验方法；第 3.3 节与附录 D 给出参数拟合，附录 B 分析学习率 schedule 终点。</li>
+        <li><a href="https://arxiv.org/abs/2305.16264">Muennighoff et al., Scaling Data-Constrained Language Models</a>：有限数据与重复训练的有效规模模型。<a href="https://github.com/huggingface/datablations">官方 datablations 仓库</a>包含数据采样方法、训练配置与拟合入口；<a href="https://github.com/huggingface/datablations/blob/main/utils/parametric_fit.ipynb">parametric_fit.ipynb</a>可用于对照实际实验拟合。</li>
+        <li><a href="https://arxiv.org/abs/2401.00448">Sardana et al., Beyond Chinchilla-Optimal: Accounting for Inference in Language Model Scaling Laws</a>：固定质量与推理需求下的训练、部署联合成本；长训练比例的拟合偏差和硬件利用率对成本的影响。arXiv 页面附带拟合与成本计算代码。</li>
+      </ol>
+    </section>
+  </article>
+  <nav class="series-pager" data-series="pretraining"></nav>
+</main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">
+{
+  "global": {
+    "params": {"label":"N：模型参数量","description":"本次规模比较中稠密模型的参数数目；主要权重矩阵计算量按每 token 前向 2N FLOPs 估计。","unit":"个参数"},
+    "tokens": {"label":"D：训练实际处理量","description":"训练累计处理的 token 数，同一个 token 重复读取会重复计数。","unit":"token"},
+    "compute": {"label":"C：训练计算量","description":"主要权重矩阵的训练计算预算，近似等于 6ND。","unit":"FLOPs"},
+    "norm-n": {"label":"n = N/N₀","description":"参数量相对 N₀ = 1B 参数的倍数。","unit":"无量纲"},
+    "norm-d": {"label":"d = D/D₀","description":"训练 token 数相对 D₀ = 20B token 的倍数。","unit":"无量纲"},
+    "norm-c": {"label":"c = C/(6N₀D₀)","description":"训练预算相对 1.2 × 10²⁰ FLOPs 的倍数，预算约束为 nd = c。","unit":"无量纲"},
+    "floor": {"label":"E：渐近常数项","description":"模型与数据幂律项衰减后剩余的拟合常数；需结合外推范围解释。","unit":"nats/token"},
+    "model-a": {"label":"A：模型项系数","description":"n = 1 时模型容量项的大小；教学系数为 0.8。","unit":"nats/token"},
+    "data-b": {"label":"B：数据项系数","description":"d = 1 时有限数据与优化项的大小；教学系数为 0.8。","unit":"nats/token"},
+    "alpha": {"label":"α：模型衰减指数","description":"参数量翻倍后，模型项乘以 2 的 −α 次方；教学值为 0.3。","unit":"无量纲"},
+    "beta": {"label":"β：数据衰减指数","description":"训练 token 翻倍后，数据项乘以 2 的 −β 次方；教学值为 0.3。","unit":"无量纲"}
+  },
+  "scopes": {
+    "fitting": {"huber":{"label":"Hδ：Huber 损失","description":"绝对残差不超过 δ 时采用二次惩罚，超过后采用线性惩罚。此处输入为预测与观测 log loss 之差。","unit":"无量纲"}},
+    "repetition": {
+      "unique":{"label":"U：可用独立数据池规模","description":"按固定去重与 tokenization 规则确定的一遍可用训练 token 数。","unit":"token"},
+      "effective":{"label":"D_eff：有效数据量","description":"将重复训练的收益换算成预测函数中的等价新鲜数据量。实际计算仍按处理量 D 收费。","unit":"token"},
+      "repeat-scale":{"label":"R*：额外重复的衰减尺度","description":"R = D/U − 1 为第一遍之后的额外遍数。当 R = R* 时，当前边际有效量降到 e⁻¹。","unit":"遍"}
+    },
+    "deployment": {
+      "target":{"label":"ℓ：目标验证 loss","description":"候选模型必须达到的平均交叉熵上限；交互图固定为 3.1。","unit":"nats/token"},
+      "inference":{"label":"I：部署期推理处理量","description":"模型整个服务周期累计处理的推理 token 量；细化硬件成本时分成输入与输出两类。","unit":"token"},
+      "total-cost":{"label":"C_total：训练加推理计算量","description":"在主要权重矩阵计算近似下，合计为 6ND + 2NI。","unit":"FLOPs"}
+    }
+  }
+}
+</script>
+<script>
+(() => {
+  'use strict';
+  const el = id => document.getElementById(id);
+  const f = (n, digits=2) => n.toFixed(digits);
+  const loss = (n,d) => 1.5 + .8*n**(-.3) + .8*d**(-.3);
+  const effective = (k,r) => 1 + r*(1-Math.exp(-(k-1)/r));
+  const required = n => (.8/(1.6-.8*n**(-.3)))**(1/.3);
+  function chart(id, config) {
+    const svg=el(id), w=Math.max(200,svg.clientWidth), h=260;
+    svg.setAttribute('viewBox',`0 0 ${w} ${h}`);
+    const left=39,right=16,top=15,bottom=36,pw=w-left-right,ph=h-top-bottom;
+    const tx=x=>left+pw*(config.log?Math.log(x/config.xmin)/Math.log(config.xmax/config.xmin):(x-config.xmin)/(config.xmax-config.xmin));
+    const ty=y=>top+ph*(1-y/config.ymax);
+    let html='';
+    for(let i=0;i<=4;i++) {
+      const y=config.ymax*i/4, py=ty(y);
+      html+=`<line x1="${left}" x2="${w-right}" y1="${py}" y2="${py}" stroke="var(--border)"/><text x="${left-7}" y="${py+4}" text-anchor="end" fill="var(--text-soft)" font-size="11">${y<10?f(y,1):f(y,0)}</text>`;
+    }
+    for(const x of config.ticks) html+=`<text x="${tx(x)}" y="${h-14}" text-anchor="middle" fill="var(--text-soft)" font-size="11">${x}</text>`;
+    for(const curve of config.curves) {
+      let path='';
+      for(let i=0;i<=160;i++) {
+        const x=config.log?config.xmin*(config.xmax/config.xmin)**(i/160):config.xmin+(config.xmax-config.xmin)*i/160;
+        path+=(i?'L':'M')+f(tx(x))+','+f(ty(curve.fn(x)));
+      }
+      html+=`<path d="${path}" fill="none" stroke="${curve.color}" stroke-width="${curve.dash?2:2.5}" ${curve.dash?'stroke-dasharray="5 4"':''}/>`;
+    }
+    for(const point of config.points||[]) {
+      html+=`<line x1="${tx(point.x)}" x2="${tx(point.x)}" y1="${ty(point.y)}" y2="${ty(0)}" stroke="${point.color}" opacity=".35" stroke-dasharray="3 4"/>`;
+      html+=`<circle cx="${tx(point.x)}" cy="${ty(point.y)}" r="${point.open?7:4.5}" fill="${point.open?'var(--surface)':point.color}" stroke="${point.color}" stroke-width="2.5"/>`;
+    }
+    svg.innerHTML=html;
+  }
+  function budget() {
+    const c=2**Number(el('budget-c').value), n=2**Number(el('budget-n').value), d=c/n, opt=Math.sqrt(c);
+    el('budget-c-out').textContent=`${f(c,1)} × 基准 · ${f(1.2*c)} × 10²⁰ FLOPs`;
+    el('budget-n-out').textContent=`${f(n)}B 参数`;
+    el('budget-current').textContent=`${f(n)}B 参数 / ${f(20*d)}B token`;
+    el('budget-loss').textContent=`预测 loss ${f(loss(n,d),4)} nats/token`;
+    el('budget-optimum').textContent=`${f(opt)}B 参数 / ${f(20*opt)}B token`;
+    el('budget-regret').textContent=`当前多出 ${f(loss(n,d)-loss(opt,opt),4)} nats/token`;
+    chart('budget-chart',{xmin:.25,xmax:16,log:true,ymax:4,ticks:[.25,1,4,16],curves:[{fn:x=>.8*x**(-.3),color:'var(--accent-2)'},{fn:x=>.8*(c/x)**(-.3),color:'var(--text-faint)',dash:true},{fn:x=>loss(x,c/x)-1.5,color:'var(--accent)'}],points:[{x:opt,y:loss(opt,opt)-1.5,color:'var(--accent-2)',open:true},{x:n,y:loss(n,d)-1.5,color:'var(--accent)'}]});
+  }
+  function repeat() {
+    const k=Number(el('repeat-k').value), r=Number(el('repeat-r').value), value=effective(k,r), marginal=Math.exp(-(k-1)/r);
+    el('repeat-k-out').textContent=`${f(k)} 遍`;
+    el('repeat-r-out').textContent=`${f(r,1)} 遍`;
+    el('repeat-actual').textContent=`${f(20*k)}B token`;
+    el('repeat-effective').textContent=`${f(20*value)}B token`;
+    el('repeat-caption').textContent=`当前位置再读一个 token，边际有效量为 ${f(marginal,3)}；继续重复的有效数据量上限为 ${f(20*(1+r))}B token。`;
+    chart('repeat-chart',{xmin:1,xmax:12,log:false,ymax:12,ticks:[1,4,8,12],curves:[{fn:x=>x,color:'var(--text-faint)',dash:true},{fn:x=>effective(x,r),color:'var(--accent)'}],points:[{x:k,y:value,color:'var(--accent)'}]});
+  }
+  function deployment() {
+    const inference=Number(el('deploy-i').value), n=2**Number(el('deploy-n').value), d=required(n);
+    const train=x=>1.2*x*required(x), total=x=>train(x)+.02*inference*x;
+    let opt=.25, best=Infinity;
+    for(let j=0;j<=4000;j++) { const candidate=.25*16**(j/4000), cost=total(candidate); if(cost<best){best=cost;opt=candidate;} }
+    el('deploy-i-out').textContent=`${f(inference,0)}B 推理 token`;
+    el('deploy-n-out').textContent=`${f(n)}B 参数`;
+    el('deploy-current').textContent=`${f(n)}B 参数 / ${f(d*20)}B token`;
+    el('deploy-total').textContent=`总计 ${f(total(n),3)} × 10²⁰ FLOPs`;
+    el('deploy-optimum').textContent=`${f(opt,3)}B 参数 / ${f(20*required(opt))}B token`;
+    el('deploy-saving').textContent=`总计 ${f(best,3)} × 10²⁰ FLOPs`;
+    const ymax=Math.ceil(Math.max(total(.25),total(4))*1.08);
+    chart('deploy-chart',{xmin:.25,xmax:4,log:true,ymax,ticks:[.25,.5,1,2,4],curves:[{fn:train,color:'var(--text-faint)',dash:true},{fn:total,color:'var(--accent)'}],points:[{x:opt,y:best,color:'var(--accent-2)',open:true},{x:n,y:total(n),color:'var(--accent)'}]});
+  }
+  [['budget-c',budget],['budget-n',budget],['repeat-k',repeat],['repeat-r',repeat],['deploy-i',deployment],['deploy-n',deployment]].forEach(([id,render])=>el(id).addEventListener('input',render));
+  function renderAll(){budget();repeat();deployment();}
+  renderAll();
+  let frame;
+  window.addEventListener('resize',()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(renderAll);});
+})();
+</script>
+<script src="/assets/series.js?v=2a575d4a9e89"></script>
+<script src="/assets/post-links.js?v=8a89387e7679"></script>
+<script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+</body>
+</html>

@@ -392,24 +392,24 @@
         <div class="afig-ctl"></div>
         <figcaption>超连接的一层（\(n_{hc}=4\)）：\(A\) 把 4 条流加权合成子层 \(F\) 的输入，\(C\) 把 \(F\) 的输出按各自的权重写回每条流，\(B\) 让 4 条流互相混合（连线粗细 ∝ \(B_{ij}\)）。图里的 \(B\) 是一个示意的双随机矩阵，每行每列的和都是 1。</figcaption>
       </figure>
-      <p>问题是：深层堆叠时信号经过的是 \(\prod_l B_l\)。只要 \(B_l\) 的谱范数稍大于 1，乘上上百层就会爆炸；稍小于 1 就会消失。报告说 HC 在层数多时会频繁出现数值不稳定，难以扩展。</p>
+      <p>深层堆叠的残差直通路径会经过多个 \(B_l\) 的连乘。沿相近方向持续放大时，小的单层增益可以累积成很大的输出；实际增益还取决于各层放大方向如何对齐。<a href="/posts/hyper-connections/">Hyper-Connections</a>逐步计算这一过程，<a href="/posts/manifold-hyper-connections/">mHC</a>进一步推导双随机约束能够控制的范围，以及动态映射和新计算支路怎样影响完整梯度。</p>
 
       <h3>5.2 把 B 约束成双随机矩阵</h3>
       <p>mHC（DeepSeek 2025 年底的论文，arXiv 2512.24880）的核心是把 \(B_l\) 限制在<strong>双随机矩阵</strong>集合（Birkhoff 多面体）上：</p>
       $$B_l\in\mathcal M:=\{M\in\mathbb R^{n\times n}\mid M\mathbf 1_n=\mathbf 1_n,\;\mathbf 1_n^\top M=\mathbf 1_n^\top,\;M\ge0\}.$$
       <p>即非负、每行和每列都等于 1。它有两条好性质：</p>
       <ol>
-        <li><strong>谱范数 \(\le1\)。</strong>Birkhoff–von Neumann 定理说双随机矩阵是置换矩阵的凸组合 \(M=\sum_k\lambda_kP_k\)（\(\lambda_k\ge0,\sum\lambda_k=1\)），而置换矩阵是正交的，\(\|P_k\|_2=1\)，由三角不等式 \(\|M\|_2\le\sum_k\lambda_k=1\)。也就是说残差变换是「非扩张」的，前向和反向都不会放大。</li>
+        <li><strong>谱范数 \(\le1\)。</strong>Birkhoff–von Neumann 定理说双随机矩阵是置换矩阵的凸组合 \(M=\sum_k\lambda_kP_k\)（\(\lambda_k\ge0,\sum\lambda_k=1\)），而置换矩阵是正交的，\(\|P_k\|_2=1\)，由三角不等式 \(\|M\|_2\le\sum_k\lambda_k=1\)。固定这个矩阵时，残差线性混合及其转置都具有非扩张性；动态系数的导数与子层分支另外参与完整梯度。</li>
         <li><strong>对乘法封闭。</strong>两个双随机矩阵的乘积仍是双随机的（行和：\(M_1M_2\mathbf1=M_1\mathbf1=\mathbf1\)），所以堆多少层，\(\prod_lB_l\) 都还在 \(\mathcal M\) 里，范数仍 \(\le1\)。</li>
       </ol>
-      <p>同时 \(A_l\) 和 \(C_l\) 也被约束为非负且有界（用 sigmoid），避免不同流之间的信号互相抵消。</p>
+      <p>同时 \(A_l\) 和 \(C_l\) 通过 sigmoid 参数化，使读取和写入系数保持非负且幅度有界。</p>
 
       <h3>5.3 动态参数化与 Sinkhorn 投影</h3>
       <p>三个映射的参数是「动态 + 静态」两部分：先把 \(X_l\) 展平并归一化 \(\hat X_l=\mathrm{RMSNorm}(\mathrm{vec}(X_l))\in\mathbb R^{1\times n_{hc}d}\)，再线性生成原始参数：</p>
       $$\tilde A_l=\alpha^{\text{pre}}_l\,(\hat X_lW^{\text{pre}}_l)+S^{\text{pre}}_l,\qquad \tilde B_l=\alpha^{\text{res}}_l\,\mathrm{Mat}(\hat X_lW^{\text{res}}_l)+S^{\text{res}}_l,\qquad \tilde C_l=\alpha^{\text{post}}_l\,(\hat X_lW^{\text{post}}_l)^\top+S^{\text{post}}_l,$$
       <p>其中 \(W^{\text{pre}},W^{\text{post}}\in\mathbb R^{n_{hc}d\times n_{hc}}\)，\(W^{\text{res}}\in\mathbb R^{n_{hc}d\times n_{hc}^2}\)，\(S\) 是静态偏置，\(\alpha\) 是初始化为小值的门控标量。然后施加约束：</p>
       $$A_l=\sigma(\tilde A_l),\qquad C_l=2\sigma(\tilde C_l),\qquad B_l=\mathrm{Sinkhorn}(\exp(\tilde B_l)).$$
-      <p>Sinkhorn–Knopp 迭代：从 \(M^{(0)}=\exp(\tilde B_l)\)（保证正）出发，交替做列归一化和行归一化 \(M^{(t)}=\mathcal T_r(\mathcal T_c(M^{(t-1)}))\)，迭代 \(t_{\max}=20\) 次。对正矩阵这个过程收敛到一个双随机矩阵。</p>
+      <p>Sinkhorn–Knopp 迭代：从 \(M^{(0)}=\exp(\tilde B_l)\)（保证正）出发，交替做列归一化和行归一化 \(M^{(t)}=\mathcal T_r(\mathcal T_c(M^{(t-1)}))\)。对正矩阵这个过程收敛到一个双随机矩阵。有限的 20 轮得到近似结果，需要分别检查行和、列和的误差；归一化顺序、浮点精度和稳定项会影响有限轮结果。</p>
 
       <figure class="fig afig" id="af-sk">
         <svg viewBox="0 0 440 314" role="img" aria-label="Sinkhorn 迭代：交替做列归一化和行归一化，行和与列和都趋向 1"></svg>
@@ -879,7 +879,7 @@
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script src="/assets/anim.js?v=499c11838720"></script>
   <script>
   (() => {
@@ -1523,8 +1523,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

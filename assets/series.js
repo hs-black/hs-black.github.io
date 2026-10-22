@@ -9,6 +9,25 @@
 // the post's <h1>.
 (() => {
   const SERIES = {
+    pretraining: {
+      title: "预训练算法：从预算与数据到学习动态",
+      posts: [
+        ["pretraining-scaling", "训练预算怎样分配：Scaling Laws 与模型、数据的取舍"],
+        ["pretraining-data-curation", "预训练数据怎样筛选：去重、质量与多样性"],
+        ["pretraining-data-mixture", "数据配比怎样学出来：DoReMi、DoGE 与 RegMix"],
+        ["pretraining-mup", "从小模型调参到大模型：μP 与超参数迁移"],
+        ["pretraining-objectives", "一段文本提供什么监督：从去噪、FIM 到多 token 预测"],
+        ["pretraining-stability", "深层 Transformer 怎样稳定训练"],
+      ],
+    },
+    hyperconnections: {
+      title: "Hyper-Connections 与深层信息流",
+      posts: [
+        ["hyper-connections", "Hyper-Connections：从一条残差流到多路信息交换"],
+        ["manifold-hyper-connections", "mHC：用双随机约束稳定多路残差"],
+        ["attention-residuals", "Attention Residuals：沿深度选择信息"],
+      ],
+    },
     scaling: {
       title: '大模型规模化训练',
       posts: [
@@ -150,6 +169,30 @@
           "Prefill / Decode 分离：把计算与缓存交接清楚"
         ],
         [
+          "pretraining-scaling",
+          "训练预算怎样分配：Scaling Laws 与模型、数据的取舍"
+        ],
+        [
+          "pretraining-data-curation",
+          "预训练数据怎样筛选：去重、质量与多样性"
+        ],
+        [
+          "pretraining-data-mixture",
+          "数据配比怎样学出来：DoReMi、DoGE 与 RegMix"
+        ],
+        [
+          "pretraining-mup",
+          "从小模型调参到大模型：μP 与超参数迁移"
+        ],
+        [
+          "pretraining-objectives",
+          "一段文本提供什么监督：从去噪、FIM 到多 token 预测"
+        ],
+        [
+          "pretraining-stability",
+          "深层 Transformer 怎样稳定训练"
+        ],
+        [
           "scaling-memory",
           "训练的账本：显存、FLOPs 与 MFU"
         ],
@@ -168,6 +211,18 @@
         [
           "multi-adapter-serving",
           "多 Adapter 推理服务"
+        ],
+        [
+          "hyper-connections",
+          "Hyper-Connections：从一条残差流到多路信息交换"
+        ],
+        [
+          "manifold-hyper-connections",
+          "mHC：用双随机约束稳定多路残差"
+        ],
+        [
+          "attention-residuals",
+          "Attention Residuals：沿深度选择信息"
         ],
         [
           "deepseek-v4-flash",

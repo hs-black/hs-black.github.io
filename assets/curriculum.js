@@ -42,6 +42,14 @@
       extra: ['scaling-collectives', 'scaling-tensor-parallel', 'scaling-context-parallel', 'scaling-pipeline', 'scaling-moe', 'scaling-5d'],
     },
     {
+      id: 'pretraining', title: '设计预训练算法与实验',
+      goal: '把预算、数据、学习目标与更新尺度连起来，用受控实验判断一种训练方法是否有效。',
+      prerequisite: '阶段 1 的概率与矩阵计算；链式法则和 SGD / Adam（可先读《优化器：从 SGD 到 Muon》）。',
+      check: '推导固定算力下的模型与数据分配；审计去重与混合采样；迁移宽度超参；检查监督 mask 和梯度尺度。',
+      core: ['pretraining-scaling', 'pretraining-data-curation', 'pretraining-data-mixture', 'pretraining-mup', 'pretraining-objectives', 'pretraining-stability'],
+      extra: ['smol-decisions', 'smol-optim-data', 'smol-marathon'],
+    },
+    {
       id: 'adaptation', title: '训练、微调与多租户',
       goal: '理解梯度与优化器状态，再把不同 adapter 安全地放进同一服务。',
       prerequisite: '阶段 1 的矩阵形状与链式法则（优化器课会补齐）；进入多 Adapter 服务前完成阶段 4。',
@@ -51,10 +59,10 @@
     },
     {
       id: 'architectures', title: '拆开真实模型',
-      goal: '把架构图转换成每层张量、权重、缓存和跨卡通信。',
-      prerequisite: '阶段 3 的压缩与稀疏 attention，以及阶段 5 的并行与通信。',
-      check: '从配置重建容量估算；指出哪些张量分片、哪些复制；沿关键路径解释一枚 token 的延迟。',
-      core: ['deepseek-v4-flash', 'deepseek-v4-flash-inference', 'deepseek-v4-pro', 'deepseek-v4-pro-inference'],
+      goal: '解释跨层信息怎样传递，再把架构图转换成每层张量、权重、缓存和跨卡通信。',
+      prerequisite: '残差分支需要矩阵乘法、softmax 与链式法则；真实模型推理需要阶段 3 的缓存和阶段 5 的通信。',
+      check: '手算多路残差与深度加权；测量连乘增益和状态容量；从配置重建真实模型的跨卡关键路径。',
+      core: ['hyper-connections', 'manifold-hyper-connections', 'attention-residuals', 'deepseek-v4-flash', 'deepseek-v4-flash-inference', 'deepseek-v4-pro', 'deepseek-v4-pro-inference'],
       extra: ['deepseek-v4', 'kimi-k2', 'kimi-k3'],
     },
     {

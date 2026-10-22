@@ -308,6 +308,7 @@
       <p><strong>Attention sink</strong>：长上下文模型会给序列开头的几个 token 异常高的注意力，即使它们语义上不重要（<a href="https://arxiv.org/abs/2309.17453">Xiao et al.</a>）。softmax 要求注意力权重之和为 1，当一个头「没什么可看」时，权重需要一个去处，开头的 token 就成了这个「水槽」。实际意义：KV cache 装不下时，保留开头几个 token 加最近的滑动窗口，就能基本保持效果，无需微调。实现方式各不相同：原论文建议预训练时加一个专门的占位 token；gpt-oss 把它做成每个头一个可学习的 bias logit，拼进 softmax 的分母里（相当于一个永远存在的「空」选项）。gpt-oss 还在注意力层用了 bias 项，这在 GPT-2 之后很少见，一般认为多余（<a href="https://arxiv.org/abs/2302.08626">Dehghani et al.</a> 的结果显示对 loss 影响很小），但它能起到实现 sink 的作用。</p>
 
       <h2 id="stab">稳定性：z-loss、embedding 不做权重衰减、QK-norm</h2>
+      <p>这些改动分别控制不同位置的尺度。<a href="/posts/pretraining-stability/">深层 Transformer 怎样稳定训练</a>沿残差前向、归一化 Jacobian 和 attention 熵，把尺度变化连接到可测量的梯度与更新。</p>
       <p>训练不稳定（典型表现是 loss spike：loss 突然跳升）在大规模训练里尤其常见，轻则浪费几百步，重则要回滚到之前的 checkpoint。OLMo 2、Qwen3 等近期的大规模训练常用三个简单技巧来压住它。</p>
       <h3>Z-loss</h3>
       <p>softmax 交叉熵里，记输出 logits 为 \(z\)，配分函数 \(Z=\sum_j e^{z_j}\)，交叉熵 \(=-z_y+\log Z\)。logits 可以整体平移而不改变概率，所以 \(\log Z\) 原则上可以漂到很大，带来数值问题。<a href="https://arxiv.org/abs/2204.02311">PaLM</a> 的 z-loss 加一个惩罚把它拉回 0 附近：</p>
@@ -456,7 +457,7 @@
         <li><strong>NoPE</strong>：每 4 层一层 NoPE，其余 RoPE；3B 消融确认长上下文更好、短上下文不受损。</li>
         <li><strong>文档内掩码</strong>：为了超长序列训练的速度和稳定性；对下游无影响。</li>
         <li><strong>布局</strong>：更深的 Qwen2.5-3B 式布局（36 层）。</li>
-        <li><strong>稳定性</strong>：保留共享 embedding，加上 OLMo 2 式的 embedding 不做权重衰减；不伤表现，还压低了 embedding 范数。</li>
+        <li><strong>稳定性</strong>：保留共享 embedding，并采用 OLMo 2 式的 embedding 不做权重衰减，避免其范数被持续压小后放大归一化梯度。</li>
       </ul>
       <p>对照它的 <a href="https://huggingface.co/HuggingFaceTB/SmolLM3-3B/blob/main/config.json">config.json</a>：<code>hidden_size 2048</code>、<code>num_hidden_layers 36</code>、<code>num_attention_heads 16</code>、<code>num_key_value_heads 4</code>、<code>intermediate_size 11008</code>、<code>tie_word_embeddings true</code>、<code>no_rope_layer_interval 4</code>、<code>vocab_size 128256</code>，和上面一一对应。</p>
       <p>结构上的经验可以浓缩成一句话：<strong>用例决定选择</strong>。具体来说：让部署目标指导结构决策；在创新和务实之间平衡——不能忽视已被验证的进步（有 GQA 还用 MHA 是糟糕的选择），也不要追逐每篇承诺边际收益的论文；系统胜过直觉，每个结构改动都要验证；规模效应是真实的，算力允许就在目标尺寸上重新消融。</p>
@@ -477,7 +478,7 @@
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script>
     (() => {
       const $ = (id) => document.getElementById(id);
@@ -743,8 +744,8 @@
       lbReset(); for (let i = 0; i < STEPS; i++) lbStep(); lbDraw();
     })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

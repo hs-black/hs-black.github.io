@@ -133,5 +133,5 @@ all checks passed</code></pre><p>先根据练习 2 预测第二次运行的 cach
  ArticleSteps.mount('#wave-demo',{steps:Array.from({length:17},(_,t)=>({title:'时刻 '+t+' ms',caption:t===16?'四波 combine 全部完成，流水总长 16 ms。':'观察每条资源队列的开始条件：上一阶段已完成，且当前资源已空闲。'})),duration:700,render(step,i,p){const t=Math.min(16,i+p);$('wave-time').textContent=t.toFixed(1)+' ms';$('wave-done').textContent=tasks.filter(x=>x.combine[1]<=t).length+' / 4';document.querySelectorAll('#wave-demo .ds-cursor').forEach(e=>e.style.left=t/max*100+'%');document.querySelectorAll('#wave-demo .ds-wave').forEach(e=>{e.classList.toggle('is-done',t>=+e.dataset.end);e.style.opacity=t<+e.dataset.start?'.35':'1';});}});
 })();
 </script>
-<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script>
+<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body></html>

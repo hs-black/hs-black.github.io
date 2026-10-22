@@ -302,6 +302,7 @@
       </div>
 
       <h2 id="spikes">6. Loss spike：分类、成因、预防与急救</h2>
+      <p><a href="/posts/pretraining-stability/">深层 Transformer 怎样稳定训练</a>解释了残差尺度、归一化与 attention 熵怎样影响更新，可以据此为下面的诊断选择逐层监控量。</p>
       <p>SmolLM3 在 1T token 处重启了。那么，训练出问题时是不是总得重启？取决于问题的严重程度和根因。最常见的「中途问题」是 <strong>loss spike</strong>：训练 loss 突然跳高，可能只是小插曲，也可能是发散的前兆。Stas Bekman 有个贴切的比喻：训练 loss 曲线像心电图，有好的、坏的，也有「你该担心了」的。</p>
 
       <h3>两大类</h3>
@@ -505,7 +506,7 @@
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -733,8 +734,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

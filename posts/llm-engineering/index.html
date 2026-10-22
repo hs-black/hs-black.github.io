@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LLM 工程学习路径：从张量到推理服务 · Zunzhe Zhang</title>
-  <meta name="description" content="九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。">
+  <meta name="description" content="十个阶段串起模型计算、GPU 算子、缓存、推理服务、预训练算法、微调、深层信息流和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/curriculum.css?v=dd0ca17259f8">
@@ -19,7 +19,7 @@
     <h1>LLM 工程学习路径：从张量到推理服务</h1>
     <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></div>
   </header>
-  <p class="course-intro">一个请求变慢了，是 prompt 太长、KV 读得太多、CPU 没有及时提交，还是请求排在队列里？把这些问题拆开，需要同时看懂模型的计算、数据的存放和系统的时间线。</p>
+  <p class="course-intro">同一份算力，应该训练更大的模型，还是让模型多读一些数据？一个推理请求变慢了，时间花在计算、读写还是排队上？分析这些问题，需要把模型的数学、训练的选择和系统的成本连起来。</p>
   <p class="course-intro">每一阶段都有三件事：读懂推导与图解，亲手算一遍，再运行实验验证判断。主线按先修关系排列；“延伸阅读”用于继续深挖。完成练习并解释实验结果后，再勾选对应课程。</p>
   <div class="course-summary">
     <p><b>起点：</b>能读 Python，知道矩阵乘法和概率。训练分支还需要链式法则。</p>
@@ -29,9 +29,10 @@
   <div class="course-tools">
     <label for="course-route">学习方向</label>
     <select id="course-route">
-      <option value="all">完整体系 · 九个阶段</option>
+      <option value="all">完整体系 · 十个阶段</option>
       <option value="inference">推理工程 · 基础到综合项目</option>
       <option value="kernels">算子与运行时 · 基础 + GPU</option>
+      <option value="pretraining">预训练算法 · 预算、数据与深层信息流</option>
       <option value="adapters">微调与多租户 · 基础到训练分支</option>
       <option value="multimodal">多模态与 VLA · 基础到动作生成</option>
     </select>
@@ -55,9 +56,9 @@
   </article>
 </main>
 <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a> · <a href="/blog/?view=curriculum">按学习路径浏览博客</a></footer>
-<script src="/assets/post-links.js?v=9057de45e84d"></script>
-<script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+<script src="/assets/post-links.js?v=8a89387e7679"></script>
+<script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 <script>
 (() => {
   const stages = window.CURRICULUM.stages;
@@ -73,6 +74,7 @@
     all: stages.map(s => s.id),
     inference: ['foundations', 'kernels', 'memory', 'engine', 'serving', 'capstone'],
     kernels: ['foundations', 'kernels'],
+    pretraining: ['foundations', 'kernels', 'pretraining', 'architectures'],
     adapters: ['foundations', 'kernels', 'memory', 'engine', 'adaptation'],
     multimodal: ['foundations', 'kernels', 'memory', 'engine', 'serving', 'multimodal'],
   };

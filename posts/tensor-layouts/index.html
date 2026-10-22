@@ -44,4 +44,4 @@ function layout(){const tr=$('layout-mode').value==='transpose',rows=tr?4:3,cols
 function sectors(){const s=+$('sector-stride').value,o=+$('sector-offset').value,ids=new Set();$('sector-grid').innerHTML=Array.from({length:32},(_,i)=>{let a=o+i*s,sec=Math.floor(a/8);ids.add(sec);return `<div class="k-cell">${a}<small>lane ${i} · S${sec}</small></div>`}).join('');$('sector-result').textContent=`起点 ${o}，stride ${s} → ${ids.size} 个 sector × 32 B = ${ids.size*32} B；32 条 lane 各请求 4 B。`;}
 ['sector-stride','sector-offset'].forEach(id=>$(id).addEventListener('input',sectors));sectors();
 })();</script>
-<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script></body></html>
+<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script></body></html>

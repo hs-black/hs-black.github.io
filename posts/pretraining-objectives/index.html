@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>一段文本提供什么监督：从去噪、FIM 到多 token 预测 · Zunzhe Zhang</title>
+<meta name="description" content="把 T5、UL2、FIM 与多 token 预测放进同一套条件概率、标签和计算预算中，推导监督数量、梯度累积归一化与词表显存，并用 NumPy 检查目标是否写对。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.objective-controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin-bottom:16px}.objective-controls label{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.objective-controls select,.objective-controls input{max-width:100%;font:inherit;color:var(--text);accent-color:var(--accent)}.objective-controls select{background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:5px}.token-row{display:grid;grid-template-columns:105px 1fr;gap:10px;align-items:start;margin:12px 0}.token-label{font-size:13px;color:var(--text-soft);padding-top:8px}.token-track{display:flex;flex-wrap:wrap;gap:5px;min-height:43px}.token{display:flex;flex-direction:column;align-items:center;min-width:29px;padding:5px 7px;border:1px solid var(--border);border-radius:6px;background:var(--bg);font:14px var(--font-mono);transition:background .2s,border-color .2s}.token small{font-size:10px;color:var(--text-soft)}.token.marker{color:var(--accent);background:var(--bg-soft)}.token.visible{border-color:var(--accent)}.token.target{background:var(--accent);color:#fff;border-color:var(--accent)}.token.target small{color:#fff}.token.muted{opacity:.32}.figure-readout{padding:12px;background:var(--bg-soft);border-radius:8px;font-size:14px;line-height:1.8;min-height:3em}.pair-grid{display:grid;grid-template-columns:58px repeat(7,minmax(24px,1fr));gap:4px;font-size:13px;text-align:center;margin:15px 0}.pair-cell{padding:9px 2px;border-radius:5px;background:var(--bg-soft)}.pair-cell.boundary{border-left:2px solid var(--text-soft)}.pair-cell.selected{background:var(--accent);color:#fff}.pair-cell.invalid{color:var(--text-soft);opacity:.55}.pair-head{font-size:11px;align-self:center;overflow-wrap:anywhere}.objective-table{overflow-x:auto}.objective-table table{min-width:550px}.math-block{overflow-x:auto;max-width:100%}@media(max-width:520px){.token-row{grid-template-columns:1fr;gap:2px}.token-label{padding:0}.pair-grid{grid-template-columns:35px repeat(7,minmax(22px,1fr));gap:2px;font-size:11px}.pair-cell{padding:8px 0}.objective-controls input[type=range]{width:125px}}@media(prefers-reduced-motion:reduce){.token{transition:none}}
+</style>
+</head>
+<body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>一段文本提供什么监督：从去噪、FIM 到多 token 预测</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header>
+<nav class="series" data-series="pretraining"></nav>
+<article class="prose">
+<p>给模型一段代码：<code>return a + b</code>。可以让它看到 <code>return a +</code> 后预测 <code>b</code>；也可以把 <code>a +</code> 挖掉，让它根据两边补齐；还可以在读到 <code>return</code> 时，同时预测后面的几个 token。同一份数据由此产生了不同的学习问题。</p>
+<p>预训练目标的核心，是决定<strong>预测时可以看见什么，以及哪些预测会贡献梯度</strong>。这两个决定会进一步改变目标长度、注意力计算、词表投影和数据打包。把它们写清楚，才能判断一个新目标带来的收益来自更合适的监督、更大的计算量，还是评估条件发生了变化。</p>
+
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#conditional">条件、输入与标签</a></li><li><a href="#denoising">T5 / UL2：去噪与混合目标</a></li><li><a href="#fim">FIM：右侧条件与切块</a></li><li><a href="#mtp">MTP：未来标签与显存</a></li><li><a href="#normalization">有效监督数与梯度归一化</a></li><li><a href="#exercises">习题</a></li><li><a href="#lab">CPU 实验</a></li></ol></nav>
+
+<h2 id="conditional">先把“读到什么”和“预测什么”分开</h2>
+<p>设一个训练样本提供条件序列 \(c\) 和目标序列 \(y_1,\ldots,y_U\)。模型在第 \(j\) 次预测时读取条件 \(c\) 与已经给定的目标前缀 \(y_{&lt;j}\)，输出词表上的概率分布。令 \(m_j\in\{0,1\}\) 表示这一位置是否参与训练，单个样本的有效监督数为 \(M=\sum_jm_j\)：</p>
+<div class="math-block">\[
+\htmlData{symbol=loss}{\mathcal L}=\frac{1}{\htmlData{symbol=count}{M}}\sum_{j=1}^{U}\htmlData{symbol=mask}{m_j}\big[-\log p_\theta(y_j\mid c,y_{&lt;j})\big].
+\]</div>
+<p>这里使用自然对数，损失的单位是 nats／有效目标 token。Teacher forcing 把真实的目标前缀送入模型，一次前向即可并行计算各位置的交叉熵。目标 token 自己是否被藏好，由注意力可见性和输入右移共同保证。</p>
+<p>普通 next-token prediction 把原文 \(x_1,\ldots,x_T\) 变成输入 \(x_1,\ldots,x_{T-1}\) 和标签 \(x_2,\ldots,x_T\)。位置 \(t\) 的隐藏状态只能依赖 \(x_{\le t}\)。实现时，<code>attention_mask</code> 决定信息流，<code>labels=-100</code> 之类的约定决定交叉熵是否计分。前缀只提供条件时，它的标签可以忽略，目标仍需要读取它；padding 的标签被忽略后，还要在注意力计算中正确处理 padding。</p>
+
+<figure class="article-figure" id="objective-flow">
+<h3>相同原文，三种输入与标签</h3>
+<div class="objective-controls"><label>构造方式 <select id="objective-mode"><option value="ntp">NTP · 预测下一个</option><option value="t5">T5 · 恢复缺失片段</option><option value="fim">FIM · 前后文补中间</option></select></label></div>
+<div id="objective-rows"></div><p class="figure-readout" id="objective-readout" aria-live="polite"></p>
+<figcaption>字母代表已分词的内容 token；紫色括号项是专用特殊 token。推进到最后一步时，紫色实心格是正在计分的标签，紫色边框标出它能够读取的输入。T5 的 encoder 条件与 decoder 输入分行展示。</figcaption>
+</figure>
+
+<h2 id="denoising">T5 与 UL2：把上下文安排在缺口两侧</h2>
+<p>预测下一个词只利用左侧前文。若希望模型学会联合解释前后文，可以把一段原文拆成已知部分与待恢复部分。T5 的 span corruption 将连续缺失片段替换为 sentinel：每个片段有自己的编号，目标依次给出这些编号及其内容，末尾再放一个结束 sentinel。</p>
+<p>例如，原文 <code>A B C D E F G H</code> 挖掉 <code>B C</code> 与 <code>G</code> 后，encoder 输入是 <code>A &lt;s0&gt; D E F &lt;s1&gt; H</code>，目标是 <code>&lt;s0&gt; B C &lt;s1&gt; G &lt;s2&gt;</code>。编号让 decoder 知道正在填哪一个缺口；encoder 的双向注意力让缺口两侧成为共同条件。decoder 依旧按目标顺序做因果预测，并通过 cross-attention 读取 encoder 表示。</p>
+<p>若原文有 \(T\) 个 token，删除 \(K\) 个，分成 \(S\) 段，则 encoder 长度与目标长度分别为：</p>
+<div class="math-block">\[T_{\rm enc}=T-K+S,\qquad U_{\rm dec}=K+S+1.\]</div>
+<p>两个长度都计入 sentinel；在 encoder 输入或 decoder 目标末尾添加 EOS 时，对应长度再加一个位置。由此可见，连续挖掉一整段，比把同样数量的 token 挖成许多单点更节约特殊符号。T5 的经典配置使用约 15% 的腐坏比例与平均长度约 3 的 span，目标序列因此显著短于原文。实际开销还取决于 encoder／decoder 层数以及 cross-attention：每层的注意力项分别随 \(T_{\rm enc}^2\)、\(U_{\rm dec}^2\)、\(T_{\rm enc}U_{\rm dec}\) 增长，线性层则随各自序列长度增长。</p>
+<p>UL2 把几种条件安排放进同一模型。R-denoising 使用较短、较稀疏的缺口；S-denoising 把前缀作为双向可读的条件，生成后缀；X-denoising 使用更长的片段或更高的腐坏比例，让模型承担更大范围的重建。模式标记告诉模型本次承担哪种任务。任务形态互补：短缺口偏向局部语义，长缺口要求组织较长输出，前缀任务直接训练顺序续写。</p>
+<p>混合比例需要连同归一化方式一起说明。设任务 \(k\) 的抽样概率为 \(\pi_k\)，每个样本平均提供 \(u_k\) 个有效目标。若把所有目标 token 汇总后求平均，它的长期监督份额接近：</p>
+<div class="math-block">\[w_k=\frac{\pi_k u_k}{\sum_r\pi_r u_r}.\]</div>
+<p>因此，等概率抽两种任务、目标平均长度分别为 30 和 120 时，后者贡献约 80% 的计分位置。若希望优化“每个任务等权”的目标，可以先对各任务的有效 token 求平均，再按指定任务权重组合。两种写法对应两种明确的训练目标；日志同时记录样本占比、目标占比与计算时间，配比才有可解释的含义。数据域之间的配比问题可接着看<a href="/posts/pretraining-data-mixture/">数据配比怎样学出来</a>。</p>
+
+<h2 id="fim">FIM：通过重排，让因果模型使用右侧条件</h2>
+<p>代码补全常常同时拥有光标前后的内容。FIM 将一段文本分成 prefix、middle、suffix，再按 prefix–suffix–middle 顺序拼接，并加入分段标记。以 <code>AB | CD | EF</code> 为例，训练流变成：</p>
+<pre><code>&lt;PRE&gt; A B &lt;SUF&gt; E F &lt;MID&gt; C D &lt;EOS&gt;</code></pre>
+<p>当因果模型走到 <code>&lt;MID&gt;</code> 时，前缀 AB 和后缀 EF 都已经出现，因此能据此生成 C。生成 D 时，它还看到了真实的 C。自然语言位置与模型中的序列位置由重排连接起来，因果 mask 沿重排后的顺序工作。FIM 也包含 suffix–prefix–middle 等变体，用不同排列扩展模型遇到的条件形式。</p>
+<p>原始 FIM 训练在重排后的完整流上继续使用语言模型损失，包括 prefix、suffix、middle 及相应特殊符号。只给 middle 计分会形成另一个条件补全目标。评估时可以同时报告常规续写损失、middle 条件损失，以及实际代码补全成功率：前两者衡量概率拟合，后者检验给定前后文能否补出可执行的代码。</p>
+<p>一个很实际的问题出现在<strong>FIM 变换与定长切块的先后顺序</strong>。先变换长文档，再每 4K token 切成独立上下文，可能把 prefix 与 suffix 留在前一块，把 middle 留在后一块。配置写着“50% FIM”，其中真正同时具备前后文的补全样本却少得多。有效 FIM 比例应该按最终送进模型的窗口统计：middle 的目标位置究竟有多少能读取所需的两个条件片段。</p>
+<p>诊断时可以把文档 ID、三个片段的边界、切块位置一同打印出来，随机抽几十个最终窗口直接还原。对照实验固定原始语料、窗口长度与 token 预算，一组先切窗口再做 FIM，另一组先变换再切块；同时比较有效补全比例和相同测试集上的 infill 指标。选择切块策略时还要保留文档语义边界，并确保分段标记的额外长度被纳入窗口预算。</p>
+
+<h2 id="mtp">MTP：让一个表示承担多个未来位置的监督</h2>
+<p>另一条路线保持输入顺序，把监督延伸到更远的未来。位置 \(t\) 的共享表示 \(z_t\in\mathbb R^d\) 编码已读到的文本，第 \(h\) 个预测头负责 \(x_{t+h}\)。Gloeckle 等人的 MTP 架构给每个距离设置独立 Transformer head，再共享词表投影矩阵；远期预测也由当前前缀产生。</p>
+<div class="math-block">\[
+p_h(\cdot\mid x_{\le t})=\operatorname{softmax}\!\left(W_U f_h(z_{\le t})\right),\qquad W_U\in\mathbb R^{V\times d}.
+\]</div>
+<p>这里 \(V\) 是词表大小，\(f_h\) 是距离 \(h\) 的因果预测分支。第一个头承担通常的 next-token prediction，其他头给共享主干增加跨越多个位置的学习信号。若模型只依靠紧邻词之间的局部搭配，远期预测会迫使表示保留更有用的上下文。在推理时，第一个头可以独立执行标准续写，其他头也可以参与<a href="/posts/speculative-decoding/">投机解码</a>中的候选生成与验证。</p>
+<p>设 \(m_{t,h}=1\) 表示距离 \(h\) 的标签存在且仍在同一文档；头权重为非负的 \(a_h\)。采用按有效预测对归一化的约定时：</p>
+<div class="math-block">\[
+\mathcal L_{\rm MTP}=\frac{\sum_{t,h}a_h\htmlData{symbol=pairmask}{m_{t,h}}[-\log p_h(x_{t+h}\mid x_{\le t})]}{\sum_{t,h}a_hm_{t,h}}.
+\]</div>
+<p>若有多个独立文档，长度分别为 \(L_b\)，预测距离为 \(h=1,\ldots,H\)，并取 \(a_h=1\)，监督对数是 \(\sum_b\sum_{h=1}^H\max(L_b-h,0)\)。越靠近文档末尾，存在的未来标签越少。把这些标签直接从打包后的数组右移，容易预测到下一篇文档；attention 的文档隔离与 label 的边界检查需要同时成立。先对每个头各自取平均再求和，还会改变短文档中远期头的相对权重，应当在目标定义中明确下来。</p>
+
+<figure class="article-figure" id="mtp-targets">
+<h3>每个预测头究竟收到几个标签？</h3>
+<div class="objective-controls"><label>预测距离上限 <select id="mtp-horizon"><option>1</option><option>2</option><option selected>3</option><option>4</option></select></label><label><input id="mtp-split" type="checkbox" checked> D 后结束第一篇文档</label></div>
+<div id="mtp-grid" class="pair-grid"></div><p class="figure-readout" id="mtp-readout" aria-live="polite"></p>
+<figcaption>列是共享主干的输入位置，行是预测距离。格内写该头的真实标签；“—”表示此标签不存在。进度从 A 移到 G，实心格展示当前主干表示承担的全部监督。D 后的边界把长度 7 的序列分成长度 4 与 3 的两篇文档。</figcaption>
+</figure>
+
+<p>增加预测头还会改变显存。设一批有 \(N\) 个主干位置、\(H\) 个头、词表大小 \(V\)，一次物化全部 logits 需要 \(NHV\) 个元素。示例取 \(N=8192,H=4,V=128000\)，单份 BF16 logits 就约 7.8 GiB；softmax、梯度及其他激活还会继续占空间。</p>
+<p>原始 MTP 的实现安排是先算共享主干，然后逐个头做前向与反向，把各头传回的梯度累加在主干表示上，再一次性向主干反传。头间可以及时释放词表 logits，峰值的词表维度项由 \(O(NHV)\) 降到 \(O(NV)\)。共享表示与累计梯度仍需保存。实际吞吐取决于头的计算、分块词表损失、通信和算子调度；测量时应把峰值显存、总训练 FLOPs 与每秒处理的原文 token 分开记录。</p>
+
+<h2 id="normalization">标签写对之后，还要把梯度的分母写对</h2>
+<p>长短样本、去噪比例以及 MTP 的文档边界都会改变每批有效标签数。假设两个 microbatch 分别有 2 与 8 个标签，损失和分别为 6 与 8。如果先各自求均值再平均，得到 \((3+1)/2=2\)；把十个标签放在一起求平均，结果是 \((6+8)/10=1.4\)。前一种写法给第一批每个 token 四倍的权重。</p>
+<p>梯度累积需要实现同一个全局目标。一个累积窗口内，第 \(r\) 批损失和为 \(S_r\)，有效标签数为 \(M_r\)，目标是 \(\mathcal L=\sum_rS_r/\sum_rM_r\)。各批反传时使用这个窗口共同的分母，便能复现完整大 batch 的梯度。Hugging Face 的梯度累积分析给出了同样的 token 归一化问题；它会在混合任务、padding 与可变长度数据中反复出现。</p>
+<p>扩展到 \(R\) 个采用梯度平均的数据并行 worker，先汇总全局计数 \(M_{\rm global}\)，每个 worker 反传 \(R S_{\rm local}/M_{\rm global}\)，后续平均才得到全局 token 均值的梯度。累积框架若还有额外的除以步数操作，要把它一起纳入这个等式。最直接的检查是固定 dropout 和数据顺序，比较“完整 batch 一步”与“分批累积一步”的参数更新。</p>
+
+<div class="objective-table"><table><thead><tr><th>目标</th><th>目标位置可用的条件</th><th>主要计分对象</th><th>预算中额外要记的量</th></tr></thead><tbody>
+<tr><td>NTP</td><td>左侧前缀</td><td>下一个 token</td><td>原文位置与词表投影</td></tr>
+<tr><td>T5 / UL2</td><td>去噪输入或前缀，以及目标前文</td><td>恢复片段或后缀</td><td>encoder / decoder 长度、任务目标占比</td></tr>
+<tr><td>FIM</td><td>重排后的前缀、后缀与已生成 middle</td><td>原始方法的完整重排流</td><td>标记开销、有效 infill 窗口</td></tr>
+<tr><td>MTP</td><td>当前及更早的输入</td><td>多个距离的未来标签</td><td>独立头、有效预测对、词表激活峰值</td></tr>
+</tbody></table></div>
+<p>比较目标时，先固定一套部署任务及对应测试条件，再给出两组实验：等训练 FLOPs 衡量预算内收益，等原文 token 衡量数据利用率。沿用相同 tokenizer、数据过滤、模型规模与测试集，同时报告有效监督数。这样才能解释一个方法为什么进步，以及它把成本转移到了哪里。预算估计可结合<a href="/posts/pretraining-scaling/">Scaling Laws 与训练预算</a>，完整训练步骤可对照<a href="/posts/smol-marathon/">SmolLM3 的训练过程</a>。</p>
+
+<h2 id="exercises">把目标落实成可检查的实现</h2>
+<div class="article-exercise"><h3>练习一：去噪究竟节省了哪些位置？</h3><p>一段 1000 token 的原文删除 150 个 token，构成 50 个 span。采用末尾 sentinel，另给 decoder 目标添加 EOS。求 encoder、decoder 长度，以及每层三类注意力的长度乘积。</p><details><summary>推导与答案</summary><p>Encoder 长度是 \(1000-150+50=900\)，decoder 目标长度是 \(150+50+1+1=202\)。Encoder self-attention 的位置对上界为 \(900^2=810000\)，decoder self-attention 为 \(202^2=40804\)，cross-attention 为 \(900\times202=181800\)。因果 decoder 的有效位置对约为全矩阵的一半；具体 kernel 可以利用因果结构。总训练成本还包括层数、隐藏维度、FFN 与词表投影，因此可由这些长度继续推 FLOPs。</p></details></div>
+<div class="article-exercise"><h3>练习二：MTP 与文档边界</h3><p>两篇长度分别为 4 与 3 的文档被打包在一起，预测未来 3 个 token。求有效监督数。若直接把它当成长度 7 的一篇文档，会多出多少项？</p><details><summary>推导与答案</summary><p>第一篇有 \(3+2+1=6\) 对，第二篇有 \(2+1+0=3\) 对，共 9 对。合并为单篇会得到 \(6+5+4=15\) 对，多出的 6 对跨越文档边界。实现时为每个预测距离同时检查目标下标与文档 ID；随后用这 9 对作为全局 token 均值的分母。若文档序列包含 EOS，则把 EOS 算进各篇长度，再按相同规则计数。</p></details></div>
+<div class="article-exercise"><h3>练习三：相同任务概率为什么得到不同权重？</h3><p>任务 A、B 各抽一半，平均目标长度为 20、80。希望每个任务的 token 平均损失最终各占一半，可以怎样实现？</p><details><summary>推导与答案</summary><p>直接汇总 token 时，A、B 权重为 20%、80%。一种实现是每个任务内部按有效 token 归一化，再计算 \(0.5\mathcal L_A+0.5\mathcal L_B\)。另一种实现是在保持汇总 token 均值的条件下，把样本抽样概率改成 A 为 0.8、B 为 0.2，使 \(0.8\times20=0.2\times80\)。两者改变的数据覆盖与采样方差不同，实验需要同时记录每个任务见过多少独立样本。</p></details></div>
+<div class="article-exercise"><h3>练习四：FIM 损失下降，补全却没有进步</h3><p>FIM 训练流的平均交叉熵下降，但编辑器中的中间补全表现持平。给出一个能区分原因的最小对照实验。</p><details><summary>分析与答案</summary><p>先将验证损失拆为 prefix、suffix、middle 三部分，并按有效 token 汇总；整体下降可能主要来自前两部分。接着统计最终训练窗口中 middle 可以读取完整两侧条件的比例。固定语料和 FLOPs，仅切换“窗口内变换”与“文档变换后切窗”，在相同 prefix / suffix 的测试样本上比较 middle NLL 和固定采样预算下的补全成功率。如果条件完整率与 middle 指标同时改善，就应调整 packing；如果 middle NLL 改善而成功率不变，则进一步检查测试难度、解码预算和编译／单元测试结果。</p></details></div>
+
+<h2 id="lab">CPU 实验：重建文本、检查梯度，再训练一个小目标</h2>
+<p><a href="/posts/pretraining-objectives/lab.py" download>下载 lab.py</a>，安装 NumPy 后运行：</p>
+<pre><code>python lab.py</code></pre>
+<p>脚本先验证 span corruption 能重建原文，检查 FIM 的标签右移，再构造一个切块破坏完整 FIM 条件的反例。随后对长度 4、3 的两篇文档建立 MTP 标签：共享表示为 \([7,3]\)，三个线性预测头的权重为 \([3,3,5]\)，词表大小为 5。每个头的梯度按顺序累加，有限差分分别检查共享表示与头权重；完整 batch 与按文档拆分的梯度也必须一致。</p>
+<pre><code>MTP valid pairs: 9; feature/head gradients checked
+Accumulation example: mean-of-means = 2.000; token mean = 1.400
+Toy trainable features + linear heads: 1.6175 -&gt; 0.0132 nats/pair (120 steps)
+PASS: reconstruction, shifted labels, packing counterexample, boundaries, gradients, accumulation</code></pre>
+<p>这里的训练对象是可学习的表示表和线性头，用来验证多目标梯度确实能降低定义好的损失。可进一步把 <code>horizon</code> 改成 1、2、4，重新数监督对；或把按有效数加权的梯度改成 microbatch 均值的平均，观察断言给出差异。接入真实 Transformer 时，沿用这些输入、边界和梯度等价性检查，再加入 head 的因果注意力测试。</p>
+
+<h2 id="references">参考资料</h2>
+<ul>
+<li><a href="https://arxiv.org/abs/1910.10683">Exploring the Limits of Transfer Learning with a Unified Text-to-Text Transformer</a>：T5 的 span corruption、sentinel 与 encoder–decoder 目标设计。</li>
+<li><a href="https://arxiv.org/abs/2205.05131">UL2: Unifying Language Learning Paradigms</a>：R、S、X denoisers 与多目标混合。</li>
+<li><a href="https://arxiv.org/abs/2207.14255">Efficient Training of Language Models to Fill in the Middle</a>：FIM 的重排、完整流损失，以及文档／上下文级变换实验。</li>
+<li><a href="https://arxiv.org/abs/2404.19737">Better &amp; Faster Large Language Models via Multi-token Prediction</a>：共享主干、独立预测头、共享 unembedding 与顺序反向的显存安排。</li>
+<li><a href="https://huggingface.co/blog/gradient_accumulation">Fixing Gradient Accumulation</a>：有效目标计数与 token 级损失归一化。</li>
+</ul>
+</article><nav class="series-pager" data-series="pretraining"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global":{"loss":{"label":"有效目标平均损失 ℒ","description":"有效目标 token 的负对数概率之和，除以有效目标数。","unit":"nats / token"},"count":{"label":"有效目标数 M","description":"当前求均值范围内所有 mⱼ 的总和；梯度累积时应覆盖完整累积窗口。"},"mask":{"label":"计分标记 mⱼ","description":"1 表示第 j 个标签贡献交叉熵；0 表示跳过该标签。信息可见性另由 attention mask 决定。"},"pairmask":{"label":"有效预测对 mₜ,ₕ","description":"位置 t 对距离 h 的标签存在且在同一文档时为 1。"}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/pretraining-objectives/figures.js"></script>
+<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+</body></html>

@@ -589,6 +589,7 @@ tokens:
       </div>
 
       <h2 id="scaling">Scaling law：多大的模型，训多少 token</h2>
+      <p><a href="/posts/pretraining-scaling/">训练预算怎样分配</a>进一步把模型规模、独立数据、重复训练和部署需求放进同一个优化问题，推导最优点，并检验拟合曲线能外推多远。</p>
       <p>「What」里最核心的是两个数：参数量 \(N\) 和训练 token 数 \(D\)。给定算力，钱该花在更大的模型上，还是更多的数据上？</p>
       <h3>从 Kaplan 到 Chinchilla</h3>
       <p>深度学习早期，训练并不太受算力约束：挑硬件能装下的最大模型和 batch，训到过拟合或数据用完为止。即便如此，人们已感觉到规模有用，比如 <a href="https://arxiv.org/abs/1712.00409">Hestness et al. 2017</a> 就系统地展示了更大的模型训更久能带来可预测的收益。</p>
@@ -654,7 +655,7 @@ tokens:
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script>
     (() => {
       const $ = (id) => document.getElementById(id);
@@ -808,8 +809,8 @@ tokens:
       bcUpdate();
     })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

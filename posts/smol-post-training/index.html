@@ -251,6 +251,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       <p><strong>多轮推理。</strong>在 Open-R1 的开发中他们注意到：只在单轮推理数据上训练的模型，无法泛化到多轮推理——没见过的分布自然不会。借鉴 Qwen3 团队的内部评测 ThinkFollow（随机插入 <code>/think</code> 或 <code>/no_think</code>，测模型能否稳定切换），他们用 Multi-IF 的 prompt，检查模型输出的 think 块是否为空。混合 baseline 在第一轮之后几乎完全无法打开推理模式。修复办法是构造一个新数据集 <strong>IFThink</strong>：以 Multi-IF 的流程为基础，取 Tulu 3 指令遵循子集的单轮指令，用 Qwen3-32B 扩展成多轮对话，同时生成可验证的指令和推理轨迹。加进 baseline 后效果大幅改善。</p>
 
       <h2 id="hparams">9. SFT 超参：掩码、packing、学习率、epoch</h2>
+      <p>监督位置和损失分母在预训练中也决定模型实际学到什么。<a href="/posts/pretraining-objectives/">从去噪、FIM 到多 token 预测</a>用同一段文本比较不同目标，并推导 packing、跨文档边界和梯度累积的计算约定。</p>
       <h3>掩码 user 轮次</h3>
       <p>聊天数据里 user 和 assistant 消息交替出现。如果对所有 token 都算损失，模型实际上也在学「自动补全用户的问题」，而不是专注于产生好回答。掩掉 user 轮次能避免这一点。TRL 里的做法是在 template 中用 <code>{% generation %}</code> … <code>{% endgeneration %}</code> 包住 assistant 的部分，<code>apply_chat_template(..., return_assistant_tokens_mask=True)</code> 就会返回一个 <code>assistant_masks</code>，assistant token 为 1、其余为 0。经验上，掩码通常只带来几个点的提升，对 SmolLM3 影响最大的是 IFEval——模型更少复述 prompt，更严格地遵守各种约束。</p>
 
@@ -512,7 +513,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=0db6ff6b7f47"></script>
+  <script src="/assets/series.js?v=2a575d4a9e89"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -701,8 +702,8 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=9057de45e84d"></script>
-  <script src="/assets/posts.js?v=d0504bda181a"></script>
-<script src="/assets/curriculum.js?v=cc75d107b740"></script>
+  <script src="/assets/post-links.js?v=8a89387e7679"></script>
+  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
+<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
 </body>
 </html>

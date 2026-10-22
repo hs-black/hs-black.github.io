@@ -7,11 +7,74 @@
     <description>Zunzhe Zhang 的博客：大模型、具身智能、实验与想法。</description>
     <language>zh-CN</language>
     <item>
+      <title>训练预算怎样分配：Scaling Laws 与模型、数据的取舍</title>
+      <link>https://hs-black.github.io/posts/pretraining-scaling/</link>
+      <guid>https://hs-black.github.io/posts/pretraining-scaling/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从固定 FLOPs 的最优模型规模推导，到跨尺度拟合、重复数据与部署成本：用三个交互图、四道计算与诊断题和 NumPy 实验，学会制定预训练预算。</description>
+    </item>
+    <item>
+      <title>预训练数据怎样筛选：去重、质量与多样性</title>
+      <link>https://hs-black.github.io/posts/pretraining-data-curation/</link>
+      <guid>https://hs-black.github.io/posts/pretraining-data-curation/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从 MinHash 与 SemDeDup 推导去重，再用 FineWeb、DCLM 理解质量过滤、快照分布和固定预算评估，附交互图、计算题与 CPU 实验。</description>
+    </item>
+    <item>
+      <title>数据配比怎样学出来：DoReMi、DoGE 与 RegMix</title>
+      <link>https://hs-black.github.io/posts/pretraining-data-mixture/</link>
+      <guid>https://hs-black.github.io/posts/pretraining-data-mixture/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>推导参考相对 excess loss、梯度对齐与小模型回归，分析 token 归约、梯度累积和跨规模迁移，附交互图与 NumPy 实验。</description>
+    </item>
+    <item>
+      <title>从小模型调参到大模型：μP 与超参数迁移</title>
+      <link>https://hs-black.github.io/posts/pretraining-mup/</link>
+      <guid>https://hs-black.github.io/posts/pretraining-mup/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从特征更新推导μP的初始化与SGD、Adam学习率缩放，串起Tensor Programs和后续参数化研究，用交互计算、工程诊断及NumPy实验学习宽度迁移。</description>
+    </item>
+    <item>
+      <title>一段文本提供什么监督：从去噪、FIM 到多 token 预测</title>
+      <link>https://hs-black.github.io/posts/pretraining-objectives/</link>
+      <guid>https://hs-black.github.io/posts/pretraining-objectives/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>把 T5、UL2、FIM 与多 token 预测放进同一套条件概率、标签和计算预算中，推导监督数量、梯度累积归一化与词表显存，并用 NumPy 检查目标是否写对。</description>
+    </item>
+    <item>
+      <title>深层 Transformer 怎样稳定训练</title>
+      <link>https://hs-black.github.io/posts/pretraining-stability/</link>
+      <guid>https://hs-black.github.io/posts/pretraining-stability/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从残差 Jacobian、Pre-LN 与 DeepNorm 推导深度稳定性，再用注意力熵理解 QK normalization 和 σReparam，建立包含梯度裁剪、参数更新和低精度计算的诊断实验。</description>
+    </item>
+    <item>
+      <title>Hyper-Connections：从一条残差流到多路信息交换</title>
+      <link>https://hs-black.github.io/posts/hyper-connections/</link>
+      <guid>https://hs-black.github.io/posts/hyper-connections/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从恒等残差出发推导 HC 的读取、混合、写回、动态参数化与梯度；分析信息路径、初始化、带宽成本，含交互图、习题与 NumPy 实验。</description>
+    </item>
+    <item>
+      <title>mHC：用双随机约束稳定多路残差</title>
+      <link>https://hs-black.github.io/posts/manifold-hyper-connections/</link>
+      <guid>https://hs-black.github.io/posts/manifold-hyper-connections/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>推导 mHC 的双随机约束、均值守恒与非扩张性，分析有限 Sinkhorn、动态梯度、FP32 归一化、融合与重算，含交互图、完整习题及 NumPy 实验。</description>
+    </item>
+    <item>
+      <title>Attention Residuals：沿深度选择信息</title>
+      <link>https://hs-black.github.io/posts/attention-residuals/</link>
+      <guid>https://hs-black.github.io/posts/attention-residuals/</guid>
+      <pubDate>Thu, 22 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从残差累加推导沿深度的 attention，理解 Full 与 Block AttnRes 的权重、梯度和状态生命周期，再用在线 softmax、重算与流水线缓存解释它怎样高效运行。</description>
+    </item>
+    <item>
       <title>LLM 工程学习路径：从张量到推理服务</title>
       <link>https://hs-black.github.io/posts/llm-engineering/</link>
       <guid>https://hs-black.github.io/posts/llm-engineering/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。</description>
+      <description>十个阶段串起模型计算、GPU 算子、缓存、推理服务、预训练算法、微调、深层信息流和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。</description>
     </item>
     <item>
       <title>从零写一个最小推理引擎</title>
