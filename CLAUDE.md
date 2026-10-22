@@ -86,6 +86,26 @@ Kinds, used in both the post header and the home list:
 
 ## Writing
 
+- Engineering lessons should read as continuous articles, with the question,
+  reasoning, derivation, worked numbers and engineering consequence connected
+  in prose. Use inline interactive figures for the steps that benefit from
+  motion. Preserve a slide version only as an optional presentation aid;
+  do not turn slide bullet points into a stack of article cards.
+- Explain variables, tensor axes and units beside each important formula.
+  Repeat the needed definitions after a substantial gap or context change.
+  A symbol tooltip supplements this text; it does not replace it. Avoid using
+  one letter for unrelated quantities in the same derivation.
+- Math uses the local pinned KaTeX runtime in
+  `/assets/vendor/katex/0.16.11/` and `reader-math.js` / `reader-math.css`.
+  Explicit `data-symbol` annotations and the page's `#math-definitions` JSON
+  provide hover, focus and tap explanations, with `data-math-scope` for local
+  meanings. Never infer a definition by matching letters across the whole page.
+  Formula labels in SVG need explicitly sized XHTML `foreignObject` content
+  with `data-tex`, or an adjacent HTML formula; raw TeX in SVG `text` is not math.
+- Inline teaching animations start paused. Give the reader named objects,
+  stable positions, a visible initial state, controls, and a nearby explanation
+  of each change. Every arrow and color needs a clear meaning; motion should
+  make a computation or state transition easier to follow.
 - Personal / academic pages (home, papers, projects) are in English; posts
   are in Chinese unless the owner asks otherwise. Write in the owner's
   first-person voice, plainly; no filler intros or hype.
@@ -115,7 +135,8 @@ Kinds, used in both the post header and the home list:
   `prefers-reduced-motion` (site.css already shortens CSS animations; JS
   animation loops should check it too when they matter).
 - External libraries only when they earn it, pinned to an exact version from
-  a CDN (jsDelivr). Math: KaTeX (snippet in `templates/article.html`). Charts:
+  a CDN (jsDelivr), or vendored with their license. Math: local KaTeX (snippet
+  in `templates/article.html`). Charts:
   hand-written SVG/HTML first; D3 if really needed.
 
 ## Series and shared helpers
@@ -156,14 +177,16 @@ controls `.ctrls` > `.ctrl` (label · range · output), `.seg` toggle buttons an
   `posts/next-token/` for the pattern).
 - Navigation: ← → / space / PageUp/Down, click (left third goes back), swipe,
   `F` for fullscreen, `#N` in the URL opens slide N.
+- If a slide heading contains TeX, add a plain-language `data-menu-title` to
+  the heading; native slide-selector options cannot display typeset formulas.
 - Smooth animation: build a timeline with `assets/anim.js` (`Anim.timeline()`
   → `.to(sel, {x, y, scale, opacity, fill, draw, text, attr}, {at, dur})`,
   `.label()` for stops) and bind it with `Anim.slide(slideEl, tl, { steps:
   true, controls: true })`: each label is reached by one key press, the
   scene is a pure function of time so going back and scrubbing work. Don't
-  mix anim steps with ordinary `.fragment`s on the same slide. In articles,
-  `Anim.inView(el, tl)`. The header comment of anim.js has the full API; see
-  `posts/kv-cache/` for a deck built this way.
+  mix anim steps with ordinary `.fragment`s on the same slide. Article figures
+  should wait for the reader to advance or play them. The header comment of
+  anim.js has the full API; see `posts/kv-cache/slides.html` for a deck example.
 - Live widgets go in `<div class="widget" data-interactive>`: clicks inside
   don't turn the page, and focused inputs/buttons keep their keys. See
   `posts/scaling-pipeline/` and `posts/scaling-collectives/`.
@@ -189,6 +212,12 @@ then open http://localhost:8000/. Root-absolute paths need a server at the
 site root; opening files directly with `file://` will not load the styles.
 For a visual check, Playwright with the preinstalled Chromium can screenshot
 pages at desktop and phone widths.
+
+After changing the shared math reader, run `python3 scripts/check-reader-math.py`
+(Python Playwright and Chromium required). The test serves its own local fixture
+and checks scoped definitions, rendering, keyboard/touch access and retry behavior.
+Also validate rendered TeX with KaTeX's `throwOnError: true`: checking only the
+`.katex-error` class can miss unknown commands rendered inline in red.
 
 ## Publishing
 

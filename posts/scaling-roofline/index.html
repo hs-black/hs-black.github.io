@@ -7,10 +7,9 @@
   <meta name="description" content="一个运算到底卡在算力、显存带宽还是网络上：算术强度、roofline 图、矩阵乘法的临界 batch，以及 TPU 与 GPU 的硬件结构。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     :root { --r-mem: #d6336c; --r-cmp: #13917f; --r-net: #b8860b; }
     @media (prefers-color-scheme: dark) {
@@ -67,6 +66,8 @@
     .rl-legend svg { width: 24px; height: 8px; }
     .btns { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 10px; }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -130,13 +131,13 @@
           <text x="0" y="22" font-size="13" class="soft">串行（上界）</text>
           <rect x="120" y="8" width="260" height="22" rx="4" style="fill: var(--r-cmp)"/>
           <rect x="380" y="8" width="180" height="22" rx="4" style="fill: var(--r-mem)"/>
-          <text x="250" y="24" font-size="12" text-anchor="middle" style="fill:#fff">T_math</text>
-          <text x="470" y="24" font-size="12" text-anchor="middle" style="fill:#fff">T_comms</text>
+          <foreignObject class="diagram-math-label" x="124" y="8" width="252" height="22"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="T_{\mathrm{math}}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.917px;line-height:1.2;color:#fff">T_math</div></foreignObject>
+          <foreignObject class="diagram-math-label" x="384" y="8" width="172" height="22"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="T_{\mathrm{comms}}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.917px;line-height:1.2;color:#fff">T_comms</div></foreignObject>
           <text x="0" y="72" font-size="13" class="soft">完全重叠（下界）</text>
           <rect x="120" y="50" width="260" height="22" rx="4" style="fill: var(--r-cmp)"/>
           <rect x="120" y="78" width="180" height="22" rx="4" style="fill: var(--r-mem)"/>
-          <text x="250" y="66" font-size="12" text-anchor="middle" style="fill:#fff">T_math</text>
-          <text x="210" y="94" font-size="12" text-anchor="middle" style="fill:#fff">T_comms</text>
+          <foreignObject class="diagram-math-label" x="124" y="50" width="252" height="22"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="T_{\mathrm{math}}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.917px;line-height:1.2;color:#fff">T_math</div></foreignObject>
+          <foreignObject class="diagram-math-label" x="124" y="78" width="172" height="22"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="T_{\mathrm{comms}}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.917px;line-height:1.2;color:#fff">T_comms</div></foreignObject>
           <line x1="380" x2="380" y1="44" y2="108" class="line" style="stroke-dasharray: 3 3"/>
           <line x1="560" x2="560" y1="2" y2="40" class="line" style="stroke-dasharray: 3 3"/>
           <text x="120" y="135" font-size="12" class="faint">完全重叠时，总时间由较长的那个决定：这里计算更长，是「计算受限」（compute-bound）。</text>
@@ -715,8 +716,9 @@
         $('rl-readout').innerHTML =
           '<div><span class="k">FLOPs</span><span class="v">' + sci(r.flops) + '</span></div>' +
           '<div><span class="k">字节</span><span class="v">' + sci(r.bytes) + '</span></div>' +
-          '<div><span class="k">T_math</span><span class="v">' + fmtT(tMath) + '</span></div>' +
-          '<div><span class="k">T_HBM</span><span class="v">' + fmtT(tMem) + '</span></div>';
+          String.raw`<div><span class="k" data-tex="T_{\mathrm{math}}">计算时间</span><span class="v">` + fmtT(tMath) + '</span></div>' +
+          String.raw`<div><span class="k" data-tex="T_{\mathrm{HBM}}">HBM 搬运时间</span><span class="v">` + fmtT(tMem) + '</span></div>';
+        window.ReaderMath?.render($('rl-readout'));
         $('rl-note').textContent = op.note + ' 纵轴的峰值：' + r.peakName + '。网络屋顶只是为了对照：若这些字节要走芯片间链路而不是 HBM，斜线会低这么多。';
       }
       let lastW = 0;
@@ -750,8 +752,9 @@
         const lo = Math.max(tM, tH, tC), hi = tM + tH + tC;
         const mx = hi;
         const bar = (name, t, col) => '<div class="tbar"><span>' + name + '</span><div class="track"><div class="fill" style="width:' + (t / mx * 100).toFixed(2) + '%;background:var(' + col + ')"></div></div><span class="t">' + fmtT(t) + '</span></div>';
-        $('mm-bars').innerHTML = bar('T_math', tM, '--r-cmp') + bar('T_HBM', tH, '--r-mem') + (n > 1 && split === 'D' ? bar('T_comm', tC, '--r-net') : '') +
+        $('mm-bars').innerHTML = bar(String.raw`<span data-tex="T_{\mathrm{math}}">计算时间</span>`, tM, '--r-cmp') + bar(String.raw`<span data-tex="T_{\mathrm{HBM}}">HBM 时间</span>`, tH, '--r-mem') + (n > 1 && split === 'D' ? bar(String.raw`<span data-tex="T_{\mathrm{comm}}">通信时间</span>`, tC, '--r-net') : '') +
           bar('下界 max', lo, '--accent') + bar('上界 sum', hi, '--text-faint');
+        window.ReaderMath?.render($('mm-bars'));
         const which = lo === tM ? ['cmp', '计算受限'] : lo === tH ? ['mem', 'HBM 带宽受限'] : ['net', '通信受限'];
         const Ihbm = flops / bytes, crit = peak / c.BW;
         let extra = '';
@@ -916,8 +919,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

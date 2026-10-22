@@ -8,10 +8,9 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     :root { --pp-w: #0f9d8a; --pp-idle: color-mix(in srgb, var(--text-faint) 14%, transparent); }
     @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --pp-w: #34d1b8; } }
@@ -69,6 +68,8 @@
     .bigread b { display: block; font-family: var(--font-mono); font-size: 26px; color: var(--text); }
     .series-pager { margin-top: 0; font-size: 20px; width: 860px; }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body class="deck-page">
   <main class="deck"><div class="stage">
@@ -215,7 +216,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 10 -->
     <section class="slide">
       <div class="kicker">AFAB 的气泡</div>
-      <h2>气泡被 \(m\) 摊薄</h2>
+      <h2 data-menu-title="气泡被 micro-batch 数摊薄">气泡被 \(m\) 摊薄</h2>
       <div class="s24">
         <p class="fragment">开头仍然是 \(p-1\) 个前向的爬坡，结尾仍然是 \(p-1\) 个反向的退坡，气泡的绝对量没变：\(t_{pb} = (p-1)(t_f+t_b)\)。</p>
         <p class="fragment" style="margin-top:10px">但理想时间变成了 \(m\) 倍：\(t_{id} = m(t_f+t_b)\)。于是</p>
@@ -355,7 +356,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 19 -->
     <section class="slide">
       <div class="kicker">交错的气泡</div>
-      <h2>气泡 \(\div\,v\)，通信 \(\times\,v\)</h2>
+      <h2 data-menu-title="切成 v 份：气泡缩小，通信增加">气泡 \(\div\,v\)，通信 \(\times\,v\)</h2>
       <div class="s24">
         <p class="fragment">每一段只有原来 \(1/v\) 的层，所以一段的前向/反向时间是 \(t_f/v,\ t_b/v\)。爬坡和退坡仍然是 \(p-1\) 步，但每步变短了：</p>
         <div class="fragment">$$t^{int}_{pb} = \frac{(p-1)(t_f+t_b)}{v},\qquad r_{bubble} = \frac{1}{v}\cdot\frac{p-1}{m}$$</div>
@@ -367,7 +368,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 20 -->
     <section class="slide tight" id="s-int">
       <div class="kicker">交错 1F1B · 交互</div>
-      <h2>拖 \(v\) 看气泡缩小</h2>
+      <h2 data-menu-title="拖动 v 看气泡缩小">拖 \(v\) 看气泡缩小</h2>
       <div class="widget gv" data-interactive data-sched="int" data-p="4" data-m="8" data-v="2" data-ctrls="p,m,v,c" data-anim="1"></div>
       <p class="s22">颜色深浅区分同一张卡上的不同段。把「p2p 延迟」拉起来：每跨一次级边界多等 \(c\)，交错因为跨边界次数多，受伤更重。这就是「通信 \(\times v\)」在时间线上的样子。</p>
     </section>
@@ -393,7 +394,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 22 -->
     <section class="slide tight" id="s-dfsbfs">
       <div class="kicker">DFS ↔ BFS · 交互</div>
-      <h2>\(N\) 从 \(p\) 拉到 \(m\)</h2>
+      <h2 data-menu-title="在途数量：从流水线级数到 micro-batch 数">\(N\) 从 \(p\) 拉到 \(m\)</h2>
       <div class="widget gv" data-interactive data-sched="int" data-p="4" data-m="16" data-v="2" data-n="4" data-ctrls="v,N" data-anim="1"></div>
       <p class="s22">气泡几乎不变，峰值在途激活随 \(N\) 增大（\(N=m\) 时退化成「交错版 AFAB」）。BFS 换来的是 FSDP 下权重聚合次数更少——这部分收益模拟器里看不到。</p>
     </section>
@@ -499,7 +500,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     <!-- 27 -->
     <section class="slide">
       <div class="kicker">ZB-H1 的推导</div>
-      <h2>为什么正好少了 \(T_W\)</h2>
+      <h2 data-menu-title="为什么正好少了一次权重梯度计算">为什么正好少了 \(T_W\)</h2>
       <div class="s22">
         <p class="fragment">1F1B 里，第 0 级每次等待反向，等的是「后面 \(p-1\) 级各做一次完整反向」，即 \((p-1)(T_B+T_W)\) 的链条；拆开后链条上只剩 B，W 被挪到链条之外。</p>
         <p class="fragment" style="margin-top:8px">而尾部，原先 1F1B 的退坡时间里各级在空等，现在用推迟的 W 填进去。三种调度的账（ZB-H1 里第 \(i\) 级（从 1 数）的峰值激活是 \((p-i+1)M_B + (i-1)M_W\)，不超过 \(pM_B\)）：</p>
@@ -758,7 +759,7 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
 
   </div></main>
 
-  <script src="/assets/slides.js?v=03e51263994e"></script>
+  <script src="/assets/slides.js?v=33e153b61ac9"></script>
   <script src="/assets/anim.js?v=9b723aa5f47d"></script>
   <script src="/assets/series.js?v=0db6ff6b7f47"></script>
   <script>
@@ -1602,8 +1603,8 @@ if i &gt; 0: send(g, to=i-1)</code></pre>
     });
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

@@ -7,10 +7,9 @@
   <meta name="description" content="按下开始键之后会发生什么：吞吐与完成时间的账、起跑检查清单、SmolLM3 训练中的四个谜案、loss spike 的诊断与处理、多阶段 mid-training 与 4k→128k 长上下文扩展。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     .fig svg { width: 100%; height: auto; display: block; }
     .fig text { font-family: var(--font-sans); fill: var(--text); }
@@ -43,6 +42,8 @@
     .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; font-size: 13px; color: var(--text-soft); margin-top: 6px; }
     .legend i { display: inline-block; width: 18px; height: 3px; vertical-align: middle; margin-right: 6px; border-radius: 2px; }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -732,8 +733,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

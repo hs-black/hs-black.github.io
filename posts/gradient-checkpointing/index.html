@@ -8,10 +8,9 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     /* Literal rgba (not color-mix) so anim.js can tween these colors. */
     :root { --c3: #0f9d8a; --c3-soft: rgba(15, 157, 138, 0.18); --grad: #d6336c; --idle: rgba(138, 138, 147, 0.26); }
@@ -55,6 +54,8 @@
     .toc li { break-inside: avoid; }
   </style>
   <link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body class="deck-page">
   <main class="deck"><div class="stage">
@@ -452,7 +453,7 @@ reserved = torch.cuda.max_memory_reserved()</code></pre><p class="ws-note">ÊØèÁß
 
   </div></main>
 
-  <script src="/assets/slides.js?v=03e51263994e"></script>
+  <script src="/assets/slides.js?v=33e153b61ac9"></script>
   <script src="/assets/anim.js?v=9b723aa5f47d"></script>
   <script src="/assets/series.js?v=0db6ff6b7f47"></script>
   <script>

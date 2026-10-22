@@ -7,10 +7,9 @@
   <meta name="description" content="从路由器讲起：top-k、softmax 与 sigmoid 门控、容量与丢 token、负载均衡损失的推导、z-loss、细粒度与共享专家、无辅助损失均衡，再到专家并行的 all-to-all、通信量和与 DP/TP/PP 的组合。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     :root { --moe-3: #0f9d8a; }
     @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --moe-3: #34d1b8; } }
@@ -44,6 +43,8 @@
     .prose table td.num { font-family: var(--font-mono); font-size: 14px; }
     .formula-note { font-size: 14px; color: var(--text-faint); }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -1060,8 +1061,8 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

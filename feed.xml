@@ -137,7 +137,7 @@
       <link>https://hs-black.github.io/posts/kv-cache/</link>
       <guid>https://hs-black.github.io/posts/kv-cache/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从 QKV 张量、增量位置与 causal mask 到 GQA 分片、显存和带宽预算；附数值动画、工程诊断、计算题与 NumPy 正确性实验。</description>
+      <description>从一行 attention 的数值计算出发，推导 KV 为什么可复用、prefill/decode 怎样交接、位置与 mask 如何对齐，再算清 GQA 缓存的容量和读取成本；含可操作图解、符号释义、习题与 NumPy 实验。</description>
     </item>
     <item>
       <title>KV cache 压缩：把历史装得更小</title>
@@ -165,7 +165,7 @@
       <link>https://hs-black.github.io/posts/paged-attention/</link>
       <guid>https://hs-black.github.io/posts/paged-attention/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从 KV 容量与地址计算，到块池分配、COW、引用计数和 OOM 抢占；配有计算动画、三道习题与可运行的分页模拟。</description>
+      <description>从连续缓存的浪费讲到页表寻址、分块 softmax、容量预算和写时复制：用完整推导、三个可操作动态图、四道习题与 CPU 实验理解分页推理。</description>
     </item>
     <item>
       <title>Continuous batching：每一轮重新组队</title>
@@ -417,7 +417,7 @@
       <link>https://hs-black.github.io/posts/scaling-inference/</link>
       <guid>https://hs-black.github.io/posts/scaling-inference/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从 KV cache 到投机解码：推导解码为什么受带宽限制、延迟下界、吞吐与延迟的权衡，以及 LLaMA-3-70B 的服务账本。</description>
+      <description>从 KV cache 到投机解码：推导带宽与算力瓶颈、延迟下界、吞吐权衡和多卡服务账本；公式旁解释符号与单位，并提供可悬停、点击的变量释义。</description>
     </item>
     <item>
       <title>一次只猜一个 token</title>

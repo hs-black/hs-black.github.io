@@ -1,908 +1,483 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang</title>
-<meta name="description" content="从 KV 容量与地址计算，到块池分配、COW、引用计数和 OOM 抢占；配有计算动画、三道习题与可运行的分页模拟。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
-<style>
-.slide.lesson{padding:34px 64px 82px;gap:10px;justify-content:flex-start}
-.slide.lesson h2{font-size:42px;line-height:1.18}.slide.lesson .kicker{font-size:17px}
-.scene{display:block;width:1152px;height:340px;flex:none;overflow:visible}
-.scene text{fill:var(--text);font-family:var(--font-sans);font-size:21px}
-.scene .minor{fill:var(--text-soft);font-size:17px}.scene .tiny{fill:var(--text-faint);font-size:15px}
-.scene .big{font-size:32px;font-weight:650}.scene .mono{font-family:var(--font-mono)}
-.scene .wire{stroke:var(--text-faint);stroke-width:2;fill:none}.scene .hotwire{stroke:var(--accent);stroke-width:4;fill:none}
-.captions{position:relative;min-height:76px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.5;color:var(--text-soft)}
-.captions p:first-child{opacity:1}.captions b{color:var(--text);font-weight:650}
-.slide .note{font-size:17px;color:var(--text-faint);line-height:1.4}.slide .formula{font-family:var(--font-mono);font-size:28px;padding:22px 28px;border-radius:16px;background:var(--accent-soft)}
-.slide .two-col{display:grid;grid-template-columns:1fr 1fr;gap:28px}.slide .card{padding:28px;border:1px solid var(--border);border-radius:18px;background:var(--surface)}
-.slide .card h3{font-size:29px;margin:0 0 15px}.slide .card p{font-size:25px;color:var(--text-soft)}
-.slide .reference-list{font-size:24px;line-height:1.5}.slide .reference-list li+li{margin-top:14px}
-.slide .route{display:flex;gap:14px;align-items:center;flex-wrap:wrap;font-size:27px}.route span{padding:16px 20px;background:var(--accent-soft);border-radius:12px}
-.slide .small-title{font-size:68px}.slide .links{font-size:22px;line-height:1.8}.slide .date{font-size:17px;color:var(--text-faint)}
-
-.serving-visual text{fill:var(--text);font:23px var(--font-sans)}
-.serving-visual .clock,.serving-visual .answer,.serving-visual .outputs{font-weight:700;fill:var(--accent)}
-</style>
-<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>if (/^#\d+$/.test(location.hash)) location.replace('/posts/paged-attention/slides.html' + location.hash);</script>
+  <title>PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang</title>
+  <meta name="description" content="从连续缓存的浪费讲到页表寻址、分块 softmax、容量预算和写时复制：用完整推导、三个可操作动态图、四道习题与 CPU 实验理解分页推理。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+  <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+  <style>
+    .prose section { scroll-margin-top: 24px; }
+    .prose .notation { font-size: 15px; color: var(--text-soft); border-left: 3px solid var(--border); padding-left: 14px; }
+    .prose .fig { margin: 26px 0; }
+    .prose .fig figcaption { text-align: left; line-height: 1.7; }
+    .pa-demo { padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .pa-demo h3 { margin: 0 0 8px; font-size: 18px; }
+    .pa-demo p { margin: 10px 0; }
+    .pa-help { font-size: 14px; color: var(--text-soft); line-height: 1.7; }
+    .pa-controls { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; padding-top: 16px; margin-top: 16px; border-top: 1px solid var(--border); }
+    .pa-controls button, .pa-demo select { padding: 7px 11px; border: 1px solid var(--border); border-radius: 7px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; cursor: pointer; }
+    .pa-controls button:disabled { opacity: .42; cursor: default; }
+    .pa-controls input[type=range] { width: 100%; accent-color: var(--accent); }
+    .pa-controls label { flex: 1 0 100%; font-size: 13px; color: var(--text-soft); }
+    .pa-controls output { margin-left: auto; font-size: 13px; color: var(--text-soft); }
+    .pa-demo :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
+    .pa-caption { min-height: 5.4em; padding: 12px 14px; border-left: 3px solid var(--accent); background: var(--accent-soft); border-radius: 0 8px 8px 0; font-size: 15px; line-height: 1.7; }
+    .pa-step { color: var(--accent); font-weight: 650; }
+    .pa-request { display: flex; align-items: center; flex-wrap: wrap; gap: 8px 14px; padding: 12px 0; font-size: 15px; }
+    .pa-chain { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 12px 0; }
+    .pa-node { border: 2px solid var(--border); border-radius: 10px; padding: 12px; background: var(--bg); font-size: 14px; min-width: 0; }
+    .pa-node strong { display: block; font-size: 15px; margin-bottom: 8px; }
+    .pa-node.is-current { border-color: var(--accent); background: var(--accent-soft); }
+    .pa-node .pa-result { font: 16px/1.6 var(--font-mono); }
+    .pa-map { width: 100%; font-size: 14px; border-collapse: collapse; }
+    .pa-map td, .pa-map th { text-align: left; padding: 7px 6px; border-bottom: 1px solid var(--border); }
+    .pa-map tr.is-current { background: var(--accent-soft); font-weight: 650; }
+    .pa-memory { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 16px; }
+    .pa-block { border: 2px solid var(--border); border-radius: 10px; padding: 10px; min-width: 0; }
+    .pa-block > b { display: block; font-size: 14px; margin-bottom: 8px; }
+    .pa-slot { display: flex; gap: 8px; align-items: center; padding: 7px 8px; border-bottom: 1px solid var(--border); font-size: 13px; transition: background-color .2s, outline-color .2s; }
+    .pa-slot:last-child { border-bottom: 0; }
+    .pa-slot small { min-width: 3em; color: var(--text-soft); font-size: 12px; }
+    .pa-slot.is-current { background: var(--accent-soft); outline: 2px solid var(--accent); outline-offset: -2px; }
+    .pa-slot.is-new { background: color-mix(in srgb, var(--accent-2) 15%, var(--surface)); }
+    .pa-slot.is-empty { color: var(--text-faint); }
+    .pa-wire { height: 7px; background: var(--border); border-radius: 8px; overflow: hidden; margin: 12px 0; }
+    .pa-wire span { display: block; width: 0; height: 100%; background: var(--accent); }
+    .pa-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0; }
+    .pa-stat { padding: 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+    .pa-stat strong { display: block; font: 21px/1.5 var(--font-mono); color: var(--accent); }
+    .pa-numerics { width: 100%; font-size: 14px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+    .pa-numerics th, .pa-numerics td { text-align: right; padding: 8px 6px; border-bottom: 1px solid var(--border); }
+    .pa-numerics th:first-child, .pa-numerics td:first-child { text-align: left; }
+    .pa-numerics tr.is-current { background: var(--accent-soft); }
+    .pa-equation { font: 15px/1.8 var(--font-mono); overflow-wrap: anywhere; padding: 10px 12px; background: var(--bg-soft); border-radius: 8px; }
+    .pa-refs { font-size: 13px; color: var(--text-soft); }
+    .pa-cow-requests { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; font-size: 15px; }
+    .pa-cow-requests div { padding: 12px; border: 1px solid var(--border); border-radius: 9px; }
+    .pa-cow-requests b, .pa-cow-requests span { display: block; }
+    .pa-cow-requests span { color: var(--accent); margin-top: 5px; font-family: var(--font-mono); }
+    .pa-exercise { margin: 24px 0; padding-bottom: 20px; border-bottom: 1px solid var(--border); }
+    .pa-exercise h3 { font-size: 20px; }
+    .pa-exercise summary { cursor: pointer; font-weight: 600; color: var(--accent); }
+    .pa-download { display: inline-block; padding: 8px 14px; border: 1px solid var(--accent); border-radius: 8px; }
+    @media (max-width: 520px) {
+      .pa-demo { padding: 14px; }
+      .pa-chain { grid-template-columns: 1fr; }
+      .pa-node { padding: 10px; }
+      .pa-memory { gap: 8px; }
+      .pa-block { padding: 7px; }
+      .pa-slot { padding: 7px 3px; gap: 4px; font-size: 12px; }
+      .pa-slot small { min-width: 2.6em; font-size: 11px; }
+      .pa-caption { min-height: 8.8em; }
+      .pa-numerics { font-size: 12px; }
+      .pa-numerics th, .pa-numerics td { padding: 8px 3px; }
+      .pa-cow-requests { gap: 8px; }
+      .pa-cow-requests div { padding: 9px; font-size: 13px; }
+    }
+    @media (prefers-reduced-motion: reduce) { .pa-slot { transition: none; } }
+  </style>
 </head>
-<body class="deck-page">
-<main class="deck">
-<div class="stage">
-<section class="slide center">
-<div class="kicker rise">LLM 推理系统 · 显存管理</div>
-<h1 class="rise small-title" style="--d:1">PagedAttention：让 KV cache 按需生长</h1>
-<p class="muted rise" style="--d:2">token 要按顺序读，显存不必连成一整片。</p>
-<p class="small muted rise" style="--d:3">按 → 推进 · 动画可播放、拖动和倒回</p>
-<p class="date">2026-10-20 · 图中的容量、时长与 token 均为教学示意</p>
-</section>
+<body>
+<header class="site-header wrap">
+  <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+  <nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav>
+</header>
+<main class="wrap">
+  <header class="post-header">
+    <h1>PagedAttention：让 KV cache 按需生长</h1>
+    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span><a href="/posts/paged-attention/slides.html">旧版幻灯片</a></div>
+  </header>
+  <nav class="series" data-series="systems"></nav>
+  <article class="prose">
+    <p>一条请求刚读完 100 个 token，接下来可能只生成 20 个，也可能生成 2000 个。服务端必须保存它的 <a href="/posts/kv-cache/">KV cache</a>，却不知道这段缓存最终会长到哪里。给它预留一个足够大的连续数组，短请求会占着不用的空间；等数组满了再扩容，又可能要搬动已经写好的历史。</p>
+    <p>PagedAttention 把这个问题拆成两件事：<strong>请求认为历史是一条连续序列，显存只负责提供固定大小的块。</strong>一张很小的页表把两者接起来。请求增加一个 token 时，通常只写下一个槽位；跨过块边界时，再申请一块空闲显存。Attention 仍然按原来的逻辑位置计算，只是读取 K、V 前多了一次地址转换。</p>
+    <p>这改变的是缓存的组织方式。它不会自动减少模型要保存的 K、V 元素，也不会因为“分页”就省掉完整 attention 的历史读取。收益首先来自更少的预留浪费、更容易复用的空闲块，以及多个请求对相同历史的共享；这些收益再转化成可以容纳的并发和调度空间。</p>
 
-<section class="slide lesson" id="pg-reserve">
-<div class="kicker">01 · 问题</div>
-<h2>答案有多长，开始时并不知道</h2>
-<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="答案有多长，开始时并不知道">
-<defs>
-<marker id="pg-reserve-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
-</marker>
-</defs>
-<text x="36" y="33" class="minor" text-anchor="start" opacity="1">给每个请求预留 12 个 token 的空间</text>
-<text x="36" y="107" class="" text-anchor="start" opacity="1">请求 A：用了 5 个</text>
-<g class="reserve0-0" opacity="1">
-<rect x="300" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="327.0" y="108.0" class="" text-anchor="middle" opacity="1">1</text>
-</g>
-<g class="reserve0-1" opacity="1">
-<rect x="363" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="390.0" y="108.0" class="" text-anchor="middle" opacity="1">2</text>
-</g>
-<g class="reserve0-2" opacity="1">
-<rect x="426" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="453.0" y="108.0" class="" text-anchor="middle" opacity="1">3</text>
-</g>
-<g class="reserve0-3" opacity="1">
-<rect x="489" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="516.0" y="108.0" class="" text-anchor="middle" opacity="1">4</text>
-</g>
-<g class="reserve0-4" opacity="1">
-<rect x="552" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="579.0" y="108.0" class="" text-anchor="middle" opacity="1">5</text>
-</g>
-<g class="reserve0-5" opacity="1">
-<rect x="615" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="642.0" y="108.0" class="" text-anchor="middle" opacity="1">6</text>
-</g>
-<g class="reserve0-6" opacity="1">
-<rect x="678" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="705.0" y="108.0" class="" text-anchor="middle" opacity="1">7</text>
-</g>
-<g class="reserve0-7" opacity="1">
-<rect x="741" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="768.0" y="108.0" class="" text-anchor="middle" opacity="1">8</text>
-</g>
-<g class="reserve0-8" opacity="1">
-<rect x="804" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="831.0" y="108.0" class="" text-anchor="middle" opacity="1">9</text>
-</g>
-<g class="reserve0-9" opacity="1">
-<rect x="867" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="894.0" y="108.0" class="" text-anchor="middle" opacity="1">10</text>
-</g>
-<g class="reserve0-10" opacity="1">
-<rect x="930" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="957.0" y="108.0" class="" text-anchor="middle" opacity="1">11</text>
-</g>
-<g class="reserve0-11" opacity="1">
-<rect x="993" y="76" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="1020.0" y="108.0" class="" text-anchor="middle" opacity="1">12</text>
-</g>
-<rect class="used0-0" x="300" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<rect class="used0-1" x="363" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<rect class="used0-2" x="426" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<rect class="used0-3" x="489" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<rect class="used0-4" x="552" y="76" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<text x="36" y="219" class="" text-anchor="start" opacity="1">请求 B：用了 3 个</text>
-<g class="reserve1-0" opacity="1">
-<rect x="300" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="327.0" y="220.0" class="" text-anchor="middle" opacity="1">1</text>
-</g>
-<g class="reserve1-1" opacity="1">
-<rect x="363" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="390.0" y="220.0" class="" text-anchor="middle" opacity="1">2</text>
-</g>
-<g class="reserve1-2" opacity="1">
-<rect x="426" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="453.0" y="220.0" class="" text-anchor="middle" opacity="1">3</text>
-</g>
-<g class="reserve1-3" opacity="1">
-<rect x="489" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="516.0" y="220.0" class="" text-anchor="middle" opacity="1">4</text>
-</g>
-<g class="reserve1-4" opacity="1">
-<rect x="552" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="579.0" y="220.0" class="" text-anchor="middle" opacity="1">5</text>
-</g>
-<g class="reserve1-5" opacity="1">
-<rect x="615" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="642.0" y="220.0" class="" text-anchor="middle" opacity="1">6</text>
-</g>
-<g class="reserve1-6" opacity="1">
-<rect x="678" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="705.0" y="220.0" class="" text-anchor="middle" opacity="1">7</text>
-</g>
-<g class="reserve1-7" opacity="1">
-<rect x="741" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="768.0" y="220.0" class="" text-anchor="middle" opacity="1">8</text>
-</g>
-<g class="reserve1-8" opacity="1">
-<rect x="804" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="831.0" y="220.0" class="" text-anchor="middle" opacity="1">9</text>
-</g>
-<g class="reserve1-9" opacity="1">
-<rect x="867" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="894.0" y="220.0" class="" text-anchor="middle" opacity="1">10</text>
-</g>
-<g class="reserve1-10" opacity="1">
-<rect x="930" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="957.0" y="220.0" class="" text-anchor="middle" opacity="1">11</text>
-</g>
-<g class="reserve1-11" opacity="1">
-<rect x="993" y="188" width="54" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="1020.0" y="220.0" class="" text-anchor="middle" opacity="1">12</text>
-</g>
-<rect class="used1-0" x="300" y="188" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<rect class="used1-1" x="363" y="188" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<rect class="used1-2" x="426" y="188" width="54" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--accent)" opacity="0"/>
-<text x="300" y="310" class="big waste" text-anchor="start" opacity="0">24 个位置，只存了 8 个 token 的 KV</text>
-</svg>
-<div class="captions">
-<p class="caption-0">生成一个 token，就要把它的 K、V 留下来，供后续 token 读取。</p>
-<p class="caption-1">如果每个请求一开始都预留最大长度，短答案也会占着一大片空地。</p>
-<p class="caption-2">这里两条请求实际只用了 8 个位置，却预留了 24 个。空位挡住了其他请求。</p>
-</div>
-<p class="note">每个方格代表一个 token 在各层的 KV；图中容量仅用于演示。</p>
-</section>
-<section class="slide workshop" id="pg-shapes"><div class="kicker">工程细节</div><h2>先数清楚：一个 token 要留下多少数据</h2><p class="">普通 GQA 的 K、V 各有一个四维张量。这里只算 KV，不把权重、临时 workspace 混进来。</p><div class="ws-equation">K, V ∈ [L, T, H<sub>kv</sub>, d]</div><table class="ws-table"><thead><tr><th>符号</th><th>含义</th><th>教学模型</th></tr></thead><tbody><tr><td>L</td><td>Transformer 层数</td><td>32</td></tr><tr><td>Hkv / d</td><td>每层 KV 头数 / 每头宽度</td><td>8 / 128</td></tr><tr><td>b</td><td>每个元素的存储字节数</td><td>BF16：2 B</td></tr></tbody></table><p class="ws-note">若做张量并行，用每张卡实际存储的 KV 头数代入；复制的 KV 不能按卡数再除一次。</p></section>
-<section class="slide workshop" id="pg-bytes"><div class="kicker">工程细节</div><h2>128 KiB：每新增一个位置的账单</h2><div class="ws-equation">m<sub>token</sub> = 2 × L × H<sub>kv</sub> × d × b</div><p class="">前面的 2 是 K 和 V。代入：2 × 32 × 8 × 128 × 2 = 131,072 B = 128 KiB。</p><div class="ws-equation">m<sub>block</sub> = B × m<sub>token</sub> = 16 × 128 KiB = 2 MiB</div><div class="ws-cols"><div class="ws-card"><p class="">逻辑块装 B 个 token 的 KV。所有层通常共用 token→物理块编号，底层各层有自己的 KV 存储。</p></div><div class="ws-card"><p class="">计量统一用 KiB / MiB / GiB：分别是 2¹⁰ / 2²⁰ / 2³⁰ B。不要把 GB 的十进制单位混入容量题。</p></div></div></section>
-<section class="slide workshop" id="pg-capacity"><div class="kicker">工程细节</div><h2>24 GiB 的 KV 池，能同时容纳多少请求？</h2><p class="">延续上页模型，块大小 16，池内共有 24 × 1024 / 2 = 12,288 个物理块。</p><div class="ws-equation">每条长度 4,097：ceil(4,097 / 16) = 257 块</div><div class="ws-equation">最大并发 = floor(12,288 / 257) = 47 条</div><p class="">47 条占 12,079 块，还剩 209 块。第 48 条需要 257 块，差 48 块；“总 token 数看着还够”不足以证明能放下。</p><p class="ws-note">这里每条长度固定、不共享块；真实服务还要留增长余量，pool 容量应来自运行时完成权重和 workspace 预留之后的测量。</p></section>
-<section class="slide lesson" id="pg-map">
-<div class="kicker">02 · 分页</div>
-<h2>顺序留在表里，数据放进空闲块</h2>
-<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="顺序留在表里，数据放进空闲块">
-<defs>
-<marker id="pg-map-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
-</marker>
-</defs>
-<text x="36" y="35" class="minor" text-anchor="start" opacity="1">请求 A 的逻辑顺序</text>
-<g class="logical0" opacity="1">
-<rect x="36" y="72" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="101.0" y="104.0" class="" text-anchor="middle" opacity="1">0–3</text>
-</g>
-<g class="logical1" opacity="1">
-<rect x="192" y="72" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="257.0" y="104.0" class="" text-anchor="middle" opacity="1">4–7</text>
-</g>
-<g class="logical2" opacity="1">
-<rect x="348" y="72" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="413.0" y="104.0" class="" text-anchor="middle" opacity="1">8–9</text>
-</g>
-<text x="36" y="184" class="minor" text-anchor="start" opacity="1">block table</text>
-<g class="map0" opacity="0">
-<rect x="36" y="212" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="101.0" y="244.0" class="" text-anchor="middle" opacity="1">P5</text>
-</g>
-<g class="map1" opacity="0">
-<rect x="192" y="212" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="257.0" y="244.0" class="" text-anchor="middle" opacity="1">P1</text>
-</g>
-<g class="map2" opacity="0">
-<rect x="348" y="212" width="130" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="413.0" y="244.0" class="" text-anchor="middle" opacity="1">P7</text>
-</g>
-<text x="660" y="35" class="minor" text-anchor="start" opacity="1">GPU 上的物理块池</text>
-<g class="physical0" opacity="1">
-<rect x="660" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="709.0" y="114.0" class="" text-anchor="middle" opacity="1">P0</text>
-</g>
-<g class="physical1" opacity="1">
-<rect x="772" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="821.0" y="114.0" class="" text-anchor="middle" opacity="1">P1</text>
-</g>
-<g class="physical2" opacity="1">
-<rect x="884" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="933.0" y="114.0" class="" text-anchor="middle" opacity="1">P2</text>
-</g>
-<g class="physical3" opacity="1">
-<rect x="996" y="70" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="1045.0" y="114.0" class="" text-anchor="middle" opacity="1">P3</text>
-</g>
-<g class="physical4" opacity="1">
-<rect x="660" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="709.0" y="230.0" class="" text-anchor="middle" opacity="1">P4</text>
-</g>
-<g class="physical5" opacity="1">
-<rect x="772" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="821.0" y="230.0" class="" text-anchor="middle" opacity="1">P5</text>
-</g>
-<g class="physical6" opacity="1">
-<rect x="884" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="933.0" y="230.0" class="" text-anchor="middle" opacity="1">P6</text>
-</g>
-<g class="physical7" opacity="1">
-<rect x="996" y="186" width="98" height="74" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="1045.0" y="230.0" class="" text-anchor="middle" opacity="1">P7</text>
-</g>
-<path d="M 100 262 C 100 330, 821 330, 821 260" class="hotwire link0" opacity="0" marker-end="url(#pg-map-arrow)"/>
-<path d="M 256 262 C 256 330, 821 330, 821 144" class="hotwire link1" opacity="0" marker-end="url(#pg-map-arrow)"/>
-<path d="M 412 262 C 412 330, 1045 330, 1045 260" class="hotwire link2" opacity="0" marker-end="url(#pg-map-arrow)"/>
-</svg>
-<div class="captions">
-<p class="caption-0">先把序列切成小块：每块放 4 个 token 的 KV。最后一块可以暂时没装满。</p>
-<p class="caption-1">block table 记录“逻辑第几块，对应物理哪一块”：这里是 [P5, P1, P7]。</p>
-<p class="caption-2">物理块可以散落在显存里。请求看到的 token 顺序仍然是 0、1、2……</p>
-</div>
-<p class="note">教学块大小 B = 4；实际引擎按模型与 kernel 选择块大小。</p>
-</section>
+    <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
+      <li><a href="#why-pages">连续缓存在哪里浪费</a></li>
+      <li><a href="#address">从逻辑位置找到物理地址</a></li>
+      <li><a href="#attention">散落的 KV 怎样计算同一个 attention</a></li>
+      <li><a href="#capacity">用页数算容量，而不只数 token</a></li>
+      <li><a href="#sharing">共享前缀之后，谁可以写入</a></li>
+      <li><a href="#implementation">把生命周期写进代码</a></li>
+      <li><a href="#diagnosis">结果错了，先检查哪一层</a></li>
+      <li><a href="#practice">练习、实验与参考</a></li>
+    </ol></nav>
 
-<section class="slide lesson" id="pg-read">
-<div class="kicker">03 · 寻址</div>
-<h2>读 token 6，先查表，再找偏移</h2>
-<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="读 token 6，先查表，再找偏移">
-<defs>
-<marker id="pg-read-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
-</marker>
-</defs>
-<g class="query" opacity="1">
-<rect x="36" y="83" width="240" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="156.0" y="124.0" class="" text-anchor="middle" opacity="1">读取 token 6</text>
-</g>
-<text x="36" y="197" class="minor" text-anchor="start" opacity="1">逻辑块 = 6 ÷ 4 取整 = 1</text>
-<text x="36" y="233" class="minor" text-anchor="start" opacity="1">块内偏移 = 6 mod 4 = 2</text>
-<g class="lookup" opacity="1">
-<rect x="370" y="83" width="230" height="68" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="485.0" y="124.0" class="" text-anchor="middle" opacity="1">table[1] = P1</text>
-</g>
-<path d="M 276 117 H 370" class="hotwire lookupwire" opacity="0" marker-end="url(#pg-read-arrow)"/>
-<text x="718" y="49" class="minor" text-anchor="start" opacity="1">物理块 P1</text>
-<g class="offset0" opacity="1">
-<rect x="718" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="761.0" y="115.0" class="" text-anchor="middle" opacity="1">4</text>
-</g>
-<g class="offset1" opacity="1">
-<rect x="814" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="857.0" y="115.0" class="" text-anchor="middle" opacity="1">5</text>
-</g>
-<g class="offset2" opacity="1">
-<rect x="910" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="953.0" y="115.0" class="" text-anchor="middle" opacity="1">6</text>
-</g>
-<g class="offset3" opacity="1">
-<rect x="1006" y="83" width="86" height="50" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="1049.0" y="115.0" class="" text-anchor="middle" opacity="1">7</text>
-</g>
-<path d="M 600 117 H 710" class="hotwire readwire" opacity="0" marker-end="url(#pg-read-arrow)"/>
-<g class="kernel" opacity="0">
-<rect x="718" y="240" width="374" height="66" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="905.0" y="280.0" class="" text-anchor="middle" opacity="1">attention kernel 读取 K、V</text>
-</g>
-<path d="M 953 138 V 240" class="hotwire towork" opacity="0" marker-end="url(#pg-read-arrow)"/>
-</svg>
-<div class="captions">
-<p class="caption-0">attention 仍然按逻辑序列读历史。分页改变的是地址计算。</p>
-<p class="caption-1">token 6 落在逻辑块 1。查表得到 P1，再取 P1 里偏移为 2 的 K、V。</p>
-<p class="caption-2">PagedAttention kernel 一边按表定位，一边计算 attention。无需先把整个历史复制成连续数组。</p>
-</div>
-<p class="note">token 编号从 0 开始，token 6 是第 7 个；图中只画一层、一个 KV head 的寻址。</p>
-</section>
-<section class="slide workshop" id="pg-address-work"><div class="kicker">计算动画 · 从逻辑编号到字节</div><h2>把 token 6 变成真正的内存地址</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><g class="" opacity="1"><rect x="10" y="35" width="190" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="105.0" y="75.5" text-anchor="middle">token t = 6</text></g><g class="" opacity="1"><rect x="270" y="35" width="230" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="385.0" y="75.5" text-anchor="middle">q = 1，r = 2</text></g><g class="" opacity="1"><rect x="570" y="35" width="190" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="665.0" y="75.5" text-anchor="middle">table[1] = P1</text></g><g class="" opacity="1"><rect x="830" y="35" width="300" height="65" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="980.0" y="75.5" text-anchor="middle">K 地址偏移：110 B</text></g><text x="18" y="165" class="">B = 4；Hkv = 2；d = 4；b = 2</text><text x="18" y="210" class="">元素偏移 = ((P × B + r) × Hkv + h) × d + j</text><text x="18" y="255" class="">取 h = 1、j = 3，元素偏移 = </text><text x="555" y="255" class="answer">0</text><circle class="packet" cx="105" cy="125" r="12" fill="var(--accent)"/></svg><p class="ws-note">教学布局：K 和 V 分开，每个 K 池按 [物理块, 块内位置, KV 头, 头内维度] 连续存放。</p><p class="ws-caption">先做整除和取余，再查 block table；最后按 stride 展开。实际 kernel 可重排维度，但映射必须等价。</p></section>
-<section class="slide workshop" id="pg-kernel-layout"><div class="kicker">工程细节</div><h2>分页以后，attention 仍然按完整历史归一化</h2><pre class="ws-code">for logical_block in range(ceil(length / B)):
-    physical = block_table[logical_block]
-    K_tile, V_tile = load_kv(physical)
-    valid = logical_block * B + arange(B) &lt; length
-    scores = (q @ K_tile.T) * scale
-    online_softmax_update(scores, V_tile, mask=valid)</pre><p class="">尾块里的未写位置必须 mask。每块独立 softmax 再把结果相加，会丢失块之间的归一化权重。</p><p class="ws-note">block table 是整数元数据，通常远小于 KV。性能更依赖合并访存、向量化和跨块归约。</p></section>
-<section class="slide lesson" id="pg-grow">
-<div class="kicker">04 · 生长</div>
-<h2>写满一块，再拿下一块</h2>
-<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="写满一块，再拿下一块">
-<defs>
-<marker id="pg-grow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
-</marker>
-</defs>
-<text x="36" y="35" class="minor" text-anchor="start" opacity="1">已经生成 4 个 token</text>
-<g class="full0" opacity="1">
-<rect x="36" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="80.0" y="104.0" class="" text-anchor="middle" opacity="1">0</text>
-</g>
-<g class="full1" opacity="1">
-<rect x="133" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="177.0" y="104.0" class="" text-anchor="middle" opacity="1">1</text>
-</g>
-<g class="full2" opacity="1">
-<rect x="230" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="274.0" y="104.0" class="" text-anchor="middle" opacity="1">2</text>
-</g>
-<g class="full3" opacity="1">
-<rect x="327" y="72" width="88" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="371.0" y="104.0" class="" text-anchor="middle" opacity="1">3</text>
-</g>
-<g class="oldmap" opacity="1">
-<rect x="36" y="196" width="170" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="121.0" y="234.0" class="minor" text-anchor="middle" opacity="1">逻辑块 0 → P5</text>
-</g>
-<g class="freeblock" opacity="1">
-<rect x="655" y="65" width="185" height="80" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="747.5" y="112.0" class="" text-anchor="middle" opacity="1">
-</text>
-</g>
-<text x="655" y="49" class="minor" text-anchor="start" opacity="1">物理块 P2</text>
-<g class="nexttoken" opacity="0">
-<rect x="485" y="72" width="95" height="50" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="532.5" y="104.0" class="" text-anchor="middle" opacity="1">4</text>
-</g>
-<g class="newmap" opacity="0">
-<rect x="36" y="196" width="170" height="62" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="121.0" y="234.0" class="minor" text-anchor="middle" opacity="1">逻辑块 1 → P2</text>
-</g>
-<text x="655" y="208" class="minor" text-anchor="start" opacity="1">已有 P5 保持原位</text>
-<text x="655" y="252" class="minor claim" text-anchor="start" opacity="0">只为新增的 KV 分配一块</text>
-</svg>
-<div class="captions">
-<p class="caption-0">P5 已装满 4 个 token。下一次 decode 会为 token 4 生成新的 K、V。</p>
-<p class="caption-1">从空闲池取出 P2，把新 token 的 KV 写进去。原来的 P5 不需要搬家。</p>
-<p class="caption-2">block table 追加一项。以后继续填 P2，直到它也装满。</p>
-</div>
-<p class="note">一般只有尾块会留下未用槽位；不同模型的分层存储细节由引擎处理。</p>
-</section>
+    <section id="why-pages">
+      <h2>1. 连续缓存在哪里浪费</h2>
+      <p>假设每条请求最多允许 4096 个 token。若一开始就给每条请求分配能装下 4096 个 token 的连续 KV 空间，当前只有 128 个 token 的请求也会占据整份配额。它尚未使用的 3968 个位置不能再分给别人。这是<strong>预留空间与实际长度之间的浪费</strong>，与 attention 的数学计算无关。</p>
+      <p>另一种办法是按当前长度分配，再随着生成扩容。问题在于，请求结束的时间并不一致。显存里会留下大小不同的空洞：总空闲量可能够用，却没有一段足够大的连续空间。重新分配并复制缓存能解决一部分问题，但复制需要时间，也可能产生新旧两份缓存同时存在的峰值。</p>
+      <p>分页把缓存划成等大的物理块，每块容纳固定数量的 token。这里用小写 \(\htmlData{symbol=page-size}{b}\) 表示<strong>每块的 token 数</strong>，例如 \(b=16\)。这不是请求的 batch size。一个请求的第 0 个逻辑块、第 1 个逻辑块，可以分别位于物理块 5 和物理块 1；它们不需要在显存中相邻。</p>
+      <p>只要空闲池还有一块，任意请求就能拿来扩展。已经写好的块保持原位，页表末尾多一个物理块编号即可。整块之间的分配空洞因而不再要求整理成一段连续区域；但最后一块仍可能装不满，这部分叫<strong>块内碎片</strong>，后面会单独计算。</p>
+      <div class="callout"><p>“按需申请”通常指从预先建立的 KV 块池中取一块，而不是每生成一个 token 就调用一次 GPU 内存分配器。显存池的物理容量可以早已分配好，请求占用的块数仍然按需增长。</p></div>
+    </section>
 
-<section class="slide lesson" id="pg-release">
-<div class="kicker">05 · 回收</div>
-<h2>请求结束，块就能交给下一位</h2>
-<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="请求结束，块就能交给下一位">
-<defs>
-<marker id="pg-release-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
-</marker>
-</defs>
-<text x="40" y="40" class="minor" text-anchor="start" opacity="1">请求 A：P5、P2</text>
-<g class="tableA" opacity="1">
-<rect x="40" y="79" width="210" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="145.0" y="120.0" class="" text-anchor="middle" opacity="1">A 的 block table</text>
-</g>
-<g class="pool" opacity="1">
-<rect x="360" y="223" width="500" height="80" rx="12" fill="var(--bg-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="610.0" y="270.0" class="" text-anchor="middle" opacity="1">
-</text>
-</g>
-<text x="360" y="329" class="minor" text-anchor="start" opacity="1">空闲块池</text>
-<text x="910" y="109" class="done" text-anchor="start" opacity="0">A 已结束</text>
-<g class="newB" opacity="0">
-<rect x="40" y="223" width="140" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="110.0" y="264.0" class="" text-anchor="middle" opacity="1">新请求 B</text>
-</g>
-<path d="M 180 257 H 210" class="hotwire assignB" opacity="0" marker-end="url(#pg-release-arrow)"/>
-<g class="release0" opacity="1">
-<rect x="420" y="79" width="140" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="490.0" y="120.0" class="" text-anchor="middle" opacity="1">P5</text>
-</g>
-<g class="release1" opacity="1">
-<rect x="620" y="79" width="140" height="68" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="690.0" y="120.0" class="" text-anchor="middle" opacity="1">P2</text>
-</g>
-</svg>
-<div class="captions">
-<p class="caption-0">一个请求结束后，它独占的 KV 不再需要。这里先看不保留 prefix cache 的情况。</p>
-<p class="caption-1">移除 A 的 block table，P5、P2 回到空闲池。无需把其他请求挪到一起。</p>
-<p class="caption-2">B 可以立刻拿走空闲块。分页让“结束、释放、再使用”变成小块之间的交接。</p>
-</div>
-<p class="note">启用 prefix caching 时，引用计数归零的满块可以先保留内容，等有新需求再驱逐。</p>
-</section>
+    <section id="address" data-math-scope="address">
+      <h2>2. 从逻辑位置找到物理地址</h2>
+      <p>先看最小的地址转换。位置编号从 0 开始，\(\htmlData{symbol=position}{t}\) 是请求内部的逻辑 token 位置，\(\htmlData{symbol=page-size}{b}\) 是每块的 token 数。把 \(t\) 除以 \(b\)，商告诉我们去查页表的哪一项，余数告诉我们在块里的哪个槽位：</p>
+      $$\htmlData{symbol=logical-page}{j}=\left\lfloor\frac{\htmlData{symbol=position}{t}}{\htmlData{symbol=page-size}{b}}\right\rfloor,\qquad
+      \htmlData{symbol=offset}{r}=t\bmod b,\qquad
+      \htmlData{symbol=physical-page}{p}=\operatorname{page\_table}[j].$$
+      <p class="notation">本式中，\(j\) 是逻辑块编号，\(r\) 是块内偏移，\(p\) 是物理块编号；三者都从 0 开始计数。页表把逻辑块编号映射到物理块编号，块内偏移不变。</p>
+      <p>例如块大小为 4，页表是 <code>[5, 1]</code>。逻辑位置 0～3 在物理块 5，位置 4～7 在物理块 1。读取位置 6 时，先算出 \(j=1\)、\(r=2\)，再查到 <code>page_table[1]=1</code>，最终读取<strong>物理块 1 的槽位 2</strong>。物理块编号较小，不代表它存的是较早的 token。</p>
 
-<section class="slide lesson" id="pg-cow">
-<div class="kicker">06 · 共享</div>
-<h2>只读时共用，要写入时再分开</h2>
-<svg class="scene" viewBox="0 0 1152 340" role="img" aria-label="只读时共用，要写入时再分开">
-<defs>
-<marker id="pg-cow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
-<path d="M0 0 L10 5 L0 10Z" fill="var(--text-faint)"/>
-</marker>
-</defs>
-<g class="branchA" opacity="1">
-<rect x="32" y="64" width="180" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="122.0" y="101.0" class="" text-anchor="middle" opacity="1">分支 A</text>
-</g>
-<g class="branchB" opacity="1">
-<rect x="32" y="206" width="180" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="122.0" y="243.0" class="" text-anchor="middle" opacity="1">分支 B</text>
-</g>
-<g class="shared" opacity="1">
-<rect x="438" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="552.0" y="159.5" class="" text-anchor="middle" opacity="1">P3：a b c _</text>
-</g>
-<path d="M 212 94 L 438 137" class="hotwire edgeA" opacity="1" marker-end="url(#pg-cow-arrow)"/>
-<path d="M 212 236 L 438 167" class="hotwire edgeB" opacity="1" marker-end="url(#pg-cow-arrow)"/>
-<text x="445" y="227" class="ref2" text-anchor="start" opacity="1">refcount = 2</text>
-<g class="copy" opacity="0">
-<rect x="438" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="552.0" y="159.5" class="" text-anchor="middle" opacity="1">P8：a b c _</text>
-</g>
-<g class="writeA" opacity="0">
-<rect x="438" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="552.0" y="159.5" class="" text-anchor="middle" opacity="1">P3：a b c X</text>
-</g>
-<g class="writeB" opacity="0">
-<rect x="822" y="110" width="228" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)" stroke-width="2"/>
-<text x="936.0" y="159.5" class="" text-anchor="middle" opacity="1">P8：a b c Y</text>
-</g>
-<path d="M 212 236 C 500 310, 800 310, 910 195" class="hotwire newedge" opacity="0" marker-end="url(#pg-cow-arrow)"/>
-<text x="835" y="227" class="ref1" text-anchor="start" opacity="0">各自 refcount = 1</text>
-</svg>
-<div class="captions">
-<p class="caption-0">同一提示词生成两种续写时，两条分支可共享已算好的 KV。这里共享的尾块还剩一个空位。</p>
-<p class="caption-1">A、B 要写入不同 token，不能同时改同一尾块。给 B 分配 P8，复制已有的 a、b、c。</p>
-<p class="caption-2">A 在 P3 写 X，B 在 P8 写 Y。更早的完整只读块仍可继续共享，这就是写时复制。</p>
-</div>
-<p class="note">这是分支采样的写时复制示意；满块 prefix cache 命中通常直接共享，不必复制。</p>
-</section>
-<section class="slide workshop" id="pg-refcount"><div class="kicker">工程细节</div><h2>引用计数管理“谁还在读”，长度管理“哪里能写”</h2><div class="ws-cols"><div class="ws-card"><p class=""><b>每个请求</b><br>block_table：逻辑块到物理块<br>length：已写 KV 的 token 数<br>状态：运行 / 等待 / 完成</p></div><div class="ws-card"><p class=""><b>每个物理块</b><br>refcount：活跃请求引用数<br>valid length：尾块有效范围<br>free queue：可再分配块</p></div></div><p class="">没有 prefix cache 时，refcount 变成 0 可以直接归还。启用 prefix cache 时，还可能留下有效 hash 和内容，直到被驱逐。</p><p class="ws-note">引用计数不是 token 数；同一块被两个请求读取，哪怕只写了三个 token，refcount 仍然是 2。</p></section>
-<section class="slide workshop" id="pg-cow-work"><div class="kicker">数据流动画 · COW 与计数</div><h2>一次写入，为什么会先少掉一个空闲块？</h2><svg class="ws-visual serving-visual" viewBox="0 0 1152 285" role="img"><g class="atable-new" opacity="0"><rect x="20" y="35" width="220" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="130" y="73" text-anchor="middle">A → P3</text></g><g class="atable" opacity="1"><rect x="20" y="35" width="220" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="130.0" y="73.0" text-anchor="middle">A → P2</text></g><g class="" opacity="1"><rect x="20" y="140" width="220" height="60" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="130.0" y="178.0" text-anchor="middle">B → P2</text></g><g class="old" opacity="1"><rect x="360" y="55" width="310" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="515.0" y="105.5" text-anchor="middle">P2 [4, 5, 6, _]</text></g><g class="new" opacity="0"><rect x="790" y="55" width="310" height="85" rx="12" fill="var(--accent-soft)" stroke="var(--border)"/><text x="945.0" y="105.5" text-anchor="middle">P3 [4, 5, 6, _]</text></g><text x="360" y="190" class="">P2 引用：</text><text x="485" y="190" class="oldref">2</text><text x="790" y="190" class="">P3 引用：</text><text x="915" y="190" class="newref">0</text><text x="20" y="265" class="">空闲块：</text><text x="135" y="265" class="free">4</text><text x="945" y="105.5" text-anchor="middle" class="write" opacity="0">P3 [4, 5, 6, 1001]</text><path class="copyline" d="M670 95 L790 95" stroke="var(--accent)" stroke-width="5" opacity="0"/></svg><p class="ws-caption">B = 4，两个请求共享未满的尾块 P2。A 要继续写：先分配并复制 P3，再把 A 的映射切过去，最后写 1001。</p><p class="ws-note">如果尾块已经满，下一 token 直接申请新块；不用复制已经写满的前缀。</p></section>
-<section class="slide workshop" id="pg-allocate-code"><div class="kicker">工程细节</div><h2>先确保分配成功，再改变可见状态</h2><pre class="ws-code">if tail_is_full:
-    new = allocate_or_fail()
-    table.append(new)
-elif refcount[tail] &gt; 1:
-    new = allocate_or_fail()      # 失败时旧映射完全不动
-    copy_valid_kv(tail, new)
-    wait_until_copy_is_visible()
-    refcount[tail] -= 1
-    table[-1] = new
-write_token(table[-1], token)</pre><p class="ws-note">GPU stream / event 要保证 copy 和 write 的顺序。请求取消、异常返回也要走释放路径；只靠正常完成释放会慢慢漏掉整个池。</p></section>
-<section class="slide workshop" id="pg-oom-case"><div class="kicker">工程细节</div><h2>三个空闲块，四个请求同时跨边界</h2><p class="">池里只剩 3 块。A、B、C、D 本轮各需要一个新块，token 预算却足够安排四人。</p><div class="ws-cols"><div class="ws-card"><p class=""><b>可行的调度</b><br>本轮只运行其中 3 条，另一条等待；或者先抢占一个可释放足够块的请求，再分配。</p></div><div class="ws-card"><p class=""><b>必须避免</b><br>先给四条都追加映射，再在 GPU kernel 中发现地址无效。容量检查要在发布这轮 block table 前完成。</p></div></div><div class="ws-equation">本轮新增块数 ≤ 空闲块数 + 本轮可安全释放块数</div><p class="ws-note">不能回收仍被其他请求引用的共享块；“抢占了一个请求”不等于“释放了它表里的所有块”。</p></section>
-<section class="slide workshop" id="pg-preemption-cost"><div class="kicker">工程细节</div><h2>腾出显存以后，还要付一次恢复成本</h2><p class="">教学估算：某条请求已处理 4,000 个 token；保留 token ID，释放 KV，之后以 20,000 token/s 重新 prefill。</p><div class="ws-equation">重算成本 ≈ 4,000 / 20,000 s = 200 ms</div><p class="">若改为搬运 500 MiB KV，链路有效带宽 25 GiB/s，单向理想搬运时间是 500 / 25 / 1024 s ≈ 19.5 ms。</p><p class="ws-note">换出再换回合计至少 39.1 ms，还需 CPU 内存、同步和调度。选择重算还是搬运，要测实际开销，并看这段时间会阻塞谁。</p></section>
-<section class="slide">
-<div class="kicker">07 · 容量</div>
-<h2>把浪费限制在尾块里</h2>
-<div class="formula">所需块数 = ceil(序列长度 / 块大小)</div>
-<div class="two-col">
-<div class="card">
-<h3>长度 10，块大小 4</h3>
-<p>分配 3 块，共 12 个位置。前两块装满，尾块空 2 个。</p>
-</div>
-<div class="card">
-<h3>每条序列的尾部空位 &lt; 1 块</h3>
-<p>固定大小块可以互换使用，避免为了连续地址留下大段碎片。</p>
-</div>
-</div>
-<p class="note">这里计算的是 KV 的 token 槽位，不含 block table、模型权重和临时工作区；共享还会进一步减少实际块数。</p>
-</section>
-<section class="slide workshop" id="pg-waste-work"><div class="kicker">工程细节</div><h2>把“尾块浪费”算成可观测的数</h2><table class="ws-table"><thead><tr><th>长度 T</th><th>B = 16 的块数</th><th>分配位置</th><th>尾部空位</th></tr></thead><tbody><tr><td>17</td><td>2</td><td>32</td><td>15</td></tr><tr><td>32</td><td>2</td><td>32</td><td>0</td></tr><tr><td>63</td><td>4</td><td>64</td><td>1</td></tr><tr><td>合计 112</td><td>8</td><td>128</td><td>16</td></tr></tbody></table><div class="ws-equation">尾部浪费率 = 16 / 128 = 12.5%</div><p class="ws-note">每请求最多浪费 B−1 个位置。若长度对 B 的余数均匀，平均浪费 (B−1)/2；真实长度常集中在模板附近，应从 trace 统计。</p></section>
-<section class="slide workshop" id="pg-block-tradeoff"><div class="kicker">工程细节</div><h2>块越小，省下的是空位，多出来的是管理</h2><table class="ws-table"><thead><tr><th>同一组长度 17 / 32 / 63</th><th>B = 4</th><th>B = 16</th><th>B = 64</th></tr></thead><tbody><tr><td>总块数</td><td>29</td><td>8</td><td>3</td></tr><tr><td>分配位置</td><td>116</td><td>128</td><td>192</td></tr><tr><td>空位</td><td>4</td><td>16</td><td>80</td></tr><tr><td>128 KiB/token 的空位容量</td><td>0.5 MiB</td><td>2 MiB</td><td>10 MiB</td></tr></tbody></table><p class="">小块减少尾部浪费，让共享边界更细；大块减少表项、哈希和分配操作，也可能更适合某个 kernel 的访存布局。</p><p class="ws-note">选择引擎与 kernel 支持的块大小，再用相同请求轨迹测延迟、吞吐和块占用。不要只最小化浪费率。</p></section>
-<section class="slide workshop" id="pg-bandwidth"><div class="kicker">工程细节</div><h2>容量优化不会抹掉读取历史的成本</h2><p class="">教学模型：32 条请求，每条历史长度 4,096，每个历史位置占 128 KiB KV。一次 decode 读取全部历史：</p><div class="ws-equation">32 × 4,096 × 128 KiB = 16 GiB</div><div class="ws-equation">理想读取下界 = 16 GiB / (2 TiB/s) = 7.8125 ms</div><p class="">这是按每份 KV 恰读一次的带宽下界，未含权重、通信和 kernel 开销。分页解决放置和共享，attention kernel 才决定读得多有效率。</p><p class="ws-note">若跨请求复用了同一物理前缀，缓存层次可能改变实际 HBM 流量；不能直接把逻辑读取量当实测带宽。</p></section>
-<section class="slide workshop" id="pg-debug"><div class="kicker">工程细节</div><h2>占用率只有 70%，为什么请求还是进不来？</h2><table class="ws-table"><thead><tr><th>教学日志</th><th>读法</th></tr></thead><tbody><tr><td>物理块 1,000；活跃 700；闲置缓存 300</td><td>闲置缓存可驱逐，不等于不可用</td></tr><tr><td>新请求需 350 块；剩余可用 300</td><td>差 50 块，入场条件不成立</td></tr><tr><td>取消 100 条请求后 refcount 没变</td><td>引用释放缺失，是泄漏线索</td></tr></tbody></table><p class="">先分清 allocated / active / cached / free 的定义，再看拒绝入场的原因。空闲率平均值掩盖了长请求一次所需的大额分配。</p><p class="ws-note">核对守恒：活跃唯一块 + 可驱逐缓存块 + 未缓存空闲块 = 物理池容量。</p></section>
-<section class="slide workshop" id="pg-checklist"><div class="kicker">工程细节</div><h2>一次有效的块大小实验，固定四件事</h2><div class="ws-cols"><div class="ws-card"><p class=""><b>输入固定</b><br>相同到达时间、输入/输出长度、共享前缀比例、随机种子。先保存 trace，再重放。</p></div><div class="ws-card"><p class=""><b>预算固定</b><br>同一 KV 池字节数、同一调度 token 预算、相同并发限制、相同精度。</p></div></div><p class="">输出同时记录：尾部空位 MiB、块表长度、抢占次数、P50/P99 TTFT 与 ITL、完成请求/s。</p><p class="ws-note">若把块变小后还提高了 KV 总容量，就无法判断改善来自粒度还是额外显存。</p></section>
-<section class="slide">
-<div class="kicker">08 · 合起来看</div>
-<h2>调度决定谁上场，分页决定住哪里</h2>
-<div class="route">
-<span>请求到来</span> → <span>调度本轮 token</span> → <span>分配 / 查找 KV 块</span> → <span>GPU 计算</span>
-</div>
-<p>分页让长度不同的请求更容易共存；调度器才能不断让新请求填进空位。</p>
-<p class="links">继续看：<a href="/posts/continuous-batching/">Continuous batching：每一轮重新组队</a>
-<br>
-<a href="/posts/prefix-caching/">Prefix caching：相同的开头，只算一次</a> · <a href="/posts/scaling-memory/">显存预算</a>
-</p>
-</section>
+      <figure class="fig" id="address-figure">
+        <div class="pa-demo" data-demo="address">
+          <h3>图 1 · 跟着一个逻辑位置走完查址</h3>
+          <p class="pa-help">固定页表为 [5, 1]，每块 4 个位置。先选择要读取的 token，再按“下一步”观察地址怎样变换。两块显存中的内容始终留在原位。</p>
+          <div class="pa-request"><label for="address-token">读取逻辑位置</label><select id="address-token" aria-label="选择逻辑 token 位置"><option>0</option><option>1</option><option>2</option><option>3</option><option>4</option><option>5</option><option selected>6</option><option>7</option></select><span>位置编号从 0 开始</span></div>
+          <div class="pa-chain">
+            <div class="pa-node" data-node="split"><strong>① 按块大小拆开位置</strong><div class="pa-result" id="address-split">6 ÷ 4 → 逻辑块 1，偏移 2</div></div>
+            <div class="pa-node" data-node="lookup"><strong>② 查请求自己的页表</strong><table class="pa-map"><thead><tr><th>逻辑块</th><th>物理块</th></tr></thead><tbody><tr data-map="0"><td>0</td><td>P5</td></tr><tr data-map="1"><td>1</td><td>P1</td></tr></tbody></table></div>
+          </div>
+          <div class="pa-wire" aria-hidden="true"><span></span></div>
+          <div class="pa-memory">
+            <div class="pa-block" data-page="1"><b>物理块 P1</b><div class="pa-slot" data-position="4"><small>槽 0</small><span>K4 / V4</span></div><div class="pa-slot" data-position="5"><small>槽 1</small><span>K5 / V5</span></div><div class="pa-slot" data-position="6"><small>槽 2</small><span>K6 / V6</span></div><div class="pa-slot" data-position="7"><small>槽 3</small><span>K7 / V7</span></div></div>
+            <div class="pa-block" data-page="5"><b>物理块 P5</b><div class="pa-slot" data-position="0"><small>槽 0</small><span>K0 / V0</span></div><div class="pa-slot" data-position="1"><small>槽 1</small><span>K1 / V1</span></div><div class="pa-slot" data-position="2"><small>槽 2</small><span>K2 / V2</span></div><div class="pa-slot" data-position="3"><small>槽 3</small><span>K3 / V3</span></div></div>
+          </div>
+          <p class="pa-caption" aria-live="polite"></p>
+          <div class="pa-controls"><button type="button" data-action="prev">← 上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步 →</button><button type="button" data-action="reset">重置</button><output></output><label>回放位置<input type="range" min="0" max="3000" value="0" aria-label="地址转换回放位置"></label></div>
+        </div>
+        <figcaption>页表改变的是“到哪里读取”，不是“这个 token 在序列的第几个位置”。RoPE 与 causal mask 仍然使用逻辑位置 6；物理块 1 和槽位 2 都不能替代它。</figcaption>
+      </figure>
 
+      <h3>再往下一层：算出字节偏移</h3>
+      <p>页表只帮我们找到物理块。块中还有 KV 头与向量维度，因此 kernel 还要继续计算元素偏移。假设某一层的 K 数组采用连续布局 <code>[物理块数, b, Hkv, d]</code>，V 放在另一个同形状数组中。这里 \(\htmlData{symbol=kv-heads}{H_{kv}}\) 是 KV 头数，\(\htmlData{symbol=head-dim}{d}\) 是每个头的维度，\(h\) 和 \(c\) 分别是要读取的头编号与通道编号。</p>
+      $$\operatorname{element\_offset}=((\htmlData{symbol=physical-page}{p}\,\htmlData{symbol=page-size}{b}+\htmlData{symbol=offset}{r})\,\htmlData{symbol=kv-heads}{H_{kv}}+h)\,\htmlData{symbol=head-dim}{d}+c.$$
+      <p>仍然读取逻辑位置 6，但这次取 KV 头 1、通道 3。令每块 4 token、KV 头数为 2、头维度为 4，则元素偏移是 \(((1\times4+2)\times2+1)\times4+3=55\)。BF16 每元素 2 字节，所以地址是 <code>K 数组首地址 + 110 B</code>。这是这个教学布局的结果；真实 kernel 可以改变轴顺序或向量化布局，但必须保留同一个逻辑映射。</p>
+      <p>因此，“页表看起来正确”还不够。把 KV 头数与 query 头数混用、把字节 stride 当成元素 stride，都会读到错误数据。这也是地址公式要把每个轴写清楚的原因。</p>
+    </section>
 
-<section class="slide workshop" id="pg-ex1"><div class="kicker">练习 1 · 先计算，再展开</div><h2>8 GiB 池能容纳多少条 1,025-token 请求？</h2><div class="ws-prompt">模型 L = 24，Hkv = 4，d = 128，BF16。块大小 B = 16，不共享。求每 token / 每块字节数、块数、最大并发及剩余块。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">① 每 token：2 × 24 × 4 × 128 × 2 = 49,152 B = 48 KiB。<br>② 每块：16 × 48 = 768 KiB；池有 floor(8 × 2²⁰ / 768) = 10,922 块。<br>③ 每请求 ceil(1,025 / 16) = 65 块。<br>④ floor(10,922 / 65) = 168 条，剩 2 块；池还有不足一块的 512 KiB 未分配。</p></details></div></section>
-<section class="slide workshop" id="pg-ex2"><div class="kicker">练习 2 · 先计算，再展开</div><h2>共享尾块之后，谁该释放哪一块？</h2><div class="ws-prompt">B = 4。A、B 共享一个已有 3 token 的块 P2，refcount = 2，空闲块数 5。A 追加一个 token，随后 A 完成，最后 B 完成。无 prefix cache。逐步写出引用与空闲数。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">① A 写前 COW：申请 P3；P2=1、P3=1，空闲 4。<br>② A 完成：P3 从 1→0，归还，空闲 5；P2 保持 1。<br>③ B 完成：P2 从 1→0，归还，空闲 6。<br>最后比最初多一块，因为最初已有 P2 被占用。直接清空 P2 会破坏 B。</p></details></div></section>
-<section class="slide workshop" id="pg-ex3"><div class="kicker">练习 3 · 先计算，再展开</div><h2>逻辑顺序没错，为什么 attention 输出还是错？</h2><div class="ws-prompt">长度 6，B = 4，block table=[5,1]。kernel 从第二个物理块读满 4 个位置，却没有 mask 最后两个位置。另一个实现把每块 softmax 结果等权平均。两个错误分别怎么修？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="">① 第二块仅位置 4、5 有效；把逻辑位置 ≥ 6 的 score 设为 −∞，不读未初始化值参与计算。<br>② 各块的归一化分母不同，不能等权平均；使用全局 softmax 或可合并的在线 softmax 状态 (m, l, o)。<br>验证时随机打乱物理块编号，与连续 KV 的 dense attention 比较；包含长度 0/1/B/B+1 等边界。</p></details></div></section>
-<section class="slide workshop" id="paged-attention-lab"><div class="kicker">动手实验 · CPU 教学模拟</div><h2>用一个小内存池，亲手触发 COW 和 OOM</h2><p class="">下载代码后，在保存代码的目录运行：</p><pre class="ws-code">python3 lab.py --block-size 16
-python3 lab.py --block-size 4</pre><p class="ws-note">B=16：blocks=8，slots=128，useful=112，tail_waste=16。B=4：blocks=29，tail_waste=4；两次均输出 PASS。</p><p class="">先预测块数，再修改 lengths。代码还验证共享后写入互不污染、最后一个引用归还、COW 分配失败不破坏旧映射。把 refs 检查删掉再故意漏一次 release，观察池怎样耗尽。</p><a class="ws-lab-link" download href="/posts/paged-attention/lab.py">下载 lab.py · Python 3 标准库</a></section>
-<section class="slide">
-<div class="kicker">参考与延伸阅读</div>
-<h2>从内存池走到推理引擎</h2>
-<ul class="reference-list">
-<li>
-<a href="https://arxiv.org/abs/2309.06180">Kwon et al. — Efficient Memory Management for Large Language Model Serving with PagedAttention</a>（SOSP 2023）：分页、块共享与写时复制。</li>
-<li>
-<a href="https://docs.vllm.ai/en/latest/design/paged_attention/">vLLM：Paged Attention</a>：attention kernel 如何根据 block table 访问 KV。</li>
-<li>
-<a href="https://docs.vllm.ai/en/latest/design/prefix_caching/">vLLM：Automatic Prefix Caching</a>：缓存块的引用、释放与驱逐。</li>
-</ul>
-<p class="links">
-<a href="/blog/">返回博客</a> · <a href="/posts/continuous-batching/">下一站：连续批处理 →</a>
-</p>
-</section>
+    <section id="attention" data-math-scope="attention">
+      <h2>3. 散落的 KV 怎样计算同一个 attention</h2>
+      <p>缓存放散了，最直接的做法是每轮先把它们重新拼成一个连续数组，再运行原来的 attention。这个办法适合写正确性参考，却又引入了一遍历史数据复制。PagedAttention 的关键是让 kernel <strong>沿页表直接读取各个物理块</strong>，边读边算，避免为了调用 attention 而先拼回完整历史。</p>
+      <p>数学上，当前 query 看到的仍是同一组 key 和 value。对一个 query 头，用 \(\htmlData{symbol=score}{z_i}\) 表示它与第 \(i\) 个 key 点积、缩放并加上 mask 后的分数，\(\htmlData{symbol=value}{v_i}\) 表示对应的 value 向量。Attention 输出是：</p>
+      $$\htmlData{symbol=output}{y}=\frac{\sum_i e^{\htmlData{symbol=score}{z_i}}\,\htmlData{symbol=value}{v_i}}{\sum_i e^{z_i}}.$$
+      <p class="notation">本式的求和覆盖当前 query 能看到的所有有效逻辑位置。\(z_i\) 是一个标量分数，\(v_i\) 和输出 \(y\) 是向量；图 2 会先用只有一个通道的 value，把每一步算成普通数字。</p>
+      <p>页表只改变这些 \((z_i,v_i)\) 在内存中的取出位置，不改变求和对象。只要 mask 与数值归一化正确，分页结果就应与连续布局一致。但“每个块分别做 softmax，再把输出平均”并不正确：各块贡献的概率总量通常不同，不能给它们相同的权重。</p>
 
+      <h3>用一个反例看清归一化在哪里</h3>
+      <p>假设两个块分别含两个位置，四个分数为 \([0,\ln2,\ln3,\ln4]\)，对应的标量 value 为 \([2,4,6,8]\)。指数化后是 \([1,2,3,4]\)，全部权重的和为 10，所以正确输出是：</p>
+      $$y=\frac{1\times2+2\times4+3\times6+4\times8}{1+2+3+4}=6.$$
+      <p>若只看第一块，它的局部输出是 \(10/3\)；第二块的局部输出是 \(50/7\)。二者等权平均得到约 5.238，已经不是 6。正确合并应给两块分别分配 \(3/10\) 和 \(7/10\) 的总概率，因为它们在全局分母中贡献了 3 和 7。</p>
 
-</div>
+      <h3>怎样不保存所有分数，也能合并结果</h3>
+      <p>稳定 softmax 会先减去最大分数，避免直接计算过大的指数。对一个已经处理的块，保留三个量就够了：最大分数 \(\htmlData{symbol=maximum}{m}\)、减去该最大值后的指数和 \(\htmlData{symbol=denominator}{\ell}\)，以及同样缩放后的 value 加权和 \(\htmlData{symbol=numerator}{u}\)。</p>
+      $$m=\max_i z_i,\qquad \ell=\sum_i e^{z_i-m},\qquad u=\sum_i e^{z_i-m}v_i.$$
+      <p>这里 \(m\) 和 \(\ell\) 是标量，\(u\) 与 value 同维度；处理完所有块后，输出就是 \(y=u/\ell\)。要合并两个状态 \((m_1,\ell_1,u_1)\) 和 \((m_2,\ell_2,u_2)\)，先把二者换到同一个最大值 \(m=\max(m_1,m_2)\) 下，再相加：</p>
+      $$\ell=e^{m_1-m}\ell_1+e^{m_2-m}\ell_2,$$
+      $$u=e^{m_1-m}u_1+e^{m_2-m}u_2,\qquad y=u/\ell.$$
+      <p>前面的缩放因子不是额外的近似。第一块原本保存的是“减去 \(m_1\) 后的和”，乘 \(e^{m_1-m}\) 正好把它改成“减去 \(m\) 后的和”。分子和分母同时换尺度，最终比值不变。这与 <a href="/posts/flash-attention/">FlashAttention 的在线 softmax</a> 使用的是同一条恒等式；分页解决存储地址，在线合并解决分块计算后的归一化。</p>
+
+      <figure class="fig" id="merge-figure">
+        <div class="pa-demo" data-demo="merge">
+          <h3>图 2 · 两个块怎样合成输出 6</h3>
+          <p class="pa-help">输入始终固定。观察每块的最大值、指数和、加权和，再看第一块怎样从“最大值 ln 2”换到“最大值 ln 4”的尺度。</p>
+          <div class="pa-chain"><div class="pa-node" data-merge-block="0"><strong>块 A · 逻辑位置 0、1</strong><div>分数：0，ln 2</div><div>value：2，4</div></div><div class="pa-node" data-merge-block="1"><strong>块 B · 逻辑位置 2、3</strong><div>分数：ln 3，ln 4</div><div>value：6，8</div></div></div>
+          <table class="pa-numerics"><thead><tr><th>状态</th><th>最大值 m</th><th>指数和 ℓ</th><th>加权和 u</th></tr></thead><tbody><tr data-merge-row="a"><td>块 A</td><td>待计算</td><td>待计算</td><td>待计算</td></tr><tr data-merge-row="b"><td>块 B</td><td>待计算</td><td>待计算</td><td>待计算</td></tr><tr data-merge-row="total"><td>全局</td><td>待合并</td><td>待合并</td><td>待合并</td></tr></tbody></table>
+          <div class="pa-wire" aria-hidden="true"><span></span></div>
+          <div class="pa-equation" id="merge-equation">直接参考：(2 + 8 + 18 + 32) / 10 = 6</div>
+          <p class="pa-caption" aria-live="polite"></p>
+          <div class="pa-controls"><button type="button" data-action="prev">← 上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步 →</button><button type="button" data-action="reset">重置</button><output></output><label>回放位置<input type="range" min="0" max="4000" value="0" aria-label="分块 softmax 合并回放位置"></label></div>
+        </div>
+        <figcaption>第一块换尺度时，指数和从 1.5 变为 0.75，加权和从 5 变为 2.5；二者同乘 1/2。最终全局状态为 (ln 4, 2.5, 15)，输出 15/2.5 = 6。</figcaption>
+      </figure>
+
+      <h3>最后一块没有填满，不能把空槽当成零分数</h3>
+      <p>若请求只有 6 个有效位置、块大小为 4，第二块只有前两个槽位有效。Attention 可以按块读取，但必须根据<strong>请求的有效逻辑长度</strong>排除后两个槽。空槽的 K/V 即使碰巧都是零，点积分数 0 也会贡献 \(e^0=1\)，把真正位置的概率稀释掉。</p>
+      <p>因此，空槽的分数要被视为 \(-\infty\)，概率贡献为零。对于完全无有效位置的块，直接跳过，或使用“分母为 0”的空状态进行显式分支处理；不要机械计算 \(-\infty-(-\infty)\)，因为那会得到 NaN。这个边界比正常数据流更容易在单元测试中漏掉。</p>
+    </section>
+
+    <section id="capacity" data-math-scope="capacity">
+      <h2>4. 用页数算容量，而不只数 token</h2>
+      <p>分页后的容量预算有两层：先计算一个 token 的 KV 占多少字节，再计算实际占用了多少个物理块。设模型有 \(\htmlData{symbol=layers}{L}\) 层，每层有 \(\htmlData{symbol=kv-heads}{H_{kv}}\) 个 KV 头，每头 \(\htmlData{symbol=head-dim}{d}\) 维，每元素占 \(\htmlData{symbol=element-bytes}{e}\) 字节；K 与 V 维度相同，全部这些层都保留完整历史。</p>
+      $$\htmlData{symbol=token-bytes}{m_{\mathrm{tok}}}=2\,\htmlData{symbol=layers}{L}\,\htmlData{symbol=kv-heads}{H_{kv}}\,\htmlData{symbol=head-dim}{d}\,\htmlData{symbol=element-bytes}{e},\qquad
+      \htmlData{symbol=page-bytes}{m_{\mathrm{page}}}=\htmlData{symbol=page-size}{b}\,m_{\mathrm{tok}}.$$
+      <p class="notation">\(m_{\mathrm{tok}}\) 是跨全部缓存层、每 token 的 KV 字节数；\(m_{\mathrm{page}}\) 是同样范围内一组物理块的字节数。\(b\) 仍是每块 token 数，前面的 2 来自 K、V 两份。按层分别建池的实现应对每层单独核算，再考虑各池的约束。</p>
+      <p>例如 \(L=24\)、\(H_{kv}=4\)、\(d=128\)，使用 BF16，每元素 \(e=2\) 字节。于是每 token 占 \(49{,}152\) B，也就是 48 KiB。若每块 16 token，一块就是 768 KiB。这里使用二进制单位：1 KiB = 1024 B，1 GiB = 2³⁰ B。</p>
+      <p>长度为 \(\htmlData{symbol=sequence-length}{S}\) 的请求，不共享块时要分配 \(\lceil S/b\rceil\) 块。上面的模型若当前长度为 1025，块大小为 16，就需要 65 块，实际有 1040 个槽位，其中 15 个尚未使用。它们占据 \(15\times48=720\) KiB；这份尾部浪费不会因页表而消失。</p>
+      $$\text{尾部空槽}=\left\lceil\frac{\htmlData{symbol=sequence-length}{S}}{\htmlData{symbol=page-size}{b}}\right\rceil b-S,\qquad 0\le\text{尾部空槽}\le b-1.$$
+      <p>对于多条独立请求，把每条请求向上取整后再相加，不能先把总 token 数相加再取整。长度为 17、32、63 的三条请求，块大小为 4 时，块数为 \(5+8+16=29\)，总共 116 个槽位，实际用了 112 个，浪费 4 个；块大小改成 16 后，块数为 \(2+2+4=8\)，128 个槽位中有 16 个未使用。</p>
+
+      <h3>块越小越好吗？</h3>
+      <p>小块通常减少尾部空槽，也让共享与回收更细。但相同历史会对应更多页表项、更多块边界，kernel 的访存、工作划分和元数据处理也会变化。大块通常减少这些管理工作，却增加短请求的尾部浪费，并可能扩大一次写时复制需要复制的内容。</p>
+      <p>页大小因而是容量与执行效率的共同选择。先用真实长度分布计算尾部浪费，再比较对应 kernel 在目标 batch、上下文长度下的时间。仅凭“页表更短”或“碎片更少”，都不能直接推出整体服务更快。</p>
+      <p>还要留出权重、激活、通信缓冲、临时 workspace 和运行时占用。若把整张卡的显存都当作 KV 池，算出来的并发没有可执行意义。对于多卡服务，这份账应按<strong>每张卡实际保存的 KV 头与层</strong>计算；头复制、不同层的缓存策略，都可能让简单的“总量除以卡数”失效。</p>
+    </section>
+
+    <section id="sharing" data-math-scope="sharing">
+      <h2>5. 共享前缀之后，谁可以写入</h2>
+      <p>两条请求若有完全相同的有效前缀，并且模型、adapter、位置与 attention 配置一致，这段前缀对应的 K/V 也相同。它们可以让各自的页表指向同一组物理块。区别在于，<strong>页表属于请求，物理块可以同时被多个请求引用</strong>。</p>
+      <p>共享需要计数。一个物理块的引用计数为 2，意味着仍有两个所有者依赖它，不能因为其中一条请求完成就释放。若缓存管理器还要把这块留给后续请求复用，管理器的持有关系也必须纳入生命周期设计。下面的图只考虑两个活动请求，不额外保留 prefix cache，因此引用归零就能归还空闲池。</p>
+      <p>完整块里的历史不会再写入，共享比较直接；真正容易出错的是<strong>未填满的共享尾块</strong>。假设一块能装 4 个 token，现在已经存了 3 个。A、B 都指向它，A 想把自己的下一个 token 写进最后一槽。若直接写，B 随后追加自己的 token 时就会覆盖 A 的内容。B 的有效长度仍为 3 时还不会读取这个槽位，但同一个槽位无法同时保存两条分支各自的第 4 个 token。</p>
+      <p>解决办法是写时复制（copy-on-write，COW）：A 先申请一个新块，把旧尾块中有效的 3 个位置复制过去，再让自己的页表改指新块，最后追加 A 的 token。B 保持指向旧块。已经共享的完整前缀块不需要一起复制。</p>
+
+      <figure class="fig" id="cow-figure">
+        <div class="pa-demo" data-demo="cow">
+          <h3>图 3 · 共享读取，分开写入</h3>
+          <p class="pa-help">这个小池只有 P2、P5 两个物理块，每块 4 个槽位。p0、p1、p2 是相同前缀，a3、b3 是两条请求后来各自生成的 token。所有符号表示对应 token 的 K/V。</p>
+          <div class="pa-cow-requests"><div><b>请求 A 的页表</b><span id="cow-table-a">[P2]</span></div><div><b>请求 B 的页表</b><span id="cow-table-b">尚未创建</span></div></div>
+          <div class="pa-wire" aria-hidden="true"><span></span></div>
+          <div class="pa-memory">
+            <div class="pa-block" data-cow-page="2"><b>P2 · <span class="pa-refs" id="cow-ref-2">引用 1</span></b><div class="pa-slot"><small>槽 0</small><span>p0</span></div><div class="pa-slot"><small>槽 1</small><span>p1</span></div><div class="pa-slot"><small>槽 2</small><span>p2</span></div><div class="pa-slot is-empty"><small>槽 3</small><span>空槽</span></div></div>
+            <div class="pa-block" data-cow-page="5"><b>P5 · <span class="pa-refs" id="cow-ref-5">空闲</span></b><div class="pa-slot is-empty"><small>槽 0</small><span>空槽</span></div><div class="pa-slot is-empty"><small>槽 1</small><span>空槽</span></div><div class="pa-slot is-empty"><small>槽 2</small><span>空槽</span></div><div class="pa-slot is-empty"><small>槽 3</small><span>空槽</span></div></div>
+          </div>
+          <p class="pa-equation" id="cow-account">已用 1 块 · 空闲 1 块</p>
+          <p class="pa-caption" aria-live="polite"></p>
+          <div class="pa-controls"><button type="button" data-action="prev">← 上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步 →</button><button type="button" data-action="reset">重置</button><output></output><label>回放位置<input type="range" min="0" max="5000" value="0" aria-label="共享与写时复制回放位置"></label></div>
+        </div>
+        <figcaption>复制的是要被写入的共享尾块。图中 A 改指 P5 后，P2 的引用从 2 变为 1；B 再写入时已经独占 P2，不需要第二次复制。</figcaption>
+      </figure>
+
+      <p>如果共享块恰好已经填满，情况更简单：A 的下一个 token 直接写进新申请的下一块，旧块继续共享，不需要复制旧块。这就是“逻辑追加”和“原地改写共享尾块”的区别。若引擎只复用填满的 prefix 块，也可以避免跨请求复用未满尾块的这类复杂性；但请求分叉等场景仍需要清楚地定义写入权限。</p>
+      <p>共享也不会把所有 attention 读取合为一次。两个请求的 query 可能不同，仍然各自计算 attention；共享首先减少物理存储和重复前缀计算。能否在某次 kernel 执行里进一步复用缓存读取，还取决于实际执行方式。</p>
+    </section>
+
+    <section id="implementation">
+      <h2>6. 把生命周期写进代码</h2>
+      <p>分页系统至少要同时维护三份状态：请求的页表和有效长度、物理块的引用计数、空闲块集合。它们必须描述同一个事实。只更新页表却忘了减旧块引用，会泄漏；引用归零后提前回收 GPU 仍在读取的块，则可能把另一条请求的新数据当作旧历史读入。</p>
+      <p>追加一个 token 时，可以先判断尾块状态。下面把“块里有几个有效位置”也作为显式元数据；省略模型计算，只展示内存管理顺序：</p>
+      <pre><code>if 没有尾块 or 尾块已满:
+    new = allocate()          # 失败时尚未改变请求页表
+    page_table.append(new)
+elif refcount[尾块] &gt; 1:
+    old = 尾块
+    new = allocate()          # 先确保申请成功
+    copy_valid_KV(old, new)
+    page_table[-1] = new
+    refcount[old] -= 1
+write_KV(page_table[-1], next_slot)
+valid_length += 1</code></pre>
+      <p>为什么先申请，再改旧引用？因为申请可能失败。若先把旧块引用减掉、甚至释放，再发现没有空闲块，原来的有效状态已经被破坏。CPU 实验中会专门制造这个失败：一个块被两条请求共享，池里没有空块，此时 COW 必须报告容量不足，并保持两个页表、原内容和引用计数完全不变。</p>
+      <p>GPU 上还多了一层时间关系：复制尚未完成时不能开始读取新块；读取旧块的 kernel 尚未完成时不能把它复用给别人。引用计数表达“谁拥有”，event 或其他完成协议表达“谁还在使用”。这两个条件都满足，回收才成立。它们与 <a href="/posts/cuda-streams/">跨 stream 的缓冲区生命周期</a> 是同一个问题。</p>
+      <p>有时不是某一个请求太长，而是所有活动请求都快跨越块边界。每条请求当前看起来都能继续，下一轮却一起申请新块。调度器需要结合可用块、增长预算和抢占策略作出准入决定。保守预留上界可以避免这类同时增长耗尽容量，但会降低利用率；更积极的策略则需要可靠的等待、重算或换出路径。分页给出了可管理的块，并没有替调度器完成这个选择。</p>
+    </section>
+
+    <section id="diagnosis">
+      <h2>7. 结果错了，先检查哪一层</h2>
+      <p>不要一开始就用生成文本判断缓存是否正确。一个错位的 K 向量可能只略微改变分数，argmax 恰好没变，文本仍然看起来正常。更有效的办法是固定输入和权重，比较每一步的 attention 输出或 logits，并从最小输入开始缩小范围。</p>
+      <div class="table-wrap"><table><thead><tr><th>现象</th><th>优先检查</th><th>最小复现</th></tr></thead><tbody>
+        <tr><td>只在跨块后出错</td><td>页表索引、除法/取模、块 stride</td><td>长度 b−1、b、b+1</td></tr>
+        <tr><td>只有最后一块出错</td><td>有效长度与空槽 mask</td><td>块大小 4、长度 5 或 6</td></tr>
+        <tr><td>换物理块编号后结果变了</td><td>把物理顺序误当成逻辑顺序或 RoPE 位置</td><td>把 [0,1] 改成 [5,1]</td></tr>
+        <tr><td>分叉后两请求互相影响</td><td>COW、共享尾块、缓存身份</td><td>共享 3/4 满的尾块，再分别追加</td></tr>
+        <tr><td>数值正确，运行久了却 OOM</td><td>完成/取消/失败路径的引用释放</td><td>反复创建、分叉、释放，核对空闲数</td></tr>
+      </tbody></table></div>
+      <p>再加两个很实用的不变量。第一，空闲块不能同时出现在任何有效页表中；第二，每个物理块的引用数，应等于当前所有拥有者对它的引用总数。对于没有持久 prefix cache 的小实验，全部请求结束后，空闲块数量应回到初始值。实际引擎若保留 prefix cache，要把“仍被缓存持有”与“泄漏”区分开。</p>
+      <p>比较 attention 时，参考路径可以先按逻辑顺序把 K/V 拼回连续数组，显式构造 mask，再做标准 softmax。优化路径通过页表直接读取；二者只共享模型输入，尽量不共享地址转换代码。否则同一个地址错误可能同时出现在实现和“参考”里，让测试错误地通过。</p>
+    </section>
+
+    <section id="practice">
+      <h2>8. 练习：从计算走到排错</h2>
+      <p>下面继续使用同一套记号：\(b\) 是每块 token 数，\(L\) 是层数，\(H_{kv}\) 是 KV 头数，\(d\) 是每头维度；BF16 每元素为 2 字节。每道题都可以先写出单位，再代入数字。</p>
+      <div class="pa-exercise"><h3>练习 1：8 GiB 的 KV 池能装多少请求？</h3>
+        <p>模型有 24 层、4 个 KV 头，每头 128 维，使用 BF16；每块 16 token。已有一份专门划给 KV 的 8 GiB 池，不共享块。每条请求当前长度都是 1025。求每 token 与每块的字节数、池中完整块数、最多能放多少条请求，以及最后剩多少空间。</p>
+        <details><summary>展开参考解答</summary><p>每 token 为 \(2\times24\times4\times128\times2=49{,}152\) B，即 48 KiB；每块 16 token，所以每块为 768 KiB。</p><p>池能容纳 \(\lfloor8\times2^{20}/768\rfloor=10{,}922\) 个完整块，还余下不足一块的 512 KiB。每条请求需要 \(\lceil1025/16\rceil=65\) 块，因此最多为 \(\lfloor10922/65\rfloor=168\) 条，剩 2 个完整块；加上不足一块的 512 KiB，共剩 2 MiB。</p><p>这 168 条请求各自还有 15 个尾部空槽。它们已经属于请求占用的块，不能与池中“剩 2 块”混为一谈。请求继续增长时，这个当前长度下的并发还需要重新做增长预算。</p></details>
+      </div>
+      <div class="pa-exercise"><h3>练习 2：共享尾块之后，谁该归还哪一块？</h3>
+        <p>每块 4 token。A、B 共享一个已有 3 token 的块 P2，引用为 2，当前空闲块数为 5。A 追加一个 token，随后 A 完成，最后 B 完成。不保留 prefix cache。逐步写出引用与空闲块数。</p>
+        <details><summary>展开参考解答</summary><p>A 不能直接写共享尾块，先申请 P3 并复制三个有效位置：P2 的引用变为 1，P3 的引用为 1，空闲块数变为 4。A 的页表改指 P3，再把新 token 写进它的槽位 3。</p><p>A 完成时只归还自己持有的 P3，空闲数回到 5；P2 仍由 B 持有。B 完成时 P2 的引用从 1 变成 0，空闲数变为 6。</p><p>最后比最初多一块，是因为最初 P2 仍被请求占用。若 A 完成时直接释放共享的 P2，就会破坏 B 的后续读取。</p></details>
+      </div>
+      <div class="pa-exercise"><h3>练习 3：页表没错，attention 为什么还是错？</h3>
+        <p>长度为 6，每块 4 token，页表为 <code>[5,1]</code>。一个 kernel 把第二块的 4 个槽位全部送进 softmax；另一个 kernel 正确屏蔽空槽，但把每块独立 softmax 的输出等权平均。两个错误分别怎样修？</p>
+        <details><summary>展开参考解答</summary><p>第一个错误与地址无关：第二块只有逻辑位置 4、5 有效。逻辑位置大于等于 6 的分数必须屏蔽为 −∞，不能依靠空槽碰巧为零。若整块没有有效元素，跳过它或显式处理空状态。</p><p>第二个错误与归一化有关：不同块的指数和不同，局部输出不能等权平均。用全局 softmax，或按正文的最大值、指数和、加权和三个状态合并。</p><p>验证时先固定逻辑 K/V，随机打乱物理块编号，再与连续布局参考比较。覆盖长度 1、b−1、b、b+1；长度 0 则验证 API 的拒绝或空结果约定。</p></details>
+      </div>
+      <div class="pa-exercise"><h3>练习 4：手算一次在线合并</h3>
+        <p>块 A 的分数为 [0, ln 2]，value 为 [2,4]；块 B 的分数为 [ln 3, ln 4]，value 为 [6,8]。分别求两个局部状态，再合并。为什么第一块的分子和分母都要乘 1/2？</p>
+        <details><summary>展开参考解答</summary><p>A 以 ln 2 为最大值，缩放后的指数为 [1/2,1]，所以状态是 \((\ln2,1.5,5)\)。B 以 ln 4 为最大值，指数为 [3/4,1]，状态是 \((\ln4,1.75,12.5)\)。</p><p>共同最大值是 ln 4。A 的尺度要乘 \(e^{\ln2-\ln4}=1/2\)，得到指数和 0.75、加权和 2.5。合并后分母为 2.5，分子为 15，输出为 6。</p><p>只缩放分子会改变 A 的局部平均值；只缩放分母也会改变输出。两者一起缩放，才能只改变表示方式，同时保留原来的概率关系。</p></details>
+      </div>
+
+      <h2 id="lab">9. 用一个小实验检查页表与生命周期</h2>
+      <p><a class="pa-download" href="/posts/paged-attention/lab.py" download>下载 lab.py</a></p>
+      <p>实验只需要 Python 3，不依赖 GPU。它把每个 token 的 KV 简化为一个可检查的编号，重点验证分页后的逻辑读取、分叉隔离、引用计数、释放和 COW 失败时的状态完整性。编号模型不执行真正的 attention；正文的 softmax 算例用于单独检查归一化。</p>
+      <pre><code>python3 lab.py
+python3 lab.py --block-size 16 --lengths 17,32,63</code></pre>
+      <p>默认块大小为 4，第一条命令应输出：</p>
+      <pre><code>block_size=4 blocks=29 slots=116
+useful=112 tail_waste=4
+PASS: dense oracle, COW isolation, refcounts, release, transactional OOM, address=110 B</code></pre>
+      <p>第二条命令会把块数改为 8、槽位改为 128、尾部浪费改为 16。先预测这些变化，再运行。接着修改 <code>self_test()</code> 的分叉位置：让尾块分别处于未满和恰好填满状态，检查什么时候必须复制，什么时候只需追加新块。最后故意去掉 COW，看最早失败的检查是否确实指出两个分支相互影响。</p>
+      <p>把这份管理逻辑接入 <a href="/posts/mini-inference-engine/">最小推理引擎</a> 后，就可以继续验证真实 logits：更换物理布局或页大小，输出应在数值容差内保持一致；调整请求到达与完成顺序，页池仍应正确回收。这时，地址、数学和调度三个层面的检查才真正连起来。</p>
+
+      <h2 id="references">参考与延伸阅读</h2>
+      <ul>
+        <li><a href="https://arxiv.org/abs/2309.06180">Efficient Memory Management for Large Language Model Serving with PagedAttention</a>：分页缓存、块共享与写时复制的原始论文。</li>
+        <li><a href="https://docs.vllm.ai/en/stable/design/paged_attention/">vLLM：Paged Attention</a>：原始 kernel 设计中的页表访问与分块计算；该文档保留的是历史实现说明。</li>
+        <li><a href="https://docs.vllm.ai/en/stable/design/prefix_caching/">vLLM：Automatic Prefix Caching</a>：块身份、引用、空闲队列与前缀复用。</li>
+        <li><a href="/posts/prefix-caching/">Prefix caching</a> 与 <a href="/posts/continuous-batching/">Continuous batching</a>：共享缓存如何与请求调度配合。</li>
+      </ul>
+    </section>
+  </article>
+  <nav class="series-pager" data-series="systems"></nav>
 </main>
-<script src="/assets/slides.js?v=03e51263994e">
-</script>
-<script src="/assets/anim.js?v=9b723aa5f47d">
-</script>
-<script>
-(() => {
-  const scenes = [
-  {
-    "id": "pg-reserve",
-    "steps": [
-      {
-        "label": "写入 KV",
-        "actions": [
-          [
-            ".used0-0",
-            {
-              "opacity": 1
-            },
-            0.0
-          ],
-          [
-            ".used0-1",
-            {
-              "opacity": 1
-            },
-            0.08
-          ],
-          [
-            ".used0-2",
-            {
-              "opacity": 1
-            },
-            0.16
-          ],
-          [
-            ".used0-3",
-            {
-              "opacity": 1
-            },
-            0.24
-          ],
-          [
-            ".used0-4",
-            {
-              "opacity": 1
-            },
-            0.32
-          ],
-          [
-            ".used1-0",
-            {
-              "opacity": 1
-            },
-            0.0
-          ],
-          [
-            ".used1-1",
-            {
-              "opacity": 1
-            },
-            0.08
-          ],
-          [
-            ".used1-2",
-            {
-              "opacity": 1
-            },
-            0.16
-          ]
-        ]
-      },
-      {
-        "label": "看见浪费",
-        "actions": [
-          [
-            ".waste",
-            {
-              "opacity": 1
-            }
-          ]
-        ]
-      }
-    ]
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a> · <a href="/posts/llm-engineering/#memory">回到学习路径</a></footer>
+<script type="application/json" id="math-definitions">
+{
+  "global": {
+    "page-size": {"label":"b：块大小","description":"一个物理 KV 块可以容纳的 token 数。这里不是请求的 batch size。","unit":"token / 块"},
+    "position": {"label":"t：逻辑位置","description":"当前请求内部的 token 位置编号，从 0 开始；不随物理页布局改变。","unit":"位置编号"},
+    "logical-page": {"label":"j：逻辑块编号","description":"逻辑位置 t 除以块大小 b 后向下取整，作为请求页表的索引。","unit":"从 0 开始的编号"},
+    "offset": {"label":"r：块内偏移","description":"逻辑位置 t 对块大小 b 取余，表示要访问块中的第几个槽位。","unit":"从 0 开始的槽位编号"},
+    "physical-page": {"label":"p：物理块编号","description":"从请求页表查出的 KV 池物理块编号；它不表示时间顺序或 RoPE 位置。","unit":"物理块编号"},
+    "kv-heads": {"label":"Hkv：KV 头数","description":"当前计算范围内，每层保存的 key/value 头数；GQA 时通常小于 query 头数。","unit":"个头"},
+    "head-dim": {"label":"d：每头维度","description":"一个 key 或 value 向量中的元素数；容量公式假设 K 与 V 维度相同。","unit":"元素 / 头"},
+    "layers": {"label":"L：缓存层数","description":"在当前容量预算中，每个 token 都要保存 K/V 的模型层数。","unit":"层"},
+    "element-bytes": {"label":"e：每元素字节数","description":"存储一个 K/V 元素需要的字节数。BF16 为 2 字节。","unit":"B / 元素"},
+    "token-bytes": {"label":"m_tok：每 token 的 KV 字节数","description":"跨预算中的全部层，保存一个 token 的 K 和 V 所需的总字节数。","unit":"B / token"},
+    "page-bytes": {"label":"m_page：一组物理块的 KV 字节数","description":"每层对应 b 个 token 的块合计占用的字节数，等于 b 乘每 token 的跨层 KV 字节数。","unit":"B / 组"},
+    "sequence-length": {"label":"S：当前有效历史长度","description":"该请求已经保存有效 K/V 的 token 数，不包括分配后尚未使用的尾部空槽。","unit":"token"}
   },
-  {
-    "id": "pg-map",
-    "steps": [
-      {
-        "label": "建立映射",
-        "actions": [
-          [
-            ".map0,.map1,.map2",
-            {
-              "opacity": 1
-            }
-          ]
-        ]
-      },
-      {
-        "label": "连接物理块",
-        "actions": [
-          [
-            ".link0",
-            {
-              "opacity": 1
-            },
-            0.0
-          ],
-          [
-            ".link1",
-            {
-              "opacity": 1
-            },
-            0.12
-          ],
-          [
-            ".link2",
-            {
-              "opacity": 1
-            },
-            0.24
-          ],
-          [
-            ".physical5 rect",
-            {
-              "fill": "var(--accent-soft)",
-              "stroke": "var(--accent)"
-            }
-          ],
-          [
-            ".physical1 rect",
-            {
-              "fill": "var(--accent-soft)",
-              "stroke": "var(--accent)"
-            }
-          ],
-          [
-            ".physical7 rect",
-            {
-              "fill": "var(--accent-soft)",
-              "stroke": "var(--accent)"
-            }
-          ]
-        ]
-      }
-    ]
-  },
-  {
-    "id": "pg-read",
-    "steps": [
-      {
-        "label": "定位地址",
-        "actions": [
-          [
-            ".lookupwire,.readwire",
-            {
-              "opacity": 1
-            }
-          ],
-          [
-            ".lookup rect",
-            {
-              "fill": "var(--accent-soft)"
-            }
-          ],
-          [
-            ".offset2 rect",
-            {
-              "fill": "var(--accent-soft)",
-              "stroke": "var(--accent)"
-            }
-          ]
-        ]
-      },
-      {
-        "label": "参与计算",
-        "actions": [
-          [
-            ".towork,.kernel",
-            {
-              "opacity": 1
-            }
-          ]
-        ]
-      }
-    ]
-  },
-  {
-    "id": "pg-grow",
-    "steps": [
-      {
-        "label": "分配下一块",
-        "actions": [
-          [
-            ".nexttoken",
-            {
-              "opacity": 1
-            }
-          ],
-          [
-            ".freeblock rect",
-            {
-              "fill": "var(--accent-soft)",
-              "stroke": "var(--accent)"
-            }
-          ],
-          [
-            ".nexttoken",
-            {
-              "x": 210,
-              "y": 12
-            },
-            0.2
-          ]
-        ]
-      },
-      {
-        "label": "追加映射",
-        "actions": [
-          [
-            ".newmap",
-            {
-              "opacity": 1,
-              "x": 200
-            }
-          ],
-          [
-            ".claim",
-            {
-              "opacity": 1
-            }
-          ]
-        ]
-      }
-    ]
-  },
-  {
-    "id": "pg-release",
-    "steps": [
-      {
-        "label": "结束并归还",
-        "actions": [
-          [
-            ".done",
-            {
-              "opacity": 1
-            }
-          ],
-          [
-            ".tableA",
-            {
-              "opacity": 0.2
-            }
-          ],
-          [
-            ".release0,.release1",
-            {
-              "y": 155
-            }
-          ]
-        ]
-      },
-      {
-        "label": "服务新请求",
-        "actions": [
-          [
-            ".newB,.assignB",
-            {
-              "opacity": 1
-            }
-          ],
-          [
-            ".release0",
-            {
-              "x": -210,
-              "y": 155
-            }
-          ],
-          [
-            ".release0 rect",
-            {
-              "stroke": "var(--accent)"
-            }
-          ]
-        ]
-      }
-    ]
-  },
-  {
-    "id": "pg-cow",
-    "steps": [
-      {
-        "label": "复制尾块",
-        "actions": [
-          [
-            ".copy",
-            {
-              "opacity": 1,
-              "x": 384
-            }
-          ],
-          [
-            ".edgeB,.ref2",
-            {
-              "opacity": 0
-            }
-          ],
-          [
-            ".newedge,.ref1",
-            {
-              "opacity": 1
-            }
-          ]
-        ]
-      },
-      {
-        "label": "各自写入",
-        "actions": [
-          [
-            ".writeA,.writeB",
-            {
-              "opacity": 1
-            }
-          ],
-          [
-            ".copy,.shared",
-            {
-              "opacity": 0
-            }
-          ]
-        ]
-      }
-    ]
+  "scopes": {
+    "attention": {
+      "score": {"label":"z_i：attention 分数","description":"当前 query 与逻辑位置 i 的 key 点积、缩放并施加 mask 后的标量分数。","unit":"无量纲"},
+      "value": {"label":"v_i：位置 i 的 value","description":"参与 attention 加权求和的 value 向量；动态图中用单个通道的标量演示。","unit":"与输出向量相同"},
+      "output": {"label":"y：attention 输出","description":"所有有效逻辑位置的 value 按全局 softmax 概率加权得到的向量。","unit":"与 value 相同"},
+      "maximum": {"label":"m：已处理分数的最大值","description":"稳定 softmax 用来统一指数尺度的最大分数；两个块合并时取两者最大值。","unit":"无量纲"},
+      "denominator": {"label":"ℓ：缩放后的指数和","description":"将各分数减去当前最大值 m，再指数化求和。最终归一化分母。","unit":"无量纲"},
+      "numerator": {"label":"u：缩放后的 value 加权和","description":"用 exp(z_i−m) 对 value 加权求和的向量，最终 attention 输出是 u/ℓ。","unit":"与 value 相同"}
+    }
   }
-];
-  window.lessonTimelines = {};
-  scenes.forEach(({id, steps}) => {
-    const slide = document.getElementById(id);
-    const tl = Anim.timeline({root: slide});
-    tl.label('起点', 0);
-    let at = 0;
-    steps.forEach((step, i) => {
-      const start = at + 0.12;
-      tl.to('.caption-' + i, {opacity: 0}, {at: start, dur: 0.16});
-      tl.to('.caption-' + (i + 1), {opacity: 1}, {at: start + 0.16, dur: 0.2});
-      step.actions.forEach(([selector, props, delay = 0, dur = 0.85]) => {
-        tl.to(selector, props, {at: start + delay, dur});
-      });
-      at = Math.max(tl.duration, start + 1.0);
-      tl.label(step.label, at);
-    });
-    Anim.slide(slide, tl, {steps: true, controls: true, delay: 0});
-    window.lessonTimelines[id] = tl;
-  });
-})();
+}
 </script>
 <script>
 (() => {
-  const scenes = [{"id": "pg-address-work", "steps": [["整除与取余", [[".packet", {"x": 280}]]], ["查表得到物理块", [[".packet", {"x": 560}]]], ["按 stride 展开", [[".packet", {"x": 860}], [".answer", {"text": 55}]]]]}, {"id": "pg-cow-work", "steps": [["分配并复制", [[".new,.copyline", {"opacity": 1}], [".free", {"text": 3}]]], ["切换 A 的映射", [[".atable", {"opacity": 0}], [".atable-new", {"opacity": 1}], [".oldref", {"text": 1}], [".newref", {"text": 1}]]], ["写入私有尾块", [[".new text", {"opacity": 0}], [".write", {"opacity": 1}]]]]}];
-  scenes.forEach(({id,steps}) => {
-    const slide = document.getElementById(id), tl = Anim.timeline({root:slide});
-    tl.label('起点',0);
-    let at=0;
-    steps.forEach(([label,actions])=>{
-      actions.forEach(([selector,props])=>{
-        if(typeof props.text === 'number') props.fmt=v=>Number.isInteger(props.text)?String(Math.round(v)):v.toFixed(1);
-        tl.to(selector,props,{at:at+.1,dur:.9});
-      });
-      at+=1.1;tl.label(label,at);
+  const reduce = matchMedia('(prefers-reduced-motion: reduce)');
+  const controllers = [];
+  function controller(root, count, draw) {
+    let time = 0, playing = false, frame = 0, last = 0;
+    const range = root.querySelector('input[type=range]');
+    const play = root.querySelector('[data-action=play]');
+    const prev = root.querySelector('[data-action=prev]');
+    const next = root.querySelector('[data-action=next]');
+    const output = root.querySelector('.pa-controls output');
+    const duration = count - 1;
+    function render(value) {
+      time = Math.max(0, Math.min(duration, value));
+      const step = Math.min(duration, Math.floor(time + 1e-7));
+      range.value = String(Math.round(time * 1000));
+      root.dataset.step = String(step);
+      prev.disabled = time <= 0;
+      next.disabled = time >= duration;
+      output.textContent = (step + 1) + ' / ' + count;
+      root.querySelector('.pa-wire span').style.width = (100 * time / duration) + '%';
+      draw(step, time);
+    }
+    function stop() { playing = false; cancelAnimationFrame(frame); play.textContent = '播放'; }
+    function tick(now) {
+      if (!playing) return;
+      render(time + Math.min(now - last, 100) / 2200); last = now;
+      if (time >= duration) stop(); else frame = requestAnimationFrame(tick);
+    }
+    play.addEventListener('click', () => {
+      if (playing) { stop(); return; }
+      if (reduce.matches) { render(time >= duration ? 0 : Math.floor(time + 1e-7) + 1); return; }
+      if (time >= duration) render(0);
+      playing = true; play.textContent = '暂停'; last = performance.now(); frame = requestAnimationFrame(tick);
     });
-    Anim.slide(slide,tl,{steps:true,controls:true,delay:0});
-    window.lessonTimelines[id]=tl;
+    prev.addEventListener('click', () => { stop(); render(Math.ceil(time - 1e-7) - 1); });
+    next.addEventListener('click', () => { stop(); render(Math.floor(time + 1e-7) + 1); });
+    root.querySelector('[data-action=reset]').addEventListener('click', () => { stop(); render(0); });
+    range.addEventListener('input', () => { stop(); render(Number(range.value) / 1000); });
+    document.addEventListener('visibilitychange', () => { if (document.hidden) stop(); });
+    render(0);
+    const api = { reset: () => { stop(); render(0); }, stop };
+    controllers.push(api); return api;
+  }
+  const address = document.querySelector('[data-demo=address]');
+  const addressSelect = document.getElementById('address-token');
+  const addressControl = controller(address, 4, (step) => {
+    const t = Number(addressSelect.value), j = Math.floor(t / 4), r = t % 4, physical = [5,1][j];
+    document.getElementById('address-split').textContent = t + ' ÷ 4 → 逻辑块 ' + j + '，偏移 ' + r;
+    address.querySelector('[data-node=split]').classList.toggle('is-current', step === 1);
+    address.querySelector('[data-node=lookup]').classList.toggle('is-current', step === 2);
+    address.querySelectorAll('[data-map]').forEach(row => row.classList.toggle('is-current', step >= 2 && Number(row.dataset.map) === j));
+    address.querySelectorAll('[data-position]').forEach(slot => slot.classList.toggle('is-current', step === 3 && Number(slot.dataset.position) === t));
+    const captions = [
+      '起点：要读取请求 A 的逻辑位置 ' + t + '。P1、P5 是物理块编号；槽位旁的 K/V 数字表示原来的逻辑位置。',
+      '拆开位置：' + t + ' ÷ 4 的商是 ' + j + '，余数是 ' + r + '。商用来查页表，余数会一直带到最后。',
+      '查询页表：page_table[' + j + '] = P' + physical + '。只转换块编号，块内偏移仍为 ' + r + '。',
+      '完成读取：P' + physical + ' 的槽位 ' + r + '，存放的正是 K' + t + ' / V' + t + '。模型看到的位置仍为 ' + t + '，不是物理块编号。'
+    ];
+    address.querySelector('.pa-caption').textContent = captions[step];
   });
+  addressSelect.addEventListener('change', () => addressControl.reset());
+
+  const merge = document.querySelector('[data-demo=merge]');
+  controller(merge, 5, (step) => {
+    const rows = {
+      a: step === 0 ? ['待计算','待计算','待计算'] : step < 3 ? ['ln 2','1.5','5'] : ['ln 4','0.75','2.5'],
+      b: step < 2 ? ['待计算','待计算','待计算'] : ['ln 4','1.75','12.5'],
+      total: step < 4 ? ['待合并','待合并','待合并'] : ['ln 4','2.5','15']
+    };
+    Object.entries(rows).forEach(([name, values]) => {
+      const row = merge.querySelector('[data-merge-row=' + name + ']');
+      [...row.querySelectorAll('td')].slice(1).forEach((td,i) => td.textContent = values[i]);
+      row.classList.toggle('is-current', (name === 'a' && [1,3].includes(step)) || (name === 'b' && step === 2) || (name === 'total' && step === 4));
+    });
+    merge.querySelectorAll('[data-merge-block]').forEach((node,i) => node.classList.toggle('is-current', step === i + 1));
+    const equations = [
+      '直接参考：(2 + 8 + 18 + 32) / 10 = 6',
+      '块 A：exp([0, ln 2] − ln 2) = [1/2, 1]',
+      '块 B：exp([ln 3, ln 4] − ln 4) = [3/4, 1]',
+      '块 A 换尺度：exp(ln 2 − ln 4) = 1/2',
+      '合并：ℓ = 0.75 + 1.75 = 2.5；u = 2.5 + 12.5 = 15；y = 6'
+    ];
+    const captions = [
+      '先保留直接计算的答案 6。分页处理只能改变读取和累加方式，不应该改变这个答案。',
+      '块 A 的最大分数是 ln 2。指数和为 1/2 + 1 = 1.5，加权和为 (1/2)×2 + 1×4 = 5。',
+      '块 B 的最大分数是 ln 4。指数和为 3/4 + 1 = 1.75，加权和为 (3/4)×6 + 1×8 = 12.5。两行目前使用不同尺度。',
+      '共同最大值选 ln 4。块 A 的 ℓ 和 u 都乘 1/2，分别变成 0.75 和 2.5；块 B 已使用这一尺度，保持不变。',
+      '现在才能相加。全局指数和为 2.5，加权和为 15，输出 15/2.5 = 6，与连续读取的参考完全一致。'
+    ];
+    document.getElementById('merge-equation').textContent = equations[step];
+    merge.querySelector('.pa-caption').textContent = captions[step];
+  });
+
+  const cow = document.querySelector('[data-demo=cow]');
+  controller(cow, 6, (step) => {
+    document.getElementById('cow-table-a').textContent = step < 2 ? '[P2]' : step < 5 ? '[P5]' : '已完成 · []';
+    document.getElementById('cow-table-b').textContent = step === 0 ? '尚未创建' : '[P2]';
+    document.getElementById('cow-ref-2').textContent = '引用 ' + (step === 1 ? 2 : 1);
+    document.getElementById('cow-ref-5').textContent = step >= 2 && step < 5 ? '引用 1' : '空闲';
+    const p2 = ['p0','p1','p2',step >= 4 ? 'b3' : '空槽'];
+    const p5 = step < 2 || step >= 5 ? ['空槽','空槽','空槽','空槽'] : ['p0','p1','p2',step >= 3 ? 'a3' : '空槽'];
+    [[2,p2],[5,p5]].forEach(([id,values]) => {
+      cow.querySelectorAll('[data-cow-page="' + id + '"] .pa-slot').forEach((slot,i) => {
+        slot.querySelector('span').textContent = values[i];
+        slot.classList.toggle('is-empty',values[i] === '空槽');
+        slot.classList.toggle('is-new',values[i] === 'a3' || values[i] === 'b3');
+        slot.classList.toggle('is-current',(id === 5 && step === 2 && i < 3) || (id === 5 && step === 3 && i === 3) || (id === 2 && step === 4 && i === 3));
+      });
+    });
+    document.getElementById('cow-account').textContent = step >= 2 && step < 5 ? '已用 2 块 · 空闲 0 块' : '已用 1 块 · 空闲 1 块';
+    const captions = [
+      'A 独占 P2，其中有 3 个前缀位置；P5 还在空闲池。此时无需复制任何数据。',
+      'B 从同一前缀分叉，页表也指向 P2。只有引用从 1 变为 2，K/V 数据保持一份。',
+      'A 准备写入共享尾块：先申请 P5，复制 P2 的 3 个有效位置，再把 A 改指 P5。P2、P5 现在各有一个引用。',
+      'A 把自己的 a3 写入 P5 的槽位 3。P2 没有改变，因此 B 仍然只看到共同前缀。',
+      'B 追加 b3 时已经独占 P2，可以直接写入它的槽位 3。A、B 的分支分别保存在不同物理块。',
+      'A 完成：P5 引用从 1 变为 0，归还池。B 仍引用 P2，不能回收；P5 画成空槽表示已无有效所有者。'
+    ];
+    cow.querySelector('.pa-caption').textContent = captions[step];
+  });
+  const observer = new IntersectionObserver(entries => entries.forEach(e => {
+    if (!e.isIntersecting) controllers[[address,merge,cow].indexOf(e.target)]?.stop();
+  }));
+  [address,merge,cow].forEach(el => observer.observe(el));
 })();
 </script>
-<script src="/assets/post-links.js?v=1c9122c90486">
-</script>
-<script src="/assets/posts.js?v=0644ef627f82">
-</script>
+<script src="/assets/post-links.js?v=3173091271f1"></script>
+<script src="/assets/posts.js?v=150c41e1230c"></script>
+<script src="/assets/series.js?v=0db6ff6b7f47"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

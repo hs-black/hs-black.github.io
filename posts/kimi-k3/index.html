@@ -7,10 +7,9 @@
   <meta name="description" content="精读 Kimi K3 技术报告：有下界的 KDA、注意力残差、Stable LatentMoE 与分位数均衡，以及 1M 上下文的训练、RL 与推理系统。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     .chart { width: 100%; height: auto; display: block; margin-top: 8px; }
     .chart .axis { stroke: var(--border); stroke-width: 1; fill: none; }
@@ -47,6 +46,8 @@
       .chart text, .chart .lbl { font-size: 17px; }
     }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -177,8 +178,8 @@
           <rect class="box" x="250" y="70" width="120" height="60" rx="6"/><text x="310" y="96" text-anchor="middle">块 2</text><text class="t-soft" x="310" y="114" text-anchor="middle">求和 → b₂</text>
           <rect class="boxa" x="400" y="40" width="230" height="120" rx="8"/>
           <text x="515" y="62" text-anchor="middle">块 n 的第 i 层</text>
-          <text class="t-soft" x="515" y="84" text-anchor="middle">softmax(w_l · RMSNorm(·)) 加权</text>
-          <text class="t-soft" x="515" y="104" text-anchor="middle">源：b₀…b_{n−1} 与部分和 b_n^{i−1}</text>
+          <foreignObject class="diagram-math-label" x="404" y="69" width="222" height="21"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="\operatorname{softmax}(w_l\cdot\operatorname{RMSNorm}(\cdot))\;\text{加权}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.917px;line-height:1.2;color:var(--text-soft)">softmax(w_l · RMSNorm(·)) 加权</div></foreignObject>
+          <foreignObject class="diagram-math-label" x="404" y="90" width="222" height="23"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="\text{源：}b_0\ldots b_{n-1}\;\text{与部分和 }b_n^{i-1}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.917px;line-height:1.2;color:var(--text-soft)">源：b₀…b_{n−1} 与部分和 b_n^{i−1}</div></foreignObject>
           <text class="t-soft" x="515" y="124" text-anchor="middle">块间并行算，块内 online softmax 合并</text>
           <text class="t-soft" x="515" y="144" text-anchor="middle">显存 O(Nd) 而非 O(Ld)</text>
           <path class="attn" style="marker-end:url(#ah)" d="M45,80 C120,10 330,10 398,70"/>
@@ -700,8 +701,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

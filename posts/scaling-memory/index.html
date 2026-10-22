@@ -7,10 +7,9 @@
   <meta name="description" content="一步训练里显存花在哪、FLOPs 怎么数、MFU 怎么算：从 16 字节/参数和激活公式推到 6ND，附显存计算器与训练时长估算器。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     :root {
       --m-w: #5b4cf0; --m-g: #13917f; --m-master: #9b8cff; --m-opt: #e8590c;
@@ -80,6 +79,8 @@
     .afig .anim-bar { max-width: 600px; margin-left: auto; margin-right: auto; }
     .kbd { font-family: var(--font-mono); font-size: 0.9em; }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -315,18 +316,18 @@
           <text x="60" y="24" text-anchor="middle" font-size="13" class="soft">x [s,b,h]</text>
           <rect class="box" x="10" y="60" width="100" height="40" rx="8"/><text x="60" y="85" text-anchor="middle" font-size="14">RMSNorm</text>
           <rect class="box-acc" x="10" y="130" width="100" height="40" rx="8"/><text x="60" y="155" text-anchor="middle" font-size="13">Q/K/V 输入</text>
-          <rect class="box" x="90" y="200" width="100" height="40" rx="8"/><text x="140" y="225" text-anchor="middle" font-size="14">W_Q</text>
-          <rect class="box" x="250" y="200" width="100" height="40" rx="8"/><text x="300" y="225" text-anchor="middle" font-size="14">W_K</text>
-          <rect class="box" x="410" y="200" width="100" height="40" rx="8"/><text x="460" y="225" text-anchor="middle" font-size="14">W_V</text>
+          <rect class="box" x="90" y="200" width="100" height="40" rx="8"/><foreignObject class="diagram-math-label" x="94" y="201" width="92" height="38"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="W_Q" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:11.570px;line-height:1.2;color:var(--text)">W_Q</div></foreignObject>
+          <rect class="box" x="250" y="200" width="100" height="40" rx="8"/><foreignObject class="diagram-math-label" x="254" y="201" width="92" height="38"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="W_K" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:11.570px;line-height:1.2;color:var(--text)">W_K</div></foreignObject>
+          <rect class="box" x="410" y="200" width="100" height="40" rx="8"/><foreignObject class="diagram-math-label" x="414" y="201" width="92" height="38"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="W_V" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:11.570px;line-height:1.2;color:var(--text)">W_V</div></foreignObject>
           <rect class="box-acc" x="90" y="262" width="420" height="40" rx="8"/><text x="300" y="287" text-anchor="middle" font-size="14">FlashAttention（存 Q、K、V、O、lse）</text>
-          <rect class="box" x="250" y="324" width="100" height="40" rx="8"/><text x="300" y="349" text-anchor="middle" font-size="14">W_O</text>
+          <rect class="box" x="250" y="324" width="100" height="40" rx="8"/><foreignObject class="diagram-math-label" x="254" y="325" width="92" height="38"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="W_O" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:11.570px;line-height:1.2;color:var(--text)">W_O</div></foreignObject>
           <rect class="box" x="10" y="392" width="100" height="40" rx="8"/><text x="60" y="417" text-anchor="middle" font-size="14">+ 残差</text>
           <!-- annotations -->
           <g font-size="12" class="mono">
             <circle cx="122" cy="80" r="5" class="acc2"/><text x="132" y="84" class="soft">2sbh</text>
             <circle cx="122" cy="150" r="5" class="acc2"/><text x="132" y="154" class="soft">2sbh</text>
-            <circle cx="530" cy="275" r="5" class="acc2"/><text x="540" y="279" class="soft">Q 2sbh, K+V 4sbh_kv</text>
-            <circle cx="530" cy="295" r="5" class="acc2"/><text x="540" y="299" class="soft">O 2sbh（W_O 的输入）</text>
+            <circle cx="530" cy="275" r="5" class="acc2"/><foreignObject class="diagram-math-label" x="540" y="264" width="178" height="21"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="Q\;2sbh,\quad K+V\;4sbh_{\mathrm{kv}}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:flex-start;white-space:nowrap;font-size:9.917px;line-height:1.2;color:var(--text-soft)">Q 2sbh, K+V 4sbh_kv</div></foreignObject>
+            <circle cx="530" cy="295" r="5" class="acc2"/><foreignObject class="diagram-math-label" x="540" y="285" width="178" height="22"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="O\;2sbh\;\text{（}W_O\text{ 的输入）}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:flex-start;white-space:nowrap;font-size:9.917px;line-height:1.2;color:var(--text-soft)">O 2sbh（W_O 的输入）</div></foreignObject>
           </g>
           <text x="370" y="420" font-size="13" class="soft">MLP 部分同理：RMSNorm 输入 2sbh、MLP 输入 2sbh，</text>
           <text x="370" y="440" font-size="13" class="soft">SwiGLU 的 gate、up、SiLU 输出、乘积各 2sbF。</text>
@@ -1141,8 +1142,8 @@ optimizer.step()</code></pre>
     Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.afig-ctl') });
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

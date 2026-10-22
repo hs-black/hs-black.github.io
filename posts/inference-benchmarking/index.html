@@ -21,7 +21,7 @@ python3 lab.py --rate 12
 python3 lab.py --arrival closed --stall-ms 500
 python3 lab.py --pattern poisson --rate 8
 python3 lab.py --rate 12 --json</pre><p class="ws-lead">先预测开放与闭环哪个会积压更多请求，再检查 JSON 的 arrival、start 和 tokens。把规则到达改为固定种子的 Poisson 到达，比较 p99。</p><p class="ws-lead">扩展任务：加入两个 worker，再加入按长度变化的服务时间。保留时间戳定义，让新调度器也通过不重叠、因果顺序和手算案例检查。</p></section><section class="slide workshop" id="references"><div class="kicker">推理工程 · 服务与测量</div><h2>参考与下一步</h2><ul class="references"><li><a href="https://github.com/vllm-project/vllm/blob/v0.31.0/vllm/benchmarks/serve.py">vLLM 0.31.0：benchmark 指标实现</a></li><li><a href="https://docs.vllm.ai/en/stable/cli/bench/serve/">vLLM：bench serve 参数与生产指标</a></li><li><a href="https://prometheus.io/docs/practices/histograms/">Prometheus：histogram 与 summary 的聚合</a></li><li><a href="https://arxiv.org/abs/2401.09670">DistServe：面向 goodput 的服务设计</a></li></ul><p class="ws-caption">继续：<a href="/posts/prefill-decode-disaggregation/">P/D 分离</a>，把刚建立的测量方法用于一次系统架构选择。</p></section>
-</div></main><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
+</div></main><script src="/assets/slides.js?v=33e153b61ac9"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
 (()=>{
 const clamp=(x,a=0,b=1)=>Math.min(b,Math.max(a,x));
 const $=(el,s)=>el.querySelector(s);
@@ -35,5 +35,5 @@ timeline('queue-build',6,[0,1,2,3,4,5,6],(el,t)=>{const ms=t*100;let queued=0,do
 const sweepRates=[4,6,8,10,12];const sweepVals=sweepRates.map(rate=>{let free=0,good=0,end=0;for(let i=0;i<60;i++){const a=i/rate,s=Math.max(a,free);if(s+.04-a<=.2+1e-9)good++;free=s+.1;end=free;}return{rate,through:60/end,good:good/end};});
 timeline('load-sweep',4,[0,1,2,3,4],(el,t)=>{const n=Math.min(4,Math.floor(t));const xs=v=>100+(v.rate-4)*115,ys=v=>230-v*16;const part=sweepVals.slice(0,n+1);$(el,'.sweep-through').setAttribute('d',part.map((v,i)=>(i?'L':'M')+xs(v)+' '+ys(v.through)).join(' '));$(el,'.sweep-good').setAttribute('d',part.map((v,i)=>(i?'L':'M')+xs(v)+' '+ys(v.good)).join(' '));const v=sweepVals[n];$(el,'.sweep-point').setAttribute('cx',xs(v));$(el,'.sweep-point').setAttribute('cy',ys(v.good));$(el,'.sweep-label').textContent='λ='+v.rate+'，goodput='+v.good.toFixed(2);$(el,'.live-caption').textContent=n<4?'还没有持续积压，大部分请求同时满足两项延迟目标。':'λ=12 超过 10 req/s 服务能力：吞吐封顶，但只有前 10 个请求满足 TTFT。';});
 
-})();</script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+})();</script><script src="/assets/post-links.js?v=3173091271f1"></script><script src="/assets/posts.js?v=150c41e1230c"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body></html>

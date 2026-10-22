@@ -31,7 +31,10 @@
   slides.forEach((el, i) => {
     const option = document.createElement('option');
     option.value = i;
-    option.textContent = (i + 1) + '. ' + (el.querySelector('h1, h2')?.textContent.trim() || '幻灯片');
+    const heading = el.querySelector('h1, h2');
+    // Native select options cannot contain typeset equations. Authors can give
+    // a short spoken title when the visible heading includes mathematical TeX.
+    option.textContent = (i + 1) + '. ' + (heading?.dataset.menuTitle || heading?.textContent.trim() || '幻灯片');
     jump.appendChild(option);
   });
 

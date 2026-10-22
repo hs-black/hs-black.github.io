@@ -1,316 +1,412 @@
 <!doctype html>
 <html lang="zh-CN">
 <head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>KV cache：记住已经算过的历史 · Zunzhe Zhang</title>
-<meta name="description" content="从 QKV 张量、增量位置与 causal mask 到 GQA 分片、显存和带宽预算；附数值动画、工程诊断、计算题与 NumPy 正确性实验。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
-<style>
-.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
-.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
-.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
-.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
-
-.slide.workshop .course-number-scene .cn-value{font:36px var(--font-mono);fill:var(--accent)}
-.slide.workshop .course-number-scene .cn-label{font-size:20px;fill:var(--text-soft)}
-.slide.workshop .course-number-scene .cn-detail{font-size:19px}
-</style>
-<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <script>if (/^#\d+$/.test(location.hash)) location.replace('/posts/kv-cache/slides.html' + location.hash);</script>
+  <title>KV cache：记住已经算过的历史 · Zunzhe Zhang</title>
+  <meta name="description" content="从一行 attention 的数值计算出发，推导 KV 为什么可复用、prefill/decode 怎样交接、位置与 mask 如何对齐，再算清 GQA 缓存的容量和读取成本；含可操作图解、符号释义、习题与 NumPy 实验。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+  <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+  <style>
+    .kv-figure { margin: 1.6em 0; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+    .kv-figure h3 { margin: 0; font-size: 19px; }
+    .kv-figure .fig-read { margin: 8px 0 16px; color: var(--text-soft); font-size: 14px; line-height: 1.65; }
+    .kv-figure figcaption { text-align: left; margin-top: 14px; line-height: 1.65; }
+    .kv-controls { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 15px 0 10px; }
+    .kv-controls button { border: 1px solid var(--border); border-radius: 8px; background: var(--bg); color: var(--text); font: inherit; font-size: 14px; padding: 7px 11px; cursor: pointer; }
+    .kv-controls button:disabled { opacity: .4; cursor: default; }
+    .kv-controls button:focus-visible, .kv-controls input:focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .kv-controls input[type="range"] { flex: 1 1 120px; min-width: 90px; }
+    .kv-step { font: 13px var(--font-mono); color: var(--text-soft); min-width: 3.2em; text-align: right; }
+    .kv-caption { min-height: 4.8em; padding: 12px 14px; background: var(--accent-soft); border-radius: 9px; font-size: 15px; line-height: 1.7; }
+    .kv-caption strong { color: var(--accent); }
+    .kv-foot { font-size: 13px; color: var(--text-faint); }
+    .kv-symbol-note { font-size: 14px; color: var(--text-soft); }
+    .kv-figure .table-wrap { margin: 12px 0; }
+    .kv-figure table { width: 100%; font-size: 14px; border-collapse: collapse; }
+    #attention-demo table { min-width: 0; table-layout: fixed; }
+    .kv-figure th, .kv-figure td { padding: 8px 5px; text-align: center; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    .attn-bars { display: grid; gap: 10px; margin: 16px 0; }
+    .attn-bar { display: grid; grid-template-columns: 74px minmax(0, 1fr) 60px; align-items: center; gap: 10px; font-size: 14px; }
+    .attn-track { background: var(--bg-soft); height: 24px; border-radius: 5px; overflow: hidden; }
+    .attn-fill { width: 0; height: 100%; background: var(--accent); transition: width .55s ease; }
+    .attn-bar output { text-align: right; font-variant-numeric: tabular-nums; }
+    .attn-total { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: baseline; font-size: 14px; }
+    .attn-total strong { font: 28px var(--font-mono); color: var(--accent); }
+    .attn-inactive { color: var(--text-faint); }
+    .attn-active { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+    .kv-small-controls { display: flex; flex-wrap: wrap; gap: 8px 18px; margin: 12px 0; font-size: 14px; align-items: center; }
+    .kv-small-controls label { display: inline-flex; gap: 7px; align-items: center; }
+    .kv-small-controls select { padding: 5px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg); color: var(--text); font: inherit; }
+    .life-flow { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 8px; margin: 12px 0; }
+    .life-node { padding: 9px 6px; border: 1px solid var(--border); border-radius: 9px; text-align: center; background: var(--bg); font-size: 14px; line-height: 1.5; transition: background .3s, border-color .3s; }
+    .life-node.is-working { border-color: var(--accent); background: var(--accent-soft); }
+    .life-node small { display: block; font-size: 12px; color: var(--text-soft); }
+    .life-grid { display: grid; grid-template-columns: 55px repeat(5,minmax(0,1fr)); gap: 5px; align-items: stretch; font-size: 13px; margin-top: 12px; }
+    .life-grid .head { text-align: center; color: var(--text-soft); padding: 4px 0; }
+    .life-grid .row-label { display: flex; align-items: center; font-weight: 600; }
+    .life-cell { min-height: 58px; border: 1px dashed var(--border); border-radius: 7px; display: flex; flex-direction: column; justify-content: center; align-items: center; background: var(--bg); transition: background .35s, border-color .35s; }
+    .life-cell.filled { border: 1px solid var(--accent); background: var(--accent-soft); }
+    .life-cell.writing { border-width: 2px; }
+    .life-cell small { font-size: 10px; color: var(--text-soft); }
+    .life-status { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px; }
+    .life-status div { padding: 10px 12px; border-radius: 9px; background: var(--bg-soft); font-size: 13px; line-height: 1.6; }
+    .life-status b { display: block; font-size: 16px; color: var(--accent); }
+    .mask-scroll { max-width: 100%; overflow-x: auto; margin: 16px 0; }
+    .mask-grid { display: grid; gap: 5px; min-width: 250px; font-size: 12px; text-align: center; }
+    .mask-grid .mask-head { color: var(--text-soft); padding: 4px 0; }
+    .mask-cell { display: flex; flex-direction: column; justify-content: center; min-height: 48px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-soft); transition: background .25s, opacity .25s; }
+    .mask-cell.allowed { color: var(--accent); border-color: var(--accent); background: var(--accent-soft); }
+    .mask-cell.inactive { opacity: .4; }
+    .mask-cell small { font-size: 11px; }
+    .mask-row-label { padding-top: 8px; font-weight: 600; }
+    .mask-value { font: 16px/1.65 var(--font-mono); overflow-wrap: anywhere; }
+    .kv-exercise { margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--border); }
+    .kv-exercise h3 { margin-top: 0; }
+    .kv-example { padding: 12px 16px; background: var(--bg-soft); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; }
+    .kv-equation-note { margin-top: 6px; color: var(--text-soft); font-size: 15px; }
+    @media (max-width: 480px) {
+      .kv-figure { padding: 14px 11px; }
+      .kv-controls { gap: 6px; }
+      .kv-controls button { padding: 7px 9px; }
+      .kv-caption { min-height: 0; }
+      #attention-demo table { font-size: 12px; }
+      #attention-demo th, #attention-demo td { padding: 8px 2px; }
+      .life-grid { grid-template-columns: 40px repeat(5,minmax(0,1fr)); gap: 3px; font-size: 12px; }
+      .life-cell { min-height: 54px; }
+      .life-cell small { font-size: 9px; }
+      .life-status { grid-template-columns: 1fr; }
+      .life-node { font-size: 12px; }
+      .attn-bar { grid-template-columns: 60px minmax(0,1fr) 48px; gap: 6px; }
+    }
+    @media (prefers-reduced-motion: reduce) { .attn-fill, .life-cell, .life-node, .mask-cell { transition: none; } }
+  </style>
 </head>
-<body class="deck-page">
-<main class="deck">
-<div class="stage">
-<section class="slide center">
-<div class="kicker rise">动画图解 LLM 系统</div>
-<h1 class="rise" style="--d:1">KV cache：记住已经算过的历史</h1>
-<p class="muted rise" style="--d:2">每次只生成一个新 token，为什么显存却越用越多？</p>
-<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
-</section>
-<section class="slide lesson" id="qkv">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>Q 是问题，K 是索引，V 是内容</h2>
-<p class="intro">当前 token 带着 Q 查历史：先匹配 K，再把对应的 V 混合起来。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="查询 Q 依次匹配三个 K，再把三个 V 按权重汇入输出">
-</svg>
-<div class="captions">
-<p>假设正在补全“猫坐在……”。每个 token 的 hidden state 经过投影，得到 <b>Q、K、V</b>。</p>
-<p>当前的 Q 与历史 K 做点积，得到一排匹配分数。分数越高，这个位置越值得关注。</p>
-<p>softmax 把分数变成和为 1 的权重，再用这些权重加权求和 V，得到 attention 输出。</p>
-</div>
-<p class="note">词语、权重和张量尺寸均为示意；真实 token 划分由 tokenizer 决定。</p>
-</section>
-<section class="slide lesson" id="causal">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>历史不会因为新词而改变</h2>
-<p class="intro">因果 attention 只允许一个位置读取自己和前面的位置。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="因果 attention 矩阵保持旧三角不变，新 token 只增加一行查询">
-</svg>
-<div class="captions">
-<p>横轴是被读取的 K，纵轴是发起查询的 Q。右上角是未来，被 causal mask 挡住。</p>
-<p>旧位置的输入与可见历史都没变，所以已有 token 在每层产生的 K、V 可以继续使用。</p>
-<p>新 token 加入后，只多出最后一行查询。每层追加一份 K、V，就能留给后续步骤。</p>
-</div>
-</section>
-<section class="slide workshop" id="tensor-axes">
-<div class="kicker">工程细节</div><h2>先写出张量形状，再讨论缓存</h2>
-<p class="ws-lead">B 是请求数，T 是本次输入长度，D 是 hidden size；Hq / Hkv 是 query / KV 头数，d 是每头维度。</p><table class="ws-table"><thead><tr><th>张量</th><th>标准布局</th><th>在做什么</th></tr></thead><tbody><tr><td>X</td><td>[B, T, D]</td><td>进入这一层的 token 表示</td></tr><tr><td>Q</td><td>[B, Hq, T, d]</td><td>本次查询</td></tr><tr><td>K、V</td><td>各 [B, Hkv, T, d]</td><td>本次新生成的 key / value</td></tr><tr><td>cache K、V</td><td>各 [B, Hkv, P + T, d]</td><td>P 个历史位置 + T 个新位置</td></tr></tbody></table><p class="ws-note">布局可以换轴；存储的元素数不变。这里假设 K 与 V 维度相同。</p>
-</section>
-<section class="slide workshop" id="softmax-arithmetic">
-<div class="kicker">逐步算一遍</div><h2>一行 attention，真的算出一个数</h2>
-<p class="ws-lead">已缩放的 logits 为 [0, ln 2, ln 3]；exp 后是 [1, 2, 3]，除以总和 6。V 为 [2, 4, 8]。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="一行 attention，真的算出一个数"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">位置 0：权重 1/6 × value 2</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">位置 1：权重 2/6 × value 4</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">位置 2：权重 3/6 × value 8</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
-</section>
-<section class="slide workshop" id="cache-validity">
-<div class="kicker">工程细节</div><h2>为什么缓存 K、V，却通常不缓存 Q？</h2>
-<div class="ws-equation">Qₜ = XₜWQ；Kₜ = XₜWK；Vₜ = XₜWV</div><p class="ws-lead">后续位置需要历史 K 来匹配、历史 V 来取内容。历史 Q 只服务历史位置的输出，不会被未来查询读取。</p><div class="ws-cols"><div class="ws-card"><h3>复用成立的条件</h3><p>同一模型权重、相同前缀、相同位置编码与可见性；推理时关闭 dropout。</p></div><div class="ws-card"><h3>修改历史后怎么办？</h3><p>从最早修改位置起重新计算。中间层 hidden state 已经受前文影响，不能只替换那个 token 的第一层 K。</p></div></div><p class="ws-note">这里讨论因果解码器。双向 encoder 的旧表示可能因新输入而变化。</p>
-</section>
+<body>
+<header class="site-header wrap">
+  <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+  <nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav>
+</header>
+<main class="wrap">
+  <header class="post-header">
+    <h1>KV cache：记住已经算过的历史</h1>
+    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span><a href="/posts/kv-cache/slides.html">旧版幻灯片</a></div>
+  </header>
+  <article class="prose">
+    <p>模型已经读完一段 8000 token 的提示词，生成了第一个新 token。为了生成第二个，它需要再把前面 8000 个位置都跑一遍吗？如果每次都这样做，越长的对话就会积累越多重复工作。KV cache 的出发点很直接：找出下一步仍然需要、而且数值不会变化的结果，把它留下来。</p>
+    <p>这个想法同时带来两个后果。旧 token 的投影和前向计算可以省掉，生成会快很多；留下来的结果却要占用显存，而且新 query 仍需读取它们。因此，“有缓存”并不意味着不再处理历史。理解缓存的关键，是分清<strong>不必再算什么、仍然要读什么、什么时候又要多存一份</strong>。</p>
+    <p class="kv-symbol-note">公式里的点线标记可以用鼠标悬停、键盘聚焦或手机点按查看符号含义。关键定义也会写在公式附近，方便直接顺着正文阅读。</p>
+    <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
+      <li><a href="#attention">先算清楚一行 attention</a></li>
+      <li><a href="#reuse">旧 K/V 为什么不会变</a></li>
+      <li><a href="#lifecycle">Prefill、decode 与待消费的 token</a></li>
+      <li><a href="#shapes">从一条序列到 GQA batch</a></li>
+      <li><a href="#positions">追加多个 token 时，位置与 mask 怎样对齐</a></li>
+      <li><a href="#capacity">显存账本：一份历史有多大</a></li>
+      <li><a href="#bandwidth">缓存省计算，为什么还会越来越慢</a></li>
+      <li><a href="#implementation">实现与排错：先比较数值，再讨论速度</a></li>
+      <li><a href="#exercises">计算与排错练习</a></li>
+      <li><a href="#lab">运行 NumPy 实验</a></li>
+      <li><a href="#references">参考与延伸阅读</a></li>
+    </ol></nav>
 
-<section class="slide lesson" id="prefill">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>Prefill：一次处理整段提示词</h2>
-<p class="intro">已知的 prompt 可以在一次前向中并行计算；因果约束由 mask 保证。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="四个 prompt token 并行产生 KV 并写入显存，最后一个位置预测新 token">
-</svg>
-<div class="captions">
-<p>把“猫 / 坐 / 在 / 垫上”送入模型。这里画一个 attention 层，真实模型逐层执行。</p>
-<p>这一层并行产生所有输入位置的 Q、K、V；K、V 写入这一层的 cache。</p>
-<p>各位置通过 causal attention 读取允许看到的历史。最后一个位置的输出继续经过后续层，预测第一个新 token。</p>
-</div>
-</section>
-<section class="slide workshop" id="incremental-code">
-<div class="kicker">工程细节</div><h2>最小增量实现：追加后再 attention</h2>
-<pre class="ws-code">q, k_new, v_new = project(x_new)
+    <section id="attention" data-math-scope="attention">
+      <h2>1. 先算清楚一行 attention</h2>
+      <p>假设我们只看一个 attention 层、一个头。位置 \(t\) 的 hidden state 经过三组投影，得到 query \(q_t\)、key \(k_t\) 和 value \(v_t\)。Query 用来询问“哪些历史位置与现在有关”；key 提供匹配用的向量；value 提供被加权汇总的内容。这里三者都是有 \(d\) 个分量的向量，并不是词语本身。</p>
+      <p>当前 query 与允许读取的每个 key 做点积。因果模型在位置 \(t\) 只能读取编号 \(0\) 到 \(t\) 的位置，所以包含自己。先把点积除以头维度的平方根，得到分数，再用 softmax 归一化：</p>
+      $$z_{t,j}=\frac{\htmlData{symbol=q}{q_t}^{\mathsf T}\htmlData{symbol=k}{k_j}}{\sqrt{\htmlData{symbol=d}{d}}},\qquad
+      a_{t,j}=\frac{e^{z_{t,j}}}{\sum_{r=0}^{t}e^{z_{t,r}}},\qquad 0\le j\le t.$$
+      <p class="kv-equation-note">\(q_t\) 是当前位置的 query，\(k_j\) 是历史位置 \(j\) 的 key；\(d\) 是每个头的向量维度。\(a_{t,j}\) 是位置 \(j\) 的注意力权重，同一行权重的和为 1。</p>
+      <p>随后用这一行权重混合 value。输出仍然是一个 \(d\) 维向量：</p>
+      $$o_t=\sum_{j=0}^{t}a_{t,j}\htmlData{symbol=v}{v_j}.$$
+      <p>为方便手算，把 value 暂时看成标量。三个位置的已缩放分数为 \([0,\ln2,\ln3]\)，value 为 \([2,4,8]\)。取指数得到 \([1,2,3]\)，总和为 6，所以权重是 \([1/6,2/6,3/6]\)。最后输出 \(2/6+8/6+24/6=17/3\approx5.667\)。向量 value 的计算完全一样，只是对每个分量都做这次加权求和。</p>
+      <figure class="kv-figure" id="attention-demo" data-demo="attention">
+        <h3>一行 attention：分数怎样变成输出</h3>
+        <p class="fig-read">每一行始终代表同一个历史位置。上表跟踪归一化，下方条形显示该位置对最终输出贡献了多少，条形满宽统一表示 8。先逐步推进，再把 query 强度改成 0，观察为什么输出变成普通平均数。</p>
+        <div class="kv-small-controls"><label>Query 强度 <select id="query-scale"><option value="0">0 · 分数全为零</option><option value="1" selected>1 · 原始分数</option><option value="2">2 · 分数拉开</option></select></label></div>
+        <div class="table-wrap"><table><thead><tr><th>位置</th><th>分数</th><th>指数</th><th>权重</th><th>Value</th></tr></thead><tbody id="attention-rows"></tbody></table></div>
+        <div class="attn-bars" id="attention-bars"></div>
+        <div class="attn-total"><span>加权输出</span><strong id="attention-total">尚未求和</strong><span id="attention-sum"></span></div>
+        <div class="kv-controls" data-controls><button type="button" data-action="prev">上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步</button><button type="button" data-action="reset">重置</button><input type="range" min="0" max="4" step="1" value="0" aria-label="attention 计算步骤"><output class="kv-step"></output></div>
+        <div class="kv-caption" aria-live="polite"></div>
+        <figcaption>教学算例：query 强度为 \(\alpha\) 时，三个分数取 \([0,\alpha\ln2,\alpha\ln3]\)。value 保持不变，因而输出变化只来自权重变化。</figcaption>
+      </figure>
+      <p>注意这次计算读取了什么：一个当前 query、一排历史 key、一排历史 value。历史位置当时发出的 query 并没有出现在公式里。它已经完成了自己的任务，后来的 token 不需要再用它来提问。这就是缓存 K、V 而通常不缓存 Q 的直接原因。</p>
+    </section>
+
+    <section id="reuse">
+      <h2>2. 旧 K/V 为什么不会变</h2>
+      <p>“后面还要用”只说明值得缓存，还不足以说明缓存正确。另一个必要条件是：追加新 token 后，已有 K/V 必须与重新计算的结果相同。因果 attention 给了我们这个条件。</p>
+      <p>先看第一层。位置 2 的输入来自它自己的 token embedding 和位置编码；attention 只能读位置 0、1、2。后来追加位置 3，不会进入位置 2 的可见范围，因此位置 2 的输出不变。第二层收到的旧位置输入也就不变，它产生的旧 K/V 同样不变。沿着层数继续推，所有层的旧位置都成立。逐 token 的 RMSNorm、MLP 和残差相加也不会让未来 token 反过来修改历史。</p>
+      <p>因此，已有前缀的每层 K/V 可以原样复用。新的 token 只需要计算自己的 hidden state、Q/K/V 和每层输出；它的 query 去读已保存的历史，然后把自己的 K/V 留给下一步。只要权重、输入前缀、位置编码和可见性规则一致，缓存路径应当与完整前向得到相同的结果，允许浮点运算顺序造成的小误差。</p>
+      <p>这也告诉我们什么时候要使缓存失效。修改第 100 个 token，不仅改变这一位置的 K/V，还会影响其后所有能看见它的位置；不能只替换一个槽位。切换 adapter、改变 RoPE 的频率配置，或换一套 attention mask，也可能改变缓存的含义。服务端的 <a href="/posts/prefix-caching/">prefix cache</a> 因而需要识别“同一段计算”，不能只比较一串表面相同的文本。</p>
+      <div class="kv-example"><strong>一个可执行的判断：</strong>固定一段输入，将最后一个 token 改掉。正确的因果前向中，之前所有位置的输出都应该不变。如果这个检查失败，先检查未来位置是否被 mask，缓存优化还不应该开始。</div>
+    </section>
+
+    <section id="lifecycle">
+      <h2>3. Prefill、decode 与待消费的 token</h2>
+      <p>生成并不是“先写 token 到缓存，再显示到屏幕”。缓存保存的是模型已经处理过的输入，而刚采样出的 token 还没有经过模型。这一个时间差很容易让代码里的长度错一位。</p>
+      <p>例如提示词有三个 token，编号为 0、1、2。Prefill 把它们一起送入模型：第一层并行计算三个位置，在因果 mask 下做 attention，并保存第一层的 K/V；第二层再处理第一层输出，保存第二层的 K/V。层与层仍然有依赖，不能因为位置并行就认为所有层同时执行。</p>
+      <p>全部层完成后，最后一个 prompt 位置产生 logits。采样器从 logits 选出第一个新 token，记为 \(y_0\)。这时缓存仍然只有 prompt 的三个位置。下一次前向才把 \(y_0\) 作为输入，使用绝对位置 3，算出并追加它的 K/V；随后得到预测 \(y_1\) 的 logits。</p>
+      <figure class="kv-figure" id="lifecycle-demo" data-demo="lifecycle">
+        <h3>一枚新 token，何时真正进入缓存？</h3>
+        <p class="fig-read">上方高亮当前执行的部件，下方每一行是一层自己的缓存。每格表示该层某个位置的一对 K/V。实心格已经写入，虚线格尚未写入；列的位置始终不变。</p>
+        <div class="life-flow"><div class="life-node" data-node="0">第 1 层<small>投影 → attention → MLP</small></div><div class="life-node" data-node="1">第 2 层<small>投影 → attention → MLP</small></div><div class="life-node" data-node="2">采样器<small>logits → 新 token</small></div></div>
+        <div class="life-grid" id="life-grid"></div>
+        <div class="life-status"><div>模型本轮消费的输入<b id="life-input"></b></div><div>已采样、尚未消费的 token<b id="life-pending"></b></div></div>
+        <div class="kv-controls" data-controls><button type="button" data-action="prev">上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步</button><button type="button" data-action="reset">重置</button><input type="range" min="0" max="6" step="1" value="0" aria-label="prefill 与 decode 执行步骤"><output class="kv-step"></output></div>
+        <div class="kv-caption" aria-live="polite"></div>
+        <figcaption>图中只画两层、每层一个头，以及三个 prompt token，便于追踪生命周期。每格代表一对向量，不代表一个字节，也不表示实际分词结果。</figcaption>
+      </figure>
+      <p>Prefill 一次处理很多已知 token，线性层能在矩阵乘中复用权重；decode 每条请求通常只带来一个新输入。新的输出又决定下一轮输入，所以单条请求的这些 decode 步骤串行发生。增加 batch 是把不同请求放到同一轮，不是提前知道同一请求的未来 token。</p>
+      <p>如果 prompt 长度为 \(P_0\)，最终生成 \(O\ge1\) 个输出，而且最后一个输出产生后立刻结束，那么最多有 \(P_0+O-1\) 个位置参与前向、写入 KV。最后采样出的那个 token 不必再被消费。容量准入也可以保守地按 \(P_0+O\) 预留，但统计“已用缓存长度”时应数已经处理的输入，不能直接拿已生成 token 数代替。</p>
+    </section>
+
+    <section id="shapes" data-math-scope="shapes">
+      <h2>4. 从一条序列到 GQA batch</h2>
+      <p>单头的公式很清楚，真正实现时却必须知道每条轴代表什么。设本轮有 \(B\) 条请求，每条输入 \(C\) 个新 token，模型 hidden size 为 \(D\)。输入张量便是 \(X\in\mathbb R^{B\times C\times D}\)。这里 \(C\) 是<strong>本次输入的长度</strong>，不是完整历史长度；普通 decode 中 \(C=1\)。</p>
+      <p>Query 有 \(H_q\) 个头，缓存的 key/value 各有 \(H_{kv}\) 个头，每头维度为 \(d\)。先做投影，再拆出头这一维：</p>
+      $$W_Q\in\mathbb R^{D\times H_qd},\qquad W_K,W_V\in\mathbb R^{D\times H_{kv}d}.$$
+      <div class="table-wrap"><table><thead><tr><th>张量</th><th>按 batch、位置、头、分量排列</th><th>含义</th></tr></thead><tbody>
+        <tr><td>输入 \(X\)</td><td>\([B,C,D]\)</td><td>本轮新输入</td></tr>
+        <tr><td>\(Q\)</td><td>\([B,C,H_q,d]\)</td><td>本轮的 query</td></tr>
+        <tr><td>新 \(K,V\)</td><td>各 \([B,C,H_{kv},d]\)</td><td>本轮要追加的 K/V</td></tr>
+        <tr><td>追加后的 cache</td><td>各 \([B,P+C,H_{kv},d]\)</td><td>\(P\) 个旧位置加 \(C\) 个新位置</td></tr>
+      </tbody></table></div>
+      <p class="kv-equation-note">\(B\)：请求数；\(C\)：本次新输入长度；\(P\)：调用前已有缓存长度；\(D\)：模型宽度；\(H_q,H_{kv}\)：query 与 KV 头数；\(d\)：每头维度。不同实现会交换轴顺序，元素总数不变。</p>
+      <p>这里假设 query、key 和 value 的每头维度相同。模型常取 \(D=H_qd\)，但投影的输入维度和输出维度在数学上可以不同；附带的小实验就用不同的宽度，让读者能看见每次 reshape 的依据。真正的模型配置还可能采用不同的 K/V 维度，应按各自形状计数。</p>
+      <p>在普通 MHA 中，query 和 KV 头一一对应，\(H_q=H_{kv}\)。GQA 让多个 query 头共享一组 K/V。例如 \(H_q=4,H_{kv}=2\)，query 头 0、1 读取 KV 头 0，query 头 2、3 读取 KV 头 1。共享的是 K/V 向量；每个 query 仍然计算自己的分数和权重。</p>
+      $$\htmlData{symbol=g}{G}=\frac{\htmlData{symbol=hq}{H_q}}{\htmlData{symbol=hkv}{H_{kv}}},\qquad
+      \operatorname{kvhead}(h)=\left\lfloor\frac{h}{G}\right\rfloor.$$
+      <p>上式中 \(G\) 是每组 query 头的数量，\(h\) 是从 0 开始的 query 头编号，假设头按组连续排列且 \(H_q\) 能被 \(H_{kv}\) 整除。GQA 缓存只需要存 \(H_{kv}\) 份，不必为了匹配 query 数量在显存里复制成 \(H_q\) 份。参考代码里的 <code>repeat</code> 只是让头对应关系显式可见；高效 kernel 应直接复用底层 K/V。</p>
+      <p>把请求组成 batch 后，还有一个独立问题：各请求的历史长度往往不同。短请求为了矩阵布局而补出的槽位必须被 mask。补零不等于排除它：零 key 与 query 的点积是 0，softmax 仍可能给它分配概率；零 value 也会因此稀释真实输出。</p>
+    </section>
+
+    <section id="positions" data-math-scope="positions">
+      <h2>5. 追加多个 token 时，位置与 mask 怎样对齐</h2>
+      <p>缓存把一次完整前向拆成了多次调用，但没有重置序列的位置。已有 \(P=3\) 个位置时，新送入的两个 token 应使用位置 3、4，而不是重新从 0、1 开始。RoPE 要用正确的位置旋转 query 和 key；缓存里的 key 也必须与当前 query 使用同一套位置编码约定。</p>
+      <p>位置编码之外，还要构造正确的 causal mask。记本次 chunk 长度为 \(C\)，本次 query 的局部编号为 \(i\)，则它的绝对位置是 \(P+i\)。追加后共有 \(P+C\) 个 key，key 的全局编号为 \(j\)。允许读取的条件是：</p>
+      $$\operatorname{allowed}[i,j]=\bigl(j\le \htmlData{symbol=p}{P}+i\bigr),\qquad
+      0\le i&lt;\htmlData{symbol=c}{C},\quad 0\le j&lt;P+C.$$
+      <p class="kv-equation-note">\(P\) 是调用前已经缓存的 token 数；\(C\) 是本次新增输入数；\(i\) 从本次 chunk 的 0 开始，\(j\) 从整段历史的 0 开始。比较之前必须把它们放到同一个坐标系。</p>
+      <p>取 \(P=3,C=2\)，query 长度为 2，key 长度为 5，所以 mask 是 \(2\times5\)，而不是 \(2\times2\)。Query 3 可以看 key 0、1、2、3，不能看 key 4；query 4 则能看全部五个。两份新 K/V 可以一起算出、一起写入，但“已经在内存里”不代表“当前 query 可以读取”。</p>
+      <figure class="kv-figure" id="mask-demo" data-demo="mask">
+        <h3>缓存存在，但因果坐标不能从零重来</h3>
+        <p class="fig-read">横轴是整段历史的 key 编号，纵轴是本轮 query 的绝对位置。勾选格参与 softmax；叉号格被排除。演示假设有效分数全相等，value 依次为 1、2、3…，这样可以直接用平均数核对输出。</p>
+        <div class="kv-small-controls"><label>旧历史 P <select id="mask-prefix"><option>0</option><option>1</option><option>2</option><option selected>3</option><option>4</option></select></label><label>新输入 C <select id="mask-chunk"><option>1</option><option selected>2</option><option>3</option></select></label></div>
+        <div class="kv-small-controls"><label><input type="checkbox" id="mask-wrong"> 对照：误用从零开始的局部三角</label></div>
+        <div class="mask-scroll"><div class="mask-grid" id="mask-grid"></div></div>
+        <div class="mask-value" id="mask-value"></div>
+        <div class="kv-controls" data-controls><button type="button" data-action="prev">上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步</button><button type="button" data-action="reset">重置</button><input type="range" min="0" max="3" step="1" value="0" aria-label="带缓存的 causal mask 步骤"><output class="kv-step"></output></div>
+        <div class="kv-caption" aria-live="polite"></div>
+        <figcaption>默认输入下，正确输出依次为 2.5、3；错误局部 mask 给出 1、1.5。张量形状完全兼容，因此这类错误通常不会触发 shape 报错。</figcaption>
+      </figure>
+      <p>物理地址还会带来第三套编号。例如滑动窗口只分配 4 个槽位，位置 5 可以写入槽位 \(5\bmod4=1\)，但它的 RoPE 位置仍然是 5。窗口里当前保存了哪些绝对位置，必须由缓存管理器记录。使用 <a href="/posts/paged-attention/">PagedAttention</a> 后，页号也只是地址映射；不能拿页内槽位代替模型位置。</p>
+      <p>对不同长度的 batch，请求 A 可能已有 3 个位置，请求 B 只有 1 个。它们本轮新输入的位置、有效 key 长度和 mask 都要按请求计算。框架中用于表示当前位置的参数也不一定等于张量的物理长度，尤其在 padding、预分配或滑动窗口存在时，先检查 API 的具体语义。</p>
+    </section>
+
+    <section id="capacity" data-math-scope="capacity">
+      <h2>6. 显存账本：一份历史有多大</h2>
+      <p>容量可以直接从张量形状推出来。只看<strong>一条请求、一个已编码 token</strong>：每层存 \(H_{kv}\) 个 key 向量和 \(H_{kv}\) 个 value 向量，各有 \(d\) 个元素。若模型有 \(L\) 层，每个缓存元素占 \(b_e\) 字节，那么每个 token 的 KV 大小是：</p>
+      $$m_{\mathrm{token}}=2\,\htmlData{symbol=l}{L}\,\htmlData{symbol=hkv}{H_{kv}}\,\htmlData{symbol=d}{d}\,\htmlData{symbol=bytes}{b_e}\quad\text{字节/token}.$$
+      <p class="kv-equation-note">这里 \(L\) 是层数，\(H_{kv}\) 是每层 KV 头数，\(d\) 是每头维度，\(b_e\) 是每个元素的字节数。前面的 2 表示 key、value 两份，已经计入公式，不应再次乘 2。</p>
+      <p>若有 \(B\) 条请求，每条已缓存 \(S\) 个位置，所需有效数据容量为：</p>
+      $$M_{\mathrm{KV}}=\htmlData{symbol=b}{B}\,\htmlData{symbol=s}{S}\,m_{\mathrm{token}}=2BLSH_{kv}db_e.$$
+      <p>这一处 \(B\) 是并发请求数，\(S\) 是每条请求的历史长度，单位是 token；它们分别沿请求轴和时间轴放大容量。不同请求长度为 \(S_r\) 时，用 \(\sum_r S_r\) 代替 \(BS\)。预分配空槽、分页尾部碎片和分配器开销还要另算。</p>
+      <p>取一个具体配置：32 层，8 个 KV 头，每头 128 维，缓存用 BF16，每元素 2 字节。计算得到</p>
+      $$m_{\mathrm{token}}=2\times32\times8\times128\times2
+      =131072\ \mathrm{B}=128\ \mathrm{KiB}.$$
+      <p>这里使用二进制单位：1 KiB = 1024 B，1 GiB = 2³⁰ B。一条 8192 token 的历史占 \(8192\times128\,\mathrm{KiB}=1\,\mathrm{GiB}\)。32 条同长度请求就是 32 GiB。若只把 query 头数从 32 增到 64，同时保持 8 个 KV 头，缓存大小不变；query 的计算量可能增加，但它不在这个存储公式里。若把 KV 头从 8 改为 32，其余不变，缓存才会扩大到四倍。</p>
+      <p>模型权重占 16 GiB，不代表放进一张 24 GiB 的卡后还能服务任意长的请求。可用于 KV 的预算应先从设备总容量中扣除权重、临时工作区、通信缓冲区和其他常驻内存。假设扣除后确实剩下 16 GiB，而每条请求都要保证可存 10240 个已编码位置，每条需要 1.25 GiB，按这一项预算最多容纳 \(\lfloor16/1.25\rfloor=12\) 条。</p>
+      <p>多卡也不能简单把整个缓存公式除以 GPU 数。若 KV 头被分片，每张卡保存较少的头；若某些 KV 头被复制，每张卡仍要为副本付出容量。先写出每张卡实际持有的 \(H_{kv}\) 和请求集合，再算本地缓存。这和 <a href="/posts/distributed-inference/">分布式推理</a> 中“权重分片、激活复制、缓存复制”是同一个问题。</p>
+    </section>
+
+    <section id="bandwidth" data-math-scope="bandwidth">
+      <h2>7. 缓存省计算，为什么还会越来越慢</h2>
+      <p>缓存省掉了旧 token 的重新投影和整层前向，却没有从 attention 公式里删除旧位置。标准 dense attention 的一个新 query 仍需要与所有可见 key 做匹配，再按权重读取 value。所以缓存越长，一步 decode 要扫描的数据通常越多。</p>
+      <p>先估计计算量。对单层、单个 decode 输入，一条请求有 \(H_q\) 个 query 头，每个头读取 \(S\) 个历史位置，每个向量有 \(d\) 维。QK 点积约做 \(2H_qSd\) FLOPs，加权求和 V 再做约 \(2H_qSd\) FLOPs。每个乘加按 2 FLOPs 计，忽略 softmax 等较小项：</p>
+      $$F_{\mathrm{attn}}\approx4\,\htmlData{symbol=b}{B}\,\htmlData{symbol=l}{L}\,\htmlData{symbol=hq}{H_q}\,\htmlData{symbol=s}{S}\,\htmlData{symbol=d}{d}.$$
+      <p class="kv-equation-note">\(B\) 是本轮解码请求数，\(L\) 是层数，\(H_q\) 是 query 头数，\(S\) 是每条历史长度，\(d\) 是头维度。这是计算量；刚才的显存公式则使用 KV 头数 \(H_{kv}\)。</p>
+      <p>再估计内存读取。若每份历史 K/V 从 HBM 读取一次，GQA 组内充分复用，忽略当前 Q 和少量输出，读字节数就接近 \(M_{\mathrm{KV}}\)。一轮的理想读取时间为：</p>
+      $$T_{\mathrm{KV}}\gtrsim \frac{2BLS\,\htmlData{symbol=hkv}{H_{kv}}d\,\htmlData{symbol=bytes}{b_e}}{\htmlData{symbol=beta}{\beta}}.$$
+      <p>分子里的 \(H_{kv}\) 是每层 KV 头数，\(b_e\) 是每个缓存元素的字节数；\(B,L,S,d\) 仍分别表示请求数、层数、历史长度和头维度。\(\beta\) 是用于这次读取的有效带宽，单位字节/秒。分子是这一轮要读的历史字节数，因此相除得到秒。缓存命中、kernel 的读取次数、访存布局和通信都会影响实际时间；这个估算首先帮助我们判断数量级。</p>
+      <p>沿用 128 KiB/token 的配置。8 条请求、每条 4096 token，共有 4 GiB 历史。把有效带宽设为 1 TiB/s 作为教学输入，则读一遍约需 \(4/1024\,\mathrm{s}=3.90625\,\mathrm{ms}\)。历史加倍而请求数不变，读取量也加倍。这个数还没有包括读模型权重、MLP、采样和调度的时间。</p>
+      <p>这说明了 batch 的一个不对称。线性层的权重可以被同轮多条请求复用；每条请求的 KV 历史却通常不同，batch 增加一条，就多一份要读的缓存。因此扩大 batch 能摊薄读权重的成本，却不会把每条请求的历史自动变成共享数据。GQA 通过减少 KV 头节省存储和读取；<a href="/posts/sparse-attention/">稀疏 attention</a> 改变读哪些历史；<a href="/posts/kv-cache-compression/">KV 压缩</a> 改变历史怎样表示。它们优化的是不同环节。</p>
+      <p>如果测到短上下文时很快，长上下文时每 token 延迟逐渐上升，可以先画出延迟与历史长度的关系，再对照缓存字节增长。如果连很短的上下文都出现大片 GPU 空隙，则应检查 CPU 提交、同步和调度。缓存账本给出一个可验证的解释，不应该代替时间线和实际测量。</p>
+    </section>
+
+    <section id="implementation">
+      <h2>8. 实现与排错：先比较数值，再讨论速度</h2>
+      <p>一个容易检查的参考实现可以先用连续数组。每层接收本轮 hidden state 和旧缓存，计算本轮 Q/K/V，用绝对位置处理 RoPE，再追加 K/V，最后构造带历史偏移的 mask：</p>
+      <pre><code># x_new: [B, C, D]；旧缓存已有 P 个位置
+q, k_new, v_new = project(x_new)
+positions = P + arange(C)
 q, k_new = rope(q, k_new, positions)
-k = concat(k_cache, k_new, axis=&quot;time&quot;)
-v = concat(v_cache, v_new, axis=&quot;time&quot;)
-scores = q @ k.transpose(-1, -2) / sqrt(d)
-scores = where(allowed, scores, -inf)
-y = softmax(scores, axis=-1) @ v
-return y, (k, v)</pre><p class="ws-lead">追加当前 token 后再读，才能关注自己。每一层有独立 cache；上一层的输出才是下一层输入。</p><p class="ws-note">concat 用于理解；服务端通常预分配或分页写入，避免每步复制整个历史。</p>
-</section>
-<section class="slide workshop" id="position-arithmetic">
-<div class="kicker">逐步算一遍</div><h2>缓存长度、绝对位置、物理槽位要分开</h2>
-<p class="ws-lead">已有 5 个 token，窗口物理容量为 4。新 token 的 RoPE 位置继续增长，写入槽位按容量取模。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="缓存长度、绝对位置、物理槽位要分开"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">新 token 位置 5 → 槽位 5 mod 4 = 1</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">新 token 位置 6 → 槽位 6 mod 4 = 2</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">新 token 位置 7 → 槽位 7 mod 4 = 3</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
-</section>
-<section class="slide workshop" id="chunk-causal-mask">
-<div class="kicker">工程细节</div><h2>一次追加两个 token，mask 不是 2×2</h2>
-<p class="ws-lead">cache 已有 P = 3 个位置；本次 chunk 长 T = 2。Q 的长度是 2，K 的长度是 5。</p><div class="ws-equation">allowed[i, j] = (j ≤ P + i)，i = 0…T−1</div><table class="ws-table"><thead><tr><th>本次 query</th><th>可读 K0</th><th>K1</th><th>K2</th><th>K3</th><th>K4</th></tr></thead><tbody><tr><td>Q3</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>屏蔽</td></tr><tr><td>Q4</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td><td>✓</td></tr></tbody></table><p class="ws-lead">若直接用左上对齐的 2×5 下三角，Q3 会只看到 K0，结果不会报错，却已经错了。</p><p class="ws-note">不同 API 的非方形 causal mask 对齐规则不同；先用显式布尔 mask 与参考结果比对。</p>
-</section>
+k = concatenate([k_cache, k_new], axis="time")
+v = concatenate([v_cache, v_new], axis="time")
+allowed = key_positions[None, :] &lt;= positions[:, None]
+y = attention(q, k, v, allowed)
+return y, (k, v)</code></pre>
+      <p>当前 token 的 K/V 必须在 attention 的可读集合里，因为因果注意力允许关注自己。处理完这一层后，输出再进入下一层；不能拿第一层的 K/V 供所有层共用。生产实现通常通过预分配或页表写入，避免每一步 <code>concatenate</code> 都复制整段历史，但地址优化不应该改变上述可见性和数值关系。</p>
+      <p>验证时保留一个独立的完整前向路径。对同一段随机输入，分别一次算完、逐 token 计算、按不同 chunk 长度计算，比较每个位置的 attention 输出或最终 logits。要比较数值误差，而不只是最终 argmax：两个不同的概率分布也可能选中同一个 token。</p>
+      <div class="table-wrap"><table><thead><tr><th>现象</th><th>优先检查</th><th>能区分问题的输入</th></tr></thead><tbody>
+        <tr><td>第一个位置对，后面开始错</td><td>RoPE 位置或历史 mask 偏移</td><td>逐 token 与完整前向对比</td></tr>
+        <tr><td>单 token 正常，chunk 出错</td><td>非方形 causal mask 的对齐</td><td>先缓存 3 个，再输入 2 个</td></tr>
+        <tr><td>等长 batch 正常，不等长出错</td><td>每请求长度与 padding mask</td><td>同轮历史长度 1 和 5</td></tr>
+        <tr><td>只在某些 query 头出错</td><td>GQA 的 query → KV 头映射</td><td>4 个 query 头、2 个 KV 头</td></tr>
+        <tr><td>数值正确，长序列越来越慢</td><td>KV 扫描、重复复制与内存带宽</td><td>固定 batch，只改变历史长度</td></tr>
+      </tbody></table></div>
+      <p>浮点精度也属于接口。先用 FP64 的小输入建立参考，再检查 FP32/BF16 的合理误差范围。训练时的 dropout 应关闭，参考与增量路径应使用相同权重和位置配置。如果一个实现路径把中间结果舍入得更频繁，微小差异可能正常；明显的、随位置规律增长的差异则常常是索引或 mask 错误。</p>
+    </section>
 
-<section class="slide lesson" id="decode">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>Decode：写一份，读一排</h2>
-<p class="intro">下一步只为刚生成的那个 token 计算新的 hidden state、Q、K、V。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="新 token 的 KV 追加进缓存，所有可见 KV 从 HBM 分块流入 SM 后形成输出">
-</svg>
-<div class="captions">
-<p>新 token 到达当前层。历史 K、V 已在 HBM 中，Q 只是这一轮的临时查询。</p>
-<p>先生成新 K、V，并追加到 cache。当前 token 也可以关注自己。</p>
-<p>attention kernel 分块读取可见 K、V，用当前 Q 得到输出。旧 K、V 保留在 HBM，下一轮继续读。</p>
-</div>
-</section>
-<section class="slide lesson" id="reuse">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>省的是重复计算，历史读取还在</h2>
-<p class="intro">缓存保留每层的 K、V；当前 token 仍然要经过模型的每一层。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="旧 token 的重复计算消失，但随着历史长度增长缓存扫描字节仍然增多">
-</svg>
-<div class="captions">
-<p>没有缓存：每生成一个词，都把旧 token 的投影和前向重新计算一遍。</p>
-<p>有缓存：旧 K、V 原地复用，只计算新 token 的那一份。缓存越长，避免的重复工作越多。</p>
-<p>但 full attention 的新 Q 仍需扫描全部历史。序列从 4 增长到 8，单层读取的 KV 也近似翻倍。</p>
-</div>
-</section>
-<section class="slide workshop" id="gqa-head-map">
-<div class="kicker">工程细节</div><h2>GQA 的头映射是一条索引关系</h2>
-<p class="ws-lead">例：Hq = 32、Hkv = 8。每 4 个 query heads 共用一个 KV head，仍各自计算自己的 attention 权重。</p><div class="ws-equation">KV head(h) = floor(h / (Hq / Hkv))</div><table class="ws-table"><thead><tr><th>Query heads</th><th>KV head</th><th>逻辑计算</th></tr></thead><tbody><tr><td>0…3</td><td>0</td><td>4 个不同 Q 读取同一份 K0 / V0</td></tr><tr><td>4…7</td><td>1</td><td>4 个不同 Q 读取同一份 K1 / V1</td></tr><tr><td>28…31</td><td>7</td><td>4 个不同 Q 读取同一份 K7 / V7</td></tr></tbody></table><p class="ws-lead">参考代码可以 repeat_interleave 验证；高效 kernel 应复用原始 KV，不把它永久复制 4 遍。</p>
-</section>
-<section class="slide workshop" id="tensor-parallel-kv">
-<div class="kicker">工程细节</div><h2>每卡 KV 不是总量除以卡数就结束</h2>
-<p class="ws-lead">假想模型：32 层、8192 token、8 个 KV 头、d = 128、BF16。完整逻辑 KV 为 1 GiB。</p><table class="ws-table"><thead><tr><th>部署方式</th><th>每卡存几个 KV 头</th><th>每卡 KV</th><th>所有卡合计</th></tr></thead><tbody><tr><td>TP = 4，按 KV 头均匀切分</td><td>2</td><td>0.25 GiB</td><td>1 GiB</td></tr><tr><td>TP = 16，按头切分并复制 KV</td><td>1</td><td>0.125 GiB</td><td>2 GiB</td></tr><tr><td>任意 TP，KV 全量复制</td><td>8</td><td>1 GiB</td><td>TP × 1 GiB</td></tr></tbody></table><p class="ws-note">第二行假设每个 KV head 被 2 张卡持有。真实实现可用其他布局；从每个 rank 的实际缓存形状核算。</p>
-</section>
+    <section id="exercises">
+      <h2>9. 计算与排错练习</h2>
+      <p>先写出判断，再展开解答。公式中使用的量会在每道题重新给出。</p>
+      <div class="kv-exercise" id="exercise-memory"><h3>练习 1：容量够不够</h3>
+        <p>模型有 32 层，每层 8 个 KV 头，每头 128 维，K/V 都用 BF16（2 B/元素）。已扣除权重和临时内存后，KV 预算为 16 GiB。若每条请求需要保证存下 10240 个已编码 token，最多能容纳几条？如果只把 query 头数从 32 改为 64，答案变吗？</p>
+        <details><summary>展开参考解答</summary><p>每 token 为 \(2\times32\times8\times128\times2=131072\) B，即 128 KiB。每条需要 \(10240\times128\,\mathrm{KiB}=1.25\,\mathrm{GiB}\)，所以最多 \(\lfloor16/1.25\rfloor=12\) 条。</p><p>只改变 query 头数不会改变这份 KV 账本，因为缓存仍然只有 8 个 KV 头。query 计算量和其他临时内存可能变化，但题目已把 KV 预算固定为 16 GiB。</p></details>
+      </div>
+      <div class="kv-exercise" id="exercise-mask"><h3>练习 2：没有 shape 错误的错误 mask</h3>
+        <p>已经缓存位置 0、1、2，本轮输入位置 3、4。写出正确的 2×5 布尔 mask。若所有有效分数相等，五个 value 为 [1,2,3,4,5]，两个 query 的输出各是多少？若误用局部下三角，又会是多少？</p>
+        <details><summary>展开参考解答</summary><pre><code>正确：Q3 → [1, 1, 1, 1, 0]
+      Q4 → [1, 1, 1, 1, 1]
+错误：Q3 → [1, 0, 0, 0, 0]
+      Q4 → [1, 1, 0, 0, 0]</code></pre><p>等分数对应均匀权重。正确输出是 \((1+2+3+4)/4=2.5\) 和 \((1+2+3+4+5)/5=3\)。错误输出是 1 和 1.5。区别来自是否比较 \(j\le P+i\)，这里旧缓存长度 \(P=3\)。</p></details>
+      </div>
+      <div class="kv-exercise" id="exercise-lifecycle"><h3>练习 3：生成了，不代表已经缓存</h3>
+        <p>prompt 长 5，要求生成 3 个输出 token。第一个输出由 prefill 末尾的 logits 采样产生；第三个输出产生后立即结束。总共执行几次 decode 前向？结束前缓存对应多少个已编码位置？</p>
+        <details><summary>展开参考解答</summary><p>第一个输出还没有自己的 KV。需要两次 decode 前向：消费第一个输出以预测第二个，再消费第二个输出以预测第三个。</p><p>写入缓存的位置数是 \(5+2=7\)，也就是 prompt 长度 + 输出数 − 1。第三个输出已交给用户，但不再送回模型。如果之后继续生成，才需要把它消费并追加到缓存。</p></details>
+      </div>
+      <div class="kv-exercise" id="exercise-bandwidth"><h3>练习 4：缓存读一次要多久</h3>
+        <p>沿用每 token 128 KiB 的缓存配置。本轮有 8 条请求，每条已有 4096 个可见位置。假设历史 K/V 从 HBM 各读一次，有效带宽为 1 TiB/s。读取这些历史约需多久？历史变为 8192 时呢？</p>
+        <details><summary>展开参考解答</summary><p>总字节数是 \(8\times4096\times128\,\mathrm{KiB}=4\,\mathrm{GiB}\)。1 TiB/s = 1024 GiB/s，所以 \(4/1024\,\mathrm{s}=3.90625\,\mathrm{ms}\)。</p><p>历史加倍后，读取量为 8 GiB，对应 7.8125 ms。这只是题目假设下的 KV 读取时间，还没有包含权重读取、其他算子和调度。公式前面的 K/V 两份已经计入 128 KiB/token，不能再乘一次 2。</p></details>
+      </div>
+    </section>
 
-<section class="slide lesson">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>显存怎么算？数一数这些轴</h2>
-<p class="intro">标准 MHA / GQA，且 K 与 V 的 head dimension 相同：</p>
-<div class="formula">KV bytes = 2 × layers × tokens × KV heads × head dim × bytes</div>
-<div class="widget" data-interactive>
-<div class="memory-inputs">
-<label>层数<input id="layers" type="range" min="8" max="80" step="8" value="32">
-<output id="layers-o">32</output>
-</label>
-<label>token 数<input id="tokens" type="range" min="1024" max="32768" step="1024" value="8192">
-<output id="tokens-o">8192</output>
-</label>
-<label>KV 头数<input id="heads" type="range" min="1" max="32" step="1" value="8">
-<output id="heads-o">8</output>
-</label>
-<label>并发序列<input id="batch" type="range" min="1" max="32" step="1" value="1">
-<output id="batch-o">1</output>
-</label>
-</div>
-<div class="readout-grid">
-<div>
-<p>单条序列</p>
-<strong id="one">1.00 GiB</strong>
-</div>
-<div>
-<p>所有序列合计</p>
-<strong id="all">1.00 GiB</strong>
-</div>
-</div>
-</div>
-<p class="note">固定 head dim = 128、BF16 = 2 bytes；假设序列等长。未计分页空隙、元数据与并行副本。GiB = 2³⁰ bytes。</p>
-</section>
-<section class="slide workshop" id="ragged-capacity">
-<div class="kicker">工程细节</div><h2>请求长短不同，要把各自长度加起来</h2>
-<div class="ws-equation">M = 2 × L × Hkv × d × b × ΣᵣTᵣ</div><p class="ws-lead">L = 32、Hkv = 8、d = 128、b = 2 bytes：每个 token 的所有层 KV 是 131072 bytes = 128 KiB。</p><table class="ws-table"><thead><tr><th>请求长度</th><th>对应 KV</th><th>累计</th></tr></thead><tbody><tr><td>1024 token</td><td>128 MiB</td><td>128 MiB</td></tr><tr><td>4096 token</td><td>512 MiB</td><td>640 MiB</td></tr><tr><td>8192 token</td><td>1024 MiB</td><td>1664 MiB = 1.625 GiB</td></tr></tbody></table><p class="ws-note">若全部填充到 8192，会占 3 GiB。分页按块取整，还要加尾块、元数据与预留空间。</p>
-</section>
-<section class="slide workshop" id="bandwidth-budget">
-<div class="kicker">工程细节</div><h2>把字节数变成延迟下界</h2>
-<p class="ws-lead">沿用 1 GiB / 序列的 KV。假设有效带宽为 1.5 TB/s，单步把所有层 KV 各读一次。</p><div class="ws-equation">tKV ≥ 2³⁰ bytes / (1.5 × 10¹² bytes/s)<br>≈ 0.716 ms</div><div class="ws-cols"><div class="ws-card"><h3>8 个等长请求</h3><p>读 8 GiB，理想下界约 5.73 ms。这是一次 batch 步骤，不是乘 8 后再除 8 的单请求延迟。</p></div><div class="ws-card"><h3>测到 12 ms 怎么看？</h3><p>还要拆开权重、投影/MLP、通信、调度和 kernel 利用率。0.716 ms 只是 KV 搬运的理想部分。</p></div></div><p class="ws-note">TB 用十进制，GiB 用二进制；这里的带宽是教学假设，不是某张卡的测量值。</p>
-</section>
-<section class="slide workshop" id="decode-intensity">
-<div class="kicker">工程细节</div><h2>为什么单 query 的算术强度很低？</h2>
-<p class="ws-lead">一个 head 读 T 个 key / value，每个向量 d 维。一次乘加按 2 FLOP 计，不计 softmax。</p><div class="ws-equation">QKᵀ：2Td FLOP；AV：2Td FLOP<br>KV 流量：2Tdb bytes<br>强度 I ≈ 4Td / (2Tdb) = 2/b FLOP/byte</div><p class="ws-lead">BF16 的 b = 2，所以约 1 FLOP/byte。把历史加长，算术和读取一起增多，强度不会自动提升。</p><p class="ws-note">GQA 若多个 Q 共享一次 KV 读取，强度可提高；重复读取、cache 命中和融合方式也会改变实际结果。</p>
-</section>
-
-<section class="slide lesson" id="bandwidth">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>容量够了，也可能被带宽拖慢</h2>
-<p class="intro">Decode 的 attention 要反复搬历史；每次只带来一小份新结果。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="KV 块从 HBM 经过带宽通道进入计算单元，读取计数随数据到达而增加">
-</svg>
-<div class="captions">
-<p>左侧是 HBM 中的 KV，右侧是执行 attention 的 SM。数据分块搬入，在片上计算并累积输出。</p>
-<p>若一条序列的 KV 总计 1 GiB，那么生成一个 token，跨全部层的 KV 读取量约为 1 GiB。</p>
-<p>再加入权重读取、调度和其他算子，才得到完整的 token 延迟。压缩 KV 既省容量，也可能减少这段搬运。</p>
-</div>
-<p class="note">1 GiB 为简化示例；实际流量取决于 kernel 复用、cache 命中与并行方式。</p>
-</section>
-<section class="slide lesson">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>把“存得下”和“读得快”分开想</h2>
-<div class="two-col">
-<div class="card">
-<h3>存得下更多历史</h3>
-<p>减少 KV 头数、压缩表示、量化，直接减少数据量。<a href="/posts/kv-cache-compression/">KV cache 压缩</a> 从这几个轴动手。</p>
-</div>
-<div class="card">
-<h3>用好已经分配的显存</h3>
-<p>
-<a href="/posts/paged-attention/">PagedAttention</a> 把缓存分块管理，减少预留和碎片；数据本身仍然需要保存。</p>
-</div>
-<div class="card">
-<h3>复用相同 prompt</h3>
-<p>
-<a href="/posts/prefix-caching/">Prefix caching</a> 在请求间复用完整匹配的前缀，避免重复 prefill。</p>
-</div>
-<div class="card">
-<h3>少读历史位置</h3>
-<p>
-<a href="/posts/sparse-attention/">Sparse attention</a> 只读取选中的位置。节省多少取决于选择策略和 kernel。</p>
-</div>
-</div>
-</section>
-<section class="slide workshop" id="diagnosis-length-sweep">
-<div class="kicker">工程细节</div><h2>用长度扫描定位瓶颈</h2>
-<p class="ws-lead">假想剖析：固定 batch = 1、输出 64 token，预热后测稳定 decode 步骤。</p><table class="ws-table"><thead><tr><th>上下文</th><th>attention / 步</th><th>其他 GPU / 步</th><th>CPU 空隙</th></tr></thead><tbody><tr><td>2K</td><td>0.3 ms</td><td>4.0 ms</td><td>0.5 ms</td></tr><tr><td>8K</td><td>1.1 ms</td><td>4.0 ms</td><td>0.5 ms</td></tr><tr><td>32K</td><td>4.2 ms</td><td>4.1 ms</td><td>0.5 ms</td></tr></tbody></table><p class="ws-lead">attention 随历史增长，32K 已占约一半。优先检查 KV 流量、GQA 复用和压缩；2K 场景的最大收益则被固定部分限制。</p><p class="ws-note">对照时保持输出策略、batch、精度与频率一致；同时记录 TTFT、TPOT 和显存。</p>
-</section>
-<section class="slide workshop" id="correctness-checklist">
-<div class="kicker">工程细节</div><h2>先证明增量输出等于完整前向</h2>
-<div class="ws-cols"><div class="ws-card"><h3>测试输入</h3><p>随机小张量；长度 1、跨块边界、不同长度 batch。分别逐 token 和按 2 / 3 个 token 分块。</p></div><div class="ws-card"><h3>比较的位置</h3><p>每层 Q / K / V、旋转后的 K、mask、attention 输出、最终 logits；容许浮点归约顺序造成的小误差。</p></div></div><p class="ws-lead">若首个 token 对、第二个开始错：先查追加顺序与 position offset。若只有 chunk decode 错：先查非方形 causal mask。</p><p class="ws-note">推理用 eval 模式。不要只比较最终采样文本：采样会放大微小差异，也会掩盖一些数值错误。</p>
-</section>
-<section class="slide workshop" id="cache-versus-training">
-<div class="kicker">工程细节</div><h2>推理缓存与训练激活解决不同问题</h2>
-<p class="ws-lead">训练通常一次并行处理整段序列，并保留反向所需信息；推理则重复追加 token，复用历史前向结果。</p><div class="ws-cols"><div class="ws-card"><h3>跨步训练复用的风险</h3><p>权重更新后，旧 K / V 属于旧参数。直接复用会改变训练计算图；detach 还会截断穿过历史的梯度。</p></div><div class="ws-card"><h3>两类显存要分清</h3><p>KV cache 是生成状态；激活检查点是反向重算策略。训练时减少激活，不等于减少推理 KV。</p></div></div><p class="ws-note">固定权重的评估、流式模型的截断反传有专门定义；先确定需要的梯度语义。</p>
-</section>
-<section class="slide workshop" id="exercise-memory">
-<div class="kicker">练习 1</div><h2>48 GiB 还能同时接几条请求？</h2>
-<div class="ws-prompt">32 层、8 KV heads、d = 128、BF16；权重与其他预留共 32 GiB。每条最大长度 8192。忽略分页开销时，剩余 16 GiB 能接几条？若每条再预留 2048 个输出 token 呢？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">每 token 是 2 × 32 × 8 × 128 × 2 = 128 KiB。8192 token = 1 GiB，所以最多 16 条。</p><p class="ws-lead">连同输出为 10240 token = 1.25 GiB；floor(16 / 1.25) = 12 条。剩下 1 GiB，不能再完整保证一条。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="exercise-mask">
-<div class="kicker">练习 2</div><h2>三行 query，应该看到哪些列？</h2>
-<div class="ws-prompt">已有 P = 4 个 token，再输入 T = 3 个。写出 [3, 7] mask 每行允许的列，并说明为何不能直接使用无偏移的下三角。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">本次 query 的绝对位置是 4、5、6，允许列分别为 0…4、0…5、0…6。</p><p class="ws-lead">条件是 j ≤ P + i。无偏移下三角只允许 0…i，错误屏蔽几乎全部历史。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="exercise-performance">
-<div class="kicker">练习 3</div><h2>压缩 KV 一半，端到端能快多少？</h2>
-<div class="ws-prompt">某场景每步 10 ms：KV 读取 4 ms，其余 6 ms。把 KV 字节数减半，新增反量化 0.5 ms。假设各部分串行且带宽不变，求新延迟与加速比。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">KV 从 4 ms 降为 2 ms。新延迟 = 2 + 0.5 + 6 = 8.5 ms。</p><p class="ws-lead">加速比 = 10 / 8.5 ≈ 1.176，延迟减少 15%。若只报告“KV 快了 2 倍”，无法说明整条请求的收益。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="engineering-lab">
-<div class="kicker">动手实验</div><h2>亲手验证：完整前向 = 增量前向</h2>
-<p class="ws-lead">用 NumPy 在 CPU 上跑一个可检查的参考实现。小尺寸便于把中间张量打印出来。</p><div class="ws-cols"><pre class="ws-code">python3 -m pip install numpy
-python3 lab.py
-python3 lab.py --seed 7</pre><pre class="ws-code">full vs token: PASS
+    <section id="lab">
+      <h2>10. 运行 NumPy 实验</h2>
+      <p><a href="/posts/kv-cache/lab.py" download>下载 lab.py</a>。它实现单层 GQA 与 RoPE，保留完整前向、逐 token 和 chunk 三条执行路径。输入和权重用固定种子产生，不需要模型下载，也不需要 GPU。</p>
+      <pre><code>python3 -m pip install "numpy&gt;=1.24,&lt;3"
+python3 lab.py --seed 7 --chunk 3</code></pre>
+      <p>正常输出应包含：</p>
+      <pre><code>full vs token: PASS
 full vs chunks: PASS
 wrong mask detected: PASS
-128 KiB/token; 8192 tokens = 1.000 GiB</pre></div><p class="ws-lead">把 chunk 长度改成 [1, 3, 2, 5]，再把 offset 故意写成 0；观察第一处不一致。增加 Hq，保持 Hkv 不变，确认缓存元素数不变。</p><a class="ws-lab-link" download href="/posts/kv-cache/lab.py">下载实验代码 lab.py</a><p class="ws-note">这是正确性与成本的教学实验；耗时不代表 GPU kernel 性能。</p>
-</section>
+128 KiB/token; 8192 tokens = 1.000 GiB</code></pre>
+      <p>最后一项容量计算使用 32 层、8 个 KV 头和 BF16；前面的正确性实验则使用更小的单层 FP64 张量。两者服务不同目的：小张量让每个索引都能检查，容量算例让显存量级接近实际模型。</p>
+      <p>先把 <code>--chunk</code> 改成 1、2、5、11，预测为什么结果应该不变，再运行验证。接着打开 <code>incremental()</code>，找到 <code>positions = np.arange(start, end)</code>，思考将它改为每块都从 0 开始会影响哪里。实验已主动构造一条错误 mask 路径并确认它与参考不同；你可以同样给错误 RoPE 位置增加一个检查。</p>
+      <p>最后把 <code>qh</code> 从 4 改为 8、保持 <code>kh=2</code>。query 头数会增加，K/V 缓存的元素数应保持不变。这一修改同时检验了 GQA 分组、投影形状和容量公式。完成这些数值检查后，再尝试预分配缓存，或进入 <a href="/posts/paged-attention/">PagedAttention</a>，把同一段逻辑历史放进不连续的物理页中。</p>
+    </section>
 
-<section class="slide lesson">
-<div class="kicker">参考资料</div>
-<h2>参考与延伸阅读</h2>
-<ul class="reference-list">
-<li>
-<a href="https://huggingface.co/docs/transformers/en/cache_explanation" target="_blank" rel="noopener noreferrer">Hugging Face · Caching：prefill、decode 与缓存实现</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2305.13245" target="_blank" rel="noopener noreferrer">GQA：用较少 KV heads 服务多个 query heads</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2309.06180" target="_blank" rel="noopener noreferrer">PagedAttention：高效管理推理中的 KV cache</a>
-</li>
-</ul>
-<p class="related">继续看：<a href="/posts/kv-cache-compression/">KV 压缩</a> · <a href="/posts/sparse-attention/">Sparse attention</a> · <a href="/posts/linear-attention/">Linear attention</a>
-</p>
-</section>
-</div>
-</main><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
-const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
-const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
-const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
-const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
-function scene(id,svg,steps){
- const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
- const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
- steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
- const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
- Anim.slide(el,tl,{steps:true,controls:true});
-}
-const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
+    <section id="references"><h2>参考与延伸阅读</h2><ul>
+      <li><a href="https://arxiv.org/abs/1706.03762">Attention Is All You Need</a>：scaled dot-product attention 与因果解码。</li>
+      <li><a href="https://huggingface.co/docs/transformers/en/cache_explanation">Transformers：How caching works</a>：缓存拼接、位置和 attention mask。</li>
+      <li><a href="https://arxiv.org/abs/2305.13245">GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints</a>：query 头与 KV 头共享。</li>
+      <li><a href="/posts/rope-long-context/">RoPE 与长上下文扩展</a>：旋转、绝对位置与缓存一致性。</li>
+      <li><a href="/posts/scaling-inference/">Transformer 推理的数学</a>：将缓存、权重、带宽和 batch 放进同一份服务账本。</li>
+      <li><a href="/posts/mini-inference-engine/">最小推理引擎</a>：把数值正确的前向接上分页、调度和采样。</li>
+    </ul></section>
+  </article>
+</main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a> · <a href="/posts/llm-engineering/#foundations">学习路径：把一次前向算清楚</a></footer>
+<script type="application/json" id="math-definitions">
+{"global":{"q":{"label":"当前 query qₜ","description":"当前输入位置在一个 attention 头上的查询向量；用它与允许读取的历史 key 匹配。"},"k":{"label":"历史 key kⱼ","description":"历史位置 j 在当前层、当前 KV 头上的 key 向量；缓存的是已经算出的这个向量。"},"v":{"label":"历史 value vⱼ","description":"历史位置 j 的 value 向量；按本行 attention 权重加权求和形成输出。"},"d":{"label":"头维度 d","description":"每个 query/key/value 向量的分量数；本篇容量算例假设三者每头维度相同。","unit":"元素/头"},"hq":{"label":"Query 头数 Hq","description":"每层发出不同查询的 attention 头数量。GQA 中它可以大于 KV 头数。","unit":"头"},"hkv":{"label":"KV 头数 Hkv","description":"每层分别保存多少组 key/value 头。缓存容量取决于它，而不是 query 头数。","unit":"头"},"g":{"label":"GQA 组大小 G","description":"每一组 K/V 供多少个 query 头读取，G = Hq / Hkv。","unit":"query 头/KV 头"},"b":{"label":"请求数 B","description":"本轮 batch 内的请求数量；容量算例假设这些请求的历史长度相同。","unit":"条请求"},"l":{"label":"层数 L","description":"模型中需要分别保存 K/V 的 attention 层数；本篇假设各层的 KV 配置一致。","unit":"层"},"s":{"label":"历史长度 S","description":"每条请求当前存储且可被本轮 attention 读取的位置数。","unit":"token/请求"},"bytes":{"label":"元素字节数 bₑ","description":"一个缓存元素占多少字节；BF16 为 2 B。下标 e 提醒这是一个元素的大小，与请求数 B 不同。","unit":"B/元素"},"p":{"label":"旧缓存长度 P","description":"这次调用开始前已经缓存的输入位置数量。新 chunk 的位置从 P 开始。","unit":"token"},"c":{"label":"本次输入长度 C","description":"这次调用新增输入的 token 数；普通单步 decode 为 1，chunk 可以大于 1。","unit":"token"},"beta":{"label":"有效读取带宽 β","description":"用于当前 KV 读取的有效内存带宽。字节数除以它得到读取时间的估计。","unit":"B/s"}},"scopes":{"attention":{"d":{"label":"单头向量维度 d","description":"当前单个 attention 头中 q 与 k 的分量数；分数除以 √d 做缩放。","unit":"分量"}},"bandwidth":{"s":{"label":"本轮可见历史 S","description":"一个 decode 输入需要扫描的 key/value 位置数；这里假设各请求等长且读完整可见历史。","unit":"token/请求"}}}}
+</script>
+<script>
+(() => {
+  const demos = new Map();
+  const reduce = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+  function player(id, max, render) {
+    const el = document.getElementById(id), slider = el.querySelector('input[type="range"]');
+    const buttons = Object.fromEntries([...el.querySelectorAll('[data-action]')].map(b => [b.dataset.action,b]));
+    let step = 0, timer = null;
+    const stop = () => {clearTimeout(timer); timer = null; buttons.play.textContent = '播放'; buttons.play.setAttribute('aria-pressed','false');};
+    const draw = n => {
+      step = Math.max(0, Math.min(max,n)); slider.value = step;
+      buttons.prev.disabled = step === 0; buttons.next.disabled = step === max;
+      el.querySelector('.kv-step').textContent = (step+1)+' / '+(max+1);
+      render(el,step); if(step===max) stop();
+    };
+    const advance = () => {draw(step+1); if(step<max) timer=setTimeout(advance,reduce()?2200:1800);};
+    buttons.play.addEventListener('click',()=>{if(timer){stop();return;}if(step===max) draw(0);buttons.play.textContent='暂停';buttons.play.setAttribute('aria-pressed','true');timer=setTimeout(advance,reduce()?2200:1800);});
+    buttons.prev.addEventListener('click',()=>{stop();draw(step-1);});
+    buttons.next.addEventListener('click',()=>{stop();draw(step+1);});
+    buttons.reset.addEventListener('click',()=>{stop();draw(0);});
+    slider.addEventListener('input',()=>{stop();draw(Number(slider.value));});
+    document.addEventListener('visibilitychange',()=>{if(document.hidden)stop();});
+    const observer = new IntersectionObserver(entries=>{if(!entries[0].isIntersecting)stop();},{threshold:0});observer.observe(el);
+    draw(0);const api={refresh:()=>{stop();draw(step);},reset:()=>{stop();draw(0);},getStep:()=>step};demos.set(id,api);return api;
+  }
+  const captions = [
+    ['先固定分数与 value','当前 query 对三个 key 的匹配分数已经给出。每个位置的 value 不变；此时还没有归一化，也没有输出。'],
+    ['把分数变成正数','对每个分数取指数。指数之和是归一化的分母；只看某一项的大小，还不知道它最终占多少权重。'],
+    ['除以同一个总和','三个指数都除以总和，得到加起来等于 1 的权重。后面的 value 只能按这些比例进入输出。'],
+    ['逐位置加权 value','每个位置的 value 乘自己的权重。条长显示加权贡献，统一刻度 0～8；不是原始分数，也不是缓存容量。'],
+    ['把三份贡献相加','输出是加权平均。分数偏向第三个位置时，输出更接近它的 value=8；历史 value 本身没有被修改。']
+  ];
+  function attention(el,step){
+    const alpha=Number(document.getElementById('query-scale').value), values=[2,4,8], exps=[1,2**alpha,3**alpha], sum=exps.reduce((a,b)=>a+b,0), weights=exps.map(v=>v/sum);
+    document.getElementById('attention-rows').innerHTML=values.map((v,i)=>'<tr><th>'+i+'</th><td class="'+(step===0?'attn-active':'')+'">'+(alpha*Math.log(i+1)).toFixed(3)+'</td><td class="'+(step===1?'attn-active':'')+'">'+(step>=1?exps[i]:'—')+'</td><td class="'+(step===2?'attn-active':'')+'">'+(step>=2?weights[i].toFixed(3):'—')+'</td><td>'+v+'</td></tr>').join('');
+    const bars=document.getElementById('attention-bars');
+    if(!bars.children.length)bars.innerHTML=values.map((v,i)=>'<div class="attn-bar"><span>位置 '+i+'</span><div class="attn-track"><div class="attn-fill"></div></div><output></output></div>').join('');
+    [...bars.children].forEach((bar,i)=>{const contribution=step>=3?values[i]*weights[i]:0;bar.querySelector('.attn-fill').style.width=(contribution/8*100)+'%';bar.querySelector('output').textContent=step>=3?contribution.toFixed(3):'—';});
+    document.getElementById('attention-total').textContent=step>=4?values.reduce((s,v,i)=>s+v*weights[i],0).toFixed(3):'尚未求和';
+    document.getElementById('attention-sum').textContent=step>=1?'指数总和 = '+sum:'';
+    el.querySelector('.kv-caption').innerHTML='<strong>'+captions[step][0]+'。</strong>'+captions[step][1];
+  }
+  const attentionPlayer=player('attention-demo',4,attention);
+  document.getElementById('query-scale').addEventListener('change',()=>attentionPlayer.refresh());
 
-
-scene('qkv',B('q',55,130,130,70,'Q：在','accentbox')+[0,1,2].map(i=>B('k'+i,330,30+i*95,160,60,['K：猫','K：坐','K：在'][i])+B('v'+i,650,30+i*95,150,60,['V：猫','V：坐','V：在'][i])+L('score'+i,195,165,320,60+i*95,'wire ghost')+T(563,69+i*95,['0.2','0.3','0.5'][i],'ghost weight')).join('')+B('out',920,130,150,70,'输出','accentbox')+[0,1,2].map(i=>L('mix'+i,810,60+i*95,910,165,'hotwire ghost')).join(''),[
-{name:'Q 匹配 K',run:(tl,t)=>{a(tl,t,'[id^=score]',{opacity:1});a(tl,t,'[id^=k]',{x:20},.1);a(tl,t,'.weight',{opacity:1},.45)}},
-{name:'按权重混合 V',run:(tl,t)=>{a(tl,t,'[id^=mix]',{opacity:1});[0,1,2].forEach(i=>a(tl,t,'#v'+i,{x:60},i*.14));a(tl,t,'#out',{scale:1.1},.5)}}]);
-let mat=T(490,28,'历史 K 位置','label')+T(165,178,'查询 Q','label');for(let r=0;r<5;r++)for(let c=0;c<5;c++)mat+=R('m'+r+c,300+c*62,50+r*52,52,42,c<=r?'accentbox':'box soft');mat+=B('old',750,80,300,70,'旧 K、V 保持不变')+B('new',750,215,300,70,'追加新 K、V','accentbox ghost');
-scene('causal',mat,[{name:'固定旧历史',run:(tl,t)=>{a(tl,t,'#old',{scale:1.06});for(let r=0;r<4;r++)for(let c=0;c<=r;c++)a(tl,t,'#m'+r+c,{fill:'var(--accent-2)'},0)}},{name:'多一行新查询',run:(tl,t)=>{for(let c=0;c<5;c++)a(tl,t,'#m4'+c,{fill:'var(--accent)',y:7},c*.08);a(tl,t,'#new',{opacity:1},.4)}}]);
-let pre=T(180,27,'已知 prompt','label')+T(555,27,'单层 QKV 投影','label')+T(910,27,'HBM：本层 KV cache','label');for(let i=0;i<4;i++)pre+=B('p'+i,70,55+i*64,210,48,['猫','坐','在','垫上'][i])+L('pwire'+i,290,79+i*64,440,79+i*64,'wire')+B('projection'+i,450,55+i*64,170,48,'K、V','accentbox')+B('cache'+i,810,55+i*64,210,48,'K、V','greenbox ghost');
-scene('prefill',pre,[{name:'并行写入 KV',run:(tl,t)=>{for(let i=0;i<4;i++){a(tl,t,'#projection'+i,{x:330},i*.08);a(tl,t,'#cache'+i,{opacity:1},.8)}}},{name:'预测第一个新词',run:(tl,t)=>{a(tl,t,'#p3',{x:30});a(tl,t,'#cache3',{scale:1.1});a(tl,t,'#cache3 text',{text:1,fmt:()=> '预测下一个词'},.6)}}]);
-let dec=T(200,27,'HBM：历史 cache','label')+T(745,27,'SM：当前 token 的计算','label');for(let i=0;i<5;i++)dec+=B('slot'+i,45,50+i*52,260,44,i<4?'K'+(i+1)+' / V'+(i+1):'空位',i<4?'box':'box soft');dec+=B('newkv',650,55,210,56,'新 K₅ / V₅','accentbox')+B('query',650,150,210,56,'当前 Q₅','accentbox')+B('answer',900,150,160,56,'输出','greenbox ghost')+L('channel',320,175,635,175,'wire');for(let i=0;i<5;i++)dec+=R('packet'+i,325,155,28,28,'accentbox ghost');
-scene('decode',dec,[{name:'追加当前 KV',run:(tl,t)=>{a(tl,t,'#newkv',{x:-600,y:203});a(tl,t,'#newkv',{opacity:0},.85,.2);a(tl,t,'#slot4',{opacity:1});a(tl,t,'#slot4 text',{text:1,fmt:()=> 'K₅ / V₅'},.5)}},{name:'分块读取历史',run:(tl,t)=>{for(let i=0;i<5;i++){a(tl,t,'#packet'+i,{opacity:1,x:295},i*.1,.6);a(tl,t,'#slot'+i,{scale:1.04},i*.08)}a(tl,t,'#answer',{opacity:1},.7)}}]);
-let reuse=T(180,48,'每步重算','label')+T(180,165,'有 KV cache','label')+T(180,282,'历史读取量','label');for(let i=0;i<8;i++){reuse+=B('compute'+i,320+i*85,20,73,53,i<7?'旧':'新',i<7?'box':'accentbox');reuse+=B('cached'+i,320+i*85,135,73,53,i<7?'存':'新',i<7?'greenbox':'accentbox');}reuse+=R('readbar',320,255,340,40,'accentbox')+T(740,283,'4 → 8 份 KV','label');scene('reuse',reuse,[{name:'复用七份旧结果',run:(tl,t)=>{for(let i=0;i<7;i++){a(tl,t,'#compute'+i,{opacity:.15,y:15},i*.06);a(tl,t,'#cached'+i,{y:-8},i*.06)}}},{name:'读取随历史增长',run:(tl,t)=>{a(tl,t,'#readbar',{attr:{width:680}});a(tl,t,'#cached7',{x:12})}}]);
-scene('bandwidth',B('hbm',40,60,250,210,'HBM：KV cache')+B('sm',770,60,290,210,'SM：attention','accentbox')+L('bus',310,165,750,165,'wire')+[0,1,2,3].map(i=>R('chunk'+i,325+i*65,135,45,60,'accentbox')).join('')+T(530,90,'每次生成都要搬','label')+'<text id="traffic" x="530" y="255" text-anchor="middle" class="value">0 GiB</text>',[
-{name:'历史流入计算单元',run:(tl,t)=>{[0,1,2,3].forEach(i=>a(tl,t,'#chunk'+i,{x:390-i*65,y:(i-1.5)*15},i*.13));a(tl,t,'#traffic',{text:1,fmt:v=>v.toFixed(2)+' GiB'})}},
-{name:'缩小搬运的数据',run:(tl,t)=>{[0,1,2,3].forEach(i=>a(tl,t,'#chunk'+i,{scale:.6},i*.1));a(tl,t,'#traffic',{text:.5,fmt:v=>v.toFixed(2)+' GiB（示意）'})}}]);
-function updateMemory(){let v={};['layers','tokens','heads','batch'].forEach(k=>{v[k]=+document.getElementById(k).value;document.getElementById(k+'-o').textContent=v[k]});const gib=2*v.layers*v.tokens*v.heads*128*2/2**30;document.getElementById('one').textContent=gib.toFixed(2)+' GiB';document.getElementById('all').textContent=(gib*v.batch).toFixed(2)+' GiB'}document.querySelectorAll('.memory-inputs input').forEach(e=>e.addEventListener('input',updateMemory));updateMemory();
-
-function numberSteps(id,frames,captions){
- const el=document.getElementById(id),tl=Anim.timeline({root:el});
- const value=el.querySelector('.cn-value'),label=el.querySelector('.cn-label'),detail=el.querySelector('.cn-detail'),cap=el.querySelector('.cn-caption'),rows=[...el.querySelectorAll('.cn-row')];
- const packets=rows.map((row,i)=>{const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx','625');c.setAttribute('cy',String(54+i*73));c.setAttribute('r','7');c.setAttribute('fill','var(--accent)');c.style.opacity='0';el.querySelector('svg').appendChild(c);return c});
- const driver=document.createElement('span');driver.hidden=true;el.appendChild(driver);
- const draw=v=>{const n=Math.min(frames.length-1,Math.floor(v+1e-7)),f=frames[n];label.textContent=f.label;detail.textContent=f.detail;cap.textContent=captions[n];rows.forEach((r,i)=>r.style.opacity=i===n-1?'1':'.45');return String(v)};
- tl.set(driver,{text:0,fmt:draw},{at:0});tl.set(value,{text:frames[0].value,fmt:v=>v.toFixed(frames[0].digits??2)},{at:0});tl.label('起点',0);
- frames.slice(1).forEach((f,i)=>{const t=i*1.5;tl.to(packets[i],{opacity:1},{at:t+.1,dur:.1});tl.to(packets[i],{x:100,y:135-(54+i*73)},{at:t+.2,dur:.8,ease:'linear'});tl.to(packets[i],{opacity:0},{at:t+1.1,dur:.1});tl.to(value,{text:f.value,fmt:v=>v.toFixed(f.digits??2)},{at:t+.1,dur:1.15,ease:'linear'});tl.set(driver,{text:i+1,fmt:draw},{at:t+.05});tl.label(f.stop,t+1.5)});
- Anim.slide(el,tl,{steps:true,controls:true});
-}
-numberSteps("softmax-arithmetic",[{"value": 0, "label": "累计 attention 输出", "detail": "权重之和 = 1"}, {"value": 0.3333333333333333, "label": "累计 attention 输出", "detail": "2 / 6", "stop": "读第一个 V"}, {"value": 1.6666666666666667, "label": "累计 attention 输出", "detail": "(2 + 8) / 6", "stop": "读第二个 V"}, {"value": 5.666666666666667, "label": "最终 attention 输出", "detail": "(2 + 8 + 24) / 6", "stop": "读第三个 V"}],["QKᵀ / √d 先得到 logits，再做稳定 softmax。", "分子只积累第一个 value 的贡献。", "加权求和；不是把三个 value 等权平均。", "得到 5.6667；新 Q 会改变这些权重，所以旧输出通常不能复用。"]);
-numberSteps("position-arithmetic",[{"value": 4, "label": "最后处理的位置", "detail": "下一次 position = 5", "digits": 0}, {"value": 5, "label": "当前 RoPE 位置", "detail": "槽位 1；窗口 [2, 3, 4, 5]", "digits": 0, "stop": "写入位置 5"}, {"value": 6, "label": "当前 RoPE 位置", "detail": "槽位 2；窗口 [3, 4, 5, 6]", "digits": 0, "stop": "写入位置 6"}, {"value": 7, "label": "当前 RoPE 位置", "detail": "槽位 3；窗口 [4, 5, 6, 7]", "digits": 0, "stop": "写入位置 7"}],["物理容量不会告诉你语义上的绝对位置。", "先旋转当前 Q/K，再写入槽位；槽位编号不是 position id。", "窗口滑动淘汰旧 KV，但位置不能重新从 0 编号。", "只有模型本来就使用窗口 attention 时，才能这样淘汰历史。"]);
-</script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
-</body></html>
+  const lifeGrid=document.getElementById('life-grid');
+  lifeGrid.innerHTML='<div></div>'+['0 · x₀','1 · x₁','2 · x₂','3 · y₀','4 · y₁'].map(s=>'<div class="head">'+s+'</div>').join('')+[0,1].map(layer=>'<div class="row-label">第 '+(layer+1)+' 层</div>'+Array.from({length:5},(_,pos)=>'<div class="life-cell" data-layer="'+layer+'" data-position="'+pos+'"><span>空槽</span><small>尚未写入</small></div>').join('')).join('');
+  const lifeStates=[
+    {lengths:[0,0],node:-1,input:'x₀、x₁、x₂',pending:'无',title:'提示词已经给定，缓存还空着',body:'三个 prompt token 都已知。它们可以在同一层并行处理；各层的 K/V 此时都还没有产生。'},
+    {lengths:[3,0],node:0,input:'x₀、x₁、x₂',pending:'无',title:'第 1 层写入 prompt 的 K/V',body:'三个位置的 K/V 写入第 1 层缓存。因果 mask 限制各位置只读自己和之前的位置；该层输出继续传给第 2 层。'},
+    {lengths:[3,3],node:1,input:'x₀、x₁、x₂',pending:'无',title:'第 2 层完成，最后位置产生 logits',body:'第 2 层保存自己产生的 K/V。两层缓存都覆盖位置 0、1、2；此刻可以从最后位置的 logits 预测一个新 token。'},
+    {lengths:[3,3],node:2,input:'本步骤不做模型前向',pending:'y₀ · 尚未进入模型',title:'采样得到 y₀，缓存长度没有增加',body:'采样器选出 y₀，但它还没有通过任何一层。不要因为输出已显示，就把 cache.length 从 3 增加到 4。'},
+    {lengths:[4,3],node:0,input:'y₀ · 绝对位置 3',pending:'y₀ 正在被消费',title:'Decode 从第 1 层开始处理 y₀',body:'只为新位置 3 投影 Q/K/V。写入新 K/V 后，新 query 读取位置 0～3；第 1 层的旧三格不需要重算。'},
+    {lengths:[4,4],node:1,input:'y₀ · 绝对位置 3',pending:'无，y₀ 已完成前向',title:'第 2 层也追加位置 3',body:'第 2 层使用自己的旧 K/V，再追加自己的新 K/V。两层都完成后，logits 用来预测 y₁；缓存现在覆盖 4 个已编码位置。'},
+    {lengths:[4,4],node:2,input:'本步骤不做模型前向',pending:'y₁ · 尚未进入模型',title:'第二个输出 y₁ 仍然在缓存之外',body:'如果到此结束，位置 4 不需要写入。若继续生成，下一轮才消费 y₁，并为它计算每层的 K/V。'}
+  ];
+  player('lifecycle-demo',6,(el,step)=>{
+    const state=lifeStates[step];el.querySelectorAll('.life-node').forEach((n,i)=>n.classList.toggle('is-working',i===state.node));
+    el.querySelectorAll('.life-cell').forEach(cell=>{const l=Number(cell.dataset.layer),pos=Number(cell.dataset.position),filled=pos<state.lengths[l],previous=step?lifeStates[step-1].lengths[l]:0;cell.classList.toggle('filled',filled);cell.classList.toggle('writing',filled&&pos>=previous);cell.querySelector('span').textContent=filled?'K / V':'空槽';cell.querySelector('small').textContent=filled?'位置 '+pos:'尚未写入';});
+    document.getElementById('life-input').textContent=state.input;document.getElementById('life-pending').textContent=state.pending;el.querySelector('.kv-caption').innerHTML='<strong>'+state.title+'。</strong>'+state.body;
+  });
+  function mask(el,step){
+    const prefix=Number(document.getElementById('mask-prefix').value),chunk=Number(document.getElementById('mask-chunk').value),wrong=document.getElementById('mask-wrong').checked,total=prefix+chunk;
+    const grid=document.getElementById('mask-grid');grid.style.gridTemplateColumns='48px repeat('+total+',minmax(27px,1fr))';
+    let html='<div class="mask-head">Q ↓ / K →</div>'+Array.from({length:total},(_,j)=>'<div class="mask-head">'+j+'<br>'+(j<prefix?'旧':step>=1?'新 · 已写':'待写')+'</div>').join('');
+    const outputs=[];
+    for(let i=0;i<chunk;i++){
+      const last=wrong?i:prefix+i,seen=step>=2&&(step===3||i===0);outputs.push((last+2)/2);
+      html+='<div class="mask-row-label">Q'+(prefix+i)+'</div>'+Array.from({length:total},(_,j)=>{const allowed=j<=last;return '<div class="mask-cell '+(seen&&allowed?'allowed ':'')+(!seen?'inactive':'')+'"><span>'+(seen?(allowed?'✓':'×'):'·')+'</span><small>V='+ (j+1)+'</small></div>';}).join('');
+    }
+    grid.innerHTML=html;
+    const text=step<2?'先把新 K/V 放入缓存，再按每个 query 的位置限制可见范围。':(step===2?'Q'+prefix+' 输出 = '+outputs[0]:outputs.map((v,i)=>'Q'+(prefix+i)+' 输出 = '+v).join('；'));
+    document.getElementById('mask-value').textContent=text;
+    const title=['先区分旧历史与本次新输入','新 K/V 可以一起写入','先计算本次第一个 query','计算本次全部 query'][step];
+    let body=[
+      '旧位置有 '+prefix+' 个；本次新增 '+chunk+' 个。因此新 query 的绝对位置从 '+prefix+' 开始，横轴最终有 '+total+' 个 key。',
+      '已有 '+prefix+' 个旧位置，加上 '+chunk+' 份新 K/V。即使后一个新 key 已经存好，较早的 query 也不能越过因果边界去读它。',
+      wrong?'错误 mask 使用局部编号 i=0，因此 Q'+prefix+' 只读取 K0。缺少旧缓存偏移时，数据仍能相乘，但结果已经改变。':'Q'+prefix+' 的绝对位置是 '+prefix+'，所以只能读取编号不超过 '+prefix+' 的 key；它也可以读取自己。',
+      wrong?'错误 mask 让第 i 个 query 只读到 Ki，遗漏了旧历史偏移 P='+prefix+'。取消勾选，比较相同输入的输出。':'每一行按 j ≤ P+i 判断。新 token 越靠后，可见范围越长；归一化只在这一行允许的 key 中进行。'
+    ][step];
+    if(prefix===0&&wrong&&step>=2)body='P=0 时局部编号恰好就是绝对编号，所以两种 mask 一致。这解释了为什么只测试空缓存的 prefill 会漏掉这个 bug。';
+    el.querySelector('.kv-caption').innerHTML='<strong>'+title+'。</strong>'+body;
+  }
+  const maskPlayer=player('mask-demo',3,mask);
+  ['mask-prefix','mask-chunk','mask-wrong'].forEach(id=>document.getElementById(id).addEventListener('change',()=>maskPlayer.refresh()));
+})();
+</script>
+<script src="/assets/post-links.js?v=3173091271f1"></script>
+<script src="/assets/posts.js?v=150c41e1230c"></script>
+<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</body>
+</html>

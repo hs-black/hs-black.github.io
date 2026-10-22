@@ -7,10 +7,9 @@
   <meta name="description" content="从 SM、warp、内存层级讲起，到访存合并、分块、融合、Triton，再到 FlashAttention 1–3 的推导与实现。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     .fig { margin: 1.6em 0; }
     .prose p code, .prose li code { overflow-wrap: anywhere; }
@@ -69,6 +68,8 @@
     /* timeline */
     pre code .cm { color: var(--text-faint); }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -584,7 +585,7 @@ C[localRow * N + localCol] = sum;</code></pre>
           <label class="ctrl"><span>序列长度 N</span><input type="range" id="hbm-n" min="9" max="17" step="1" value="13"><output id="hbm-n-v">8192</output></label>
           <label class="ctrl"><span>头维度 d</span><input type="range" id="hbm-d" min="0" max="2" step="1" value="1"><output id="hbm-d-v">128</output></label>
           <label class="ctrl"><span>头数 × batch</span><input type="range" id="hbm-h" min="1" max="256" step="1" value="32"><output id="hbm-h-v">32</output></label>
-          <label class="ctrl"><span>Q 块大小 B_r</span><input type="range" id="hbm-br" min="4" max="8" step="1" value="7"><output id="hbm-br-v">128</output></label>
+          <label class="ctrl"><span>Q 块大小 <span data-tex="B_r">Bᵣ</span></span><input type="range" id="hbm-br" min="4" max="8" step="1" value="7"><output id="hbm-br-v">128</output></label>
           <div class="ctrl"><span>元素字节</span><span class="seg" id="hbm-b" role="group" aria-label="元素字节"><button type="button" data-b="2" aria-pressed="true">2（BF16）</button><button type="button" data-b="1">1（FP8）</button></span><span></span></div>
           <div class="ctrl"><span>因果掩码</span><span class="seg" id="hbm-c" role="group" aria-label="因果"><button type="button" data-c="0" aria-pressed="true">否</button><button type="button" data-c="1">是</button></span><span></span></div>
         </div>
@@ -651,12 +652,12 @@ C[localRow * N + localCol] = sum;</code></pre>
           <text x="200" y="298" text-anchor="middle" class="soft" font-size="12">K/V 块 j（列）</text>
           <rect x="430" y="40" width="320" height="110" rx="8" class="box"/>
           <text x="445" y="62">FA1：外层 j（K/V），内层 i（Q）</text>
-          <text x="445" y="86" class="soft" font-size="13">K_j, V_j 载入一次；每个 Q_i, O_i 要读写 T_c 次</text>
+          <foreignObject class="diagram-math-label" x="445" y="70" width="295" height="24"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="K_j,V_j\;\text{载入一次；每个 }Q_i,O_i\;\text{要读写 }T_c\;\text{次}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:flex-start;white-space:nowrap;font-size:10.744px;line-height:1.2;color:var(--text-soft)">K_j, V_j 载入一次；每个 Q_i, O_i 要读写 T_c 次</div></foreignObject>
           <text x="445" y="108" class="soft" font-size="13">→ 按列扫过 S</text>
           <text x="445" y="130" class="soft" font-size="13">O、ℓ、m 在 HBM 上反复更新</text>
           <rect x="430" y="164" width="320" height="110" rx="8" class="box-acc"/>
           <text x="445" y="186">FA2：外层 i（Q），内层 j（K/V）</text>
-          <text x="445" y="210" class="soft" font-size="13">Q_i 载入一次，O_i 累加器留在寄存器</text>
+          <foreignObject class="diagram-math-label" x="445" y="194" width="295" height="24"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="Q_i\;\text{载入一次，}O_i\;\text{累加器留在寄存器}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:flex-start;white-space:nowrap;font-size:10.744px;line-height:1.2;color:var(--text-soft)">Q_i 载入一次，O_i 累加器留在寄存器</div></foreignObject>
           <text x="445" y="232" class="soft" font-size="13">→ 按行扫过 S；不同 i 互不依赖</text>
           <text x="445" y="254" class="soft" font-size="13">可按 i 并行到不同 thread block</text>
         </svg>
@@ -1119,7 +1120,8 @@ C[localRow * N + localCol] = sum;</code></pre>
       [['Q', Q, rowIn], ['K', K, colIn], ['V', V, colIn]].forEach(([name, Mx, inF]) => {
         qkv.appendChild(box(name + '（16×4）', mat(N, D, (c, r, k) => { c.style.background = heat(Mx[r][k]); if (inF(r)) c.className = 'sram'; })));
       });
-      view.appendChild(box('框内 = 当前在 SRAM 的块（B_r = B_c = 4）', qkv));
+      view.appendChild(box(String.raw`框内 = 当前在 SRAM 的块（<span data-tex="B_r=B_c=4">Bᵣ = B꜀ = 4</span>）`, qkv));
+      window.ReaderMath?.render(view);
       view.appendChild(box('S = QKᵀ/√d：只在片上按块出现', mat(N, N, (c, r, cc) => {
         const bi = Math.floor(r / BS), bj = Math.floor(cc / BS);
         const key = bi + ',' + bj;
@@ -1235,9 +1237,10 @@ C[localRow * N + localCol] = sum;</code></pre>
       const crit = peak / bw;
       let note = '标准注意力的搬运时间是计算时间的 ' + (ts / tc).toFixed(1) + ' 倍' + (ts > tc ? '，受带宽限制。' : '，受算力限制。');
       note += ' Flash 若 K/V 每次都从 HBM 重新读，搬运时间是计算时间的 ' + (tf / tc).toFixed(2) + ' 倍；K/V 的重复读取全部命中 L2 时是 ' + (tfl / tc).toFixed(3) + ' 倍。';
-      note += ' 片上强度 2B_r/b = ' + (2 * Br / b).toFixed(0) + ' FLOPs/B，H100 对 HBM 的临界强度约 ' + crit.toFixed(0) + '：';
+      note += String.raw` 片上强度 <span data-tex="2B_r/b">2Bᵣ/b</span> = ` + (2 * Br / b).toFixed(0) + ' FLOPs/B，H100 对 HBM 的临界强度约 ' + crit.toFixed(0) + '：';
       note += (2 * Br / b >= crit ? '即使 K/V 全部来自 HBM 也能受算力限制。' : '如果 K/V 全部来自 HBM 会受带宽限制，实际靠 L2 命中补上（一个头的 K+V 在这里是 ' + fB(2 * N * d * b) + '，L2 为 50 MB）。');
-      $('hbm-note').textContent = note;
+      $('hbm-note').innerHTML = note;
+      window.ReaderMath?.render($('hbm-note'));
     }
     upd();
   })();
@@ -1257,7 +1260,20 @@ C[localRow * N + localCol] = sum;</code></pre>
     return e;
   };
   const hidden = (e) => { e.style.opacity = '0'; return e; };
-  const bind = (fig, tl) => Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.anim-ctl') });
+  // Math labels use authored HTML rectangles, separate from animated numeric readouts.
+  const mathLabel = (svg, x, y, width, height, tex, fallback, size = 13) => {
+    const frame = mk('foreignObject', { x, y, width, height, class: 'diagram-math-label' }, svg);
+    const label = document.createElementNS('http://www.w3.org/1999/xhtml', 'div');
+    label.dataset.tex = tex;
+    label.style.cssText = 'width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;line-height:1.2;color:var(--text-soft);font-size:' + size / 1.21 + 'px';
+    label.textContent = fallback;
+    frame.appendChild(label);
+    return frame;
+  };
+  const bind = (fig, tl) => {
+    window.ReaderMath?.render(fig.querySelector('svg'));
+    return Anim.inView(fig, tl, { controls: true, controlsIn: fig.querySelector('.anim-ctl') });
+  };
 
   /* ---------- coalescing: 32 requests -> 32-byte sectors ---------- */
   (() => {
@@ -1360,8 +1376,8 @@ C[localRow * N + localCol] = sum;</code></pre>
     const SA = [80, 282], SB = [190, 282], ACC = [365, 282];
     mk('rect', { x: SA[0] - 24, y: SA[1] - 24, width: 48, height: 48, class: 'dash' }, svg);
     mk('rect', { x: SB[0] - 24, y: SB[1] - 24, width: 48, height: 48, class: 'dash' }, svg);
-    mk('text', { x: SA[0], y: 328, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'A 片 B_M×B_K');
-    mk('text', { x: SB[0], y: 328, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'B 片 B_K×B_N');
+    mathLabel(svg, SA[0] - 54, 311, 108, 25, String.raw`\text{A 片 }B_M\times B_K`, 'A 片 Bₘ×Bₖ');
+    mathLabel(svg, SB[0] - 54, 311, 108, 25, String.raw`\text{B 片 }B_K\times B_N`, 'B 片 Bₖ×Bₙ');
     mk('rect', { x: ACC[0] - 24, y: ACC[1] - 24, width: 48, height: 48, class: 'box-hot' }, svg);
     const accFill = mk('rect', { x: ACC[0] - 24, y: ACC[1] + 24, width: 48, height: 0, class: 'hot-f', opacity: 0.55 }, svg);
     mk('text', { x: ACC[0], y: 328, 'text-anchor': 'middle', class: 'sm soft' }, svg, '累加器 acc');
@@ -1452,10 +1468,10 @@ C[localRow * N + localCol] = sum;</code></pre>
     const QC = [70, 214], KC = [146, 152], VC = [226, 214];
     const SX = 114, SY = 182, CW = 16;
     [QC, KC, VC].forEach((c) => mk('rect', { x: c[0] - 22, y: c[1] - 22, width: 44, height: 44, class: 'dash' }, svg));
-    mk('text', { x: QC[0], y: 256, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'Q_i 常驻');
-    mk('text', { x: KC[0] + 30, y: KC[1] + 5, class: 'sm soft' }, svg, 'K_j');
-    mk('text', { x: VC[0], y: 256, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'V_j');
-    mk('text', { x: SX + 32, y: 270, 'text-anchor': 'middle', class: 'sm soft' }, svg, 'S_ij = Q_i K_jᵀ');
+    mathLabel(svg, QC[0] - 38, 241, 76, 23, String.raw`Q_i\;\text{常驻}`, 'Qᵢ 常驻');
+    mathLabel(svg, KC[0] + 28, KC[1] - 11, 34, 24, String.raw`K_j`, 'Kⱼ');
+    mathLabel(svg, VC[0] - 24, 241, 48, 23, String.raw`V_j`, 'Vⱼ');
+    mathLabel(svg, SX - 28, 256, 120, 24, String.raw`S_{ij}=Q_iK_j^{\mathsf{T}}`, 'Sᵢⱼ = QᵢKⱼᵀ');
     mk('rect', { x: SX, y: SY, width: 64, height: 64, class: 'box-soft' }, svg);
     const cells = [];
     for (let r = 0; r < 4; r++) for (let c = 0; c < 4; c++) {
@@ -1475,7 +1491,7 @@ C[localRow * N + localCol] = sum;</code></pre>
     const PX = 272;
     mk('text', { x: PX, y: 150, class: 'lbl' }, svg, 'm');
     mk('text', { x: PX, y: 174, class: 'lbl' }, svg, 'ℓ');
-    mk('text', { x: PX, y: 198, class: 'lbl' }, svg, 'e^(m−m′)');
+    mathLabel(svg, PX, 179, 76, 27, String.raw`e^{m-m'}`, 'e 的 (m−m′) 次方', 15);
     const fm = (v) => (v < -50 ? '−∞' : v.toFixed(2));
     const fc = (v) => (v < -0.5 ? '—' : v.toFixed(2));
     const mT = mk('text', { x: 426, y: 150, 'text-anchor': 'end', class: 'num' }, svg, '-99');
@@ -1537,7 +1553,7 @@ C[localRow * N + localCol] = sum;</code></pre>
     let t = tl.duration + 0.1;
     tl.to([kM[3], vM[3], sRows[3], maxMark[3], qM], { opacity: 0 }, { at: t, dur: 0.4 })
       .to(cells, { opacity: 0 }, { at: t, dur: 0.4 })
-      .set(blkT, { text: 0, fmt: () => '4 块走完：除以 ℓ，O_i 写回一次' }, { at: t })
+      .set(blkT, { text: 0, fmt: () => '4 块走完：归一化后，输出写回一次' }, { at: t })
       .to(oLab, { opacity: 0 }, { at: t, dur: 0.3 })
       .to(oLab2, { opacity: 1 }, { at: t + 0.2, dur: 0.3 });
     setBars(tl, barH(out), t + 0.3, 0.7);
@@ -1553,8 +1569,8 @@ C[localRow * N + localCol] = sum;</code></pre>
   })();
 })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

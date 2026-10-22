@@ -7,10 +7,9 @@
   <meta name="description" content="拆解 DeepSeek-V4：CSA/HCA 注意力、mHC、Muon、FP4 QAT 与多教师蒸馏，附成本计算器。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     .fig { margin: 1.4em 0 0; }
     .fig svg { display: block; width: 100%; height: auto; }
@@ -57,6 +56,8 @@
       .mat { font-size: 11px; }
     }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
   <header class="site-header wrap">
@@ -162,7 +163,7 @@
           <text x="340" y="126" font-size="12.5" class="soft">Pro（61 层）：HCA, HCA, CSA, HCA, CSA, …</text>
           <text x="340" y="156" font-size="13">每层 MoE：1 共享 + N 路由专家，激活 6 个</text>
           <text x="340" y="180" font-size="12.5" class="soft">前 3 层按 token id 做 Hash 路由</text>
-          <text x="340" y="210" font-size="13">残差流形状：n_hc × d = 4 × d</text>
+          <foreignObject class="diagram-math-label" x="340" y="194" width="290" height="24"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="\text{残差流形状：}\;n_{\mathrm{hc}}\times d=4\times d" style="width:100%;height:100%;display:flex;align-items:center;justify-content:flex-start;white-space:nowrap;font-size:10.744px;line-height:1.2;color:var(--text)">残差流形状：n_hc × d = 4 × d</div></foreignObject>
           <text x="340" y="234" font-size="12.5" class="soft">子层的输入输出仍是 d 维</text>
         </svg></div>
         <figcaption>图 1　V4 总体结构。橙色是 mHC 的三种映射，紫色是子层本体。</figcaption>
@@ -253,23 +254,23 @@
       <figure class="fig"><div class="sx">
         <svg viewBox="0 0 640 300" role="img" aria-label="CSA 数据流">
           <rect class="box-soft" x="20" y="250" width="180" height="32" rx="6"/>
-          <text x="110" y="271" text-anchor="middle" font-size="12.5">历史 token 的 h_s（n×d）</text>
+          <foreignObject class="diagram-math-label" x="24" y="251" width="172" height="30"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="\text{历史 token 的 }h_s\;\text{（}n\times d\text{）}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:10.331px;line-height:1.2;color:var(--text)">历史 token 的 h_s（n×d）</div></foreignObject>
           <rect class="box-soft" x="440" y="250" width="180" height="32" rx="6"/>
-          <text x="530" y="271" text-anchor="middle" font-size="12.5">当前 token 的 h_t</text>
+          <foreignObject class="diagram-math-label" x="444" y="251" width="172" height="30"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="\text{当前 token 的 }h_t" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:10.331px;line-height:1.2;color:var(--text)">当前 token 的 h_t</div></foreignObject>
           <rect class="box-acc2" x="20" y="190" width="85" height="40" rx="6"/>
           <text x="62" y="207" text-anchor="middle" font-size="11.5">KV 压缩器</text>
           <text x="62" y="222" text-anchor="middle" font-size="10.5" class="soft">c=512, m=4</text>
           <rect class="box-acc2" x="115" y="190" width="85" height="40" rx="6"/>
           <text x="157" y="207" text-anchor="middle" font-size="11.5">indexer 压缩器</text>
-          <text x="157" y="222" text-anchor="middle" font-size="10.5" class="soft">c_I=128</text>
+          <foreignObject class="diagram-math-label" x="119" y="210" width="77" height="17"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="c_I=128" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:8.678px;line-height:1.2;color:var(--text-soft)">c_I=128</div></foreignObject>
           <path class="ln" d="M62 250 V230 M157 250 V230"/>
           <rect class="box-soft" x="440" y="190" width="180" height="40" rx="6"/>
-          <text x="530" y="207" text-anchor="middle" font-size="11.5">c^Q = h_t W^DQ（d_c 维）</text>
+          <foreignObject class="diagram-math-label" x="444" y="191" width="172" height="20"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="c^Q=h_tW^{DQ}\;\text{（}d_c\text{ 维）}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:9.504px;line-height:1.2;color:var(--text)">c^Q = h_t W^DQ（d_c 维）</div></foreignObject>
           <text x="530" y="222" text-anchor="middle" font-size="10.5" class="soft">主 query 与 indexer query 共享</text>
           <path class="ln" d="M530 250 V230"/>
           <rect class="box-acc" x="230" y="130" width="180" height="40" rx="6"/>
           <text x="320" y="147" text-anchor="middle" font-size="11.5">Lightning indexer（FP4）</text>
-          <text x="320" y="162" text-anchor="middle" font-size="10.5" class="soft">I_ts = Σ_h w_h·ReLU(q_h·K_s)</text>
+          <foreignObject class="diagram-math-label" x="234" y="149" width="172" height="19"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="I_{t,s}=\sum_h w_h\cdot\operatorname{ReLU}(q_h\cdot K_s)" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:8.678px;line-height:1.2;color:var(--text-soft)">I_ts = Σ_h w_h·ReLU(q_h·K_s)</div></foreignObject>
           <path class="ln" d="M157 190 V150 H230 M480 190 V150 H410"/>
           <rect class="box-acc" x="250" y="80" width="140" height="32" rx="6"/>
           <text x="320" y="101" text-anchor="middle" font-size="12">Top-k 选择</text>
@@ -280,7 +281,7 @@
           <rect class="box" x="440" y="80" width="180" height="32" rx="6"/>
           <text x="530" y="101" text-anchor="middle" font-size="12">滑窗 KV：最近 128 token</text>
           <rect class="box-acc" x="170" y="22" width="300" height="36" rx="6"/>
-          <text x="320" y="44" text-anchor="middle" font-size="12.5">Shared-KV MQA（n_h 头）→ 分组输出投影</text>
+          <foreignObject class="diagram-math-label" x="174" y="23" width="292" height="34"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="\text{Shared-KV MQA（}n_h\text{ 头）}\to\text{分组输出投影}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:10.331px;line-height:1.2;color:var(--text)">Shared-KV MQA（n_h 头）→ 分组输出投影</div></foreignObject>
           <path class="ln" d="M115 80 V68 H250 V58 M320 80 V58 M530 80 V68 H390 V58"/>
           <path class="ln" d="M620 210 H632 V40 H470"/>
         </svg></div>
@@ -1522,8 +1523,8 @@
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

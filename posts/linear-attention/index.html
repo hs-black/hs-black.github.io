@@ -284,7 +284,7 @@ delta unit-key convergence: PASS</pre></div><p class="ws-lead">改变 chunk 大�
 </p>
 </section>
 </div>
-</main><script src="/assets/slides.js?v=03e51263994e"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
+</main><script src="/assets/slides.js?v=33e153b61ac9"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
 const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
 const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
@@ -321,5 +321,5 @@ function numberSteps(id,frames,captions){
 }
 numberSteps("gate-weights",[{"value": 0, "label": "当前归一化输出", "detail": "S0 = z0 = 0"}, {"value": 2, "label": "当前归一化输出", "detail": "2 / 1 = 2", "stop": "第一个 token"}, {"value": 3.3333333333333335, "label": "当前归一化输出", "detail": "5 / 1.5 = 3.3333", "stop": "第二个 token"}, {"value": 6, "label": "当前归一化输出", "detail": "10.5 / 1.75 = 6", "stop": "第三个 token"}],["旧信息每经过一步都乘 0.5。", "当前 token 的权重系数为 1。", "两个 token 的未归一化系数是 [0.5, 1]。", "三个 token 的系数为 [0.25, 0.5, 1]；归一化后 [1/7, 2/7, 4/7]。"]);
 numberSteps("delta-repeat",[{"value": 2, "label": "key = 1 对应的记忆", "detail": "初始 S = 2"}, {"value": 3.5, "label": "key = 1 对应的记忆", "detail": "剩余误差 1.5", "stop": "第一次纠错"}, {"value": 4.25, "label": "key = 1 对应的记忆", "detail": "剩余误差 0.75", "stop": "第二次纠错"}, {"value": 4.625, "label": "key = 1 对应的记忆", "detail": "剩余误差 0.375", "stop": "第三次纠错"}],["这是不带 z 分母的 delta memory。", "误差减半，而不是把 value 5 整份叠加到 S。", "对同一个目标反复纠错，会逐渐逼近 5。", "β = 1 且 key 为单位向量时，一次即可把该方向改为目标值。"]);
-</script><script src="/assets/post-links.js?v=1c9122c90486"></script><script src="/assets/posts.js?v=0644ef627f82"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</script><script src="/assets/post-links.js?v=3173091271f1"></script><script src="/assets/posts.js?v=150c41e1230c"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body></html>

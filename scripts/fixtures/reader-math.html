@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,follow">
+  <title>ReaderMath regression fixture</title>
+  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="/assets/reader-math.css">
+  <style>
+    body { margin: 0; }
+    main { max-width: 760px; margin: auto; padding: 24px; }
+    svg { max-width: 100%; }
+  </style>
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+  <script defer src="/assets/reader-math.js"></script>
+</head>
+<body>
+  <main class="prose">
+    <h1>公式与符号就近解释</h1>
+    <p id="global">一轮处理 \(\htmlData{symbol=b}{B}\) 条请求。</p>
+    <section data-math-scope="prefill">
+      <p id="scoped">预填充含 \(\htmlData{symbol=b}{B}\) 个 token。</p>
+      <section data-math-scope="inner">
+        <p id="inherited">内层仍含 \(\htmlData{symbol=b}{B}\) 个 token；
+          带宽为 \(\htmlData{symbol=bw}{\beta}\)。</p>
+      </section>
+    </section>
+    <p id="formula">$$T=\frac{2\htmlData{symbol=b}{B}DF}{C}$$</p>
+    <p>HTML 标签 <span id="plain" data-symbol="b">B</span> 也能解释。</p>
+    <span id="dynamic" data-tex="\frac{1}{2}"></span>
+    <svg viewBox="0 0 320 100" width="320" aria-label="公式标签测试">
+      <text id="rawsvg" x="10" y="20">\(raw\)</text>
+      <foreignObject x="10" y="30" width="240" height="55">
+        <div xmlns="http://www.w3.org/1999/xhtml" id="svgmath"
+          data-tex="\htmlData{symbol=b}{B}^2"></div>
+      </foreignObject>
+    </svg>
+    <p id="unknown">\(\htmlData{symbol=unknown}{Z}\)</p>
+    <p id="unsafe">\(\htmlStyle{position:fixed}{R}\)
+      \(\href{javascript:alert(1)}{bad}\)
+      \(\htmlData{symbol=b,extra=blocked}{X}\)
+      \(\htmlData{symbol=bad:key}{Y}\)</p>
+  </main>
+  <script type="application/json" id="math-definitions">
+    {
+      "global": {
+        "b": {"label":"B · 请求数", "description":"本轮同时推进的请求数。", "unit":"条请求"},
+        "bw": {"label":"β · HBM 带宽", "description":"从显存读取数据的速度。", "unit":"B/s"}
+      },
+      "scopes": {
+        "prefill": {
+          "b": {"label":"B · token 数", "description":"本次预填充矩阵处理的 token 总数。", "unit":"token"}
+        }
+      }
+    }
+  </script>
+</body>
+</html>

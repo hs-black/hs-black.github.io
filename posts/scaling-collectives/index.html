@@ -8,10 +8,9 @@
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css">
   <link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
-  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.css">
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/katex.min.js"></script>
-  <script defer src="https://cdn.jsdelivr.net/npm/katex@0.16.11/dist/contrib/auto-render.min.js"
-    onload="renderMathInElement(document.body, {delimiters: [{left: '$$', right: '$$', display: true}, {left: '\\(', right: '\\)', display: false}]})"></script>
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <style>
     :root {
       --c0: #5b4cf0; --c1: #e8590c; --c2: #0f9d76; --c3: #c2255c;
@@ -119,6 +118,8 @@
     .pager-slide .series-pager { margin-top: 10px; font-size: 18px; }
     .pager-slide .series-pager a { font-size: 20px; }
   </style>
+<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body class="deck-page">
   <main class="deck"><div class="stage">
@@ -702,7 +703,7 @@ dist.barrier()
     <!-- 29 -->
     <section class="slide dense">
       <div class="kicker">III · 分片记号</div>
-      <h2>\(A[I_X, J_Y]\)：下标写"沿哪个 mesh 轴切"</h2>
+      <h2 data-menu-title="矩阵下标：沿哪个 mesh 轴切">\(A[I_X, J_Y]\)：下标写"沿哪个 mesh 轴切"</h2>
       <div class="cols">
         <div>
           <ul>
@@ -907,7 +908,7 @@ dist.barrier()
     <!-- 40 W3 -->
     <section class="slide dense" id="mm-slide" style="padding-top: 40px; padding-bottom: 48px">
       <div class="kicker">III · <span class="tag">交互</span></div>
-      <h2 style="font-size: 32px">分片矩阵乘法探索器：\(A[I, J] \cdot B[J, K] \to C[I, K]\)</h2>
+      <h2 data-menu-title="分片矩阵乘法探索器：A × B → C" style="font-size: 32px">分片矩阵乘法探索器：\(A[I, J] \cdot B[J, K] \to C[I, K]\)</h2>
       <div class="widget" data-interactive style="padding: 16px 22px">
         <div class="w-grid" style="grid-template-columns: 1fr 1.25fr; gap: 22px">
           <div style="display: grid; gap: 8px; font-size: 17px; align-content: start">
@@ -1030,7 +1031,7 @@ dist.barrier()
 
   </div></main>
 
-  <script src="/assets/slides.js?v=03e51263994e"></script>
+  <script src="/assets/slides.js?v=33e153b61ac9"></script>
   <script src="/assets/series.js?v=0db6ff6b7f47"></script>
   <script src="/assets/anim.js?v=9b723aa5f47d"></script>
   <script>
@@ -2051,8 +2052,8 @@ dist.barrier()
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=1c9122c90486"></script>
-  <script src="/assets/posts.js?v=0644ef627f82"></script>
+  <script src="/assets/post-links.js?v=3173091271f1"></script>
+  <script src="/assets/posts.js?v=150c41e1230c"></script>
 <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
 </body>
 </html>

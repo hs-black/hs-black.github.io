@@ -97,10 +97,14 @@ window.POST_LINKS = {
   "linear-attention"
  ],
  "kv-cache": [
+  "distributed-inference",
   "kv-cache-compression",
-  "linear-attention",
+  "llm-engineering",
+  "mini-inference-engine",
   "paged-attention",
   "prefix-caching",
+  "rope-long-context",
+  "scaling-inference",
   "sparse-attention"
  ],
  "kv-cache-compression": [
@@ -168,8 +172,12 @@ window.POST_LINKS = {
  ],
  "paged-attention": [
   "continuous-batching",
-  "prefix-caching",
-  "scaling-memory"
+  "cuda-streams",
+  "flash-attention",
+  "kv-cache",
+  "llm-engineering",
+  "mini-inference-engine",
+  "prefix-caching"
  ],
  "prefill-decode-disaggregation": [
   "cuda-streams",
