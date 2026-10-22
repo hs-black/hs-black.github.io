@@ -229,7 +229,14 @@ window.POST_LINKS = {
   "rmsnorm-kernel",
   "smol-marathon"
  ],
- "qwen3-next": [],
+ "qwen3-next": [
+  "continuous-batching",
+  "cuda-graph",
+  "distributed-inference",
+  "gemm-optimization",
+  "prefix-caching",
+  "speculative-decoding"
+ ],
  "recurrent-depth": [
   "attention-residuals",
   "effective-depth",

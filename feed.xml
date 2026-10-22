@@ -403,7 +403,7 @@
       <link>https://hs-black.github.io/posts/qwen3-next/</link>
       <guid>https://hs-black.github.io/posts/qwen3-next/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从线性注意力推到 Gated DeltaNet、门控注意力、3:1 混合、512 expert MoE 与 MTP。</description>
+      <description>推导 Gated DeltaNet、混合注意力与 512 expert MoE，追踪前缀快照和 MTP 回滚，计算缓存、专家批量与跨卡通信；附数值交互、六道习题及 NumPy 实验。</description>
     </item>
     <item>
       <title>Kimi K3：KDA、注意力残差与 Stable LatentMoE</title>
