@@ -3,10 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>混合精度与 FP8 训练 · Zunzhe Zhang</title>
-  <meta name="description" content="浮点格式、舍入、损失缩放、FP32 主权重，到 FP8 的缩放策略、DeepSeek-V3 的细粒度量化与 MX/NVFP4 微缩放。">
+  <title>混合精度训练：从 BF16 到 FP8 与 NVFP4 · Zunzhe Zhang</title>
+  <meta name="description" content="从浮点编码到三次训练 GEMM，推导 FP8/FP4 的缩放、转置一致性、随机舍入和 Adam 噪声，分析分布式量化通信与显存账，附数值交互、习题及 NumPy 实验。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/posts/scaling-mixed-precision/training.css">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
@@ -84,14 +85,14 @@
 
   <main class="wrap">
     <header class="post-header">
-      <h1>混合精度与 FP8 训练</h1>
-      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time></div>
+      <h1>混合精度训练：从 BF16 到 FP8 与 NVFP4</h1>
+      <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time><span>更新于 2026-10-22</span></div>
     </header>
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <p>在 H100 上，FP8 矩阵乘的吞吐是 BF16 的 2 倍，BF16 又是 FP32 非矩阵运算的十几倍。把数字表示得更短，可以同时省显存、省带宽、提算力。代价是范围和精度都变小了，训练可能不稳定甚至发散。</p>
-      <p>问题归结为两个。第一，一个数用更少的位表示时，会在哪里出错：太大（溢出）、太小（下溢成 0）、还是不够细（舍入把小的变化吃掉）？第二，训练里哪些量对这些错误敏感，要用什么办法保护它们？今天大模型预训练实际用的 BF16 混合精度、DeepSeek-V3 的 FP8 方案和 Blackwell 上的微缩放格式，都是对这两个问题的回答。</p>
+      <p>一次训练里，同一份权重会先参与前向矩阵乘，再以转置形式参与反向；反向得到的梯度还要经过跨卡归约、Adam 状态更新，最后写回下一步的权重。把矩阵乘输入从 BF16 换成 FP8 或 FP4，会同时改变这些位置的数值误差和数据流。</p>
+      <p>混合精度的设计由几个具体选择组成：每种张量用什么格式，哪些元素共享 scale，点积在哪里累加，转置如何获得一致的数值，以及哪些状态必须跨训练步保留下来。浮点格式给出可表示的刻度，训练算法决定这些刻度该放在什么位置。</p>
 
       <div class="toc">
         <b>目录</b>
@@ -102,14 +103,14 @@
           <li><a href="#round">舍入：就近偶数与随机舍入</a></li>
           <li><a href="#amp">FP16 混合精度的三个技巧</a></li>
           <li><a href="#fp32ops">哪些运算要留在 FP32</a></li>
-          <li><a href="#bf16">BF16：为什么不需要损失缩放</a></li>
+          <li><a href="#bf16">BF16：范围与更新精度</a></li>
           <li><a href="#fp8">FP8：格式与缩放</a></li>
           <li><a href="#outlier">离群值与缩放粒度</a></li>
           <li><a href="#dsv3">DeepSeek-V3 的 FP8 框架</a></li>
           <li><a href="#accum">累加精度</a></li>
           <li><a href="#recipes">各种方案的显存账</a></li>
           <li><a href="#mx">微缩放：MXFP8 与 NVFP4</a></li>
-          <li><a href="#summary">小结</a></li>
+          <li><a href="#summary">把误差追踪到完整训练步</a></li><li><a href="#exercises">计算与诊断习题</a></li><li><a href="#lab">CPU 数值实验</a></li>
           <li><a href="#refs">参考与延伸阅读</a></li>
         </ol>
       </div>
@@ -117,11 +118,11 @@
       <h2 id="why">1. 为什么要降精度</h2>
       <p>PyTorch 张量默认是 FP32，每个数 4 字节。降到 16 位或 8 位有三重好处：</p>
       <ul>
-        <li><strong>算力</strong>：Tensor Core 的吞吐按位宽成倍提高。H100 上 BF16/FP16 矩阵乘约 990 TFLOPs/s，FP8 约 1979 TFLOPs/s；B200 还支持 FP4，三者的稠密峰值分别约为 BF16 2.25e15、FP8 4.5e15、FP4 9.0e15 FLOPs/s，每减半一次位宽吞吐翻一倍。</li>
-        <li><strong>带宽</strong>：带宽受限的算子（逐元素、归一化）时间和字节数成正比，位宽减半时间减半。通信也一样：梯度 all-reduce、MoE 的 all-to-all 都按字节计费。</li>
+        <li><strong>算力</strong>：硬件为低精度矩阵乘提供更高峰值。例如 H100 SXM 的稠密 BF16/FP16 与 FP8 Tensor Core 峰值约为 989、1979 TFLOPs/s；实际 GEMM 速度还受矩阵形状、对齐、数据搬运和 kernel 影响。Blackwell 进一步提供微缩放 FP4 的硬件路径。</li>
+        <li><strong>带宽</strong>：被压缩的数据载荷随位宽减少。耗时还包括 scale、转换、同步、通信延迟与融合开销；当主要成本确实来自这份载荷时，节省的字节才接近等比例转化为时间收益。</li>
         <li><strong>显存</strong>：激活、权重副本、优化器状态都可以更小。</li>
       </ul>
-      <p>但简单地把所有东西都换成 FP16 行不通，训练通常会发散。混合精度的意思是：大部分计算（尤其是矩阵乘）用低精度做，少数对数值敏感的地方保留高精度。要知道哪些地方敏感、为什么，得先看浮点数是怎么表示的。</p>
+      <p>混合精度让计算量大的矩阵乘使用较短的输入格式，让长归约与更新保留所需精度，再用明确的缩放和转换连接它们。第一步是了解数值在哪里溢出、下溢或被舍入。</p>
 
       <h2 id="encode">2. 浮点数怎么编码</h2>
       <h3>2.1 三个字段</h3>
@@ -158,13 +159,13 @@
           </tbody>
         </table>
       </div>
-      <p>BF16 的「B」来自 Google Brain。它就是 FP32 截掉低 16 位：指数一样 8 位，所以范围和 FP32 几乎相同；尾数只剩 7 位。FP16 则反过来，尾数多（10 位）、指数少（5 位），范围窄得多。</p>
+      <p>BF16 的「B」来自 Google Brain。它保留与 FP32 相同的 8 位指数和高 7 位尾数，转换时按所选舍入模式处理被移出的尾数位。指数范围因此接近 FP32；FP16 则用 10 位尾数和 5 位指数，在相同数量级上刻度更细、覆盖范围更窄。</p>
       <p>FP8 有两种格式（2022 年由 NVIDIA、Arm、Intel 联合提出，后来成为 OCP 标准），取舍也是范围和精度：</p>
       <ul>
-        <li><strong>E5M2</strong> 完全遵循 IEEE 惯例（有 \(\pm\infty\)，多种 NaN），可以看作尾数更少的 FP16，范围和 FP16 相同。</li>
+        <li><strong>E5M2</strong> 完全遵循 IEEE 惯例（有 \(\pm\infty\)，多种 NaN），可以看作尾数更少的 FP16，规格化指数范围相同，最大有限值为 57344。</li>
         <li><strong>E4M3</strong> 为了扩大范围<em>不表示无穷</em>，NaN 只保留一个位模式 S.1111.111。这样指数全 1 的那一档也能存普通数，多出 256、288、…、448 这 7 个值，最大值从 240 扩到 448，动态范围从 17 个二进制数量级（binade）扩到 18 个。</li>
       </ul>
-      <p>通常的建议是权重和激活用 E4M3、梯度用 E5M2（梯度的动态范围更大）。DeepSeek-V3 则在细粒度缩放的帮助下所有张量都用了 E4M3。</p>
+      <p>通常的建议是权重和激活用 E4M3、梯度用 E5M2（梯度的动态范围更大）。DeepSeek-V3 则在细粒度缩放的帮助下，对纳入 FP8 路径的张量统一使用 E4M3。</p>
 
       <h3>2.3 一个例子：0.1</h3>
       <p>\(0.1 = 1.6\times2^{-4}\)。在各个格式里：</p>
@@ -176,13 +177,13 @@
       </ul>
       <p>输入任意数，看它在各格式中的编码：</p>
 
-      <h3>2.4 TF32：只在 Tensor Core 里出现的格式</h3>
-      <p>还有一个常被忽略的格式。从 A100 开始，Tensor Core 支持 TF32：输入保留 FP32 的 8 位指数、只取 10 位尾数（和 FP16 一样），乘积在 FP32 中累加。它不是存储格式，张量在显存里仍然是 FP32，只是矩阵乘内部把尾数截短了。PyTorch 用 <code>torch.backends.cuda.matmul.allow_tf32</code>（或 <code>torch.set_float32_matmul_precision("high")</code>）控制 FP32 矩阵乘是否走 TF32。所以「我用的是 FP32 训练」在 A100/H100 上未必是真正的 23 位尾数。</p>
+      <h3>2.4 TF32：矩阵乘内部的精度选择</h3>
+      <p>从 A100 开始，Tensor Core 支持 TF32：矩阵乘输入在计算路径中保留 FP32 的 8 位指数与 10 位尾数，并采用 FP32 累加；显存张量仍以 FP32 存储。PyTorch 的 <code>torch.set_float32_matmul_precision</code> 及对应后端设置控制可用的内部实现。核对 FP32 基线时，需要同时记录这些设置，明确矩阵乘实际使用的精度。</p>
 
       <h2 id="range">3. 范围、精度与 ULP</h2>
       <p>浮点数的可表示值不是均匀分布的。在每个区间 \([2^k, 2^{k+1})\)（一个 binade）里，规格化数恰好有 \(2^m\) 个，等间距排列，间距是</p>
       $$\mathrm{ulp}(x) = 2^{k-m},\qquad 2^k\le |x|\lt 2^{k+1}.$$
-      <p>ULP（unit in the last place）是「最后一位变 1 对应的数值」。所以<strong>绝对精度随数值变大而变粗，相对精度大致不变</strong>：就近舍入的相对误差不超过 \(2^{-(m+1)}\)。举个数：BF16 在 1 附近的间距是 \(2^{-7}\approx0.008\)，在 1000 附近（\([512,1024)\)）的间距是 \(2^{9-7}=4\)——1000 和 1001 在 BF16 里是同一个数，但相对来说误差都不到 0.4%。这就是为什么常说 FP32 有约 7 位十进制有效数字（\(2^{-24}\approx6\times10^{-8}\)），FP16 约 3 位，BF16 约 2 到 3 位，E4M3 约 1 位。</p>
+      <p>ULP（unit in the last place）是「最后一位变 1 对应的数值」。所以<strong>绝对精度随数值变大而变粗，相对精度大致不变</strong>：在规格化范围且没有溢出时，就近舍入的相对误差不超过 \(2^{-(m+1)}\)。举个数：BF16 在 1 附近的间距是 \(2^{-7}\approx0.008\)，在 1000 附近（\([512,1024)\)）的间距是 \(2^{9-7}=4\)——1000 和 1001 在 BF16 里是同一个数，但相对来说误差都不到 0.4%。这就是为什么常说 FP32 有约 7 位十进制有效数字（\(2^{-24}\approx6\times10^{-8}\)），FP16 约 3 位，BF16 约 2 到 3 位，E4M3 约 1 位。</p>
       <p>可以做个直观的实验：在 \([1,2]\) 之间撒 10000 个点，舍入到各格式，E4M3 只能落到其中 7 个内部值上（1.125, 1.25, …, 1.875），E5M2 只有 3 个。分辨率常用 ε（1 之后的下一个可表示数与 1 的差）来衡量：FP32 是 \(2^{-23}\approx1.19\times10^{-7}\)，FP16 约 \(10^{-3}\)，BF16 再大 8 倍。</p>
       <p><strong>动态范围</strong>则由指数位数决定。用「最大值 / 最小次正规数」的以 2 为底的对数衡量：FP32 约 277 个 binade，BF16 约 261，FP16 约 40，E5M2 约 32，E4M3 约 18。</p>
 
@@ -223,7 +224,7 @@
         <div class="ctrls">
           <label class="ctrl"><span>数量级 k</span><input type="range" id="fx-k" min="-26" max="17" step="1" value="-4"><output id="fx-k-v">−4</output></label>
         </div>
-        <svg id="fx-grid" viewBox="0 0 1000 300" role="img" aria-label="一个 binade 内的可表示值"></svg>
+        <div class="figure-scroll legacy-chart"><svg id="fx-grid" viewBox="0 0 1000 300" role="img" aria-label="一个 binade 内的可表示值"></svg></div>
         <p class="note" id="fx-note"></p>
         <p class="note">E4M3 越界时按常用的饱和转换钳到 ±448（非饱和模式会得到 NaN）；FP16、BF16、E5M2 越界变成 ±∞。所有数值都是按位精确计算的，FP32 用浏览器的 <code>Math.fround</code>。</p>
       </div>
@@ -231,13 +232,13 @@
       <h2 id="round">4. 舍入：就近偶数与随机舍入</h2>
       <h3>4.1 就近偶数</h3>
       <p>IEEE 默认的舍入方式是<strong>就近舍入、平局取偶</strong>（round to nearest, ties to even，RNE）：取离 \(x\) 最近的可表示数；如果恰好在两个数中间，取尾数最后一位是 0 的那个。平局取偶是为了让平局时向上和向下的次数大致相等，避免系统性偏差。</p>
-      <p>RNE 对单次运算是最优的，但有一个在训练里很要命的性质：<strong>如果 \(|\delta|\) 小于 \(x\) 处 ULP 的一半，\(x+\delta\) 舍入后还是 \(x\)</strong>。不管加多少次，都加不上去。一个最直观的例子：在 BF16 里从 0 开始一次加 1。到 256 时，BF16 在 \([256,512)\) 的间距是 \(2^{8-7}=2\)，\(256+1=257\) 恰好落在 256 和 258 的中间，平局取偶得到 256（尾数全 0 是偶数）。于是累加永远停在 256。FP16 同理停在 2048。这叫<strong>吞没</strong>（swamping）。</p>
+      <p>RNE 选择单次转换绝对误差最小的数。若一次更新仍落在当前可表示数两侧的中点之间，舍入结果就保持不变。对同一 binade 内的正向更新，条件是 \(\Delta\lt\mathrm{ulp}(w)/2\)。在 BF16 中从 0 反复加 1，到 256 时，间距变为 2；257 恰好处于 256 与 258 中间，ties-to-even 选回 256，后续累加停在这里。FP16 对应的停滞点是 2048。这是小更新被部分和<strong>吞没</strong>的具体例子。</p>
       <h3>4.2 随机舍入</h3>
       <p>设 \(x\) 落在相邻可表示数 \(a\lt x\lt b\) 之间。<strong>随机舍入</strong>（stochastic rounding，SR）以与距离成反比的概率选择：</p>
       $$\mathrm{SR}(x) = \begin{cases} b & \text{概率 } p=\dfrac{x-a}{b-a}\\[4pt] a & \text{概率 } 1-p\end{cases}$$
-      <p>它的关键性质是<strong>无偏</strong>：</p>
+      <p>固定相邻刻度且数值处于可表示区间时，随机舍入的条件期望是：</p>
       $$\mathbb E[\mathrm{SR}(x)] = a(1-p) + bp = a + (b-a)\cdot\frac{x-a}{b-a} = x.$$
-      <p>方差是 \((b-a)^2p(1-p)\le \mathrm{ulp}^2/4\)。于是即使每次更新都小于半个 ULP，平均下来也能正确累积：在上面「加 1」的例子里，SR 下每次有 1/2 的概率加 2，期望正好加 1。Gupta 等人 2015 年就发现，用 16 位定点数训练神经网络时舍入方式起决定性作用，配合随机舍入可以几乎无损地训练。NVFP4 预训练也对梯度使用随机舍入（第 13 节）。代价是要生成随机数，以及单次结果有噪声。</p>
+      <p>方差是 \((b-a)^2p(1-p)=(x-a)(b-x)\le(b-a)^2/4\)。饱和转换先把越界值裁到端点，无偏性对应的是裁剪之后的数值。于是即使每次更新都小于半个 ULP，平均下来也能正确累积：在上面「加 1」的例子里，SR 下每次有 1/2 的概率加 2，期望正好加 1。Gupta 等人 2015 年就发现，用 16 位定点数训练神经网络时舍入方式起决定性作用，配合随机舍入可以几乎无损地训练。NVFP4 预训练也对梯度使用随机舍入（第 13 节）。代价是要生成随机数，以及单次结果有噪声。</p>
       <p>两种情形：一个权重被反复加上很小的更新；一串乘积在不同精度的累加器里求和。</p>
 
       <div class="demo" id="ra">
@@ -261,7 +262,7 @@
             <span class="seg" id="ra-sign" role="group" aria-label="乘积分布"><button type="button" data-s="pos" aria-pressed="true">全为正（|x|·|y|）</button><button type="button" data-s="mix" aria-pressed="false">有正有负（x·y）</button></span>
           </div>
         </div>
-        <svg id="ra-svg" viewBox="0 0 1000 300" role="img" aria-label="结果图"></svg>
+        <div class="figure-scroll legacy-chart"><svg id="ra-svg" viewBox="0 0 1000 300" role="img" aria-label="结果图"></svg></div>
         <div class="table-wrap"><table class="fx-table" id="ra-table"><thead></thead><tbody></tbody></table></div>
         <p class="note" id="ra-note"></p>
       </div>
@@ -304,10 +305,10 @@
         <li><strong>更新本身下溢</strong>：FP16 能表示的最小正数是 \(2^{-24}\approx6\times10^{-8}\)，更小的值变成 0。学习率乘梯度后常常落在这个范围以下。在一个普通话语音识别模型上统计，约 5% 的权重梯度指数小于 \(-24\)，放进 FP16 就直接变成 0。</li>
         <li><strong>更新被吞没</strong>：即使更新本身可表示，加到权重上时也可能被舍掉，也就是吞没。设 \(w\in[2^k,2^{k+1})\)，ULP 是 \(2^{k-m}\)，更新 \(|\Delta|\lt\frac12\mathrm{ulp}=2^{k-m-1}\) 时 \(w+\Delta\) 舍入回 \(w\)。所以当
           $$\frac{|w|}{|\Delta|}\gtrsim 2^{m+1}$$
-          时更新会丢失。FP16（\(m=10\)）是 2048，BF16（\(m=7\)）只有 256。也就是说，在 FP16 里，只要权重比更新大 2000 倍以上，这次更新就白做了。</li>
+          时更新会丢失。FP16（\(m=10\)）是 2048，BF16（\(m=7\)）只有 256。这个比值给出数量级判断；精确边界由当前权重附近、更新方向上的相邻刻度决定。</li>
       </ul>
-      <p>第二点对 BF16 更加严重。举个数：一个量级 0.02 的权重，Adam 的更新幅度约等于学习率。学习率 \(3\times10^{-4}\) 时比值约 67，BF16 还能加上；退火到 \(3\times10^{-5}\) 时比值约 670，超过 256，在 BF16 里用 RNE 直接更新，这些更新全部丢失。所以 BF16 训练同样需要 FP32 主权重（或者在 BF16 权重上用随机舍入/Kahan 补偿求和等替代办法）。在前面那个语音模型上做过对照：不用 FP32 主副本、直接更新 FP16 权重，准确率相对损失了 80%。</p>
-      <p>FP32 主副本让权重显存多了 50%（相对 FP32 训练），但激活也变成了 FP16，总显存反而大约减半。在大模型里，主副本和优化器状态会被 ZeRO 切到各个数据并行 rank 上（见<a href="/posts/scaling-data-parallel/">数据并行与 ZeRO</a>）。</p>
+      <p>BF16 在相同数量级上的刻度比 FP16 更粗。以当前权重约 0.02 为例，它位于 \([2^{-6},2^{-5})\)，BF16 的 ULP 为 \(2^{-13}\approx1.22\times10^{-4}\)。若实际更新是 \(3\times10^{-5}\)，它小于半个 ULP，直接写回 BF16 会保持原值。实际 Adam 更新由学习率、矩估计、epsilon 与 weight decay 共同决定，记录真实更新量才能判断是否发生吞没。FP32 主副本、随机舍入和补偿状态为小更新提供不同的保存方式。</p>
+      <p>单独保存 FP32 主权重和 FP16/BF16 计算副本，需要每参数 4+2 字节；相较只存一份 FP32 权重，参数载荷增加 50%。训练总显存还包括激活、梯度和优化器状态，收益由各项占比决定。主副本与优化器状态可以在数据并行 rank 之间分片，见<a href="/posts/scaling-data-parallel/">数据并行与 ZeRO</a>。</p>
 
       <h3>5.2 损失缩放</h3>
       <p>第二个问题出在反向传播里的激活梯度。它们通常远小于 1。FP16 规格化数的指数范围是 \([-14,15]\)，但如果画出一个网络（比如 SSD 检测网络）的激活梯度直方图，会发现大部分 FP16 的可表示范围（尤其是靠上的部分）根本没被用到，很多值却落在最小可表示值以下变成了 0。范围是够的，只是用错了位置。</p>
@@ -330,7 +331,7 @@ for x, y in loader:
       <p>设某层的激活梯度典型量级是 \(10^{-6}\)、小的到 \(10^{-9}\)。FP16 最小次正规数是 \(5.96\times10^{-8}\)，所以 \(10^{-9}\) 量级的值直接变成 0；\(10^{-6}\) 也在次正规区（小于 \(6.1\times10^{-5}\)），只剩 \(10^{-6}/5.96\times10^{-8}\approx17\) 个刻度，相对误差高达几个百分点。取 \(S=2^{16}=65536\)：\(10^{-6}\) 变成 \(0.066\)，回到规格化区，相对精度恢复到 \(2^{-11}\)；\(10^{-9}\) 变成 \(6.6\times10^{-5}\)，刚好进入规格化区。只要最大的梯度乘以 \(S\) 后不超过 65504（原始值小于约 1），就没有溢出。这也说明了为什么动态缩放从很大的 \(2^{16}\) 开始：先尽量往上推，溢出了再退。</p>
 
       <h3>5.3 累加精度</h3>
-      <p>第三个技巧是让低精度的乘积在高精度里累加。矩阵乘的每个输出是 \(K\) 个乘积的和，\(K\) 动辄几千，如果每次部分和都舍入到 FP16，吞没和舍入误差会一路积累。Volta 开始的 Tensor Core 支持 FP16 输入、FP32 累加，最后再把结果转回 FP16 写出。同样的道理推广开：大的归约（求和）应该在 FP32 里做，逐元素运算则用 FP16 还是 FP32 都行——它们是带宽受限的，算术精度不影响速度。</p>
+      <p>第三个技巧是让低精度乘积在较高精度里累加。矩阵乘每个输出要汇总 \(K\) 个乘积，隐藏维度或 token 数越大，求和链越长。输入格式、内部累加方式与最终输出格式是三个独立配置。逐元素融合内核也常以 BF16 读写、在寄存器内用 FP32 计算；它的速度取决于访存、指令和融合方式。</p>
 
       <h3>5.4 主权重的替代：补偿求和</h3>
       <p>如果连 FP32 主权重的 4 字节都想省掉，可以用 Kahan 补偿求和：除了 BF16 权重 \(w\)，再存一个 BF16 的补偿量 \(c\)，记录上次加法被舍掉的部分：</p>
@@ -338,22 +339,22 @@ for x, y in loader:
       <p>\((t-w)\) 是这次实际加上的量，减去本想加的 \(y\) 就是误差；下一步先把它补回来。这样被吞没的小更新不会丢，只是延迟到累积够大时才体现在 \(w\) 上。它和随机舍入一样，都是在「不存高精度副本」的前提下保住小更新，代价是额外的 2 字节状态和几次运算。</p>
 
       <h2 id="fp32ops">6. 哪些运算要留在 FP32</h2>
-      <p>上面的原则落到 Transformer 上，就是一份「哪些算子不能降精度」的清单。通常保留 FP32 的有：</p>
+      <p>Transformer 中尤其需要检查长归约和小分母，常见的高精度计算位置包括：</p>
       <ul>
         <li><strong>softmax</strong>：\(e^x\) 增长极快，FP16 下 \(x\gt\ln65504\approx11.1\) 就溢出；先减最大值可以避免上溢，但分母是一长串正数的求和，正是吞没的典型场景。FlashAttention 内部的行最大值、行和、输出累加器都是 FP32。</li>
         <li><strong>归一化</strong>（LayerNorm、RMSNorm）：要算 \(\frac1d\sum x_i^2\)。激活里有几百量级的值时，平方后在 FP16 里会溢出（\(300^2=9\times10^4\gt65504\)）；对 \(d\) 个元素求和又有吞没问题。</li>
         <li><strong>损失</strong>：交叉熵要对整个词表算 logsumexp，词表十几万。</li>
         <li><strong>各种大规模归约</strong>：求和、均值、范数（包括梯度裁剪用的全局范数）。</li>
-        <li><strong>优化器</strong>：主权重、Adam 的一阶二阶矩、更新计算本身。</li>
+        <li><strong>优化器</strong>：更新计算与矩估计的除法、平方根。状态存储可以另选压缩格式，但要检查它对后续每一步的影响。</li>
       </ul>
       <p>PyTorch 的 <code>autocast</code> 就是按这个思路列的表：在 CUDA 上，<code>matmul</code>、<code>linear</code>、<code>bmm</code>、卷积等会被转成 FP16/BF16；<code>softmax</code>、<code>log_softmax</code>、<code>layer_norm</code>、<code>group_norm</code>、<code>cross_entropy</code>、<code>sum</code>、<code>cumsum</code>、<code>exp</code>、<code>log</code>、<code>pow</code>、<code>norm</code> 等会被转成 FP32；没列出的算子按输入类型运行。注意「转成 FP32 计算」不一定意味着「FP32 存储」：融合内核常常读写 BF16、在寄存器里用 FP32 算，这样既不损失精度也不多花带宽。</p>
 
-      <h2 id="bf16">7. BF16：为什么不需要损失缩放</h2>
-      <p>损失缩放解决的是<em>范围</em>问题：FP16 的最小规格化数是 \(6.1\times10^{-5}\)，梯度掉到这以下就开始丢精度、再往下变成 0。BF16 的指数和 FP32 一样是 8 位，最小规格化数 \(1.18\times10^{-38}\)，实际训练中梯度几乎不可能小到这个程度，也几乎不可能大到 \(3.4\times10^{38}\)。所以 BF16 不需要损失缩放，也就没有跳步、没有 \(S\) 的调节——这正是它在 TPU 和 A100 之后成为大模型训练默认格式的原因。</p>
-      <p>BF16 付出的代价是<em>精度</em>：7 位尾数，相对误差可达 \(2^{-8}\approx0.4\%\)。这使得「FP32 主权重」和「FP32 累加」在 BF16 下比在 FP16 下更重要（更新的吞没阈值从 2048 降到 256）。于是 BF16 混合精度的标准显存账是每个参数 20 字节：BF16 参数 2 + BF16 梯度 2 + FP32 主权重 4 + FP32 梯度累加 4 + Adam 两个 FP32 状态 4+4。</p>
+      <h2 id="bf16">7. BF16：范围与更新精度</h2>
+      <p>损失缩放解决反向中间量的范围问题。BF16 采用与 FP32 相同的 8 位指数，最小规格化数约 \(1.18\times10^{-38}\)，通常足以容纳训练梯度，因此常用 BF16 训练无需动态 loss scaling。数值稳定性还取决于归约、分母、优化器和数据；非有限值检测依旧是训练记录的一部分。</p>
+      <p>BF16 用 7 位尾数换取较宽范围，在规格化范围的最大相对舍入误差约为 \(2^{-8}\approx0.4\%\)。选择 FP32 主权重、梯度累积与优化器状态时，要区分持久存储和临时缓冲。一个常见账本是 BF16 参数 2 B、FP32 梯度累积 4 B、FP32 主权重 4 B、Adam 两个 FP32 状态 8 B，共 18 B／参数；额外的 BF16 梯度暂存若同时存在，再计 2 B。</p>
 
       <h3>7.1 梯度累加为什么要 FP32</h3>
-      <p>上面这份账里「FP32 梯度累加」单独占了 4 字节。原因还是吞没：用梯度累加（或者流水线并行的多个 micro-batch）时，一个参数的梯度是 \(n\) 个 micro-batch 梯度之和。若在 BF16 里累加，部分和变大后每个新加进来的 micro-batch 梯度只保留约 2 到 3 位有效数字，\(n\) 越大误差越大，而且「全为正」的那部分分量会系统性偏小——第 4 节演示里的 BF16 累加曲线就是这个现象。数据并行的 all-reduce 也是一个求和，所以很多框架用 FP32 做梯度的 reduce，或者至少在 reduce 内部用 FP32 累加。也有框架去掉这份 FP32 累加缓冲（第 12 节表格第二行），省下 4 字节，代价就是这里说的精度风险。</p>
+      <p>多个 microbatch 的梯度汇总到同一个参数，部分和会逐渐变大。BF16 缓冲在连续舍入中可能丢失后续小贡献；误差方向取决于数据和舍入模式。FP32 梯度累积保留更细刻度，但通信 buffer 可以另选 BF16 或其他格式。记录累积 dtype、通信 dtype、归约算法及两种缓冲是否同时驻留，才能同时核对数值和显存。</p>
       <h3>7.2 怎么判断是精度出了问题</h3>
       <p>实际训练里，损失发散的原因很多，精度只是其中之一。几个比较直接的检查：</p>
       <ul>
@@ -365,12 +366,12 @@ for x, y in loader:
       <h2 id="fp8">8. FP8：格式与缩放</h2>
       <h3>8.1 为什么 FP8 必须缩放</h3>
       <p>E4M3 的正规范围只有 \([2^{-6}, 448]\)，加上次正规也只到 \(2^{-9}\)，约 18 个 binade；而且在每个 binade 里只有 8 个点。一个张量的数值如果分布在 \(10^{-3}\) 附近，直接转成 E4M3 大部分会落进次正规区、精度极差；分布在 \(10^3\) 附近又会溢出。所以 FP8 张量几乎总是带着一个<strong>缩放因子</strong>：</p>
-      $$S=\frac{\text{FP8}_{\max}}{\mathrm{amax}(x)},\qquad q=\mathrm{FP8}(x\cdot S),\qquad \hat x = q/S.$$
+      $$\htmlData{symbol=quant-scale}{S}=\frac{\text{FP8}_{\max}}{\mathrm{amax}(x)},\qquad q=\mathrm{FP8}(x\cdot S),\qquad \hat x = q/S.$$
       <p>\(\mathrm{amax}\) 是张量（或某个分组）的绝对值最大值。这样最大的元素恰好映射到格式的最大值附近，充分利用顶部的几个 binade。</p>
       <p>看一个具体的数。设某个张量的 amax 是 0.02，其中有一个值 0.001。不缩放直接转 E4M3：0.001 小于最小规格化数 \(2^{-6}\approx0.0156\)，落在次正规区，那里的间距是 \(2^{-9}\approx0.00195\)，0.001 约是半个间距，舍入成 0.00195，误差 95%。缩放后：\(S=448/0.02=22400\)，\(0.001\times S=22.4\)，在 \([16,32)\) 里间距是 2，舍入成 22，反量化得 \(22/22400\approx0.000982\)，误差 1.8%。同样 8 位，差别全在于数被放到了格式的哪一段。这和 FP16 的损失缩放是同一个思路，只是 FP8 的范围太窄，一个全局的 \(S\) 不够，需要每个张量（甚至每个分组）各一个。</p>
       <p>矩阵乘时缩放因子可以提出去：若 \(X\) 和 \(W\) 各有一个标量缩放 \(S_X,S_W\)，则</p>
-      $$XW = \frac{1}{S_XS_W}\,(q_X\,q_W),$$
-      <p>FP8 Tensor Core 算 \(q_Xq_W\)（FP32 累加），最后乘一个标量就还原了。每个输出元素只多一次乘法。还要注意一点：FP8 下溢出比 FP16 更容易发生，像 FP16 那样遇到溢出就跳步不合适（会跳太多步），溢出的值应该<strong>饱和</strong>到最大可表示值。</p>
+      $$\widehat Y = \frac{1}{S_XS_W}\,(q_X\,q_W)\approx XW,$$
+      <p>这里 \(\widehat Y\) 是量化输入的矩阵乘结果，\(q_X,q_W\) 为 FP8 数值，\(S_X,S_W\) 是乘在原数值上的缩放。计算还包括累加器和输出转换的误差。FP8 饱和转换把越界值钳到最大有限值；持续记录饱和比例与 amax，能判断 scale 是否覆盖了当前分布。</p>
 
       <h3>8.2 延迟缩放与即时缩放</h3>
       <p>计算 \(\mathrm{amax}(x)\) 要先完整扫一遍 \(x\)，这意味着「先写出高精度张量 → 读一遍求 amax → 再读一遍做转换」，对带宽受限的部分很不划算。两种策略：</p>
@@ -378,7 +379,7 @@ for x, y in loader:
         <li><strong>延迟缩放</strong>（delayed scaling）：用过去若干步记录的 amax 来估计这一步的缩放因子，转换和 amax 统计可以融合在产生这个张量的内核里一次完成。NVIDIA Transformer Engine 的 <code>DelayedScaling</code> 默认保留 1024 步的 amax 历史，取其中最大值，缩放因子是 \((\text{FP8}_{\max}/\mathrm{amax})/2^{\text{margin}}\)（margin 默认 0）。缺点是缩放因子是「过时」的：如果这一步突然出现比历史更大的值，就会饱和。</li>
         <li><strong>即时缩放</strong>（current scaling，DeepSeek-V3 称为 online quantization）：用当前张量（或当前分组）的 amax。更准确，代价是多一次归约。分组越小，这次归约越容易融合进内核（一个 1×128 的分组在一个线程块里就能求完）。</li>
       </ul>
-      <p>Transformer Engine 的默认格式组合是 <code>HYBRID</code>：前向（权重、激活）用 E4M3，反向（梯度）用 E5M2。</p>
+      <p>Transformer Engine 的 <code>DelayedScaling</code> 配方常用格式组合 <code>HYBRID</code>：前向（权重、激活）用 E4M3，反向（梯度）用 E5M2。</p>
 
       <h3>8.2.1 延迟缩放会在哪里出问题</h3>
       <p>设某个激活在前 1000 步的 amax 一直在 20 左右，E4M3 下缩放因子 \(S=448/20=22.4\)。某一步出现一个 50 的值（比如一次 loss spike 的前兆）：\(50\times22.4=1120\gt448\)，被饱和成 448，反量化后是 20——这个最需要被准确表示的大值被截掉了 60%。下一步 amax 历史更新为 50，\(S\) 降到 8.96，但已经晚了一步。反过来，如果历史里曾经出现过一个很大的 amax，取窗口最大值的策略会让后面很多步的 \(S\) 偏小，普通值被压向次正规区，直到那个值滑出 1024 步的窗口。即时缩放没有这两个问题。DeepSeek-V3 选择它的理由正是这两点：缩放因子更准确，框架也更简单（不用维护 amax 历史）。</p>
@@ -390,7 +391,7 @@ for x, y in loader:
         <li><strong>Dgrad</strong>：\(dX = dY\,W^\top\)，归约维度是 \(d_{\text{out}}\)。</li>
         <li><strong>Wgrad</strong>：\(dW = X^\top dY\)，归约维度是 token 数 \(T\)。</li>
       </ul>
-      <p>这三个名字在 FP8 的讨论里会反复出现：Fprop 是前向（forward propagation），Dgrad 算的是传给上一层的激活梯度（data gradient），Wgrad 算的是权重梯度。三个都在 FP8 里做，理论上比 BF16 快一倍。而且 Wgrad 用 FP8 的 \(X\)，意味着前向存给反向的激活本身就可以是 FP8，激活显存也减半。注意同一个 \(X\) 在 Fprop 里沿行（\(d_{\text{in}}\)）归约，在 Wgrad 里沿列（\(T\)）归约，这在下面讲分组缩放时会成为麻烦。</p>
+      <p>这三个名字在 FP8 的讨论里会反复出现：Fprop 是前向（forward propagation），Dgrad 算的是传给上一层的激活梯度（data gradient），Wgrad 算的是权重梯度。将三个 GEMM 都纳入 FP8 后，可使用对应硬件更高的矩阵乘峰值；例如 H100 的 FP8 稠密峰值约为 BF16 的两倍。保存给 Wgrad 的 FP8 激活 payload 是 BF16 的一半，scale、另一读向的量化副本与保留的高精度张量另计，完整状态安排见第 14 节。注意同一个 \(X\) 在 Fprop 里沿行（\(d_{\text{in}}\)）归约，在 Wgrad 里沿列（\(T\)）归约，这在下面讲分组缩放时会成为麻烦。</p>
 
       <figure class="fig">
         <svg viewBox="0 0 760 270" role="img" aria-label="FP8 线性层：Fprop、Dgrad、Wgrad 三个 FP8 GEMM 以及各张量精度">
@@ -419,10 +420,10 @@ for x, y in loader:
       </figure>
 
       <h3>8.4 FP8 能省多少时间</h3>
-      <p>FP8 只加速矩阵乘，而且通常只是线性层的矩阵乘。按 DeepSeek-V3 的方案，注意力、归一化、embedding、输出头、MoE 门控都留在高精度；逐元素算子的时间按字节算，激活从 BF16 变 FP8 只在那些被量化的张量上省带宽；量化本身（求 amax、缩放、转换、转置后重新量化）还要额外的内核或融合工作。所以即使线性层 GEMM 占了一步的 70%，理想加速也只是 \(1/(0.3+0.7/2)\approx1.54\) 倍，实际更少。这也是为什么第 12 节里各家方案都花了很多心思在显存和通信上——FP8 的收益是算力、显存、通信三处加起来的。</p>
+      <p>FP8 的主要计算收益来自纳入低精度路径的矩阵乘。按 DeepSeek-V3 的方案，注意力、归一化、embedding、输出头、MoE 门控都留在高精度；逐元素算子的时间按字节算，激活从 BF16 变 FP8 只在那些被量化的张量上省带宽；量化本身（求 amax、缩放、转换、转置后重新量化）还要额外的内核或融合工作。所以即使线性层 GEMM 占了一步的 70%，理想加速也只是 \(1/(0.3+0.7/2)\approx1.54\) 倍，实际更少。这也是为什么第 12 节里各家方案都花了很多心思在显存和通信上——FP8 的收益是算力、显存、通信三处加起来的。</p>
 
       <h2 id="outlier">9. 离群值与缩放粒度</h2>
-      <p>大模型的激活有一个众所周知的特点：少数通道的数值比其他通道大一两个数量级（离群值，outlier），而且这些通道在不同 token 上比较固定。按张量缩放时，\(\mathrm{amax}\) 由离群值决定，其他所有值都被压到格式的底部：如果离群值是普通值的 1000 倍，普通值在 E4M3 里会落到 \(448/1000\approx0.45\) 附近甚至更低，有效精度变差，更小的值直接掉进次正规区或变成 0。</p>
+      <p>大模型的激活有一个众所周知的特点：少数通道的数值比其他通道大一两个数量级（离群值，outlier），而且这些通道在不同 token 上比较固定。按张量缩放时，\(\mathrm{amax}\) 由离群值决定，其他所有值都被压到格式的底部：如果离群值是普通值的 1000 倍，普通值缩放后约为 \(448/1000\approx0.45\)，仍处在 E4M3 的规格化范围；更小的分量会先进入次正规区，其相对误差开始快速增加。</p>
       <p>所以「按张量把 amax 缩放到 FP8 最大值」的标准做法，会让低精度训练对激活离群值高度敏感。解决思路是<strong>缩小共享缩放因子的分组</strong>，让一个离群值只影响它所在的那一小组。</p>
       <p>演示生成一个 128×256 的「激活」矩阵（行是 token、列是通道，数值是固定种子的标准高斯随机数），在其中注入离群值，再用不同的格式和分组做量化-反量化，计算误差。数据为示意。</p>
 
@@ -469,10 +470,10 @@ for x, y in loader:
         <li><strong>E4M3 最依赖细粒度缩放。</strong>E5M2 范围大，按张量缩放时很少把小值压成 0，但每个值的精度更低；E4M3 精度高、范围窄。分组缩放补上了范围，于是可以把位数留给尾数——这就是 DeepSeek-V3「有了细粒度缩放就可以全部用 E4M3」的道理。FP4 只有约 3.6 个 binade、8 个非负值，任何粗粒度缩放都不够用。</li>
       </ul>
       <p>另一类办法是在量化前把离群值「摊开」。FlashAttention-3 和 NVFP4 训练都用了随机 Hadamard 变换：对 \(x\) 乘一个正交矩阵 \(H\)（Hadamard 矩阵乘随机 \(\pm1\) 对角阵），每个输出是输入的随机 \(\pm\) 组合，一个大值被均摊到所有位置上，\(\mathrm{amax}\) 和其余值的比例大幅下降。矩阵乘的另一边乘同一个 \(H\)，由 \(HH^\top=I\) 结果不变。</p>
-      <p>一个四维的小例子：\(x=(10,1,1,1)\)，最大值是其余值的 10 倍。乘以归一化的 4 阶 Hadamard 矩阵（元素是 \(\pm\tfrac12\)）后得到 \((6.5,4.5,4.5,4.5)\)：向量的长度不变，但最大值只是其余值的约 1.4 倍，按 amax 缩放时其余元素不再被压到格式底部。
+      <p>一个四维的小例子：\(x=(10,1,1,1)\)，最大值是其余值的 10 倍。乘以归一化的 4 阶 Hadamard 矩阵（元素是 \(\pm\tfrac12\)）后得到 \((6.5,4.5,4.5,4.5)\)：向量的长度不变，但最大值只是其余值的约 1.4 倍，按 amax 缩放时其余元素不再被压到格式底部。</p>
 
       <h2 id="dsv3">10. DeepSeek-V3 的 FP8 框架</h2>
-      <p>DeepSeek-V3 是第一个公开报告在超大规模模型（671B 总参数的 MoE）上用 FP8 混合精度完成预训练的工作，它把上面这些零件拼成了一个完整的系统，可以分成四块。</p>
+      <p>DeepSeek-V3 在 671B 总参数的 MoE 上报告了 FP8 混合精度预训练，它把上面这些零件拼成了一个完整的系统，可以分成四块。</p>
       <h3>10.1 什么用 FP8，什么不用</h3>
       <ul>
         <li>线性层的三个 GEMM（Fprop、Dgrad、Wgrad）全部用 FP8，输入 FP8，输出 BF16 或 FP32。</li>
@@ -488,7 +489,7 @@ for x, y in loader:
       <p>为什么两者不一样？激活每个 token 一行，离群值常集中在个别 token 或通道上，1×128 能把它们隔离得最细。权重则要在两个 GEMM 里用：Fprop 沿 \(d_{\text{in}}\) 归约，Dgrad 用 \(W^\top\)、沿 \(d_{\text{out}}\) 归约。128×128 的块在两个方向上都按 128 对齐，转置之后仍然是合法的分组，同一份 FP8 权重两边都能直接用，不用重新量化。</p>
       <p>关键的一点是：这些分组是沿着 GEMM 的<strong>归约维度 K</strong> 划分的。以 Fprop 为例，\(Y_{ij} = \sum_k X_{ik}W_{kj}\)。把 \(k\) 按 128 分成若干组 \(b\)，每组的激活缩放 \(s^X_{i,b}\) 和权重缩放 \(s^W_{b,j'}\)（\(j'\) 是 \(j\) 所在的 128 块）各不相同：</p>
       $$Y_{ij} = \sum_b s^X_{i,b}\, s^W_{b,j'}\sum_{k\in b} q^X_{ik}\,q^W_{kj}.$$
-      <p>缩放因子随 \(b\) 变化，<em>不能</em>像按张量缩放那样提到整个求和外面，只能在每组的部分和算完之后乘上去。标准的 FP8 GEMM 不支持这种「沿 K 分组的缩放」。DeepSeek 的实现把它和下面的「提升到 CUDA core 累加」结合在一起：每 128 个元素的部分和从 Tensor Core 拷到 FP32 寄存器时，顺便乘上这一组的两个缩放因子。</p>
+      <p>缩放因子随 \(b\) 变化，<em>不能</em>像按张量缩放那样提到整个求和外面，只能在每组的部分和算完之后乘上去。Hopper 上常规的按张量 scale 路径需要为这种沿 K 分组的缩放另作安排。DeepSeek 的实现把它和下面的「提升到 CUDA core 累加」结合在一起：每 128 个元素的部分和从 Tensor Core 拷到 FP32 寄存器时，顺便乘上这一组的两个缩放因子。</p>
       <p>这种分组和微缩放格式的思路一致，最好由 Tensor Core 直接接收分组缩放因子，而不是在软件里补——Blackwell 的 MX 格式正是这样做的（第 13 节）。</p>
 
       <figure class="fig">
@@ -504,7 +505,7 @@ for x, y in loader:
       </figure>
 
       <h3>10.3 全部用 E4M3、在线量化</h3>
-      <p>此前的工作（Transformer Engine、FP8-LM 等）前向用 E4M3、反向用 E5M2。DeepSeek-V3 所有张量都用 E4M3，理由是细粒度分组相当于让一组元素共享指数位，弥补了 E4M3 范围小的缺点，于是可以把位数花在尾数上。缩放因子用在线（即时）量化：每个 1×128 分组或 128×128 块现算 amax，而不是用历史估计。</p>
+      <p>此前的工作（Transformer Engine、FP8-LM 等）前向用 E4M3、反向用 E5M2。DeepSeek-V3 纳入 FP8 计算的张量使用 E4M3，理由是细粒度分组相当于让一组元素共享指数位，弥补了 E4M3 范围小的缺点，于是可以把位数花在尾数上。缩放因子用在线（即时）量化：每个 1×128 分组或 128×128 块现算 amax，而不是用历史估计。</p>
       <h3>10.4 低精度存储与通信</h3>
       <ul>
         <li><strong>优化器状态</strong>：AdamW 的一阶、二阶矩用 BF16 存，没有观察到性能下降；主权重和用于梯度累加的梯度仍是 FP32。</li>
@@ -512,35 +513,27 @@ for x, y in loader:
         <li><strong>通信</strong>：MoE 上投影之前的激活先量化成 FP8 再做 dispatch（缩放因子同样是 2 的幂），下投影之前的激活梯度也类似；combine 阶段保持 BF16。</li>
       </ul>
       <h3>10.5 转置的麻烦和一个失败的尝试</h3>
-      <p>同一个激活在 Fprop 里沿行归约、在 Wgrad 里沿列归约。按 1×128 分组的量化结果不能直接转置成 128×1 分组，只能「读出来、反量化、转置、重新量化成 128×1、写回」。一个省事的替代是对激活梯度也像权重一样用 128×128 块量化，这样转置只需交换块的下标。DeepSeek 试过这条路：对 Dgrad 相关的张量都用块量化，在约 16B 参数的 MoE 上训练约 300B token 后发散了。原因是激活梯度在 token 之间极不均衡，存在 token 相关的离群值，块量化管不住。</p>
+      <p>同一个激活在 Fprop 里沿行归约、在 Wgrad 里沿列归约。若只缓存按 1×128 分组的 FP8 结果，构造另一种读向时就需要反量化、调整分组后重新量化。保留高精度源张量时，也可以从源张量分别构造两种布局。一个省事的替代是对激活梯度也像权重一样用 128×128 块量化，这样转置只需交换块的下标。DeepSeek 试过这条路：对 Dgrad 相关的张量都用块量化，在约 16B 参数的 MoE 上训练约 300B token 后发散了。原因是激活梯度在 token 之间极不均衡，存在 token 相关的离群值，块量化管不住。</p>
       <h3>10.6 效果</h3>
       <p>DeepSeek 在两个规模上和 BF16 做了对比：约 16B 总参数的 MoE 训练 1.33T token，约 230B 总参数的 MoE 训练约 0.9T token。FP8 相对 BF16 的损失相对误差始终低于 0.25%，在训练随机性的范围内。</p>
 
       <h2 id="accum">11. 累加精度</h2>
-      <p>低精度乘积要在高精度里累加。FP8 GEMM 名义上是「FP32 累加」，但 DeepSeek 发现 H800 上 FP8 GEMM 的累加实际只保留了大约 14 位，远低于 FP32 的 24 位有效位。机制是这样的：对齐 32 个尾数乘积时按最大指数右移，只用每个乘积最高的 14 位相加，超出的位截断；加到寄存器里的累加也是 14 位精度。实测 \(K=4096\) 的两个随机矩阵相乘，最大相对误差接近 2%。\(K\) 越大问题越严重，而大模型训练中 \(K\)（隐藏维度，或者 Wgrad 里的 token 数）恰恰很大。</p>
-      <p>为什么 14 位不够？原因还是吞没：累加器里的部分和越来越大，而每次加进来的只是一个乘积。14 位有效位意味着部分和比新加的项大 \(2^{14}\approx1.6\times10^4\) 倍以上时，新项就被整个截掉；没到这个倍数时也会被截掉低位。\(K=4096\) 个同号的项相加，后面的项和部分和之比轻易就降到几千分之一，截断误差一路单向积累。如果只在 Tensor Core 里累加 128 项就把结果交出去，部分和始终和单项同一量级，截断损失就小得多；真正的长求和交给 FP32 做。</p>
+      <p>低精度乘积要在高精度里累加。DeepSeek-V3 针对 H800 报告的 FP8 GEMM 路径中，内部部分和约保留 14 位有效位，远低于 FP32 的 24 位有效位。机制是这样的：对齐 32 个尾数乘积时按最大指数右移，只用每个乘积最高的 14 位相加，超出的位截断；加到寄存器里的累加也是 14 位精度。实测 \(K=4096\) 的两个随机矩阵相乘，最大相对误差接近 2%。\(K\) 越大问题越严重，而大模型训练中 \(K\)（隐藏维度，或者 Wgrad 里的 token 数）恰恰很大。</p>
+      <p>为什么 14 位不够？原因还是吞没：累加器里的部分和越来越大，而每次加进来的只是一个乘积。14 位有效位意味着部分和比新加的项大 \(2^{14}\approx1.6\times10^4\) 倍以上时，新项就被整个截掉；没到这个倍数时也会被截掉低位。\(K=4096\) 个同号的项相加，后面的项和部分和之比轻易就降到几千分之一，截断误差一路单向积累。如果只在 Tensor Core 里累加 128 项就把结果交出去，块内部分和的增长范围更小，截断损失就小得多；真正的长求和交给 FP32 做。</p>
       <p>这就是 DeepSeek 的办法，叫<strong>提升到 CUDA core</strong>（promotion）：Tensor Core 里只累加 \(N_C\) 个元素，然后把部分和拷到 FP32 寄存器，在 CUDA core 上做全精度累加（同时乘上分组缩放因子）。\(N_C=128\)，对应 4 次 WGMMA 指令，是他们实验中能明显提升精度、又不带来太大开销的最小间隔。这会降低单个 warpgroup 发射 WGMMA 的速率，但 H800 上通常有两个 warpgroup 的 WGMMA 并存：一个在做提升时另一个可以继续做 MMA，Tensor Core 的利用率仍然很高。</p>
       <p>这是对硬件限制的妥协，DeepSeek 也因此建议未来的芯片提高 Tensor Core 内的累加精度、原生支持分组缩放、把 FP8 转换和 TMA 融合以支持在线量化、支持转置读取。Transformer Engine 后来的 FP8 块缩放方案也注明它需要「分段累加」（split accumulation）来保证精度。</p>
       <p>上面「舍入与累加」演示的第二个模式用一个简化模型复现了这种现象：累加器每次加法后截断到 14 位有效位；可以对比 FP32 累加、每 128 个元素提升一次到 FP32、以及 BF16 累加。</p>
 
-      <h2 id="recipes">12. 各种方案的显存账</h2>
-      <p>几种已知方案每个参数的显存（不含激活）。每一行的「每参数」就是左边各列字节数之和：</p>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>方案</th><th>GEMM 精度</th><th>主权重</th><th>梯度累加</th><th>模型权重</th><th>梯度</th><th>优化器状态</th><th class="num">每参数</th></tr></thead>
-          <tbody>
-            <tr><td>BF16 + FP32 混合精度基线</td><td>BF16</td><td>FP32</td><td>FP32</td><td>BF16</td><td>BF16</td><td>FP32 + FP32</td><td class="num">4+4+2+2+4+4 = 20 B</td></tr>
-            <tr><td>上面去掉 FP32 梯度累加</td><td>BF16</td><td>FP32</td><td>—</td><td>BF16</td><td>BF16</td><td>FP32 + FP32</td><td class="num">16 B</td></tr>
-            <tr><td>Transformer Engine</td><td>FP8</td><td>—</td><td>—</td><td>FP32</td><td>FP32</td><td>FP32 + FP32</td><td class="num">16 B</td></tr>
-            <tr><td>FP8-LM（O3 级）</td><td>FP8</td><td>FP16</td><td>FP16</td><td>FP8</td><td>FP8</td><td>FP8 + FP16</td><td class="num">9 B</td></tr>
-            <tr><td>DeepSeek-V3</td><td>FP8</td><td>FP32</td><td>FP32</td><td>FP8</td><td>BF16</td><td>BF16 + BF16</td><td class="num">15 B</td></tr>
-            <tr><td>Nanotron FP8</td><td>FP8</td><td>BF16</td><td>FP32</td><td>FP8</td><td>FP8</td><td>FP8 + FP8</td><td class="num">10 B</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p>Transformer Engine 那一行看起来奇怪：它没有单独的主权重，因为参数本身就以 FP32 存着，每次 GEMM 前现场量化成 FP8，FP32 参数同时扮演了主副本的角色。FP8-LM 和 Nanotron 则更激进，把梯度和优化器状态也压到了 8 位或 16 位。</p>
-      <p>可以看到 FP8 的主要收益不在参数相关的显存（DeepSeek-V3 只比基线省 25%），而在算力翻倍、激活减半和通信减半。到 2025 年，FP8 预训练仍然算不上完全成熟，方法还在演进，但已经有了 DeepSeek-V3 这样的大规模先例，很可能会像当年的 BF16 一样成为默认选项。</p>
-      <p>FP8 预训练最主要的风险是稳定性。固定模型规模时，学习率越高越不稳定；FP8 训练常见的失败形态是损失曲线一直正常，到某一步之后突然发散。</p>
+      <h2 id="recipes">12. 用实际配置列显存账</h2>
+<p>每参数字节数来自<strong>同时存活的副本</strong>。先列参数本体、主权重、梯度累积和优化器状态，再列量化缓存、转置缓存、scale、通信桶和临时 workspace。以下是未分片、采用 Adam 两个 FP32 状态的示例配置：</p>
+<div class="table-wrap"><table><thead><tr><th>持久存储配置</th><th>参数</th><th>梯度累积</th><th>独立主权重</th><th>Adam m、v</th><th>小计</th></tr></thead><tbody>
+<tr><td>FP32 参数直接更新</td><td>4 B</td><td>4 B</td><td>复用参数</td><td>8 B</td><td>16 B／参数</td></tr>
+<tr><td>BF16 副本 + FP32 主权重</td><td>2 B</td><td>4 B</td><td>4 B</td><td>8 B</td><td>18 B／参数</td></tr>
+<tr><td>BF16 参数与梯度 + FP32 主权重</td><td>2 B</td><td>2 B</td><td>4 B</td><td>8 B</td><td>16 B／参数</td></tr>
+</tbody></table></div>
+<p>第二行若另保留 BF16 的逐批梯度缓冲，峰值会增加 2 B／参数；若这份缓冲只覆盖一个 bucket，增加量按 bucket 计算。FP8 权重缓存增加约 1 B／元素及 scale，独立的行／列量化副本还要继续计入。NVFP4 的打包权重载荷约 0.5 B／元素，块 scale 的物理布局、填充及两种读向也占空间。激活与通信临时量随 batch、序列长度和并行策略变化。</p>
+<p>Transformer Engine 提供低精度计算配方，模型参数 dtype 与优化器的主权重策略由调用方配置。例如 TE 2.20.2 的 NVFP4 官方示例直接创建 <code>params_dtype=torch.bfloat16</code> 的线性层。DeepSeek-V3 使用 FP32 主权重和梯度累积、BF16 Adam 矩状态，这是它的特定系统设计；其他状态压缩方案需要各自的 scale 和误差检查。</p>
+<p>把每一项写成“元素数 × 字节数 × 常驻副本数”，再根据 ZeRO／FSDP 阶段对相应状态分片。单独统计保存给反向的激活、重计算期间重新物化的张量和通信峰值，得到的是可以与 profiler 对齐的账本。</p>
 
       <h2 id="mx">13. 微缩放：MXFP8 与 NVFP4</h2>
       <h3>13.1 MX 格式</h3>
@@ -566,7 +559,9 @@ for x, y in loader:
         <li>缩放因子用 E4M3 而不是 E8M0，可以是非 2 的幂的小数，能把块内最大值更准确地对到 6 上。</li>
         <li>E4M3 缩放因子的范围不够，再加一个 FP32 的<strong>张量级</strong>缩放因子，构成两级缩放。</li>
       </ul>
-      <p>平均每个元素 4.5 位（4 位元素 + 8 位缩放 / 16），外加每个张量一个 FP32。还是 amax 为 5.3 的那个块：NVFP4 的块缩放因子取 \(5.3/6\approx0.883\)，存成 E4M3 是 0.875；\(5.3/0.875\approx6.06\)，舍入到 6，反量化得 5.25，误差不到 1%。缩放因子能取非 2 的幂，块内最大值就能被准确地对到 E2M1 的顶端。</p>
+      <p>对于每 16 元素一组的载荷，平均是 4.5 bit／元素，外加张量级 FP32 scale。用反量化尺度表示，NVFP4 的两级计算为：</p>
+$$\htmlData{symbol=global-scale}{s_g}=\frac{a_{\rm global}}{448\times6},\quad \htmlData{symbol=block-scale}{s_b}=\mathrm{E4M3}\!\left(\frac{a_b}{6s_g}\right),\quad q_i=\mathrm{E2M1}\!\left(\frac{x_i}{s_gs_b}\right),\quad \widehat x_i=q_i s_b s_g.$$
+<p>\(a_{\rm global}\) 是整张量最大绝对值，\(a_b\) 是当前块最大绝对值；全零张量采用约定的非零 scale，并保存全零元素。例如固定 \(s_g=1\)、某块 \(a_b=5.3\)，块 scale 的理想值为 0.8833，E4M3 存为 0.875；最大元素恢复为 \(6\times0.875=5.25\)。实际张量的 \(s_g\) 由上式决定，局部 scale 的舍入也属于量化误差。</p>
       <h3>13.3 用 NVFP4 预训练</h3>
       <p>NVIDIA 在 2025 年用 NVFP4 训练了一个 12B 参数的 Mamba-Transformer 混合模型，10T token，损失曲线和下游精度都接近 FP8 基线。配方几乎就是上面这些手段的组合：</p>
       <ul>
@@ -575,24 +570,71 @@ for x, y in loader:
         <li><strong>二维缩放</strong>：权重按 16×16 的块缩放，这样前向和反向（转置后）看到的是同一个量化结果；激活和梯度按 1×16 缩放。</li>
         <li><strong>随机舍入</strong>：梯度用随机舍入，权重和激活用就近偶数。Blackwell 的 FP4 转换指令原生支持这两种舍入。</li>
       </ul>
-      <p>FP4 训练还很新，但它说明了一个趋势：位宽越低，越依赖这些「配套设施」——分组缩放、离群值处理、高精度累加、选择性地保留高精度、无偏舍入。</p>
+      <p>TE 2.20.2 的 NVFP4 配方默认对权重采用 16×16 二维 scale，对激活和梯度采用 1×16 scale；梯度使用随机舍入，Wgrad 的输入与梯度在列向量化前做 16 维 RHT。高精度参数、可复现的随机数状态与所需的反向缓存共同构成训练状态。</p>
 
-      <h2 id="summary">14. 小结</h2>
-      <div class="table-wrap">
-        <table>
-          <thead><tr><th>问题</th><th>原因</th><th>对策</th></tr></thead>
-          <tbody>
-            <tr><td>小梯度变 0</td><td>FP16 指数范围窄</td><td>损失缩放（动态）；或换 BF16</td></tr>
-            <tr><td>小更新加不到权重上</td><td>RNE 下 \(|\Delta|\lt\frac12\)ulp 被吞没（FP16 阈值 2048，BF16 256）</td><td>FP32 主权重；随机舍入；补偿求和</td></tr>
-            <tr><td>长求和误差大</td><td>部分和变大后吞没小项</td><td>FP32 累加；softmax/norm/loss/归约在 FP32</td></tr>
-            <tr><td>FP8 范围太窄</td><td>E4M3 只有约 18 个 binade</td><td>按张量缩放：延迟或即时 amax</td></tr>
-            <tr><td>离群值毁掉精度</td><td>amax 被少数大值主导</td><td>细粒度分组（1×128、128×128、MX 32、NVFP4 16）；Hadamard 旋转</td></tr>
-            <tr><td>Tensor Core 累加位数不够</td><td>Hopper FP8 约 14 位</td><td>每 128 个元素提升到 FP32</td></tr>
-            <tr><td>转置后分组方向不对</td><td>分组沿归约维度</td><td>从高精度重新量化两份；或权重用二维块</td></tr>
-          </tbody>
-        </table>
-      </div>
-      <p>所有这些技巧都在回答同一个问题——有限的位数该花在哪里。指数位买范围，尾数位买精度；缩放因子把一组数的公共指数提出去，等于给这组数免费多了几位指数；高精度累加和主权重则保证误差不会在长链条里累积。</p>
+      <h2 id="summary">14. 把误差追踪到完整训练步</h2>
+<p>在一个线性层中，记 \(T\) 为本批 token 数、\(K\) 为输入宽度、\(N\) 为输出宽度。令 \(X\in\mathbb R^{T\times K}\) 是本批激活，\(W\in\mathbb R^{K\times N}\) 是权重，\(G=\partial\mathcal L/\partial Y\in\mathbb R^{T\times N}\) 是上游梯度。三个 GEMM 分别为：</p>
+$$\htmlData{symbol=fprop}{Y=XW},\qquad\htmlData{symbol=dgrad}{dX=GW^\top},\qquad\htmlData{symbol=wgrad}{dW=X^\top G}.$$
+<p>它们沿 \(K\)、\(N\)、\(T\) 三个不同维度求和。Fprop 的误差先改变激活和本步 loss；Dgrad 的误差影响更早的所有层；Wgrad 的误差写进优化器，并通过下一步权重继续影响前向。为了定位来源，可以先固定高精度 \(X,W,G\)，分别只替换一个 GEMM，再执行完整训练闭环。</p>
+<p>写 \(\widehat X=X+E_X\)、\(\widehat W=W+E_W\)，输入量化引起的前向差为：</p>
+$$\widehat X\widehat W-XW=E_XW+XE_W+E_XE_W.$$
+<p>这里 \(E_X,E_W\) 是反量化后的输入误差。结果还要加上内部累加和输出转换的误差。观察张量相对 L2 误差、最大绝对误差与梯度方向，能够区分平均误差很小但少数通道异常的情况。输出范数接近零时，同时保留绝对误差，避免一个很小的分母主导指标。</p>
+
+<h3 id="transpose-contract">14.1 转置的是字节，还是同一个近似矩阵？</h3>
+<p>用 \(Q_r\) 表示按行分组量化、再按各组 scale 反量化得到的近似矩阵，用 \(Q_{2D}\) 表示二维方块的对应操作。按行量化的 \(Q_r(W)\) 与先转置再按行量化的 \(Q_r(W^\top)\) 使用不同分组，因此一般有 \(Q_r(W)^\top\ne Q_r(W^\top)\)。若前向和反向使用了两套不同的近似权重，Dgrad 中的矩阵就会偏离本次前向实际使用的权重转置。</p>
+<p>二维方块给出一种一致性约定。只要同一个方块使用同一 scale、同一确定性舍入规则，转置仅交换方块位置，\(Q_{2D}(W)^\top=Q_{2D}(W^\top)\)。NVFP4 的 16×16 权重 scale 利用这一性质；每个 1×16 物理块可以携带相应的复制 scale。激活和梯度保持更细的 1×16 分组，因此它们的两种方向需要各自计算。</p>
+<figure class="article-figure" id="transpose-demo"><h3>同一权重，两种读向</h3>
+<div class="mp-controls"><label>缩放分组 <select id="transpose-group"><option value="row">逐行：每行共享 scale</option><option value="square">2×2 方块共享 scale</option></select></label><label>右下角幅值 <input id="transpose-amax" type="range" min="2" max="8" step="0.1" value="4"><output id="transpose-amax-value"></output></label></div>
+<div class="mp-matrices" id="transpose-matrices"></div><p class="mp-readout" id="transpose-result" aria-live="polite"></p>
+<figcaption>示例权重为 [[6, 1.2], [2.3, a]]，元素按 E2M1 就近偶数舍入，scale 使用 FP32，固定 scale = 块 amax / 6。左右两条路径分别“先量化再转置”和“先转置再量化”，显示反量化后的数值。2×2 示例对应二维块的一致性原理。</figcaption>
+</figure>
+<p>需要两种一维布局时，从保留的高精度输入分别构造两份，可以避免“先舍入一次，再换分组舍入一次”的误差叠加。代价是额外的输入读取、量化和缓存。选择保存高精度输入、保存两份低精度布局还是反向时重计算，应当与 activation checkpointing 一起算显存和时间。</p>
+<p>Wgrad 还可以沿 token 归约维使用正交变换。取分块正交矩阵 \(R\)，每块为归一化的 16 维随机 Hadamard 变换，则：</p>
+$$X^\top G=(X^\top R)(R^\top G),\qquad RR^\top=I.$$
+<p>两边使用同一旋转，精确算术下的乘积保持不变；量化看到的是旋转后更分散的数值。TE 的 NVFP4 路径在 Wgrad 的列向输入和梯度量化前实施这一步，并从旋转后的张量计算 scale。反向重计算还需要复现对应的随机数与变换状态。</p>
+
+<h3 id="scale-communication">14.2 一次 all-gather 需要一个共同的数值解释</h3>
+<p>Sequence parallelism 会让不同 rank 持有不同 token 片段。若这些片段要以 NVFP4 格式 all-gather 成一个张量，接收端需要用同一个张量级 \(s_g\) 解释所有块。各 rank 的局部 amax 可以不同，因此 TE 的顺序是：计算局部 amax，以 max all-reduce 得到全局 amax，然后算共同 \(s_g\)、本地量化，最后 all-gather 数据与块 scale。</p>
+$$a_{\rm global}=\max_r a_r,\qquad s_g=\frac{a_{\rm global}}{448\times6}.$$
+<p>这里 \(a_r\) 是 rank \(r\) 的本地绝对值最大值，\(s_g\) 是反量化时的共同乘数。块 scale \(s_b\) 依旧属于本地块，不需要对它们逐项 all-reduce。量化 payload、块 scale、张量级 scale 与布局共同描述一个数值张量；通信实现必须保持这份对应关系。</p>
+<figure class="article-figure" id="gather-demo"><h3>先同步 amax，再把低精度片段拼起来</h3>
+<div class="mp-controls"><label>Rank 1 最大值 <input id="gather-amax" type="range" min="6" max="96" step="6" value="48"><output id="gather-amax-value"></output></label><label><input id="gather-sync" type="checkbox" checked> 量化前同步全局 amax</label></div>
+<div id="gather-ranks" class="mp-ranks"></div><p class="mp-readout" id="gather-result" aria-live="polite"></p>
+<figcaption>两个 rank 各展示一个块的最大元素。块内其他元素只影响各自的 E2M1 舍入；表中跟踪最大元素的 q、块 scale 与全局 scale。接收端按同一个 s_global 解码。取消同步可以检查本地量化的元数据与接收端解释是否一致。</figcaption>
+</figure>
+<p>小 amax 归约仍有通信启动与依赖开销。对小 GEMM 或短序列，额外同步可能占据明显比例；对大矩阵，压缩后的 all-gather 与 GEMM 收益可能覆盖它。测量时把 amax reduction、scale/cast、all-gather、GEMM 与等待时间分开记录，再看哪些能与独立工作重叠。</p>
+
+<h3 id="noise-adam">14.3 无偏舍入的噪声怎样进入 Adam？</h3>
+<p>固定本步真实梯度 \(g\)，把量化梯度写成 \(\widetilde g=g+e\)。若条件均值 \(\mathbb E[e\mid g]=0\)，它的平方期望仍然是：</p>
+$$\mathbb E[\widetilde g^2\mid g]=g^2+\htmlData{symbol=qvariance}{\operatorname{Var}(e\mid g)}.$$
+<p>Adam 用 \(v_t=\beta_2v_{t-1}+(1-\beta_2)\widetilde g_t^2\) 累积二阶矩，因此舍入方差也会进入分母 \(\sqrt{\widehat v_t}+\epsilon_{\rm Adam}\)。这条关系逐分量成立。它描述的是梯度量化的影响；若再量化 \(m_t,v_t\) 的存储，还会叠加状态压缩误差。更新本身涉及随机分子与随机分母的比值，应当通过实际更新分布检查。</p>
+<p><em>FP4 All the Way</em> 将这个问题进一步放到下降与曲率的平衡中。对一个固定梯度 \(g=\nabla L(\theta)\)、Hessian \(H\) 和零均值量化噪声协方差 \(\Sigma\)，二阶展开给出：</p>
+$$\mathbb E[\Delta L]\approx-\eta\|g\|_2^2+\frac{\eta^2}{2}\left(g^\top Hg+\operatorname{tr}(H\Sigma)\right).$$
+<p>其中 \(\eta\) 是梯度下降步长。在局部正曲率区域，噪声增加了二阶代价；梯度随着训练变小时，同样大小的噪声会占更大比例。实用的判断是同时测量信号范数、量化误差范数与真实验证损失，并对训练后期保留更高精度的梯度做对照。论文中的特定阈值依赖其噪声与曲率假设，实际 Adam 训练可以用这些量建立自己的受控探针。</p>
+<p>长训练还会改变输入分布。<em>Scaling FP8 Training to Trillion-token LLMs</em> 观察到 SwiGLU 两个投影逐渐对齐，乘法门控放大离群值，短训练中稳定的量化方案在更长周期出现问题。Smooth-SwiGLU 在量化前按通道缩放，并在后续计算中补回尺度，保持高精度函数的对应关系。它提示我们把 amax、饱和率和块内动态范围作为时间序列保存，尤其关注训练后期。</p>
+
+<h3 id="precision-ablation">14.4 把高精度留给哪些层？</h3>
+<p>Megatron-Bridge 的公开实验提供了两种可复用的对照设计。第一组在 B200 上训练 Research-8B，保持同样数量的 BF16 block，比较 F0L2 与 F1L1：前者保留最后两层，后者保留首尾各一层。这个命名中的 F、L 分别指前端、末端。实验中末端保留两层的验证损失更低，说明<strong>高精度预算放在哪里</strong>本身影响结果。其数据是内部研究语料。</p>
+<p>第二组用 Llama3-8B 与 DCLM 比较 optimizer recipe。Recipe1 和 Recipe2 保持相同学习率范围、global batch 与 NVFP4 F0L4 配置，仅将 AdamW epsilon 从 \(10^{-8}\) 改为 \(10^{-5}\)，较大的 epsilon 改变了小二阶矩区域的更新。诊断时记录 \(\epsilon_{\rm Adam}/\sqrt{\widehat v}\) 的分布：该比值很大时，更新主要由 epsilon 决定，逐坐标二阶矩调节作用减弱。原记录中的 Recipe0 同时改变了学习率和 batch，适合比较整套配方；单项机制由前两组的受控对照来判断。</p>
+<p>可以沿用这种实验结构：固定训练数据和初始 checkpoint，只把一种 GEMM、指定层或 optimizer state 切回高精度；记录层间误差、参数更新方向、验证曲线与 step time，再决定精度分配。保存权重、矩状态、scale 历史、随机数状态与数据位置，才能在同一训练状态上重放。更一般的梯度监测可看<a href="/posts/pretraining-stability/">深层 Transformer 的训练稳定性</a>。</p>
+
+<h2 id="exercises">15. 计算与诊断习题</h2>
+<div class="article-exercise"><h3>练习一：18 B 与 20 B 分别怎么算出来？</h3><p>模型有 1B 参数，BF16 参数副本、FP32 主权重、FP32 梯度累积和两个 FP32 Adam 状态全部常驻。另有一个覆盖 100M 参数的 BF16 临时梯度 bucket。求参数相关小计和该 bucket 存活时的显存，使用十进制 GB。</p><details><summary>推导与答案</summary><p>持久量为 \(1B\times(2+4+4+8)=18\) GB。临时 bucket 为 \(100M\times2=0.2\) GB，同时存活时为 18.2 GB。只有额外 BF16 梯度副本覆盖全部 1B 参数时才增加 2 GB、形成 20 GB。量化权重缓存、scale、激活与通信 workspace 分别追加；如果状态已分片，则按实际分片范围计算。</p></details></div>
+<div class="article-exercise"><h3>练习二：按行量化与转置是否交换？</h3><p>取 \(W=\begin{bmatrix}6&1.2\\2.3&4\end{bmatrix}\)，每行 scale 为该行最大绝对值除以 6，元素用 E2M1 RNE。求 \(Q_r(W)^\top\) 与 \(Q_r(W^\top)\)。再用整张 2×2 方块共享 scale 比较。</p><details><summary>推导与答案</summary><p>第一行 scale 为 1，1.2 舍入到 1；第二行 scale 为 \(2/3\)，2.3 归一化为 3.45、舍入到 3，恢复为 2。因此 \(Q_r(W)^\top=\begin{bmatrix}6&2\\1&4\end{bmatrix}\)。先转置后第二行变成 [1.2,4]，scale 仍为 \(2/3\)，1.2 归一化为 1.8、舍入到 2，恢复为 \(4/3\)。两条路径在一个元素处差 \(1/3\)。整块 scale 为 1，固定分组在转置后保持相同成员，两种路径完全一致。</p></details></div>
+<div class="article-exercise"><h3>练习三：all-gather 后为何放大了八倍？</h3><p>两个 rank 的块最大值为 6 与 48，各自先用本地 amax 计算 NVFP4 全局 scale。接收端采用第二个 rank 的 scale 解释整个拼接张量。第一个 rank 的最大元素会被恢复成多少？正确同步后它的块 scale 又是多少？</p><details><summary>推导与答案</summary><p>本地量化时，第一个 rank 有 \(s_g=6/(448\times6)=1/448\)，块 scale 为 448，元素 q 为 6。接收端使用 \(48/(448\times6)=1/56\)，恢复出 \(6\times448/56=48\)，放大八倍。先同步 amax 后，两边共同使用 \(1/56\)，第一块的 scale 为 \((6/6)/(1/56)=56\)，恢复值为 \(6\times56/56=6\)。</p></details></div>
+<div class="article-exercise"><h3>练习四：无偏梯度的二阶矩</h3><p>真实梯度为 0.01，可用相邻刻度是 0 与 0.02。使用随机舍入，求概率、均值、方差与平方期望。若旧 Adam 二阶矩为 0、\(\beta_2=0.9\)，更新后的二阶矩期望是多少？</p><details><summary>推导与答案</summary><p>两端概率都是 1/2，均值为 0.01，方差为 \(0.01^2=10^{-4}\)。平方期望为 \(0.5\times0.02^2=2\times10^{-4}\)，恰好是均值平方加方差。未做偏差校正的 \(v_1\) 期望为 \(0.1\times2\times10^{-4}=2\times10^{-5}\)；精确梯度对应 \(10^{-5}\)。要判断最终 Adam 更新，再同时跟踪一阶矩及其与二阶矩的相关性。</p></details></div>
+
+<h2 id="lab">16. CPU 实验：从量化矩阵走完一次训练</h2>
+<p><a href="/posts/scaling-mixed-precision/lab.py" download>下载 lab.py</a>，在有 NumPy 的环境中运行 <code>python lab.py --seed 7</code>。实验使用 FP32 scale 和 E4M3／E2M1 的可表示值，固定块划分，先验证转置一致性、随机舍入的期望与方差，再检查三次 GEMM 的误差分解和解析梯度。</p>
+<p>小训练闭环是两个线性层加 tanh 的回归网络，输入为 64×8，隐藏层宽度为 8，输出宽度为 4。主权重与 Adam 状态始终以 FP32 保存；只切换 GEMM 输入格式和梯度的舍入方式，激活与权重维持 RNE。每个实验使用同一初始化和数据；最终损失统一由当前 FP32 主权重计算，比较训练轨迹留下的差异。脚本同时报告三类 GEMM 误差与舍入噪声的二阶矩。全部计算由 NumPy 在 CPU 上执行，块 scale 的 FP32 约定用于隔离元素量化误差。</p>
+<pre><code>Transpose: rowwise difference 0.333333; square difference 0
+SR: mean 0.299385 (theory .300000); variance 0.060061 (theory .060000)
+Train fp32 gradient=RNE; FP32 readout: 0.157533 -&gt; 0.000368
+Train e4m3 gradient=RNE; FP32 readout: 0.157533 -&gt; 0.000800
+Train e2m1 gradient=RNE; FP32 readout: 0.157533 -&gt; 0.003354
+Train e2m1 gradient=SR; FP32 readout: 0.157533 -&gt; 0.003523
+PASS: transpose, SR moments, Adam noise, gather metadata, RHT, GEMM gradients/decomposition, training</code></pre>
+<p>这是种子 7、200 步、块宽度 4 的输出，末位数值可随 NumPy 的浮点归约略有变化。这个例子中 SR 与 RNE 都能学习，SR 的条件无偏性对应统计性质，最终效果仍由训练结果检验。所有断言通过后，可以把 <code>--block 4</code> 改成 2，比较更细分组的效果；或打开 <code>--switch-last 50</code>，让最后 50 步回到高精度 GEMM，检查后期量化噪声与优化停滞的关系。完整复现需要同时保存输入、格式、分组、舍入种子与优化器配置。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
       <p>想看各种格式在真实训练中的损失曲线和吞吐对比，推荐读 Ultra-Scale Playbook 的混合精度一节和 DeepSeek-V3 报告的第 3.3 节。</p>
@@ -604,6 +646,7 @@ for x, y in loader:
         <li>Bita Darvish Rouhani et al., <a href="https://arxiv.org/abs/2310.10537">Microscaling Data Formats for Deep Learning</a>（2023），表 1 与算法 1；OCP Microscaling Formats (MX) v1.0 规范。</li>
         <li>NVIDIA, <a href="https://developer.nvidia.com/blog/introducing-nvfp4-for-efficient-and-accurate-low-precision-inference/">Introducing NVFP4 for Efficient and Accurate Low-Precision Inference</a>（技术博客）。</li>
         <li>NVIDIA, <a href="https://arxiv.org/abs/2509.25149">Pretraining Large Language Models with NVFP4</a>（2025），第 4 节。</li>
+        <li>Maxim Fishman et al., <a href="https://arxiv.org/abs/2409.12517">Scaling FP8 Training to Trillion-token LLMs</a>：SwiGLU 离群值、长训练与矩状态量化。</li><li>Brian Chmiel et al., <a href="https://arxiv.org/abs/2505.19115">FP4 All the Way</a>：随机舍入与量化噪声的下降分析。</li><li>NVIDIA，<a href="https://docs.nvidia.com/deeplearning/transformer-engine/features/low_precision_training/nvfp4/nvfp4.html">Transformer Engine 2.20.2 NVFP4 文档</a>：2D 权重、RHT、梯度随机舍入与 all-gather 的 amax 同步。</li><li>NVIDIA NeMo，<a href="https://github.com/NVIDIA-NeMo/Megatron-Bridge/discussions/3460">Megatron-Bridge 低精度训练实验</a>（2026）：FxLy 层位置消融与 DCLM optimizer recipe 对照。</li>
         <li>Jay Shah et al., <a href="https://arxiv.org/abs/2407.08608">FlashAttention-3</a>（2024），第 3.3 节（块量化与非相干处理）。</li>
         <li>Suyog Gupta et al., <a href="https://arxiv.org/abs/1502.02551">Deep Learning with Limited Numerical Precision</a>（2015）。</li>
         <li>NVIDIA Transformer Engine，<a href="https://github.com/NVIDIA/TransformerEngine/blob/main/transformer_engine/common/recipe/__init__.py">recipe 定义</a>（DelayedScaling、Float8CurrentScaling、MXFP8BlockScaling、Float8BlockScaling）。</li>
@@ -616,7 +659,8 @@ for x, y in loader:
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=2a575d4a9e89"></script>
+<script type="application/json" id="math-definitions">{"global":{"quant-scale":{"label":"FP8 量化乘数 S","description":"此处 q = Q(Sx)，反量化为 q / S；后文 NVFP4 用 s_g、s_b 相乘恢复数值。"},"global-scale":{"label":"NVFP4 张量级反量化乘数 s_g","description":"global amax / (448×6)，用 FP32 保存；同一个 gathered 张量共用。"},"block-scale":{"label":"NVFP4 块级反量化乘数 s_b","description":"当前块 amax / (6 s_g)，再舍入为 E4M3；与 q、s_g 相乘恢复数值。"},"fprop":{"label":"前向 Y = XW","description":"X 为 T×K 激活，W 为 K×N 权重，输出 Y 为 T×N；沿输入特征 K 求和。"},"dgrad":{"label":"输入梯度 dX = GWᵀ","description":"G 为 T×N 上游梯度，结果为 T×K；沿输出特征 N 求和。"},"wgrad":{"label":"权重梯度 dW = XᵀG","description":"X 为 T×K，G 为 T×N，结果为 K×N；沿本批 token 数 T 求和。"},"qvariance":{"label":"量化噪声方差 Var(e | g)","description":"固定真实梯度 g，重复随机舍入产生的误差方差；它进入梯度平方的条件期望。"}}}</script>
+  <script src="/assets/series.js?v=414d36fec9c5"></script>
   <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -1056,7 +1100,7 @@ for x, y in loader:
       labelCells($('ra-table'));
       $('ra-note').textContent = '每个 K 取 ' + trials + ' 组随机向量（固定种子的示例数据），乘积按精确值给出，只比较累加器。' +
         (sign === 'mix' ? '有正有负时误差按 Σ|pᵢ| 归一化。' : '') +
-        '「14 位截断」是 Hopper FP8 Tensor Core 累加行为的简化模型：每次加法后把部分和截断到 14 位有效位；真实硬件是在 32 个乘积对齐后截断，数值不会完全一样。全为正时截断误差单向积累，随 K 增长；每 128 个元素提升到 FP32 后，部分和始终较小，截断损失也就小得多。';
+        '「14 位截断」是 Hopper FP8 Tensor Core 累加行为的简化模型：每次加法后把部分和截断到 14 位有效位；真实硬件是在 32 个乘积对齐后截断，数值不会完全一样。全为正时截断误差单向积累，随 K 增长；每 128 个元素提升到 FP32 后，块内部分和更小，截断损失也就小得多。';
     }
     function run() { (mode === 'upd' ? runUpd : runDot)(); }
     run();
@@ -1181,8 +1225,9 @@ for x, y in loader:
 })();
 
   </script>
-  <script src="/assets/post-links.js?v=8a89387e7679"></script>
-  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
-<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+  <script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/scaling-mixed-precision/training.js"></script>
+  <script src="/assets/post-links.js?v=fe48d4412e51"></script>
+  <script src="/assets/posts.js?v=186761fcdc0a"></script>
+<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body>
 </html>

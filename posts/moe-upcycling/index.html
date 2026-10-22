@@ -1,0 +1,205 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>已有模型怎样长成 MoE：从权重复用到专家分化 · Zunzhe Zhang</title>
+  <meta name="description" content="从复制 dense FFN 的函数保持条件，推导 router 梯度、SwiGLU 细粒度切分与专家分化，再核算 upcycling 的训练预算、GEMM 和通信。含交互图、四道习题和 NumPy 实验。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+  <style>
+    .prose section { scroll-margin-top:24px; }
+    .up-controls { display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin:15px 0; }
+    .up-controls label { display:flex;flex-wrap:wrap;gap:7px;align-items:center;font-size:14px; }
+    .up-controls select { font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--border);border-radius:6px;padding:6px;max-width:100%; }
+    .up-controls input { accent-color:var(--accent);max-width:150px; }
+    .up-controls :focus-visible { outline:2px solid var(--accent);outline-offset:3px; }
+    .up-experts { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px;margin:14px 0; }
+    .up-expert { border:1px solid var(--border);border-radius:9px;padding:10px 8px;min-width:0;background:var(--bg); }
+    .up-expert.selected { border-color:var(--accent);background:var(--accent-soft); }
+    .up-expert strong { display:block;font-size:14px;margin-bottom:5px; }
+    .up-expert span { display:block;font-size:12px;font-variant-numeric:tabular-nums;line-height:1.8; }
+    .up-expert .up-bar { height:6px;background:var(--border);border-radius:4px;margin:8px 0;overflow:hidden; }
+    .up-bar i { display:block;height:100%;background:var(--accent);transition:width .2s; }
+    .up-stats { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:15px 0; }
+    .up-stats .article-stat { font-size:13px;line-height:1.8;overflow-wrap:anywhere; }
+    .up-stats strong { display:block;font:17px/1.7 var(--font-mono); }
+    .up-readout { font-size:14px;line-height:1.8;padding:12px;background:var(--bg-soft);border-radius:8px;min-height:4.5em;overflow-wrap:anywhere; }
+    .up-shards { display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px;margin:15px 0; }
+    .up-shard { border:1px solid var(--border);border-radius:9px;padding:10px;min-width:0; }
+    .up-shard strong { display:block;font-size:14px;margin-bottom:8px; }
+    .up-shard code { display:block;font-size:12px;line-height:1.8;white-space:normal;overflow-wrap:anywhere; }
+    .up-replicas { display:flex;gap:7px;flex-wrap:wrap;margin-top:10px; }
+    .up-replicas span { padding:5px 8px;border:1px solid var(--border);border-radius:6px;font:12px var(--font-mono); }
+    .up-replicas .picked { background:var(--accent);border-color:var(--accent);color:var(--bg); }
+    .up-muted { opacity:.45; }
+    .up-small { font-size:14px;color:var(--text-soft); }
+    @media(max-width:520px) { .up-experts{gap:5px}.up-expert{padding:8px 5px}.up-expert span{font-size:11px}.up-stats{grid-template-columns:1fr}.up-shards{gap:7px}.up-shard{padding:8px}.up-controls{gap:10px}.up-readout{min-height:6em} }
+    @media(prefers-reduced-motion:reduce) { .up-bar i { transition:none; } }
+  </style>
+</head>
+<body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap">
+  <header class="post-header"><h1>已有模型怎样长成 MoE：从权重复用到专家分化</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header>
+  <nav class="series" data-series="pretraining"></nav>
+  <article class="prose">
+    <p>已经花了一大笔算力训练出一个 dense 模型，现在还有一笔预算，怎样让它继续变强？沿用原结构继续训练是一种选择。另一种选择是把 FFN 扩展为多个专家，每个 token 只调用其中几个，让新增参数承载更细的分工。这就是 sparse upcycling：用已有 checkpoint 初始化更大的稀疏模型，再继续训练。</p>
+    <p>权重复制很容易，困难在于转换前后的计算如何衔接。复制出来的专家起初会给出同样的答案；路由可能改变输出尺度；把一个大 FFN 切成小专家后，还需要正确组合各个分片。只有同时理解这些细节，才能判断新增容量是在产生收益，还是让模型重新学习刚刚失去的东西。</p>
+    <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
+      <li><a href="#reuse">从一个 FFN 到多个专家</a></li><li><a href="#routing">门控既控制输出，也控制梯度</a></li><li><a href="#granularity">SwiGLU 怎样切成细粒度专家</a></li><li><a href="#specialization">从复制到分工</a></li><li><a href="#budget">已有投入与下一笔预算</a></li><li><a href="#hardware">相同 FLOPs，为什么速度不同</a></li><li><a href="#practice">实验与练习</a></li><li><a href="#references">参考与延伸阅读</a></li>
+    </ol></nav>
+
+    <section id="reuse" data-math-scope="routing">
+      <h2>从一个 FFN 到多个专家</h2>
+      <p>把一层 FFN 写成函数 \(f(x)\)，输入是当前 token 的隐藏向量 \(x\in\mathbb R^d\)，输出也有 \(d\) 个坐标。创建 \(\htmlData{symbol=experts}{E}\) 个专家，各自加载同一份 FFN 权重，得到 \(f_1=\cdots=f_E=f\)。Attention、归一化和其余层可以直接继承。Router 为每个 token 产生 \(E\) 个分数，选出 \(\htmlData{symbol=topk}{K}\) 个专家，输出为：</p>
+      \[y(x)=\sum_{i\in\htmlData{symbol=selected}{S(x)}}\htmlData{symbol=gate}{g_i(x)}f_i(x).\]
+      <p>\(S(x)\) 是这个 token 的专家集合，\(g_i(x)\) 是实际参与加权的门控值。初始化时所有专家相同，因此：</p>
+      \[y(x)=\left(\sum_{i\in S(x)}g_i(x)\right)f(x).\]
+      <p>只要 token 成功送达专家、门控和为 1，转换后的这层就保持原来的输出。若每个转换层都满足这个条件，整条网络的前向也能衔接。这个检查可以在第一次优化器更新之前完成：固定一批 token、关闭随机 dropout，逐层比较 dense 与 MoE 的输出误差，再比较最终 logits。</p>
+      <p>Sparse Upcycling 从这类权重复用出发，研究了专家初始化、转换层位置、容量与训练恢复。它包含 T5 和 ViT 实验；其中路由归一化与 optimizer state 的选择具有模型和任务依赖。最值得保留的实验方式是<strong>从同一个 checkpoint 出发，比较继续 dense 训练与转换后的质量—成本曲线</strong>。已有 <a href="/posts/scaling-moe/">MoE 的路由与系统实现</a>解释了 token dispatch、容量和专家并行，转换实验可以在这些组件之上进行。</p>
+    </section>
+
+    <section id="routing" data-math-scope="routing">
+      <h2>门控既控制输出，也控制梯度</h2>
+      <p>令 router logits 为 \(z_i\)，全体专家的 softmax 概率为 \(p_i=e^{z_i}/\sum_j e^{z_j}\)。有两种常见的门控计算：</p>
+      \[g_i=\begin{cases}p_i,&i\in S,\\0,&i\notin S,
+      \end{cases}\qquad\text{或}\qquad
+      g_i=\begin{cases}\dfrac{p_i}{\sum_{j\in S}p_j},&i\in S,\\0,&i\notin S.
+      \end{cases}\]
+      <p>左边先对所有专家做 softmax，再保留 top-k；右边把选中的门控重新归一化，等价于对选中 logits 做 softmax。全体概率近似均匀时，左边的门控和约为 \(K/E\)。例如 8 个完整复制的专家选 2 个，输出约为原来的四分之一。右边的门控和为 1，初始输出直接衔接。</p>
+      <p>梯度也随之变化。先看专家输出的一个标量分量 \(v_i\)，加权结果为 \(y=\sum_i g_i v_i\)。在 top-k 名次保持不变的局部区间，选中集合内归一化给出：</p>
+      \[\frac{\partial y}{\partial z_j}=g_j(v_j-y)\quad(j\in S).\]
+      <p>集合外的局部导数为零。若选中专家给出相同的 \(v_j\)，加权平均 \(y\) 也等于这个值，router 暂时收不到通过输出权重传来的学习信号。特别是 top-1 的归一化门控恒为 1，这条梯度会一直为零。负载均衡等辅助目标还可以更新 router；主任务如何影响专家选择，则需要在路由设计中明确安排。</p>
+      <p>全体 softmax 后取 top-k 时，令 \(a_j=v_j\mathbf1[j\in S]\)，则：</p>
+      \[\frac{\partial y}{\partial z_j}=p_j(a_j-y).\]
+      <p>选中概率的总量参与输出，router 因而保留了这条梯度，同时要处理转换时的尺度变化。这里的差异来自加权函数本身，可以通过有限差分验证。NVIDIA 的大规模 upcycling 研究把门控顺序与权重缩放共同消融，说明初始化误差与后续收敛速度应当分别测量。</p>
+
+      <figure class="article-figure" id="router-demo">
+        <h3>复制的专家给出相同答案，门控怎样影响结果？</h3>
+        <p class="up-small">观察一个输出分量。Dense 值为 2；三个 router logits 为 [z₀, 0, −1]。条长表示最终门控 g，固定刻度 0～1。</p>
+        <div class="up-controls">
+          <label>门控 <select id="router-mode"><option value="selected">选中集合内归一化</option><option value="global">全体 softmax 后选取</option></select></label>
+          <label>Top-K <select id="router-k"><option value="1">1</option><option value="2" selected>2</option></select></label>
+          <label>专家输出 <select id="router-values"><option value="same">复制后 [2, 2, 2]</option><option value="different">分化后 [2, 3, 1]</option></select></label>
+          <label>z₀ <input id="router-z" type="range" min="0.2" max="3" step="0.1" value="1"><output id="router-z-out">1.0</output></label>
+        </div>
+        <div id="router-experts" class="up-experts"></div>
+        <div class="up-stats"><div class="article-stat">门控和<strong id="router-sum"></strong></div><div class="article-stat">加权输出 y<strong id="router-output"></strong></div></div>
+        <p id="router-readout" class="up-readout" aria-live="polite"></p>
+        <figcaption>推进到最后一步检查 ∂y/∂z。先比较复制后的两种门控；再切到分化后的专家并保持 top-2，观察集合内归一化怎样重新获得梯度。Top-1 则始终只有一个归一化权重。</figcaption>
+      </figure>
+    </section>
+
+    <section id="granularity" data-math-scope="granularity">
+      <h2>SwiGLU 怎样切成细粒度专家</h2>
+      <p>完整复制时，选两个专家需要计算两份完整 FFN。另一种扩容方式是把每个专家做小，允许一个 token 组合更多个细粒度部件。记模型宽度为 \(d\)、原 FFN 中间宽度为 \(m\)，无 bias 的 SwiGLU 为：</p>
+      \[h=\operatorname{SiLU}(W_gx)\odot(W_ux),\qquad f(x)=W_dh.\]
+      <p>\(W_g,W_u\in\mathbb R^{m\times d}\) 分别是 gate 和 up 投影，\(W_d\in\mathbb R^{d\times m}\) 是 down 投影。中间向量 \(h\) 有 \(m\) 个通道。把这些通道分成 \(\htmlData{symbol=granularity}{G}\) 个大小相等的集合 \(J_1,\ldots,J_G\)，每个小专家宽度为 \(m/G\)。元素乘法逐通道进行，因此可以精确分解：</p>
+      \[f(x)=\sum_{g=1}^{G}W_d[:,J_g]\left[\operatorname{SiLU}(W_g[J_g,:]x)\odot W_u[J_g,:]x\right]=\sum_{g=1}^{G}f^{(g)}(x).\]
+      <p>转换 checkpoint 时，同一个 \(J_g\) 必须同时作用于 gate/up 的行和 down 的列。融合 gate/up 的实现通常把它们装在一个大张量里，需要先按存储约定拆开，再配对切片。配错行号也能得到合法的矩阵形状，但中间通道已经换了含义。官方 Megatron-LM 转换器显式处理了这组对应关系。</p>
+      <p>接下来给每个分片建立若干副本。初始化时，如果 router 每个分片恰好选一个副本，就能收集到完整 FFN 的所有贡献；若选中门控都为 \(1/G\)，加权结果为 \(f(x)/G\)。将这些副本的 down 投影乘 \(G\)，即可在这组门控下恢复输出。每片的覆盖情况与总幅度是两个独立的检查量。</p>
+
+      <figure class="article-figure" id="shard-demo">
+        <h3>选齐分片，再恢复输出幅度</h3>
+        <p class="up-small">输入 x = [1, −1]，四个 SwiGLU 中间通道分为 A、B 两片，每片建立两个副本。四个专家的原始 router 概率均为 1/4，固定选择两个专家。</p>
+        <div class="up-controls">
+          <label>选择 <select id="shard-choice"><option value="complete">A₀ + B₀ · 每片一个</option><option value="duplicate">A₀ + A₁ · 同片两个</option></select></label>
+          <label>门控 <select id="shard-gate"><option value="0.5">选中归一化 · 各 1/2</option><option value="0.25">全体 softmax · 各 1/4</option></select></label>
+          <label>Down 权重倍数 <select id="shard-scale"><option value="1">1</option><option value="2" selected>2</option><option value="4">4</option></select></label>
+        </div>
+        <div id="shard-cards" class="up-shards"></div>
+        <div class="up-stats"><div class="article-stat">原 dense 输出<strong>[1.7498, −0.9410]</strong></div><div class="article-stat">MoE 输出<strong id="shard-output"></strong><span id="shard-error"></span></div></div>
+        <p id="shard-readout" class="up-readout" aria-live="polite"></p>
+        <figcaption>A、B 各包含两个隐藏通道；卡片中的向量是各分片对二维输出的贡献。先保持 A₀+B₀，配对门控与 down 倍数；再选 A₀+A₁，看相同的总门控为什么仍无法还原 B 的贡献。</figcaption>
+      </figure>
+      <p>Virtual grouping 将这个想法用于初始化：把不同分片及其副本分组，配合 router 初值，使初次选择覆盖需要的分片，再补偿门控造成的尺度变化。以后专家参数和路由会继续学习，逐步形成更自由的组合。</p>
+      <p>补偿尺度时还需要看激活函数。若 \(f(x)=W_2\operatorname{ReLU}^2(W_1x)\)，两份权重同时乘正数 \(s\) 会使输出乘 \(s^3\)，因此可以从需要的输出倍数解出立方根缩放。SwiGLU 的 SiLU 满足 \(\operatorname{SiLU}(u)=u\sigma(u)\)，缩放输入也会改变 sigmoid 门值，整体缩放关系需要实测。分配缩放到多份权重，会同时改变后续梯度与优化轨迹；将缩放集中到 down 投影，则容易构造精确的前向校验。转换实验可以同时记录初始输出误差、第一步更新与后续恢复曲线。</p>
+    </section>
+
+    <section id="specialization">
+      <h2>从复制到分工</h2>
+      <p>相同的专家怎样开始变得不同？设损失对 MoE 输出的梯度为 \(u\)，选中专家参数的梯度包含 \(g_iJ_{f_i}^\top u\)。不同专家收到的 token、权重和误差信号不同，就会迈出不同的第一步。专家输出产生差异后，router 可以从“哪个专家更能降低当前误差”中获得更多信号。</p>
+      <p>一组小实验就能分清这条链：复制三个线性专家，对四个输入做 top-2 归一化路由；记录第一次反向的专家梯度与 router 梯度。前者可以不同，后者在专家完全相同时为零。只更新一次专家，再重新计算 router 梯度，就能看到非零信号。后面的 NumPy 实验把这一步完整算出来。</p>
+      <p>真实训练还要看专家是否有足够的数据。按层记录 token 负载、每专家更新范数、门控熵，以及同一分片副本之间的输出相关性。负载很均匀、输出高度相似，说明需要继续观察分化速度；少数专家长期拿不到 token，则先检查路由和容量。负载均衡控制训练机会，领域评测与输出差异帮助判断这些机会有没有变成有用能力。</p>
+      <p>学习率计划同样影响分化。若 dense 训练已经退火到很小的学习率，直接延续这个末值可能让新增容量改变得很慢。可以从同一个转换 checkpoint 分叉，在相同新增 token 下比较末值延续与重新 warmup 的计划，观察共享层、专家和 router 的实际更新比例。Optimizer state 的继承也要作为明确的实验变量：旧的一、二阶矩会改变步长，新 router 则没有对应历史。<a href="/posts/pretraining-stability/">训练稳定性</a>介绍了这些更新量怎样监控。</p>
+      <p>Branch-Train-MiX 提供另一种顺序：先从共同基座分支，在不同领域独立训练 dense 模型；再把这些模型的 FFN 保留为专家，其余参数平均，最后训练 MoE 和 token 级 router。这样专家进入 MoE 时已经具备差异，新增成本包括领域训练与组合后的适应。共享层平均还要求检查参数坐标和能力取舍，这与 <a href="/posts/model-merging/">模型合并</a>直接相连。</p>
+    </section>
+
+    <section id="budget" data-math-scope="budget">
+      <h2>已有投入与下一笔预算</h2>
+      <p>设保留的共享部分有 \(N_s\) 个参数，被转换的 dense FFN 合计有 \(P_f\) 个参数。每个专家宽度缩为原来的 \(1/G\)，共有 \(E\) 个专家，每个 token 选 \(K\) 个。计入新增 router 参数 \(N_r\) 后：</p>
+      \[\htmlData{symbol=total}{N_{\rm total}}=N_s+\frac{E}{G}P_f+N_r,\qquad
+      \htmlData{symbol=active}{N_{\rm active}}\approx N_s+\frac{K}{G}P_f.\]
+      <p>总参数决定权重存储的主要部分；激活参数给出主要矩阵 FLOPs 的一阶估算。令 \(N_s=1\mathrm B\)、\(P_f=6\mathrm B\)、\(E=64,G=8,K=8\)，可以把一个 7B dense 模型转换为约 49B 总参数、7B 激活参数的模型。新增 router 的计算与存储单独计入实测。</p>
+      <p>已有 dense checkpoint 时，下一笔预算要比较的是：新增相同计算后，继续 dense、upcycling 和从零训练各自达到什么质量。若还在规划完整训练流程，则需要把 dense 阶段一起计入：</p>
+      \[C_{\rm total}\approx6N_{\rm dense}\htmlData{symbol=dense-tokens}{D_d}+6N_{\rm active}\htmlData{symbol=moe-tokens}{D_m}.\]
+      <p>这里 \(D_d\) 是转换前累计处理的 token，\(D_m\) 是转换后的 token，\(C\) 的单位为 FLOPs。两阶段都应使用各自实际形状校准 attention、router、重计算和通信的额外成本。相同 token 数在不同激活参数下，对应不同预算；比较时同时画质量对 token、FLOPs 和 GPU 时间的曲线。</p>
+      <p>Scaling Laws for Upcycling 进一步研究了转换时机。一个已经训练更久的 dense 模型提供更好的起点，但复制出来的专家在后续阶段可能改善得更慢。它用两个阶段数据量的交互项描述这种现象。可以把固定模型家族的经验形式写成：</p>
+      \[\widehat L(d_d,d_m)=A d_d^{-a}d_m^{-b+c\log d_d}+L_\infty,\qquad d_d,d_m>0.\]
+      <p>\(d_d=D_d/D_0\)、\(d_m=D_m/D_0\) 是按固定 token 单位 \(D_0\) 归一化后的阶段长度；\(A,a,b,c,L_\infty\) 都在这个单位约定下拟合。转换瞬间的损失另行记录，幂律拟合使用正的后续训练长度。在该经验形式下，后续训练的有效衰减指数为 \(b-c\log d_d\)。这把“从较好位置开始”和“单位新增预算改善多快”分成了两个可以测量的问题。</p>
+      <p>具体可以选三个 dense checkpoint，对每个都做同样的转换，再训练三个新增预算；留出最长预算验证曲线。数据、评测与 schedule 保持可比，参数和数据范围超出小实验时补锚点。<a href="/posts/pretraining-scaling/">训练预算与 Scaling Laws</a>讲过这类拟合、留出验证和外推误差。模型能否部署，还取决于所有专家权重的容量以及目标 batch 下的执行效率。</p>
+    </section>
+
+    <section id="hardware" data-math-scope="hardware">
+      <h2>相同 FLOPs，为什么速度不同</h2>
+      <p>比较两种相同总参数、相同激活参数的配置：粗粒度方案 \((E,G,K)=(8,1,1)\)，细粒度方案 \((64,8,8)\)。若一层处理 \(T=1024\) 个 token 且路由均匀，每个专家收到的平均 token 数都是：</p>
+      \[n_e=\frac{TK}{E}=128.\]
+      <p>细粒度方案有八倍数量的专家，每个专家的中间宽度变成八分之一。在 8 张 EP 卡上，粗粒度每卡一个专家，细粒度每卡八个。前者做一个较宽的 GEMM，后者做八个较窄的 GEMM；矩阵乘总 FLOPs 接近，但 tile 利用率、启动开销和 grouped GEMM 调度会变化。因而“每个专家的 token 数一样”仍不足以确定效率。</p>
+      <p>通信也会变化。将一次专家调用的输入向量和返回向量各计一份，隐藏宽度为 \(d\)、每元素 \(b\) 字节，逻辑 dispatch 与 combine 数据量为：</p>
+      \[\htmlData{symbol=payload}{V_{\rm logical}}=2TKdb.\]
+      <p>在 \(T=1024,d=4096,b=2\) 时，top-1 为 16 MiB，top-8 为 128 MiB。这里按独立专家调用计数；实际跨卡字节数还取决于本地命中、专家放置，以及对相同目的地 token 的复用。细粒度设计需要把这些通信路径和 GEMM 形状一起考虑。</p>
+      <p>可以做一个直接的工程对照：固定总专家参数与激活 FLOPs，改变粒度；对每种配置扫描实际训练会使用的 microbatch，分开记录路由、permute、dispatch、专家计算和 combine。再加入完整前反向及优化器步骤，观察最忙 rank 的时间与专家 token 数分布。小 GEMM 瓶颈通常表现为专家计算的有效吞吐下降；负载偏斜则表现为卡间耗时差增大；网络瓶颈需要从 dispatch/combine 的实际字节与等待时间定位。</p>
+      <p>已有 dense 模型、转换映射、训练恢复与硬件形状因此形成一条闭环：先验证数据流与输出尺度，再测专家分化与验证质量，最后按真实预算选择可部署的配置。一个更大的参数计数，只有走完这条链才成为可用的模型容量。</p>
+    </section>
+
+    <section id="practice">
+      <h2>实验与练习</h2>
+      <p><a href="/posts/moe-upcycling/lab.py" download>下载 NumPy CPU 实验 lab.py</a>，安装 NumPy 后运行：</p>
+      <pre><code>python3 -m pip install numpy
+python3 lab.py</code></pre>
+      <p>实验分别用有限差分检查两种门控的 router 导数；在三个相同线性专家上做一次更新，观察差异怎样产生；对随机输入核验 SwiGLU 分片重建；再计算参数与逻辑通信账本。默认输出包括：</p>
+      <pre><code>Cloned experts, global-softmax top-2: y=1.819939
+Cloned experts, selected-softmax top-2: y=2.000000
+One expert update: toy loss 2.117188 -&gt; 2.034577
+router gradient norm now 0.026028
+SwiGLU full=[1.749839, -0.940973]
+Parameter budget: total=49B active=7B</code></pre>
+      <p>最后应看到 <code>PASS</code>。这些数值来自小型 CPU 算例。可以把 <code>toy_loss</code> 的 top-2 改成 top-1，观察归一化 router 的梯度；或故意把某个分片的 down 列切错，检查重建断言怎样定位映射问题。测量 GPU 性能时，再使用上面的形状与分阶段计时方法。</p>
+
+      <div class="article-exercise"><h3>练习 1：复制以后，输出和梯度是多少</h3>
+        <p>8 个专家的标量输出均为 2，router 全体概率均为 1/8，固定选中其中 2 个。求全体 softmax 后选取的输出，以及对一个选中 logit 和一个未选中 logit 的局部导数。再求选中集合内归一化的结果。</p>
+        <details><summary>展开解答</summary><p>固定集合后，全体 softmax 方案的输出为 \(y=2\times(1/8)\times2=0.5\)。选中位置的导数是 \((1/8)(2-0.5)=0.1875\)，未选中位置为 \((1/8)(0-0.5)=-0.0625\)。所有导数相加为 \(2\times0.1875+6\times(-0.0625)=0\)，与共同平移 logits 保持 softmax 不变相符。</p><p>选中归一化后，两个门控各为 1/2，输出为 2，所有 router 局部导数为零。相同 logits 在 top-k 边界有并列；以上导数针对已经固定的选择分支，实验中可用微小扰动固定名次后验证。</p></details>
+      </div>
+      <div class="article-exercise"><h3>练习 2：缩放正确，为什么还原失败</h3>
+        <p>两片 FFN 输出分别为 \(a=[1,2]\)、\(b=[3,-1]\)，原 dense 输出为它们之和。每片各复制两份，选两个专家，归一化门控均为 1/2。Down 权重都乘 2。分别计算选 A₀+B₀ 与 A₀+A₁ 的输出；后者能否用一个整体标量恢复？</p>
+        <details><summary>展开解答</summary><p>原输出为 \([4,1]\)。选齐两片时，\((1/2)(2a)+(1/2)(2b)=a+b=[4,1]\)。两次选 A 时，输出为 \(2a=[2,4]\)。若再乘标量 \(s\)，第一个分量要求 \(s=2\)，第二个要求 \(s=1/4\)，两者不相容。必须恢复 B 的方向贡献，再处理整体尺度。这个例子把分片覆盖与门控幅度两个检查分开了。</p></details>
+      </div>
+      <div class="article-exercise"><h3>练习 3：两阶段预算怎样记</h3>
+        <p>一个 dense 模型有 1B 共享参数和 6B 待转换 FFN 参数，已训练 300B token。转换为 \(E=64,G=8,K=8\) 后再训练 90B token。按主要权重矩阵估算，总参数、激活参数、新增计算与两阶段总计算分别是多少？</p>
+        <details><summary>展开解答</summary><p>总参数为 \(1+(64/8)\times6=49\mathrm B\)，激活参数为 \(1+(8/8)\times6=7\mathrm B\)。这里把 router 参数单独留作额外账目。新增计算为：</p>
+          \[C_m=6\times7\times10^9\times90\times10^9=3.78\times10^{21}\text{ FLOPs}.\]
+          <p>Dense 阶段为 \(6\times7\times300\times10^{18}=1.26\times10^{22}\) FLOPs；合计 \(1.638\times10^{22}\) FLOPs。使用现成模型决定下一步时比较新增 3.78×10²¹ 的收益；规划完整流程时比较两阶段合计。实际训练时间还需要加入 router、attention、通信和利用率。</p></details>
+      </div>
+      <div class="article-exercise"><h3>练习 4：同样的计算量，为何通信增大</h3>
+        <p>比较 \((E,G,K)=(8,1,1)\) 与 \((64,8,8)\)，每层有 1024 个 token，隐藏宽度 4096，BF16 每元素 2 字节。求平均每专家 token 数、dispatch 与 combine 的逻辑总量，并说明 profiler 还需要记录什么。</p>
+        <details><summary>展开解答</summary><p>两者每专家平均分别为 \(1024/8=128\) 和 \(1024\times8/64=128\)。按每个专家调用发送输入、返回输出各一份计数，粗粒度为 \(2\times1024\times1\times4096\times2=16777216\) 字节，即 16 MiB；细粒度为它的 8 倍，即 128 MiB。</p><p>相同总参数和激活计算来自专家数增加八倍、中间宽度缩小八倍。Profiler 需要记录小 GEMM 的实际吞吐、各专家和各 rank 的 token 分布、真实跨卡字节数、dispatch/combine 等待及完整训练 step。专家放置和同目的地复用会改变实际网络流量，因此逻辑字节数适合做起点，再用测量定位瓶颈。</p></details>
+      </div>
+    </section>
+
+    <section id="references"><h2>参考与延伸阅读</h2><ol>
+      <li><a href="https://arxiv.org/abs/2212.05055">Sparse Upcycling: Training Mixture-of-Experts from Dense Checkpoints</a>：权重复制、转换恢复，以及路由归一化、容量、optimizer state 的消融；附录 B.5—B.8 与初始化检查直接相关。</li>
+      <li><a href="https://arxiv.org/abs/2410.07524">Upcycling Large Language Models into Mixture of Experts</a>：virtual grouping、细粒度切分与权重缩放；第 2 节给出构造，第 3 节比较训练配方与路由顺序。</li>
+      <li><a href="https://github.com/NVIDIA/Megatron-LM/blob/0431153bf1b5c405057b158189c260107d8b7c3a/megatron/core/transformer/moe/upcycling_utils.py">Megatron-LM：论文所链接版本的 upcycling_utils.py</a>：SwiGLU gate/up 配对切片、down 列切片、router 分组与缩放的实际实现。</li>
+      <li><a href="https://arxiv.org/abs/2403.07816">Branch-Train-MiX: Mixing Expert LLMs into a Mixture-of-Experts LLM</a>：领域分支训练、FFN 专家组合与共享权重平均，连接模型合并和 token 级路由。</li>
+      <li><a href="https://arxiv.org/abs/2502.03009">Scaling Laws for Upcycling Mixture-of-Experts Language Models</a>：转换前后 token 预算的交互、固定预算下的训练配置比较；实验与外推范围见第 3—5 节。</li>
+    </ol></section>
+  </article><nav class="series-pager" data-series="pretraining"></nav>
+</main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">
+{"global":{"experts":{"label":"E：专家总数","description":"每个转换后的 MoE 层拥有的专家数量，包括各分片的副本。","unit":"个专家"},"topk":{"label":"K：每 token 选中专家数","description":"一个 token 在当前 MoE 层调用的专家数量。","unit":"个专家 / token"},"selected":{"label":"S(x)：选中专家集合","description":"Router 根据当前输入 x 选择的专家编号集合。"},"gate":{"label":"gᵢ(x)：实际门控","description":"专家输出参与加权求和的系数；由 softmax、top-k 与选中集合内的归一化约定决定。"}},"scopes":{"granularity":{"granularity":{"label":"G：中间宽度缩小倍数","description":"原 dense FFN 中间宽度为 m，每个细粒度专家宽度为 m/G。原通道被分成 G 个片。","unit":"无量纲"}},"budget":{"total":{"label":"N_total：总参数量","description":"共享参数加全部专家与 router 参数，决定权重存储的主要规模。","unit":"个参数"},"active":{"label":"N_active：每 token 激活参数量","description":"共享参数与 K 个小专家的参数合计，用于主要矩阵 FLOPs 的近似。","unit":"个参数"},"dense-tokens":{"label":"D_d：转换前训练量","description":"Dense 阶段累计实际处理的 token 数。","unit":"token"},"moe-tokens":{"label":"D_m：转换后训练量","description":"转换为 MoE 后累计处理的 token 数。","unit":"token"}},"hardware":{"payload":{"label":"V_logical：逻辑通信量","description":"把每次专家调用的输入与返回向量各计一份，合计 2TKdb。实际跨卡量取决于专家放置与通信复用。","unit":"字节"}}}}
+</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/moe-upcycling/figures.js"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
+</body></html>

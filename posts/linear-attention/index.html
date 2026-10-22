@@ -64,6 +64,7 @@ $$\htmlData{symbol=state}{S_t}=\sum_{j\le t}\phi(k_j)v_j^\top\in\mathbb R^{r\tim
 <p>计算成本同样取决于状态维度。一个 token 的状态更新和读取各涉及 \(r d_v\) 量级工作，总长度 \(T\) 时约为 \(O(Trd_v)\)。特征维度 \(r\) 提高了记忆表达能力，也增加了每步读写和乘加。</p>
 <p>把单头状态换成服务预算也很直接。若 32 层、每层 16 个线性状态头，每头 64.5 KiB，一条请求共需 32.25 MiB，32 条请求需 1032 MiB。卷积缓存、门控辅助状态和其他 attention 层还要另加。混合架构的一部分层使用固定状态，另一部分层仍保存随长度增长的 KV，应分别按层统计。</p>
 <p>计算上，每个 token 的外积更新与状态读取都要接触整个 \(r\times d_v\) 矩阵。单个很小的请求可能无法提供足够任务占满 GPU；把多条独立请求、多个头和各层调度起来，才能利用设备并行度。训练使用更大 chunk 时，矩阵乘获得更多复用，而块末状态更新与块内临时张量也会增长。因此 chunk 大小同时影响吞吐、峰值内存与数值累加顺序。</p>
+<p data-topic-bridge="algorithm-expansion">固定状态还可以从离散动力系统推导出来。<a href="/posts/state-space-models/">S4、Mamba 与 SSD</a>把状态转移、输入选择和分块矩阵计算连在一起，可以用同一组输入检验逐步递推与并行计算的结果。</p>
 <h2 id="gates">遗忘门怎样分配历史权重</h2>
 <p>持续累加会让很早的内容长期占据状态。引入标量遗忘门 \(\htmlData{symbol=gate}{\alpha_t}\in[0,1]\)，令 \(S_t=\alpha_t S_{t-1}+\phi(k_t)v_t^\top\)，并对归一化状态使用相同门控。历史位置 \(j\) 到当前 \(t\) 的保留系数为 \(\prod_{u=j+1}^{t}\alpha_u\)。每经过一次更新，旧内容就乘上这一轮的门。</p>
 <figure class="article-figure" id="gate-demo"><h3>遗忘门怎样改变三个 value 的贡献</h3><p>keys 和 query 的特征都为 1，values 为 [2,4,8]。第二次更新使用门 0.5，最后一次门可调。</p><label>最后一次门 α <input id="gate-alpha" type="range" min="0" max="1" step="0.05" value="0.25"><output id="gate-alpha-value"></output></label><div class="figure-bars" id="gate-bars"></div><div class="figure-metric" id="gate-output"></div></figure>
@@ -103,5 +104,5 @@ $$\widehat v_t=S_{t-1}^{\top}k_t,\qquad S_t=S_{t-1}+\beta_t k_t(v_t-\widehat v_t
 })();
 
 </script>
-<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body></html>

@@ -140,7 +140,8 @@ Kinds, used in both the post header and the home list:
 ## Series and shared helpers
 
 Multi-part posts belong to a series defined in `assets/series.js`
-(`scaling`, `smol`, `pretraining`, `hyperconnections`, `systems`, `reports`). A series post carries
+(`scaling`, `smol`, `pretraining`, `hyperconnections`, `architectures`,
+`sparsity`, `systems`, `reports`). A series post carries
 `<nav class="series" data-series="…">` under its header and
 `<nav class="series-pager" data-series="…">` after the article, and loads
 `/assets/series.js`; titles in that file must match the posts' `<h1>`.
@@ -154,6 +155,13 @@ order. Load `curriculum.js` after the post/player scripts on participating
 pages; it adds a link back to the relevant stage. Course completion is an
 explicit learner checkbox stored locally in the browser. Do not add a
 separate promotional block to the home or archive pages.
+
+The `architectures` series connects state-space recurrence, shared depth,
+lookup memory (OE / Engram), and concept-level computation. The `sparsity`
+series separates weight pruning, sparse pretraining, and activation sparsity.
+Effective depth follows the Hyper-Connections series; upcycling extends
+pretraining, and model merging belongs to the adaptation path. Expand the
+existing mixed-precision article when adding numerical training recipes.
 
 `site.css` has helpers for long technical posts: `.toc`, `.table-wrap` (wide
 tables scroll inside it), `.callout` / `.callout.warn`, `details`, and demo

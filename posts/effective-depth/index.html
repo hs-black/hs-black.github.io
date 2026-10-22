@@ -1,0 +1,95 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>一个模型到底用了多少深度：测量、剪层与提前退出 · Zunzhe Zhang</title><meta name="description" content="从ShortGPT、层剪枝与LayerSkip到几何有效深度，推导CKA、残差累加参考值与任务干预，学习设计剪层、缓存和早退的受控实验。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script><style>
+.arch-controls{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}.arch-controls label{display:flex;align-items:center;gap:7px;flex:1 1 190px;min-width:0;font-size:14px;flex-wrap:wrap}.arch-controls input{min-width:70px;max-width:100%;flex:1;accent-color:var(--accent)}.arch-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px;font:inherit;max-width:100%}.arch-controls output{font:13px var(--font-mono);min-width:40px}.arch-result{padding:12px;margin:12px 0;background:var(--bg-soft);border-radius:8px;font:14px/1.8 var(--font-mono);overflow-wrap:anywhere;white-space:pre-line}.arch-note{font-size:14px;color:var(--text-soft)}.arch-matrix{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px;max-width:480px;margin:12px auto}.arch-cell{text-align:center;padding:9px 2px;border:1px solid var(--border);border-radius:4px;font:13px var(--font-mono);background:var(--bg-soft)}.arch-cell.on{border-color:var(--accent);color:var(--accent);font-weight:700}.arch-cell.blank{opacity:.3}.arch-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.arch-card{padding:12px;border:1px solid var(--border);border-radius:8px;min-width:0}.arch-card strong{font-size:14px}.arch-card p{font:13px/1.8 var(--font-mono);margin:6px 0;overflow-wrap:anywhere}.arch-track{height:11px;background:var(--bg-soft);border-radius:5px;overflow:hidden;margin:9px 0}.arch-fill{height:100%;background:var(--accent)}.arch-figure svg text{fill:var(--text-soft);font-family:var(--font-mono);font-size:14px}.arch-figure svg .axis{stroke:var(--border);stroke-width:1}.arch-figure svg .accent{stroke:var(--accent);fill:none;stroke-width:2.5}.arch-figure svg .base{stroke:var(--text-soft);fill:none;stroke-width:2;stroke-dasharray:5 4}.arch-figure svg .point{fill:var(--accent)}.arch-pairs{display:flex;gap:8px;flex-wrap:wrap}.arch-pair{padding:9px 12px;border:1px solid var(--border);border-radius:7px;font:13px/1.8 var(--font-mono);background:var(--bg-soft)}.arch-pair.active{border:2px solid var(--accent)}.arch-bar-row{display:grid;grid-template-columns:100px 1fr 65px;align-items:center;gap:8px;font:13px var(--font-mono);margin:9px 0}.arch-bar-row .arch-track{margin:0}.arch-figure button:focus-visible,.arch-controls input:focus-visible,.arch-controls select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:520px){.arch-cards{grid-template-columns:1fr}.arch-cell{font-size:12px;padding:8px 1px}.arch-result{font-size:12px}.arch-bar-row{grid-template-columns:85px 1fr 55px;font-size:12px}.arch-figure h3{font-size:18px}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>一个模型到底用了多少深度：测量、剪层与提前退出</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header><nav class="series" data-series="hyperconnections"></nav><article class="prose"><p>一个 32 层的模型，后半段的 hidden state 看起来变化很小。把它们画在一起，相邻两层的余弦相似度甚至能达到 0.9999。这样的观察很有用：它指出了值得分析的位置。接下来要判断的，是这些微小变化携带什么信息、后续计算怎样使用它，以及真正跳过一层后，预测会发生多大变化。</p>
+<p>“用了多少深度”有几种具体含义。物理深度统计独立层，<a href="/posts/recurrent-depth/">循环深度</a>统计执行次数，表示几何描述状态之间的差异，剪层实验测量某组计算对任务的作用。把这些量分别测清楚，才能从一张相似度图走到可部署的模型。</p>
+<nav class="toc"><strong>目录</strong><ol><li><a href="#local">相邻状态很像，说明什么</a></li><li><a href="#geometry">从 CKA 到几何有效深度</a></li><li><a href="#carry">残差累加自带的相似性</a></li><li><a href="#prediction">预测何时开始稳定</a></li><li><a href="#intervention">怎样做一次有解释力的剪层实验</a></li><li><a href="#early-exit">LayerSkip：把提前输出训练出来</a></li><li><a href="#engineering">测量、缓存与实际收益</a></li><li><a href="#exercises">受控实验与习题</a></li></ol></nav>
+<h2 id="local">1. 相邻状态很像，说明什么</h2>
+<p>在一个 token 的位置上，把某个 block 的输入写成 \(h_l\in\mathbb R^d\)，该 block 写入的更新写成 \(\delta_l\)，输出就是 \(h_{l+1}=h_l+\delta_l\)。ShortGPT 使用 Block Influence（BI）给层排序：</p>
+$$\htmlData{symbol=bi}{\operatorname{BI}_l}=1-\mathbb E_{x,t}\left[\frac{h_{l,t}^{\mathsf T}h_{l+1,t}}{\|h_{l,t}\|_2\|h_{l+1,t}\|_2}\right].$$
+<p>期望取遍校准文本 \(x\) 和其中被统计的位置 \(t\)。BI 小意味着输入输出方向接近，因而可以作为挑选剪层候选的便宜指标。还可以同时记录更新的相对大小 \(\|\delta_l\|_2/\|h_l\|_2\)，观察“方向变化小”来自什么原因。</p>
+<p>若更新与原状态正交，令 \(r=\|\delta_l\|_2/\|h_l\|_2\)，则有一个直接的关系：</p>
+$$\cos(h_l,h_l+\delta_l)=\frac{1}{\sqrt{1+r^2}},\qquad
+1-\cos(h_l,h_l+\delta_l)\approx\frac{r^2}{2}\quad(r\text{ 很小}).$$
+<p>原状态积累得越大，一个固定大小的新特征就越难改变整体方向。后续层读取的是向量的具体分量，某个很小的分量仍然可以产生很大的 logit 变化。</p>
+<p>构造一个可以手算的例子：\(h=(10,0)\)，新增特征 \(\delta=(0,0.1)\)。二者相加后的方向与 \(h\) 几乎相同。让二分类读出只使用第二维，权重为 \(w=(0,20)\)，正类 logit 就从 0 变成 2，概率从 0.5 变成约 0.881。向量变化在几何上很小，预测作用却十分明确。</p>
+<figure class="article-figure arch-figure" id="effective-feature"><h3>一个很小的分量，怎样改变预测？</h3><p class="arch-note">输入固定为 h = (10, 0)，紫色竖线表示写入 δ = (0, ε)。读出权重 w = (0, g)，正类概率为 sigmoid(gε)，目标类别为 1。</p><div class="arch-controls"><label>新增特征 ε<input id="effective-epsilon" type="range" min=".05" max="1" step=".05" value=".1"><output id="effective-epsilon-value"></output></label><label>读出增益 g<input id="effective-gain" type="range" min="1" max="40" step="1" value="20"><output id="effective-gain-value"></output></label></div><svg id="effective-feature-svg" viewBox="0 0 320 245" role="img" aria-label="二维残差状态、新增特征与读出方向"></svg><div class="arch-result" id="effective-feature-result"></div><figcaption>横轴是第一维，纵轴是第二维，坐标比例分别标在轴上。逐步查看新增特征、读出概率和删除更新后的损失。</figcaption></figure>
+<p>这给剪层提供了一个明确的后续步骤：先利用相似度找到候选，再直接干预计算，比较最终损失。对包含少量关键 token 的任务，还要单独观察这些位置，避免被大量容易预测的标点与常用词平均掉。</p>
+<h2 id="geometry">2. 从 CKA 到几何有效深度</h2>
+<p>逐 token 余弦比较的是同一个坐标系里的两个向量。想比较整批输入在两层里的表示结构，可以使用 linear CKA。对固定的一组 \(n\) 个样本位置，收集第 \(l\) 层表示 \(H_l\in\mathbb R^{n\times d}\)，每一行对应一个位置，每一列先减去它在这些样本上的均值。两层的 CKA 为：</p>
+$$\htmlData{symbol=cka}{\operatorname{CKA}}(H_i,H_j)=
+\frac{\|H_i^{\mathsf T}H_j\|_F^2}{\|H_i^{\mathsf T}H_i\|_F\,\|H_j^{\mathsf T}H_j\|_F}.$$
+<p>\(\|\cdot\|_F\) 是 Frobenius 范数，即矩阵元素平方和的平方根。这里比较的是样本之间的表示结构；对某层整体乘一个非零标量或做正交坐标变换，CKA 保持不变。所有层必须使用同一批样本位置，中心化也必须按相同规则完成。</p>
+<p>设统计 \(L\) 个 block 输出，编号 1 到 \(L\)，把间隔 \(k\) 层的平均相似度记成 \(\rho(k)\)：</p>
+$$\rho(k)=\frac{1}{L-k}\sum_{l=1}^{L-k}\operatorname{CKA}(H_l,H_{l+k}),\qquad 1\le k\lt L.$$
+<p>近年的一种几何有效深度定义，将这些相似度聚合成一个数：</p>
+$$\htmlData{symbol=effective}{D_{\mathrm{eff}}}=
+\frac{L}{1+2\sum_{k=1}^{L-1}\left(1-\frac{k}{L}\right)\rho(k)}.$$
+<p>权重 \(1-k/L\) 对应这个间隔有多少对层可供比较。若不同层的表示结构完全不相关，分母为 1，得到 \(D_{\mathrm{eff}}=L\)；若所有层的 CKA 都为 1，得到 \(D_{\mathrm{eff}}=1\)。对于普通非退化输入，它落在 1 到 \(L\) 之间，描述的是这组累计状态的相似性。</p>
+<p>这个数需要配套的参考构造。Transformer 的状态把过去的更新一路相加，即使每层都产生全新的信息，累计状态也会天然共享很多成分。把这样的累加过程先算一遍，才知道实测数值处在什么位置。</p>
+<h2 id="carry">3. 残差累加自带的相似性</h2>
+<p>取 \(L\) 组已经中心化的更新矩阵 \(U_1,\ldots,U_L\in\mathbb R^{n\times d}\)。为了能精确计算，让每组满足 \(U_l^{\mathsf T}U_l=I_d\)，不同组满足 \(U_i^{\mathsf T}U_j=0\)。这些条件可以通过足够高维样本空间中的正交列构造出来。初态为零，累计状态为：</p>
+$$H_l=\sum_{j=1}^lU_j.$$
+<p>每次都加入一组与历史正交的新特征。对于 \(i\le j\)，交叉项全部为零，因此：</p>
+$$H_i^{\mathsf T}H_j=iI_d,\quad
+H_i^{\mathsf T}H_i=iI_d,\quad
+H_j^{\mathsf T}H_j=jI_d,
+\qquad \operatorname{CKA}(H_i,H_j)=\frac{i}{j}.$$
+<p>两层状态的相似性来自共享的前 \(i\) 份更新。把这些值代入有效深度，注意每个无序层对恰好计一次：</p>
+$$\begin{aligned}
+D_{\mathrm{eff}}
+&=\frac{L}{1+\frac{2}{L}\sum_{j=2}^{L}\sum_{i=1}^{j-1}\frac{i}{j}}\\
+&=\frac{L}{1+\frac{2}{L}\sum_{j=2}^{L}\frac{j-1}{2}}
+=\frac{2L}{L+1}.
+\end{aligned}$$
+<p>当 \(L=6\) 时，结果约为 1.714；即使把层数增大到 24，也只有 1.92。与此同时，更新集合里一直在增加新的正交成分。这个算例给几何量的解释建立了标尺：累计状态高度相似，可以与持续产生新特征同时发生。一个可用的剪层方案，还要通过任务干预检验。</p>
+<figure class="article-figure arch-figure" id="effective-carry"><h3>每层都添新特征，累计状态依然相似</h3><p class="arch-note">矩阵的第 i 行、第 j 列显示 CKA(Hᵢ,Hⱼ)。初态携带量 γ 控制各层共同保留的起始表示；更新相关度 c 控制新写入成分之间的共享比例。</p><div class="arch-controls"><label>初态携带量 γ<input id="effective-gamma" type="range" min="0" max="8" step="1" value="0"><output id="effective-gamma-value"></output></label><label>更新相关度 c<input id="effective-correlation" type="range" min="0" max="1" step=".1" value="0"><output id="effective-correlation-value"></output></label></div><div class="arch-matrix" id="effective-carry-matrix"></div><div class="arch-result" id="effective-carry-result"></div><figcaption>从第一层开始逐步加入状态。默认 γ = c = 0，每份更新与其他更新正交；对角线始终为 1。紫色表示本次新增的行与列。</figcaption></figure>
+<p>图里的可控构造也可以写成解析式。让初态 \(H_0\) 与所有更新成分正交、\(H_0^{\mathsf T}H_0=\gamma I\)，并让更新矩阵满足 \(U_a^{\mathsf T}U_a=I\)，不同更新满足 \(U_a^{\mathsf T}U_b=cI\)（\(a\ne b\)）。则：</p>
+$$H_i^{\mathsf T}H_j=\left[\gamma+cij+(1-c)\min(i,j)\right]I.$$
+<p>将这个系数平方，再除以两边的自 Gram 系数，就得到图中的 CKA。增大初始携带量或更新相关度，都能改变累计状态的有效深度。真实模型的分析应相应记录初态、每层更新范数和更新之间的相关性；拿相同的规模曲线生成参考数据，比较会更有解释力。</p>
+<h2 id="prediction">4. 预测何时开始稳定</h2>
+<p>几何量之后，可以进一步检查各层已经包含多少可直接读出的预测信息。最简单的 logit lens 把最终 normalization 和词表投影应用到中间状态：</p>
+$$p_l=\operatorname{softmax}\!\left(W_{\mathrm{out}}\operatorname{Norm}_{\mathrm{final}}(h_l)\right).$$
+<p>这里 \(p_l\) 是词表上的概率分布，\(h_l\) 是当前 token 在第 \(l\) 层的状态。与最终分布 \(p_L\) 比较，可以记录 top-k 重合率，以及方向明确的 KL：</p>
+$$\operatorname{KL}(p_L\|p_l)=\sum_v p_L(v)\log\frac{p_L(v)}{p_l(v)}.$$
+<p>若最终分布为 \((0.9,0.1)\)，中间分布为 \((0.6,0.4)\)，它们的 top-1 已经相同，KL 仍约为 0.226 nats。若一个应用在意采样分布，概率变化就值得继续测；若只做 greedy 分类，决策一致率又是一个直接相关的指标。</p>
+<p>最终读出层主要在最终表示上训练，中间层的坐标分布可能不同。可以固定同一套 logit lens 观察变化，也可以用独立训练集拟合逐层探针，并在独立评估集测可读出信息。两种协议测量的对象不同，需要连同 normalization、读出是否训练、选取位置和停止阈值一起记录。</p>
+<p>一些研究把子层更新与已有残差的余弦 \(\cos(\delta_l,h_l)\) 由负转正的位置、KL 降到指定水平的层、top-k 重合率超过阈值的层，都称作有效深度。这里的余弦直接比较新写入与旧状态；前面的 BI 比较整个 block 的输入输出方向。使用这些结果时，保留具体的操作定义最清楚：例如“KL 首次低于 0.05 的层”。跨任务比较还应画出完整曲线，检查阈值附近的小变化是否足以改变结论。</p>
+<h2 id="intervention">5. 怎样做一次有解释力的剪层实验</h2>
+<p>对第 \(l\) 层做干预，最直接的操作是把它的更新置零，让 \(h_{l+1}=h_l\)，然后完整执行后面的层。若删除的是连续 \(m\) 层，就将这一段的输入直接接到下一层。后续 attention、MLP 和 normalization 都要从改变后的状态重新计算。</p>
+<p>ShortGPT 按校准集上的 BI 排序，优先移除低 BI 层。另一条路线对候选连续区间的输入输出计算角距离，挑选相似的边界，再用少量训练修复模型。前者适合选择若干分散 block，后者显式寻找可整体跨越的区间。这两种选择都可以与真正的删层结果比较，检验指标是否把候选排对了。</p>
+<p>令 \(S\) 为被删除的层集合，评价集上的平均负对数似然为 \(\mathcal L\)。任务影响可以写成：</p>
+$$\htmlData{symbol=ablation}{\Delta\mathcal L(S)}=\mathcal L(\text{删除 }S\text{ 后的模型})-\mathcal L(\text{完整模型}).$$
+<p>\(\Delta\mathcal L\) 的单位是 nats/token。若关心代码、数学或工具调用，还要分别测这些任务的成功率；平均语言建模损失会把各类 token 混在一起。剪层位置应只在校准集上选择，最终得分留给独立测试集，修复训练也使用单独的数据。</p>
+<p>多个层的作用会相互依赖。一个简单的标量网络先做 \(h\leftarrow h+u\)，再做 \(h\leftarrow h-h\)，最终为零。只删除第一步，输出仍为零；只删除第二步，输出为 \(h_0+u\)；两步都删掉，输出为 \(h_0\)。单层干预结果相加，无法给出这个组合的输出。实际剪层可以逐轮更新候选排序，或显式评估几组联合删除方案。</p>
+<p>修复训练同样需要对照。给完整模型和删层模型相同的继续训练 token 数与优化配置，分别记录修复前后质量及实际训练 FLOPs。删层模型每个 token 的计算较少，因此还可以另做固定 FLOPs 的对照，允许它在相同计算预算下多训练一些 token。这样可以看清收益来自删层、追加训练还是二者的组合。还可以保留一个随机删层基线，比较相似度选择带来的实际价值。</p>
+<h2 id="early-exit">6. LayerSkip：把提前输出训练出来</h2>
+<p>永久删层减少所有请求执行的网络；提前退出允许不同输入使用不同深度。要让较浅层可靠输出，可以在训练期间对中间层施加预测损失，并让模型适应层被跳过的情况。LayerSkip 将随深度增加的 layer dropout 与共享读出头的 early-exit loss 结合起来，使浅层状态也能支撑预测。</p>
+<p>若在第 \(e\) 层直接输出，最终质量由这个浅层出口决定。还有一种用法是 self-speculative decoding：前 \(e\) 层先草拟多个 token，剩余层批量验证；已经完成的前半段状态和 KV 可以复用。草稿与完整模型之间的匹配度决定接受率，而批量验证负责把输出保持在完整模型的目标分布上。具体接受、纠正采样和回退规则可接着看<a href="/posts/speculative-decoding/">投机解码</a>。</p>
+<p>这里有一个很实用的工程问题：把出口提前，单次草拟会更便宜，但草稿质量可能下降；把一次草拟的 token 数加大，验证成本更容易摊薄，但被拒绝的尾部也可能变长。以每轮实际保留下来的 token 数 \(A\) 为分母，估算单 token 时间：</p>
+$$t_{\mathrm{token}}\approx
+\frac{t_{\mathrm{draft}}+t_{\mathrm{verify}}+t_{\mathrm{bookkeeping}}}{\mathbb E[A]}.$$
+<p>三个时间分别是草拟、验证与缓存/调度管理的耗时。测试时联合扫描退出层和草稿长度，并记录接受长度分布、端到端延迟和峰值显存。训练过早退的 checkpoint、任务分布、temperature 也要保持明确。官方实现同时提供 correctness 检查与这两个参数的网格扫描，这对应的是普遍的质量与执行开销权衡。</p>
+<p>验证拒绝草稿后，缓存必须回到真正接受的前缀：前半段与后半段的 KV 长度、位置编号和后续草拟输入要一起恢复。用包含强制拒绝路径的小测试，可以分别核对每层缓存长度与下一步 logits。greedy 模式适合逐 token 对齐测试；随机采样则评估目标分布和接受算法，同分布的采样过程可以生成不同的具体序列。</p>
+<h2 id="engineering">7. 测量、缓存与实际收益</h2>
+<p>收集表示本身可能占用大量显存。若保存 \(L=32\) 层、\(n=8192\) 个位置、\(d=4096\) 维的 BF16 状态，原始张量就有 2 GiB。先固定少量代表性位置，再按层或按批转移到 CPU；若按数据批累积协方差，还需要累计总和与样本数，最后用全局均值中心化。直接把每个小批各自中心化后相加，会得到另一种统计量。</p>
+<p>有限样本还会带来一个统计效应：即使两组特征由独立随机过程产生，经验 CKA 通常也会有正偏，尤其当特征宽度 \(d\) 相对样本数 \(n\) 较大时。前面的正交更新构造通过精确的零交叉项得到闭式参考；真实测量可以另外生成相同 \(n,d\) 的独立随机矩阵，并增加样本量，观察经验基线如何变化。这样能分开有限样本的几何效应与真实表示的关联。</p>
+<p>比较 CKA 的两种实现也有意义：特征空间需要 \(d\times d\) 交叉矩阵，样本空间可以使用 \(n\times n\) Gram 矩阵；根据 \(n\) 与 \(d\) 的大小选择较小的一侧。测量时保持 token 对齐，排除 padding，并分别记录首位置、末位置、普通文本和关键预测位置。对每个样本向量做单位范数归一化、移除某个主成分，都属于额外的实验条件，应与原始结果并列报告。</p>
+<p>干预实验中的 KV 生命周期尤其重要。删掉一层后，后续层处理的历史表示随之改变；继续使用完整模型留下的后续层缓存，会混入另一条计算路径。对固定剪层配置，重新 prefill，并用同一配置逐 token 解码。比较完整前向与缓存解码的 logits，能检验层重编号、cache slot 和位置编码是否匹配。</p>
+<p>完整 block 的删除有直接的执行优势：相应的 attention、MLP 和 KV 层条目都可以移走，保留部分仍能使用原来的稠密 kernel。实际加速受未删除的 embedding、输出头、调度和通信影响。例如假设固定开销 2 ms，每层 0.1 ms，32 层总时间为 5.2 ms；删到 24 层后为 4.4 ms，加速约 1.18 倍。这些是计算例子的输入，GPU 实测还应固定 batch、上下文长度与采样条件。</p>
+<p>改变残差结构时，也要重新选择测量位置。<a href="/posts/hyper-connections/">HC</a> 与 <a href="/posts/manifold-hyper-connections/">mHC</a> 有多路状态，<a href="/posts/attention-residuals/">AttnRes</a> 显式聚合深度历史。可以测各分支实际读入的表示，也可以测展平的多路状态，但这些对象应分别命名，并用相同输入和适配该结构的参考构造比较。最终仍由任务质量、计算量与干预结果共同判断结构的作用。</p>
+<h2 id="exercises">8. 受控实验与习题</h2>
+<p><a href="./lab.py">下载 NumPy 实验</a>，在 CPU 上构造严格正交的更新，计算完整 CKA 矩阵，检查有效深度闭式解、全局中心化与读出干预。</p><pre><code>python -m pip install numpy
+python lab.py</code></pre><p>正常输出包含各组 PASS：6 层正交更新的有效深度约为 1.714286；小特征算例删除更新后，损失增加约 0.566219 nats。运行 <code>python lab.py --gamma 4</code>，预测累计表示的相似度如何变化；再运行 <code>python lab.py --gamma 0 --correlation 0.5</code>，分别观察累计状态和单层更新的有效深度。实验把这两个对象分开，以便逐项解释变化。</p>
+<div class="article-exercise"><h3>练习 1：0.9999 的相似度够不够？</h3><p>输入 \(h=(10,0)\)，更新 \(\delta=(0,0.1)\)，二分类正类读出 \(w=(0,20)\)，负类 logit 为 0，目标为正类。求余弦相似度、BI、完整与删除更新后的损失。</p><details><summary>展开解答</summary><p>余弦相似度为 \(10/\sqrt{100.01}\approx0.999950\)，所以 BI 约为 0.000050。完整模型的正类 logit 为 2，概率 \(\sigma(2)\approx0.880797\)，交叉熵为 \(\log(1+e^{-2})\approx0.126928\)。删除后 logit 为 0，损失为 \(\log2\approx0.693147\)，增加约 0.566219 nats。候选层的低 BI 与读出上的显著作用可以同时出现。</p></details></div>
+<div class="article-exercise"><h3>练习 2：每层都有独立更新，有效深度是多少？</h3><p>采用正文中中心化的更新，满足 \(U_l^{\mathsf T}U_l=I\) 且不同层 \(U_i^{\mathsf T}U_j=0\)，初态为零。分别计算 6 层与 24 层累计状态的 \(D_{\mathrm{eff}}\) 和 \(D_{\mathrm{eff}}/L\)。若直接对更新矩阵本身测量，结果如何？</p><details><summary>展开解答</summary><p>累计状态的结果为 \(2L/(L+1)\)，因此 6 层得到 \(12/7\approx1.714286\)，比例为 \(2/7\approx0.285714\)；24 层得到 \(48/25=1.92\)，比例为 \(2/25=0.08\)。更新之间的 CKA 为零，直接测更新集合则分别得到 6 和 24。差异来自累计状态共享历史成分，剪掉其中任一更新的任务影响需要由读出和后续计算确定。</p></details></div>
+<div class="article-exercise"><h3>练习 3：预测一致与分布接近</h3><p>最终分布 \(p_L=(0.9,0.1)\)，中间分布 \(p_l=(0.6,0.4)\)。计算 \(\operatorname{KL}(p_L\|p_l)\)。若停止条件是 KL 小于 0.05，这一层是否退出？如果检查 top-1 呢？</p><details><summary>展开解答</summary>$$\operatorname{KL}=0.9\log\frac{0.9}{0.6}+0.1\log\frac{0.1}{0.4}\approx0.226289\ \mathrm{nats}.$$<p>它超过 0.05，按这个规则继续计算。两个分布的第一类都是 top-1，所以只要求 top-1 一致的规则会通过。部署时最终分布还没有算出，因而需要另外训练或标定可在线获得的停止信号，再用这样的离线指标检验它。</p></details></div>
+<div class="article-exercise"><h3>练习 4：剪掉四分之一，实际节省多少？</h3><p>模型从 32 层剪到 24 层，各层 KV 规格相同。假设固定开销 2 ms、每层执行 0.1 ms，计算 KV 容量比例和端到端加速。为了判断层选择有效，还要安排哪些质量对照？</p><details><summary>展开解答</summary><p>只计这些层的 KV，容量为原来的 \(24/32=75\%\)。时间由 5.2 ms 降到 4.4 ms，加速为 \(5.2/4.4\approx1.182\) 倍，时间减少约 15.4%。用同一校准集选层，在独立评估集比较完整模型、所选剪层和随机剪层；若加入修复训练，为各组固定追加 token 数与优化配置，并报告修复前后的结果。重新建立各自缓存，分别检查 prefill 与 decode 等价，再测同一负载下的真实延迟。</p></details></div>
+<h2 id="references">参考与延伸阅读</h2><ol><li><a href="https://arxiv.org/abs/2403.03853">ShortGPT: Layers in Large Language Models are More Redundant Than You Expect</a>：Block Influence 与基于校准数据的层排序。</li><li><a href="https://arxiv.org/abs/2403.17887">The Unreasonable Ineffectiveness of the Deeper Layers</a>：连续区间的角距离选择、删层与修复训练。</li><li><a href="https://arxiv.org/abs/2404.16710">LayerSkip: Enabling Early Exit Inference and Self-Speculative Decoding</a>：共享读出、训练配方和自投机；<a href="https://github.com/facebookresearch/LayerSkip#sweep">官方参数扫描</a>与<a href="https://github.com/facebookresearch/LayerSkip#correctness">正确性检查</a>说明了退出层、草稿长度和采样条件的关系。</li><li><a href="https://arxiv.org/abs/2512.14064">What Affects the Effective Depth of Large Language Models?</a>：残差方向、logit lens 与层干预的多种操作定义。</li><li><a href="https://arxiv.org/abs/2609.31098">The Residual Stream’s Effective Depth</a>（2026）：完整层间 CKA 聚合、独立更新参考值和匹配的残差累加对照。</li></ol>
+</article><nav class="series-pager" data-series="hyperconnections"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"bi": {"label": "BI_l：Block Influence", "description": "在校准样本位置上，1 减去该 block 输入输出的平均余弦相似度；用来筛选剪层候选。"}, "cka": {"label": "CKA：中心化核对齐", "description": "用同一组样本位置、列中心化后的两个表示矩阵计算的相似度，比较它们的样本结构。"}, "effective": {"label": "D_eff：累计状态的几何有效深度", "description": "把 L 层的 CKA 按层间距离做完整加权聚合，范围为 1 到 L；数值含义需要残差累加参考构造。"}, "ablation": {"label": "ΔL(S)：删除层集合 S 后的损失变化", "description": "在同一独立评价集上，删层模型平均负对数似然减去完整模型的值，单位 nats/token。"}}}</script><script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="./figures.js"></script><script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script></body></html>

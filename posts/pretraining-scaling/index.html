@@ -179,6 +179,7 @@
       <p>一个很有用的停机判断是：新增预算带来的预测改善，是否大于当前外推误差？若两种方案只差 0.002 nats/token，而跨规模验证残差已有 0.02，下一笔钱更适合补能区分它们的实验。Scaling law 最有价值的输出，往往是明确下一次该测什么。</p>
     </section>
 
+    <p data-topic-bridge="algorithm-expansion">已有 dense 模型时，预算决策还包含一个转换时点：继续 dense 训练，还是通过<a href="/posts/moe-upcycling/">upcycling 转成 MoE</a>。比较时分别列出已投入的训练成本、接下来的增量预算和部署所需容量；从零规划模型时，再把两个训练阶段的成本相加。</p>
     <section id="practice">
       <h2>实验与练习</h2>
       <p><a class="sc-download" href="/posts/pretraining-scaling/lab.py" download>下载 NumPy 实验 lab.py</a></p>
@@ -337,9 +338,9 @@ python3 lab.py --noise 0.02 --bootstrap 120</code></pre>
   window.addEventListener('resize',()=>{cancelAnimationFrame(frame);frame=requestAnimationFrame(renderAll);});
 })();
 </script>
-<script src="/assets/series.js?v=2a575d4a9e89"></script>
-<script src="/assets/post-links.js?v=8a89387e7679"></script>
-<script src="/assets/posts.js?v=c2ffb7de30e3"></script>
-<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script>
+<script src="/assets/post-links.js?v=fe48d4412e51"></script>
+<script src="/assets/posts.js?v=186761fcdc0a"></script>
+<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body>
 </html>

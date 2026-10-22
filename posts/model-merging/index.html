@@ -1,0 +1,194 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>多个 checkpoint 怎样合成一个模型：从 Model Soups 到参数对齐 · Zunzhe Zhang</title>
+  <meta name="description" content="把模型合并拆成坐标对齐、任务更新和验证三个问题：推导 Model Soups、Task Arithmetic、TIES 与 DARE，用交互图和 NumPy 实验检查置换对称、符号冲突、稀疏化方差和词表对齐。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+  <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+  <style>
+    .prose section { scroll-margin-top: 24px; }
+    .mm-controls { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; margin: 16px 0; }
+    .mm-controls label { display: block; color: var(--text-soft); font-size: 14px; }
+    .mm-controls output { display: block; color: var(--text); margin: 5px 0; font-variant-numeric: tabular-nums; }
+    .mm-controls input[type=range] { width: 100%; accent-color: var(--accent); }
+    .mm-controls input[type=checkbox] { accent-color: var(--accent); }
+    .mm-controls select, .mm-controls button { max-width: 100%; background: var(--surface); color: var(--text); font: inherit; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; }
+    .mm-controls button { cursor: pointer; align-self: end; }
+    .mm-controls :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+    .article-figure .mm-chart { width: 100%; height: 245px; }
+    .mm-stats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 10px; }
+    .mm-stats .article-stat { font-size: 13px; overflow-wrap: anywhere; }
+    .mm-stats strong { display: block; color: var(--text); font: 17px/1.7 var(--font-mono); }
+    .mm-legend { display: flex; flex-wrap: wrap; gap: 8px 20px; font-size: 13px; color: var(--text-soft); margin: 12px 0; }
+    .mm-legend span::before { content: ''; display: inline-block; width: 18px; height: 3px; margin-right: 6px; vertical-align: middle; background: var(--accent); }
+    .mm-legend .gray::before { background: var(--text-faint); }
+    .mm-label { font-size: 14px; color: var(--text-soft); line-height: 1.7; }
+    .mm-matrix { display: grid; grid-template-columns: 38px repeat(4,minmax(0,1fr)); gap: 5px; font: 14px/1.6 var(--font-mono); margin: 16px 0; }
+    .mm-cell { display: flex; align-items: center; justify-content: center; min-height: 39px; padding: 3px; border-radius: 5px; background: var(--surface); color: var(--text); }
+    .mm-cell.heading { font-size: 12px; background: transparent; color: var(--text-soft); }
+    .mm-cell.selected { background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
+    .mm-cell.muted { opacity: .45; }
+    .mm-result { min-height: 5em; font-size: 14px; line-height: 1.8; color: var(--text-soft); overflow-wrap: anywhere; }
+    .mm-result strong { color: var(--text); }
+    .mm-download { display: inline-block; padding: 8px 14px; border: 1px solid var(--border); border-radius: 8px; }
+    @media(max-width:520px) { .mm-controls,.mm-stats { grid-template-columns: 1fr; } .mm-controls { gap: 9px; } .mm-matrix { gap: 3px; grid-template-columns: 36px repeat(4,minmax(0,1fr)); font-size: 12px; } .mm-stats strong { font-size: 16px; } }
+  </style>
+</head>
+<body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap">
+  <header class="post-header"><h1>多个 checkpoint 怎样合成一个模型：从 Model Soups 到参数对齐</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header>
+  <nav class="series" data-series="systems"></nav>
+  <article class="prose" data-math-scope="merging">
+    <p>同一个基座经过三次微调，分别擅长数学、代码和长文理解。把三个模型同时部署，权重显存和维护成本随之增加；只选一个，又可能放弃另外两个方向的收益。模型合并尝试在离线阶段组合这些 checkpoint 的参数，得到一个仍按原有架构运行的模型。</p>
+    <p>这件事的计算形式很简单：读取张量，做加减和加权，写回文件。真正决定效果的是三个问题：<strong>同一位置的参数是否有相同含义，多个训练方向如何相互作用，以及我们怎样衡量能力的取舍。</strong>Model Soups 从同任务的多次微调开始，Task Arithmetic 把学习结果写成向量，TIES 与 DARE 处理更新的冲突和冗余，Git Re-Basin 则进一步追问：两个网络的神经元，应该怎样一一对应？</p>
+    <nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#coordinates">从一个共同基座出发</a></li><li><a href="#soup">平均参数为什么可能有用</a></li><li><a href="#permutation">同样的函数，也可能有不同坐标</a></li><li><a href="#ties">TIES 怎样处理更新冲突</a></li><li><a href="#dare">DARE 保留期望，也引入方差</a></li><li><a href="#engineering">把合并变成可验证的工程实验</a></li><li><a href="#practice">CPU 实验与练习</a></li><li><a href="#references">参考与延伸阅读</a></li></ol></nav>
+
+    <section id="coordinates">
+      <h2>从一个共同基座出发</h2>
+      <p>把模型所有具名张量按固定顺序展平，记共同基座为 \(\htmlData{symbol=base}{\theta_0}\in\mathbb R^P\)，其中 \(P\) 是参数个数。第 \(i\) 个微调模型的参数是 \(\htmlData{symbol=model}{\theta_i}\)，它学到的更新可以写成任务向量：</p>
+      \[\htmlData{symbol=delta}{\tau_i}=\theta_i-\theta_0.\]
+      <p>“共同基座”具体到同一份权重版本、张量名称和结构。假设一个坐标在基座里是 2，数学微调后变为 2.3，代码微调后变为 1.9，那么两个任务在这个坐标上的更新分别是 +0.3 和 −0.1。这个差分把已经共享的预训练知识留在基座中，把后续训练的变化单独拿出来。</p>
+      <p>Task Arithmetic 使用一组系数 \(\htmlData{symbol=coefficient}{\lambda_i}\) 组合任务向量：</p>
+      \[\theta_{\mathrm{merge}}=\theta_0+\sum_i\lambda_i\tau_i.\]
+      <p>系数为正时沿任务更新前进，为负时沿相反方向移动。取两个系数都为 1，上面的坐标得到 \(2+0.3-0.1=2.2\)。系数控制的是更新幅度；它通常需要通过目标任务和保留能力的验证结果来选择。一个方向同时影响很多行为，因此还要测量数学、代码、通用语言建模等多个维度。</p>
+      <p>Model Soup 则直接对参数做加权平均。令 \(\alpha_i\ge0\)、\(\sum_i\alpha_i=1\)，便有：</p>
+      \[\theta_{\mathrm{soup}}=\sum_i\alpha_i\theta_i=\theta_0+\sum_i\alpha_i\tau_i.\]
+      <p>因此同一基座上的参数平均，也是受权重和为 1 约束的任务向量组合。两个模型各占一半时，上面的坐标得到 2.1；把两个任务向量各加一次则得到 2.2。区分这两种系数约定，能解释很多“同样是 merge，结果幅度却不同”的现象。</p>
+    </section>
+
+    <section id="soup">
+      <h2>平均参数为什么可能有用</h2>
+      <p>同一个任务用不同学习率、数据顺序或正则化训练，会得到略有差异的模型。若这些模型落在一个相连的低 loss 区域，平均参数可能消去一部分训练波动，同时保留共同的改善。Model Soups 的代表实验从共享预训练权重的多次微调出发，考察了视觉模型以及文本分类模型。</p>
+      <p>固定输入 \(x\)，在基座附近把模型的 logits 写成一阶展开。用 \(J_x\) 表示 logits 对参数的 Jacobian：</p>
+      \[f_{\theta_0+\tau}(x)\approx f_{\theta_0}(x)+J_x\tau.\]
+      <p>在线性近似有效的范围内，先平均参数、再计算 logits，与先计算各模型的 logits、再平均接近。这为参数平均提供了直观解释。实际网络的曲率会带来差异，因此可以沿着两端权重之间的直线，实测验证 loss：</p>
+      \[\theta(t)=(1-t)\theta_A+t\theta_B,\quad 0\le t\le1,\]
+      \[b(t)=L(\theta(t))-\big[(1-t)L(\theta_A)+tL(\theta_B)\big].\]
+      <p>这里 \(L\) 是固定验证集上的平均 loss，\(b(t)\) 衡量中间点高出两端线性插值多少。正的峰值是 loss barrier。用 0、0.25、0.5、0.75、1 五个点初筛，能快速发现两个模型之间是否存在明显的高损失区间；再在值得尝试的区间细化搜索。</p>
+      <p>Uniform soup 给所有候选相同权重。Greedy soup 先按验证表现排序，从最好的一份开始，逐个尝试加入。如果当前已经接纳 \(m\) 份模型，新候选 \(\theta_i\) 对应的提议是 \((m\theta_{\mathrm{soup}}+\theta_i)/(m+1)\)；验证指标改善时才接纳。这里 \(m\) 统计已经接纳的模型数。被拒绝的候选会跳过，后面的候选仍然可以继续尝试。</p>
+      <p>这套选择需要一个固定的目标。若产品同时关心代码和长文，先约定指标权重或最低能力要求，再做候选搜索。持续查看测试集来调整权重，会把测试集逐渐变成调参数据。更可靠的流程是用验证集选择合并方案，锁定方案之后再报告独立测试结果。</p>
+    </section>
+
+    <section id="permutation" data-math-scope="permutation">
+      <h2>同样的函数，也可能有不同坐标</h2>
+      <p>考虑只有两个隐藏单元的 ReLU 网络。模型 A 的输入权重是 \([1,-1]\)，输出权重是 \([1,1]\)，于是：</p>
+      \[f_A(x)=\operatorname{ReLU}(x)+\operatorname{ReLU}(-x)=|x|.\]
+      <p>交换两个隐藏单元，模型 B 的输入权重变为 \([-1,1]\)，输出权重仍为 \([1,1]\)。它同样计算 \(|x|\)。直接平均 A、B 的权重，两个输入权重却都变为 0，输出也变为 0。两个端点都正确，中点丢掉了整个函数。</p>
+      <p>沿未对齐的参数直线，输入权重为 \([1-2t,-1+2t]\)，输出是 \(|1-2t|\,|x|\)。如果验证输入均匀分布在 \([-1,1]\)，预测目标为 \(|x|\)，那么平均平方误差为：</p>
+      \[L(t)=\mathbb E_x\big[(|1-2t|-1)^2x^2\big]=\frac{(1-|1-2t|)^2}{3}.\]
+      <p>这里 \(t\) 是模型 B 的混合比例。\(t=0.5\) 时，loss 达到 \(1/3\)。把 B 的隐藏单元先交换回来，整个插值路径的 loss 就都为 0。</p>
+      <figure class="article-figure" id="permutation-figure">
+        <h3>先对齐神经元，再平均参数</h3>
+        <div class="mm-controls"><label for="perm-t">模型 B 的混合比例 t<output id="perm-t-out"></output><input id="perm-t" type="range" min="0" max="1" step="0.05" value="0.5"></label><label for="perm-x">观察输入 x<output id="perm-x-out"></output><input id="perm-x" type="range" min="-2" max="2" step="0.1" value="1"></label><label for="perm-align"><input id="perm-align" type="checkbox"> 合并前交换 B 的两个隐藏单元</label></div>
+        <p class="mm-label">横轴为输入 x，纵轴为输出 y；实心点跟随所选输入。A 与 B 的原始函数均为 |x|。</p>
+        <svg id="perm-chart" class="mm-chart" role="img" aria-label="两个表示绝对值函数的网络，在隐藏单元未对齐时参数平均产生塌缩；对齐后恢复绝对值曲线"></svg>
+        <div class="mm-legend"><span>合并后的输出</span><span class="gray">目标 |x|</span></div>
+        <div class="mm-stats"><div class="article-stat">合并后的输入权重<strong id="perm-weights"></strong><span id="perm-output"></span></div><div class="article-stat">均匀输入 [−1,1] 的 MSE<strong id="perm-loss"></strong><span>该区间上 x² 的均值为 1/3</span></div></div>
+        <figcaption>将 t 从 0 移到 1，观察中间位置如何失去输出；保持 t = 0.5，再勾选对齐，比较同一混合比例的结果。</figcaption>
+      </figure>
+      <p>一般的两层网络可写为 \(W_2\sigma(W_1x)\)。令 \(\htmlData{symbol=perm}{P}\) 为重新排列隐藏单元的置换矩阵，同时修改两侧权重：</p>
+      \[W_1'=PW_1,\qquad W_2'=W_2P^\top.\]
+      <p>逐元素激活满足 \(\sigma(Pz)=P\sigma(z)\)，所以新函数与原函数相同。若有隐藏层 bias，也要随 \(W_1\) 一起置换。Git Re-Basin 利用这种对称性，在等价的参数表示中寻找更匹配的一份，再进行插值或平均。</p>
+      <p>一种匹配方法是让两模型读取同一批校准输入，记录隐藏单元的激活矩阵 \(Z_A,Z_B\)，每行对应一个单元、每列对应一个样本。寻找 \(P\) 使 \(\|Z_A-PZ_B\|_F^2\) 最小，等价于最大化成对单元激活的内积之和，可以转成指派问题。这个目标提供了一种可测量的“单元含义相近”。</p>
+      <p>Transformer 的对齐还要遵守图结构：残差相加两侧使用相同的通道坐标，attention 中相关的投影、头划分和位置编码也有耦合约束。先列出允许的联合置换，再在这些约束内求匹配。原论文在 MLP、卷积网络和 ResNet 上研究了这种方法；把它扩展到独立训练的语言模型，需要继续验证可用对称性和跨模型激活的匹配质量。</p>
+    </section>
+
+    <section id="ties" data-math-scope="ties">
+      <h2>TIES 怎样处理更新冲突</h2>
+      <p>回到共享基座的微调模型。坐标已经对应之后，不同任务仍可能在同一参数上提出方向相反的更新。直接平均会抵消它们；大量很小的更新，也可能积累成噪声。TIES 将处理拆成三步：保留大的变化、选定每个坐标的方向、只平均同方向的更新。</p>
+      <p>第一步 Trim：对每个任务向量 \(\tau_i\)，按绝对值保留最大的 \(k\%\) 个坐标，其余设为零，得到 \(\htmlData{symbol=trim}{\widehat\tau_i}\)。这里的百分比针对每个任务的完整展平向量；实现若改成逐层阈值，便改变了各层得到的稀疏预算。</p>
+      <p>第二步 Elect sign：在第 \(j\) 个参数位置，把留下的更新相加，再取符号：</p>
+      \[\htmlData{symbol=sign}{s_j}=\operatorname{sign}\left(\sum_i\widehat\tau_{i,j}\right).\]
+      <p>因此方向由带符号幅度的总和决定。例如 +0.8、+0.7、−2.0 的和是 −0.5，最终选择负方向。较大的单次更新可以超过多个较小的相反更新。本文的图和实验统一约定：总和恰为零时，该坐标的合并更新取零。官方代码中的 <code>resolve_zero_signs</code> 默认尝试用所有坐标选定符号的全局多数方向补齐平票位置；复现实验时要一并记录这项约定。</p>
+      <p>第三步 Disjoint merge：令 \(\htmlData{symbol=selected}{\mathcal I_j}\) 收集方向与 \(s_j\) 一致、且值非零的任务，再在这些任务之间求平均：</p>
+      \[\mathcal I_j=\{i:\operatorname{sign}(\widehat\tau_{i,j})=s_j,\ \widehat\tau_{i,j}\ne0\},\]
+      \[\tau_{\mathrm{TIES},j}=\begin{cases}\dfrac{\sum_{i\in\mathcal I_j}\widehat\tau_{i,j}}{|\mathcal I_j|},&|\mathcal I_j|\gt0,\\0,&|\mathcal I_j|=0.\end{cases}\]
+      <p>最后使用统一缩放系数 \(\lambda\)，得到 \(\theta_0+\lambda\tau_{\mathrm{TIES}}\)。下面每个任务只有四个参数，保留两个恰好对应 50%。第一列展示幅度如何决定符号，第二列展示分母为何等于参与平均的两个任务。</p>
+      <figure class="article-figure" id="ties-figure">
+        <h3>从三份任务更新算出一份参数</h3>
+        <div class="mm-controls"><label for="ties-keep">每个任务保留的坐标数<select id="ties-keep"><option value="1">1 / 4 · 25%</option><option value="2" selected>2 / 4 · 50%</option><option value="3">3 / 4 · 75%</option><option value="4">4 / 4 · 100%</option></select></label><label for="ties-scale">最终更新系数 λ<output id="ties-scale-out"></output><input id="ties-scale" type="range" min="0" max="1.5" step="0.1" value="1"></label></div>
+        <div id="ties-matrix" class="mm-matrix" aria-label="三份任务更新在四个参数坐标上的数值"></div>
+        <div class="mm-result" id="ties-result" aria-live="polite"></div>
+        <figcaption>基座 θ₀ = [3, 2, 1, −1]。逐步观察原始更新、裁剪、方向选择与合并。高亮格表示当前步骤保留或接纳的更新。</figcaption>
+      </figure>
+      <p>TIES 用方向一致性减少抵消，也改变了任务之间的权重。在例子第一列，任务 C 的 −2 完整留下，任务 A、B 的正更新被过滤。这个选择应由任务效果来评估：记录每层保留率、符号冲突率和更新范数，再看哪些能力随 \(k\)、\(\lambda\) 变化。若某层长期由同一个任务主导，可以检查该任务是否用了更大的学习率、更多步数，或不同的参数化。合并系数需要与训练形成的更新尺度一起解释。</p>
+    </section>
+
+    <section id="dare" data-math-scope="dare">
+      <h2>DARE 保留期望，也引入方差</h2>
+      <p>许多微调更新很小且存在冗余。DARE 随机丢弃一部分任务向量坐标，并放大保留下来的值，然后再使用相加、平均或 TIES 等方法合并。记保留概率为 \(\htmlData{symbol=retain}{q}\)，对应丢弃概率 \(1-q\)。对某个更新 \(\tau_j\)，独立采样 \(m_j\sim\operatorname{Bernoulli}(q)\)：</p>
+      \[\htmlData{symbol=dropped}{\widetilde\tau_j}=\frac{m_j}{q}\tau_j.\]
+      <p>它以概率 \(q\) 变成 \(\tau_j/q\)，以概率 \(1-q\) 变成零。于是：</p>
+      \[\mathbb E[\widetilde\tau_j]=\tau_j,\qquad\operatorname{Var}(\widetilde\tau_j)=\frac{1-q}{q}\tau_j^2.\]
+      <p>取 \(q=0.25\)、\(\tau_j=0.2\)，保留时更新为 0.8，平均仍为 0.2，方差却有 0.12。随着保留概率下降，单次采样的波动会增加。DARE 的缩放确保期望更新相同，实际选择仍需比较多个随机种子。</p>
+      <p>线性层的情况可以精确分析。固定输入 \(x\)，如果每个更新独立采样，某一输出的增量 \(\Delta y=\sum_j x_j\widetilde\tau_j\) 满足：</p>
+      \[\mathbb E[\Delta y]=\sum_jx_j\tau_j,\qquad\operatorname{Var}(\Delta y)=\frac{1-q}{q}\sum_j(x_j\tau_j)^2.\]
+      <p>若贡献分散在很多通道，波动有机会相互平均；若少数通道承载了主要贡献，随机丢掉其中一个就会显著改变输出。后续非线性和层间传播还会改变误差的影响，因此保留比例要结合实际激活、能力评测和重复种子选择。</p>
+      <figure class="article-figure" id="dare-figure">
+        <h3>同样的期望，输出可能有多大波动</h3>
+        <p class="mm-label">d 个通道各提供 0.2 / d 的更新贡献，独立保留后放大 1 / q。横轴为合计输出增量，纵轴为该增量出现的概率；橙色柱是当前随机样本。</p>
+        <div class="mm-controls"><label for="dare-q">通道保留概率 q<output id="dare-q-out"></output><input id="dare-q" type="range" min="0.05" max="1" step="0.05" value="0.25"></label><label for="dare-width">贡献分散到多少个通道<select id="dare-width"><option value="16">16 个通道</option><option value="64">64 个通道</option></select></label><button type="button" id="dare-resample">重新采样一组保留位置</button></div>
+        <svg id="dare-chart" class="mm-chart" role="img" aria-label="独立丢弃通道得到的输出增量的精确二项分布，以及当前随机样本"></svg>
+        <div class="mm-stats"><div class="article-stat">输出增量的精确均值 / 标准差<strong id="dare-moments"></strong><span id="dare-zero"></span></div><div class="article-stat">当前样本<strong id="dare-sample"></strong><span id="dare-count"></span></div></div>
+        <figcaption>默认 q = 0.25 时，16 个通道的输出标准差约为 0.0866。改为 64 个通道，标准差减半。图中的均值和概率由二项分布直接计算，随机按钮只改变高亮样本。</figcaption>
+      </figure>
+      <p>DARE 与 TIES 的稀疏操作具有不同的选择规则：前者随机保留并做期望补偿，后者优先保留绝对值大的坐标，再按方向合并。把两者组合时，需要记录操作顺序、保留比例、随机种子和最终缩放系数；这些共同定义了一次可复现的合并。</p>
+    </section>
+
+    <section id="engineering">
+      <h2>把合并变成可验证的工程实验</h2>
+      <h3>形状相同，词表行的含义仍需核对</h3>
+      <p>两个微调模型可能各自新增了特殊 token，并把不同 token 放进同一个 ID。例如 A 的第 32000 行表示 <code>&lt;sql&gt;</code>，B 的同一行表示 <code>&lt;code&gt;</code>。直接平均这一行，会混合两种符号的表示。PEFT 的模型合并文档专门提醒了新增特殊 token 的冲突；mergekit 提供按基座词表、并集词表等策略构建输出 tokenizer 的配置。</p>
+      <p>工程上先建立“token 内容 → 目标 ID”的映射，再对齐输入 embedding、输出语言模型头及相关 bias 的行。共享权重的模型还要保持输入、输出权重的绑定关系。只有一份模型拥有的 token，需要明确来源和初始化策略。词表统一后，再检查特殊 token ID、停止条件和 chat template，并用包含各自新增 token 的真实样例做编码、生成和解码检查。</p>
+      <p>这个问题可以缩小成两行矩阵：A 的词表是 [red, blue]、embedding 是单位矩阵；B 的词表是 [blue, red]、embedding 的两行也相应交换。两者都正确表示单词，直接平均第 0 行却得到 [0.5, 0.5]。按 token 内容重排后，red 的合并向量才保持 [1, 0]。词表、张量名和神经元置换，本质上都在回答同一个问题：<strong>相加的两个坐标分别指向什么？</strong></p>
+      <h3>差分精度、更新尺度和验证预算</h3>
+      <p>任务向量常由两个接近的数相减得到。读取已有浮点权重后，用较高精度做减法与累加，最后再转换为部署 dtype，可以减少合并过程中新增的舍入误差。保存时记录基座的具体 revision、输入模型 revision、参数筛选规则、算法系数和 tokenizer 配置。大模型可以逐张量流式处理，峰值内存主要由同时驻留的输入张量、基座和累加缓冲决定。</p>
+      <p>第一次实验可以固定候选集合，比较最好单模型、uniform soup、少量权重的 task arithmetic，再加入 TIES 或 DARE。每增加一个方法，都沿用同一份验证集和相同的搜索预算。记录每个候选的数学、代码、长上下文和通用语言指标，保留完整的能力向量。平均分相近的两个模型，可能分别偏向不同产品需求。</p>
+      <p>诊断也可以按机制拆开：插值中段出现高 loss 时，检查坐标与基座版本；平均以后某一任务掉分时，检查更新范数和符号冲突；DARE 结果随种子剧烈变化时，减小丢弃率并定位激活集中通道；含特殊 token 的样例异常时，直接核对 tokenizer 与输出头的映射。每次只改变一个因素，比较固定样例和完整验证指标，才能让下一次合并有据可循。</p>
+      <p>当任务需要长期保持独立专长、并根据输入调用不同参数时，还可以把多个专家放进带路由的模型，参考 <a href="/posts/moe-upcycling/">MoE Upcycling</a>。参数平均产生一份共享权重，路由则保留多份专家并选择调用；两者对应不同的容量、通信和服务预算。</p>
+    </section>
+
+    <section id="practice">
+      <h2>CPU 实验与练习</h2>
+      <p><a class="mm-download" href="./lab.py" download>下载 NumPy 实验 lab.py</a></p>
+      <p>依赖可通过 <code>python3 -m pip install numpy</code> 安装，随后运行 <code>python3 lab.py</code>。实验先验证隐藏单元置换、TIES 数值、DARE 的均值与方差、词表重排，再训练五个小型线性回归模型，用独立验证集选 greedy soup，最后读取单独生成的测试集。所有样本由固定种子在本地生成。</p>
+      <p>默认运行中，greedy soup 选择第 3、0 号模型，验证 MSE 从最好单模型的 0.67141 降到 0.65554；独立测试 MSE 从 0.69170 降到 0.67191。把五个模型全部平均，测试 MSE 为 0.98095，因为其中一份候选的训练目标发生了系统偏移。这组 CPU 结果展示了候选筛选的作用，也方便检查“训练、选择、报告”三个数据集合是否分开。</p>
+      <p>接下来可以把回归训练中的目标偏移量从 1.5 改成 0，观察 uniform soup 与 greedy soup 的差距；再把 DARE 的通道数从 16 改成 64，检查方差是否缩小到四分之一。分别改变种子重复运行，记录验证集选中的候选、独立测试 MSE 和采样方差，便能区分一次幸运采样与稳定的趋势。</p>
+      <div class="article-exercise"><h3>练习 1：平均参数和相加更新</h3><p>基座 \(\theta_0=[1,2]\)，两个微调模型为 \(\theta_A=[1.4,1.8]\)、\(\theta_B=[0.9,2.5]\)。求权重为 0.25、0.75 的 soup，以及两个任务向量各取系数 1 的合并结果。</p><details><summary>展开完整解答</summary><p>两个任务向量为 \(\tau_A=[0.4,-0.2]\)、\(\tau_B=[-0.1,0.5]\)。Soup 直接计算 \(0.25\theta_A+0.75\theta_B=[1.025,2.325]\)。也可以先组合更新：\(0.25\tau_A+0.75\tau_B=[0.025,0.325]\)，再加基座。</p><p>Task Arithmetic 的两个系数都为 1，更新相加得到 \([0.3,0.3]\)，最终模型为 \([1.3,2.3]\)。直接把两份完整模型相加会得到 \([2.3,4.3]\)，其中共享基座出现了两次；用差分组合可以精确控制基座只出现一次。</p></details></div>
+      <div class="article-exercise"><h3>练习 2：把 TIES 的每一步算清楚</h3><p>三份更新为 \([0.8,-0.6,0.05,0.02]\)、\([0.7,0.9,-0.04,0.01]\)、\([-2,0.4,0.03,-0.06]\)。每份保留绝对值最大的两个坐标，基座为 \([3,2,1,-1]\)，最终缩放 \(\lambda=1\)。求合并权重。</p><details><summary>展开完整解答</summary><p>裁剪后的三行分别为 \([0.8,-0.6,0,0]\)、\([0.7,0.9,0,0]\)、\([-2,0.4,0,0]\)。逐列相加得到 \([-0.5,0.7,0,0]\)，选定符号为 \([-1,+1,0,0]\)。</p><p>第一列仅保留 −2，平均仍为 −2；第二列保留 0.9、0.4，平均为 \((0.9+0.4)/2=0.65\)。后两列没有非零参与项，输出为 0。最终任务向量是 \([-2,0.65,0,0]\)，加基座得到 \([1,2.65,1,-1]\)。第一列两个正值之和为 1.5，小于负值的幅度 2，所以方向为负；第二列的分母等于被接纳的两个非零更新数。</p></details></div>
+      <div class="article-exercise"><h3>练习 3：DARE 的波动如何随宽度变化</h3><p>保留概率 \(q=0.25\)。先计算单个更新 0.2 在 DARE 后的均值、方差。再把同样的总贡献 0.2 均分到 16 个独立通道，求合计贡献的标准差和全部被丢弃的概率；换成 64 个通道会怎样？</p><details><summary>展开完整解答</summary><p>单个更新以概率 0.25 取 0.8，以概率 0.75 取 0。因此均值是 \(0.25\times0.8=0.2\)，二阶矩是 \(0.25\times0.8^2=0.16\)，方差为 \(0.16-0.2^2=0.12\)。</p><p>把总贡献均分到 \(d\) 个通道，每个通道原贡献为 \(0.2/d\)。独立方差相加后，合计方差是 \(d\times3(0.2/d)^2=0.12/d\)。\(d=16\) 时方差为 0.0075、标准差约 0.08660；\(d=64\) 时方差为 0.001875、标准差约 0.04330。全部丢弃的概率分别为 \(0.75^{16}\approx1.0023\%\) 和 \(0.75^{64}\approx1.009\times10^{-8}\)。通道数增加四倍时，均分贡献模型的标准差减半。</p></details></div>
+      <div class="article-exercise"><h3>练习 4：没有训练误差，为什么合并后会失败</h3><p>A、B 都计算 \(|x|\)，但它们的两个隐藏单元顺序相反。取混合比例 \(t=0.25\)，求未对齐合并的函数与 \([-1,1]\) 均匀输入上的 MSE，再求交换 B 隐藏单元后的结果。</p><details><summary>展开完整解答</summary><p>未对齐的输入权重是 \([1-2t,-1+2t]=[0.5,-0.5]\)，输出权重仍为 \([1,1]\)，所以函数为 \(0.5|x|\)。预测误差为 \(-0.5|x|\)，平方误差为 \(0.25x^2\)。均匀分布下 \(\mathbb E[x^2]=\frac12\int_{-1}^{1}x^2\,\mathrm dx=1/3\)，得到 MSE \(1/12\approx0.08333\)。</p><p>交换 B 的隐藏单元，并同步交换输入矩阵的行与输出矩阵的列后，B 的参数坐标与 A 相同。任意混合比例都保持输入权重 \([1,-1]\)，函数恢复为 \(|x|\)，MSE 为 0。实验脚本用 2001 个等距点验证同一现象；离散网格的均值会随采样方式与连续积分存在小的数值差异。</p></details></div>
+    </section>
+
+    <section id="references"><h2>参考与延伸阅读</h2><ol>
+      <li><a href="https://arxiv.org/abs/2203.05482">Model soups</a>：共享预训练初始化下的 uniform / greedy 权重平均；<a href="https://github.com/mlfoundations/model-soups">官方代码</a>。</li>
+      <li><a href="https://arxiv.org/abs/2212.04089">Editing Models with Task Arithmetic</a>：任务向量的组合、缩放和编辑。</li>
+      <li><a href="https://arxiv.org/abs/2306.01708">TIES-Merging</a>：裁剪、幅度决定的符号选择和同方向非零更新平均；<a href="https://github.com/prateeky2806/ties-merging/blob/main/src/utils/merge_utils.py">官方合并实现</a>包含平票方向处理。</li>
+      <li><a href="https://arxiv.org/abs/2311.03099">Language Models are Super Mario</a>：DARE 的随机丢弃与缩放，以及语言模型任务向量的组合实验。</li>
+      <li><a href="https://arxiv.org/abs/2209.04836">Git Re-Basin</a>：利用置换对称性对齐网络；<a href="https://github.com/samuela/git-re-basin">官方代码</a>。</li>
+      <li><a href="https://huggingface.co/docs/peft/developer_guides/model_merging">PEFT 模型合并文档</a>与 <a href="https://github.com/arcee-ai/mergekit#tokenizer-configuration">mergekit tokenizer 配置</a>：新增 token、词表策略和实际合并配置。</li>
+    </ol></section>
+  </article>
+  <nav class="series-pager" data-series="systems"></nav>
+</main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">
+{"global":{},"scopes":{"merging":{"base":{"label":"共同基座 θ₀","description":"所有任务向量共同减去的同一版本模型权重；具名张量按固定顺序展平。"},"model":{"label":"微调模型 θᵢ","description":"第 i 次微调产生的参数向量，张量坐标与共同基座对应。"},"delta":{"label":"任务向量 τᵢ","description":"第 i 个模型相对共同基座的参数变化：τᵢ = θᵢ − θ₀。"},"coefficient":{"label":"任务系数 λᵢ","description":"第 i 个任务向量的缩放系数，控制沿该更新方向移动的幅度。"}},"permutation":{"perm":{"label":"置换矩阵 P","description":"重新排列隐藏单元的矩阵；输入权重左乘 P，输出权重右乘 P 的转置。"}},"ties":{"trim":{"label":"裁剪更新 τ̂ᵢ","description":"第 i 个任务向量保留绝对值最大的指定比例坐标，其余坐标为零。"},"sign":{"label":"选定符号 sⱼ","description":"第 j 个参数位置上，各任务裁剪更新之和的符号。"},"selected":{"label":"同向任务集合 Iⱼ","description":"在第 j 个参数位置上，更新非零且方向与选定符号相同的任务集合。"}},"dare":{"retain":{"label":"保留概率 q","description":"DARE 独立保留每个更新坐标的概率；保留值放大为原值的 1/q。"},"dropped":{"label":"DARE 后的更新 τ̃ⱼ","description":"第 j 个坐标随机保留并缩放后的更新，等于 mⱼ τⱼ / q。"}}}}
+</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script>
+<script src="./figures.js"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script>
+<script src="/assets/post-links.js?v=fe48d4412e51"></script>
+<script src="/assets/posts.js?v=186761fcdc0a"></script>
+<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
+</body>
+</html>

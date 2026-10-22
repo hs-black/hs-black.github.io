@@ -91,6 +91,7 @@ p_h(\cdot\mid x_{\le t})=\operatorname{softmax}\!\left(W_U f_h(z_{\le t})\right)
 </tbody></table></div>
 <p>比较目标时，先固定一套部署任务及对应测试条件，再给出两组实验：等训练 FLOPs 衡量预算内收益，等原文 token 衡量数据利用率。沿用相同 tokenizer、数据过滤、模型规模与测试集，同时报告有效监督数。这样才能解释一个方法为什么进步，以及它把成本转移到了哪里。预算估计可结合<a href="/posts/pretraining-scaling/">Scaling Laws 与训练预算</a>，完整训练步骤可对照<a href="/posts/smol-marathon/">SmolLM3 的训练过程</a>。</p>
 
+<p data-topic-bridge="algorithm-expansion">预测单位也可以扩展到句子或可变长度片段。<a href="/posts/concept-models/">概念模型</a>把文本编码成较短的表示序列，再学习下一表示的分布；编码、预测与还原各自承担计算成本，也各自可能丢失数字和实体等信息。</p>
 <h2 id="exercises">把目标落实成可检查的实现</h2>
 <div class="article-exercise"><h3>练习一：去噪究竟节省了哪些位置？</h3><p>一段 1000 token 的原文删除 150 个 token，构成 50 个 span。采用末尾 sentinel，另给 decoder 目标添加 EOS。求 encoder、decoder 长度，以及每层三类注意力的长度乘积。</p><details><summary>推导与答案</summary><p>Encoder 长度是 \(1000-150+50=900\)，decoder 目标长度是 \(150+50+1+1=202\)。Encoder self-attention 的位置对上界为 \(900^2=810000\)，decoder self-attention 为 \(202^2=40804\)，cross-attention 为 \(900\times202=181800\)。因果 decoder 的有效位置对约为全矩阵的一半；具体 kernel 可以利用因果结构。总训练成本还包括层数、隐藏维度、FFN 与词表投影，因此可由这些长度继续推 FLOPs。</p></details></div>
 <div class="article-exercise"><h3>练习二：MTP 与文档边界</h3><p>两篇长度分别为 4 与 3 的文档被打包在一起，预测未来 3 个 token。求有效监督数。若直接把它当成长度 7 的一篇文档，会多出多少项？</p><details><summary>推导与答案</summary><p>第一篇有 \(3+2+1=6\) 对，第二篇有 \(2+1+0=3\) 对，共 9 对。合并为单篇会得到 \(6+5+4=15\) 对，多出的 6 对跨越文档边界。实现时为每个预测距离同时检查目标下标与文档 ID；随后用这 9 对作为全局 token 均值的分母。若文档序列包含 EOS，则把 EOS 算进各篇长度，再按相同规则计数。</p></details></div>
@@ -119,5 +120,5 @@ PASS: reconstruction, shifted labels, packing counterexample, boundaries, gradie
 <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 <script type="application/json" id="math-definitions">{"global":{"loss":{"label":"有效目标平均损失 ℒ","description":"有效目标 token 的负对数概率之和，除以有效目标数。","unit":"nats / token"},"count":{"label":"有效目标数 M","description":"当前求均值范围内所有 mⱼ 的总和；梯度累积时应覆盖完整累积窗口。"},"mask":{"label":"计分标记 mⱼ","description":"1 表示第 j 个标签贡献交叉熵；0 表示跳过该标签。信息可见性另由 attention mask 决定。"},"pairmask":{"label":"有效预测对 mₜ,ₕ","description":"位置 t 对距离 h 的标签存在且在同一文档时为 1。"}}}</script>
 <script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/pretraining-objectives/figures.js"></script>
-<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body></html>

@@ -9,6 +9,24 @@
 // the post's <h1>.
 (() => {
   const SERIES = {
+    architectures: {
+      title: "模型结构：状态、深度与条件记忆",
+      posts: [
+        ["state-space-models", "状态空间模型怎样记住历史：从 S4 到 Mamba-3"],
+        ["recurrent-depth", "同一组参数多算几遍：共享深度与递归推理"],
+        ["over-encoding", "Over-Encoding：用查表扩展语言模型容量"],
+        ["engram", "Engram：条件记忆怎样与 MoE 分工"],
+        ["concept-models", "从 token 到概念：句向量生成与动态分段"],
+      ],
+    },
+    sparsity: {
+      title: "稀疏计算：权重、训练与激活",
+      posts: [
+        ["weight-pruning", "权重剪枝：从幅值到数据感知重建"],
+        ["sparse-pretraining", "稀疏预训练：动态连接怎样变成真实加速"],
+        ["activation-sparsity", "激活稀疏：当前 token 需要哪些神经元"],
+      ],
+    },
     pretraining: {
       title: "预训练算法：从预算与数据到学习动态",
       posts: [
@@ -18,6 +36,7 @@
         ["pretraining-mup", "从小模型调参到大模型：μP 与超参数迁移"],
         ["pretraining-objectives", "一段文本提供什么监督：从去噪、FIM 到多 token 预测"],
         ["pretraining-stability", "深层 Transformer 怎样稳定训练"],
+        ["moe-upcycling", "已有模型怎样长成 MoE：从权重复用到专家分化"],
       ],
     },
     hyperconnections: {
@@ -26,6 +45,7 @@
         ["hyper-connections", "Hyper-Connections：从一条残差流到多路信息交换"],
         ["manifold-hyper-connections", "mHC：用双随机约束稳定多路残差"],
         ["attention-residuals", "Attention Residuals：沿深度选择信息"],
+        ["effective-depth", "一个模型到底用了多少深度：测量、剪层与提前退出"],
       ],
     },
     scaling: {
@@ -42,7 +62,7 @@
         ['scaling-5d', '5D 并行：组合与选型'],
         ['scaling-jax', 'JAX 分片编程与 Profiling'],
         ['scaling-gpu-kernels', 'GPU 内核与 FlashAttention'],
-        ['scaling-mixed-precision', '混合精度与 FP8 训练'],
+        ["scaling-mixed-precision", "混合精度训练：从 BF16 到 FP8 与 NVFP4"],
         ['scaling-inference', 'Transformer 推理的数学'],
       ],
     },
@@ -133,8 +153,20 @@
           "Linear attention：把历史写进状态"
         ],
         [
+          "state-space-models",
+          "状态空间模型怎样记住历史：从 S4 到 Mamba-3"
+        ],
+        [
           "llm-quantization",
           "LLM 量化"
+        ],
+        [
+          "weight-pruning",
+          "权重剪枝：从幅值到数据感知重建"
+        ],
+        [
+          "activation-sparsity",
+          "激活稀疏：当前 token 需要哪些神经元"
         ],
         [
           "continuous-batching",
@@ -193,6 +225,18 @@
           "深层 Transformer 怎样稳定训练"
         ],
         [
+          "scaling-mixed-precision",
+          "混合精度训练：从 BF16 到 FP8 与 NVFP4"
+        ],
+        [
+          "sparse-pretraining",
+          "稀疏预训练：动态连接怎样变成真实加速"
+        ],
+        [
+          "moe-upcycling",
+          "已有模型怎样长成 MoE：从权重复用到专家分化"
+        ],
+        [
           "scaling-memory",
           "训练的账本：显存、FLOPs 与 MFU"
         ],
@@ -209,6 +253,10 @@
           "LoRA / QLoRA：参数高效微调"
         ],
         [
+          "model-merging",
+          "多个 checkpoint 怎样合成一个模型：从 Model Soups 到参数对齐"
+        ],
+        [
           "multi-adapter-serving",
           "多 Adapter 推理服务"
         ],
@@ -223,6 +271,26 @@
         [
           "attention-residuals",
           "Attention Residuals：沿深度选择信息"
+        ],
+        [
+          "effective-depth",
+          "一个模型到底用了多少深度：测量、剪层与提前退出"
+        ],
+        [
+          "recurrent-depth",
+          "同一组参数多算几遍：共享深度与递归推理"
+        ],
+        [
+          "over-encoding",
+          "Over-Encoding：用查表扩展语言模型容量"
+        ],
+        [
+          "engram",
+          "Engram：条件记忆怎样与 MoE 分工"
+        ],
+        [
+          "concept-models",
+          "从 token 到概念：句向量生成与动态分段"
         ],
         [
           "deepseek-v4-flash",

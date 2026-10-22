@@ -107,6 +107,7 @@ $$\begin{aligned}z'&=e^{m-m'}z+e^{a-m'},\\u'&=e^{m-m'}u+e^{a-m'}p,\\h&=u'/z'.\en
 <p>长 prefill 还可以沿 token 轴分片来源库。深度 attention 对每个 token 独立，\(P\) 张 TP 卡各持有 \(T/P\) 个 token，就能独立计算自己的深度聚合。结合层输出的 reduce-scatter、局部聚合和 all-gather，来源存储按每卡 \((N+1)BTdu/P\) 缩小。前面的 576 MiB 算例在 8 卡均匀分片下是每卡 72 MiB；还需单独核算通信缓冲和两阶段中间结果。选择 chunked prefill 时，同一个公式也能估计 chunk 长度对额外显存的影响。</p>
 <p>比较这些残差设计时，质量与系统预算要放在一起。HC/mHC 的核心状态按多路残差宽度增长，AttnRes 按历史来源数增长；它们对 kernel 融合、重算和流水线的压力各不相同。训练实验可以同时记录验证 loss、逐层 RMS、梯度范数、聚合权重的熵、step 时间及显存峰值。改变块数时保持参数量、训练 token 数和数据顺序可比，再报告真实墙钟成本，才能判断信息选择带来的收益是否值得其状态开销。</p>
 
+<p data-topic-bridge="algorithm-expansion">深度权重描述了模型在当前位置怎样读取历史。要判断这些路径对任务的贡献，还可以做<a href="/posts/effective-depth/">有效深度实验</a>：同时记录表示变化和删层后的损失，再检查提前退出的质量与时延。<a href="/posts/recurrent-depth/">共享深度模型</a>则把同一组参数展开成多轮计算，需要为各轮分别追踪隐藏状态和 KV。</p>
 <h2 id="practice">实验与练习</h2>
 <p><a href="./lab.py">下载 NumPy 实验</a>，运行 <code>python lab.py</code>。实验用双精度验证查询梯度，比较 online softmax 与直接计算，追踪块边界，并优化一个二维查询，让它从三个来源中选择目标信息。最后输出固定配置的来源库容量。训练对象是这个小型聚合器，输出可用于检查公式与状态语义。</p>
 <p>把实验里的查询初值改为零，可以观察查询仍然移动；把来源设置成三个完全相同的向量，查询梯度则变为零。再把 logits 整体增加 1000，稳定 softmax 与在线合并结果应保持一致。这些修改分别检验可学习性、不可区分来源和数值平移不变性。</p>
@@ -138,5 +139,5 @@ $('#partial-score').addEventListener('input',()=>{merge.pause();merge.render()})
 window.AttnResFigures={depth,block,merge};
 })();
 </script>
-<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body></html>

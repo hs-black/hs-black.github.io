@@ -440,7 +440,8 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
       $$\frac{2kBhd_e}{Ehd_e} > 240 \;\Rightarrow\; B > 120\cdot\frac{E}{k}$$
       <p>对 DeepSeek-V3 的 \(E=256, k=8\)，要 \(B > 3840\) 个 token。直观地说：每一步都要把所有专家的权重读一遍，但每个专家只服务 \(k/E\) 的 token，所以 batch 要比稠密模型大 \(E/k\) 倍才能摊平读权重的成本。这就是 MoE 推理特别依赖大 batch 和大规模 EP 的原因。</p>
 
-      <h2 id="tricks">其他稳定训练的技巧</h2>
+      <p data-topic-bridge="algorithm-expansion">已有 dense checkpoint 时，可以通过<a href="/posts/moe-upcycling/">upcycling</a>把 FFN 转成多个专家，再继续训练。转换当天就应逐层核对输出尺度和路由梯度，随后用相同增量预算比较专家分化与继续 dense 训练的收益。</p>
+<h2 id="tricks">其他稳定训练的技巧</h2>
       <ul>
         <li><b>选择性精度</b>（Switch）：只把路由器的输入和计算放到 float32，算完的 dispatch/combine 张量再转回 bfloat16，这样 all-to-all 不必传 float32。Switch 报告纯 bfloat16 的模型发散了，而选择性精度在速度几乎不变的情况下恢复了 float32 的稳定性。</li>
         <li><b>更小的初始化</b>（Switch）：把权重初始化尺度 \(s\) 从 1.0 降到 0.1（截断正态 \(\sigma=\sqrt{s/n}\)），质量更好、方差更小。</li>
@@ -481,7 +482,7 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=2a575d4a9e89"></script>
+  <script src="/assets/series.js?v=414d36fec9c5"></script>
   <script src="/assets/anim.js?v=499c11838720"></script>
   <script>
   (() => {
@@ -1061,8 +1062,8 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=8a89387e7679"></script>
-  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
-<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+  <script src="/assets/post-links.js?v=fe48d4412e51"></script>
+  <script src="/assets/posts.js?v=186761fcdc0a"></script>
+<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body>
 </html>

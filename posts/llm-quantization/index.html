@@ -83,6 +83,7 @@ $$H=\begin{bmatrix}1&amp;0.5\\0.5&amp;1\end{bmatrix},\qquad\delta_0=-0.4,\qquad\
 <p>质量排查从固定输入的层输出开始：比较最大误差、相对 RMS 误差和异常值位置。若误差集中在少数通道，检查 scale 与分组轴；若所有值都整体放大，检查 scale 的编码和应用次数；若只有长输入退化，检查校准长度与激活分布。性能排查则沿 batch、上下文长度和输入形状扫描，保留 backend、kernel 名称、模型 revision 与数值格式，形成能解释差异的记录。</p>
 <p>例如 70 亿参数、每 128 个权重共享 2 B scale 的理想 INT4 表示，权重约为 \(7\times10^9\times0.515625=3.609375\) GB，约 3.36 GiB。若缓存配置是 32 层、8 个 KV 头、每头 128 维、BF16，8 条长度 8192 的请求另需 8 GiB KV。权重与缓存合计约 11.36 GiB，随后还要加入运行中的临时内存。这个例子说明并发增大后，缓存可能成为更主要的容量因素。</p>
 <p>一个有用的验收记录应至少保留两类样本：模型质量样本和系统负载样本。前者覆盖部署任务与容易出现离群激活的输入，后者覆盖短请求、长 prefill 和稳定 decode。把质量损失、首 token 延迟、每 token 延迟、吞吐和峰值内存放在同一张表里，才能比较不同量化策略提供的实际取舍。</p>
+<p data-topic-bridge="algorithm-expansion">压缩权重还有一个选择：删除部分连接，并重新分配剩余权重来补偿层输出误差。<a href="/posts/weight-pruning/">权重剪枝</a>与这里的 GPTQ 共享输入相关性这一线索；<a href="/posts/activation-sparsity/">激活稀疏</a>则根据当前 token 选择参与计算的神经元。两者都需要把掩码对应到实际 kernel 和访存量。</p>
 <h2 id="exercises">计算与排错练习</h2>
 <div class="article-exercise"><h3>1. 整数码与字节</h3><p>Scale=0.125，窄范围对称 INT4，输入 [−0.875,0.875]。求整数码、重构和按低位优先打包的字节。</p><details><summary>展开解答</summary><p>整数码为 [−7,7]，重构与原值一致。−7 的补码为 9，第二个 7 放在高四位，字节是 0x79。</p></details></div>
 <div class="article-exercise"><h3>2. 元数据占多少</h3><p>4096×4096 权重，每 128 个权重共用 2 B scale，使用 INT4。总量与 BF16 压缩比是多少？</p><details><summary>展开解答</summary><p>整数码 8 MiB，scale 0.25 MiB，总计 8.25 MiB。32/8.25≈3.879 倍，等效 4.125 bit/权重。</p></details></div>
@@ -104,5 +105,5 @@ $$H=\begin{bmatrix}1&amp;0.5\\0.5&amp;1\end{bmatrix},\qquad\delta_0=-0.4,\qquad\
 })();
 
 </script>
-<script src="/assets/series.js?v=2a575d4a9e89"></script><script src="/assets/post-links.js?v=8a89387e7679"></script><script src="/assets/posts.js?v=c2ffb7de30e3"></script><script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body></html>

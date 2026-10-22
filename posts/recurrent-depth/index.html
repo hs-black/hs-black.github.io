@@ -1,0 +1,79 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>同一组参数多算几遍：共享深度与递归推理 · Zunzhe Zhang</title><meta name="description" content="从Universal Transformer和ALBERT到Recurrent Depth与MoR，推导共享参数的梯度、截断反传、动态轮数与每轮KV缓存协议，结合数值图与NumPy实验。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script><style>
+.arch-controls{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}.arch-controls label{display:flex;align-items:center;gap:7px;flex:1 1 190px;min-width:0;font-size:14px;flex-wrap:wrap}.arch-controls input{min-width:70px;max-width:100%;flex:1;accent-color:var(--accent)}.arch-controls select{background:var(--bg);color:var(--text);border:1px solid var(--border);border-radius:6px;padding:5px;font:inherit;max-width:100%}.arch-controls output{font:13px var(--font-mono);min-width:40px}.arch-result{padding:12px;margin:12px 0;background:var(--bg-soft);border-radius:8px;font:14px/1.8 var(--font-mono);overflow-wrap:anywhere;white-space:pre-line}.arch-note{font-size:14px;color:var(--text-soft)}.arch-matrix{display:grid;grid-template-columns:repeat(6,minmax(0,1fr));gap:4px;max-width:480px;margin:12px auto}.arch-cell{text-align:center;padding:9px 2px;border:1px solid var(--border);border-radius:4px;font:13px var(--font-mono);background:var(--bg-soft)}.arch-cell.on{border-color:var(--accent);color:var(--accent);font-weight:700}.arch-cell.blank{opacity:.3}.arch-cards{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px}.arch-card{padding:12px;border:1px solid var(--border);border-radius:8px;min-width:0}.arch-card strong{font-size:14px}.arch-card p{font:13px/1.8 var(--font-mono);margin:6px 0;overflow-wrap:anywhere}.arch-track{height:11px;background:var(--bg-soft);border-radius:5px;overflow:hidden;margin:9px 0}.arch-fill{height:100%;background:var(--accent)}.arch-figure svg text{fill:var(--text-soft);font-family:var(--font-mono);font-size:14px}.arch-figure svg .axis{stroke:var(--border);stroke-width:1}.arch-figure svg .accent{stroke:var(--accent);fill:none;stroke-width:2.5}.arch-figure svg .base{stroke:var(--text-soft);fill:none;stroke-width:2;stroke-dasharray:5 4}.arch-figure svg .point{fill:var(--accent)}.arch-pairs{display:flex;gap:8px;flex-wrap:wrap}.arch-pair{padding:9px 12px;border:1px solid var(--border);border-radius:7px;font:13px/1.8 var(--font-mono);background:var(--bg-soft)}.arch-pair.active{border:2px solid var(--accent)}.arch-bar-row{display:grid;grid-template-columns:100px 1fr 65px;align-items:center;gap:8px;font:13px var(--font-mono);margin:9px 0}.arch-bar-row .arch-track{margin:0}.arch-figure button:focus-visible,.arch-controls input:focus-visible,.arch-controls select:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+@media(max-width:520px){.arch-cards{grid-template-columns:1fr}.arch-cell{font-size:12px;padding:8px 1px}.arch-result{font-size:12px}.arch-bar-row{grid-template-columns:85px 1fr 55px;font-size:12px}.arch-figure h3{font-size:18px}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>同一组参数多算几遍：共享深度与递归推理</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header><nav class="series" data-series="architectures"></nav><article class="prose"><p>一个网络有 8 组不同的层参数，可以执行超过 100 层的计算。办法很直接：把中间的 4 层当作一个可重复调用的模块，前后各保留 2 层，调用中间模块 32 次，总展开深度就是 \(2+4\times32+2=132\)。参数复用让模型拥有较小的权重规模，同时把计算预算放在多轮状态更新上。</p>
+<p>这种循环沿着<strong>深度</strong>发生。序列递归模型在读到下一个 token 时更新记忆；深度循环则在处理同一份输入时，多次修改内部表示。<a href="/posts/state-space-models/">状态空间模型</a>主要研究前一种更新，Universal Transformer、ALBERT 和 recurrent-depth 语言模型则把注意力放在后一种更新。两种循环可以出现在同一个网络里。</p>
+<nav class="toc"><strong>目录</strong><ol><li><a href="#shared">参数共享以后，哪些成本还在</a></li><li><a href="#iteration">把多层网络写成一次次迭代</a></li><li><a href="#gradient">同一参数怎样接收多轮梯度</a></li><li><a href="#dynamic">让每个 token 选择计算量</a></li><li><a href="#cache">每轮 KV 的身份与缓存协议</a></li><li><a href="#runtime">把动态深度放到 GPU 上</a></li><li><a href="#exercises">受控实验与习题</a></li></ol></nav>
+<h2 id="shared">1. 参数共享以后，哪些成本还在</h2>
+<p>普通堆叠网络每层都有自己的参数 \(\theta_l\)。共享深度模型则反复使用同一个 \(F_\theta\)，或者重复使用包含几个不同层的模块。ALBERT 用跨层共享控制参数规模；Universal Transformer 在反复自注意力更新中引入迭代轮次信息，并允许位置之间使用不同的停止时间。共享参数、增加执行轮次、动态停止，分别是三个可以组合的设计选择。</p>
+<p>设非循环部分有 \(L_0\) 层，循环模块有 \(K\) 层，执行 \(R\) 轮。若各层参数规模近似为 \(P_{\mathrm{layer}}\)，则：</p>
+$$P_{\mathrm{unique}}\approx(L_0+K)P_{\mathrm{layer}},\qquad
+\htmlData{symbol=depth}{L_{\mathrm{exec}}}=L_0+K\htmlData{symbol=rounds}{R}.$$
+<p>\(P_{\mathrm{unique}}\) 统计独立存储的参数，\(L_{\mathrm{exec}}\) 统计执行的层调用。把 \(R\) 翻倍，权重与优化器状态可以保持原尺寸，核心前向计算却近似翻倍。训练激活、反向计算和 attention 缓存也要按执行方式核算。比较模型时，至少同时报告独立参数、执行轮数和实际训练计算。</p>
+<p>参数共享还有一个统计上的含义：同一个变换必须适应早期和晚期的表示。为它提供轮次编码、重复注入输入，或者让某些前后层保持独立，都能改变这种约束。ALBERT 的固定共享网络和面向可变推理预算训练的循环模型，可以放进同一框架比较，但训练目标与使用方式各有侧重。</p>
+<h2 id="iteration">2. 把多层网络写成一次次迭代</h2>
+<p>令输入序列为 \(x\)，长度为 \(T\)、隐藏宽度为 \(d\)。前置模块产生 \(E(x)\in\mathbb R^{T\times d}\)，循环状态记作 \(Z^{(r)}\in\mathbb R^{T\times d}\)，上标 \(r\) 表示轮次。一个常见写法是：</p>
+$$Z^{(0)}=Z_{\mathrm{init}},\qquad
+\htmlData{symbol=state}{Z^{(r+1)}}=F_\theta\!\left(Z^{(r)},E(x),r\right),\qquad
+p_R=\operatorname{softmax}\!\left(G_\psi(Z^{(R)})\right).$$
+<p>\(F_\theta\) 可以包含几层 causal attention 和 MLP；\(G_\psi\) 是后置模块及词表投影。输入表示 \(E(x)\) 在每轮都可被读取，因而前置模块的输出有一条持续影响后续计算的路径。轮次 \(r\) 是否显式编码，由具体模型选择。</p>
+<p>为了看清迭代的性质，先用标量模型 \(z^{(r+1)}=az^{(r)}+e\)，从 \(z^{(0)}=0\) 开始。这里 \(e\) 是每轮注入的输入，\(a\) 是共享参数。当 \(|a|\lt1\) 时：</p>
+$$z^{(R)}=e\sum_{j=0}^{R-1}a^j=\frac{e(1-a^R)}{1-a},\qquad
+z^*=\frac{e}{1-a},\qquad z^*-z^{(R)}=a^Rz^*.$$
+<p>取 \(a=0.5,e=1\)，状态依次为 1、1.5、1.75、1.875，逐步靠近 2。这里多算一轮确实减少了误差，原因是共享变换形成了合适的迭代。一般神经网络需要通过训练获得这样的行为；扩大轮数后的效果，应沿着实际质量与延迟曲线检验。</p>
+<figure class="article-figure arch-figure" id="depth-iteration"><h3>相同的更新，重复执行多少轮？</h3><p class="arch-note">标量迭代 z ← az + e。虚线是可直接算出的固定点 e/(1−a)，紫线是当前轮次以前的状态。</p><div class="arch-controls"><label>共享系数 a<input id="depth-a" type="range" min=".2" max=".9" step=".1" value=".5"><output id="depth-a-value"></output></label><label>每轮输入 e<input id="depth-e" type="range" min=".5" max="2" step=".5" value="1"><output id="depth-e-value"></output></label></div><svg id="depth-iteration-svg" viewBox="0 0 320 245" role="img" aria-label="状态随深度迭代逐步接近固定点"></svg><div class="arch-result" id="depth-iteration-result"></div><figcaption>横轴为已执行轮数，纵轴为实际状态值。增大 a 会减慢收敛。这里的误差由已知固定点定义，适合检验停止规则。</figcaption></figure>
+<p>一个可变深度训练目标会对轮数采样：</p>
+$$\mathcal L(\theta,\psi)=\mathbb E_{x}\mathbb E_{R\sim\pi}\left[\ell\bigl(p_R(x),y\bigr)\right].$$
+<p>\(\pi\) 是训练时的轮数分布，\(y\) 是目标 token。模型同时学习在不同预算下输出。Recurrent Depth 的大规模实验采用随机轮数和持续输入注入；固定较少的反传轮数控制激活开销。改变测试轮数时，还应检查状态尺度、预测分布和任务表现是否进入新的运行区间。</p>
+<h2 id="gradient">3. 同一参数怎样接收多轮梯度</h2>
+<p>共享参数在计算图里被调用多次，反向传播把每次调用产生的梯度加在一起。设最终损失只依赖 \(Z^{(R)}\)，定义第 \(r\) 轮状态 Jacobian 为 \(J_r=\partial Z^{(r+1)}/\partial Z^{(r)}\)，参数 Jacobian 为 \(U_r=\partial Z^{(r+1)}/\partial\theta\)。则：</p>
+$$\frac{\partial Z^{(R)}}{\partial\theta}
+=\sum_{r=0}^{R-1}\left(J_{R-1}\cdots J_{r+1}\right)U_r.$$
+<p>最末一项前面的矩阵乘积为空，取恒等映射。每一轮既贡献直接的参数作用，也把之前轮次的影响继续传下去。某些方向上的 Jacobian 连乘过大或过小，就会影响长迭代的可训练性；normalization、输入注入和参数初始化共同决定这个过程。</p>
+<p>完整反传需要保存或重算所有轮次。截断反传先执行前 \(R-k\) 轮，在边界把状态 detach，再只对最后 \(k\) 轮建立计算图：</p>
+<pre><code>state = initial_state
+with no_grad():
+    for r in range(R - k):
+        state = core(state, encoded_input, r)
+state = state.detach()
+for r in range(R - k, R):
+    state = core(state, encoded_input, r)
+loss = prediction_loss(head(state), target)</code></pre>
+<p>这种做法保留最后 \(k\) 轮的梯度贡献，代价是前面各轮的参数影响被截断。它改变梯度估计；activation checkpointing 则通过反向时重算来保留原计算图的梯度。两者可以组合使用。若输入表示在最后 \(k\) 轮继续注入，输入编码器仍能通过这些注入获得梯度。</p>
+<p>标量例子取 \(z'=az+1\)、\(a=0.5,R=3\)，最终状态为 1.75。完整导数是 \(d z^{(3)}/da=1+2a=2\)；只保留最后一轮，导数变成边界状态 \(z^{(2)}=1.5\)。这个差异可以精确计算，适合验证实现中 detach 的位置。</p>
+<h2 id="dynamic">4. 让每个 token 选择计算量</h2>
+<p>不同 token 可以执行不同轮数。Universal Transformer 的 ACT 根据当前状态产生停止信号，已经停止的位置把状态继续传递；MoR 则把深度分配写成路由问题。设 token \(t\) 的执行轮数为 \(R_t\)，在第 \(r\) 轮仍活跃的集合为 \(\mathcal A_r=\{t:R_t\ge r\}\)。计算预算可以通过 \(\sum_tR_t\) 或逐轮活跃 token 数记录。</p>
+<p>MoR 的 expert-choice 让每一轮选择固定数量的 token，容易安排稳定的计算形状；token-choice 则让每个 token 选择自己的执行轮数，实际负载随输入变化。前一种方法若直接对整段序列做 top-k，选中一个位置可能取决于未来位置的分数。用于 causal 解码时，需要把训练时的选择机制与推理时可获得的信息对齐。可用一个前缀一致性测试：保留前缀不变、替换后缀，前缀的 causal 路由决定应保持一致。</p>
+<p>停止规则还需要质量标定。相邻轮次的 logit 分布 KL 很小，表明预测开始稳定；它与答案是否正确需要分别评估。工程上可以记录每轮任务得分、停止轮数分布，以及已停止样本再多算几轮后的变化。对于困难程度不同的子集，分别画质量与总计算的关系，能看清路由把预算分到了哪里。</p>
+<h2 id="cache">5. 每轮 KV 的身份与缓存协议</h2>
+<p>共享投影矩阵之后，不同轮次的输入状态仍然不同。为一个单头 attention 写出第 \(r\) 轮、位置 \(t\) 的 query 和历史位置 \(s\) 的 key/value：</p>
+$$q_t^{(r)}=W_Qz_t^{(r-1)},\quad
+\htmlData{symbol=key}{k_s^{(r)}}=W_Kz_s^{(r-1)},\quad
+v_s^{(r)}=W_Vz_s^{(r-1)}.$$
+<p>普通逐轮缓存保存 \((r,s)\) 对应的 KV；它们来自这一轮输入的表示。设循环模块内有 \(K\) 个 attention 层，每层 \(H_{kv}\) 个 KV head、每头宽度 \(d_h\)，缓存元素占 \(u\) 字节。固定执行 \(R\) 轮、batch 为 \(B\)、历史长度为 \(T\) 时，循环部分缓存为：</p>
+$$M_{KV}=2BTRK H_{kv}d_hu.$$
+<p>前面的 2 对应 key 与 value。权重只存一份，激活缓存仍带轮次轴。若早期 token 在第 1 轮退出，后续 token 第 3 轮需要读取它时，就必须明确应该读取哪一份状态。</p>
+<p>MoR 给出两种可训练的协议。<strong>Recursion-wise caching</strong> 只缓存本轮活跃 token，attention 的可读集合是 \(\{s\le t:s\in\mathcal A_r\}\)。<strong>Recursive KV sharing</strong> 保存全部 token 的第一轮 KV，后续轮的 query 始终读取 \(k_s^{(1)},v_s^{(1)}\)。它们分别改变可读位置集合与所读表示的版本，可以作为架构的一部分评估。</p>
+<figure class="article-figure arch-figure" id="depth-kv"><h3>相同权重，三种 KV 读取协议</h3><p class="arch-note">六个 token 的分配轮数为 1、3、2、3、1、3。算例中第 r 轮的 key 和 value 都取 r × token 编号，query 固定为 0.25；attention 仅读取当前 token 及其左侧。</p><div class="arch-controls"><label>缓存协议<select id="depth-kv-mode"><option value="full">每轮缓存全部 token</option><option value="routed">每轮只缓存活跃 token</option><option value="shared">各轮共享第一轮 KV</option></select></label><label>观察位置<select id="depth-kv-token"><option value="4">token 4</option><option value="6" selected>token 6</option></select></label></div><div class="arch-matrix" id="depth-kv-matrix"></div><div class="arch-result" id="depth-kv-result"></div><figcaption>三行对应三轮，六列对应 token；格内是 value，紫色格为当前 query 可读的条目。“↥”指向第一轮的存储。分数为 query × key，输出由真实 softmax 计算。</figcaption></figure>
+<p>例如 \(B=1,T=8192,R=8,K=4,H_{kv}=8,d_h=128\)，BF16 缓存需要 1 GiB。若只保存第一轮，循环部分降到 128 MiB。其后的每轮 query 仍可能扫描全部历史，所以存储下降与读取流量下降需要分别计算。按轮缓存活跃 token 则取决于各 \(\mathcal A_r\) 的大小，同时改变注意力能读取的上下文。</p>
+<p>给优化版本做等价测试时，应先固定一种协议。将完整前向、逐 token 解码、不同 chunk 的 prefill 输出互相比较，并在缓存键中保留请求、循环层与轮次身份。若改变缓存协议，就重新评估质量和训练条件；同一个“共享”开关可能同时改变内存布局与模型所实现的函数。</p>
+<h2 id="runtime">6. 把动态深度放到 GPU 上</h2>
+<p>假设一个 batch 的 4 个 token 分别需要 1、2、3、6 轮。有效调用共 12 次；把所有 token 补齐到 6 轮会安排 24 个 token-round 槽位，利用率为 50%。压紧活跃集合可以减少空算，但每轮都要处理索引、搬运与形状变化。小矩阵的 kernel 效率也可能下降，因此要同时观察活跃 token 数和每轮实际时间。</p>
+<p>共享模块提供了跨轮次批处理的机会：处于不同轮次、使用同一参数模块的 token，可以合并成一次调用。调度器仍需跟踪每项的状态、轮次编码、可读 KV 集合和请求依赖。若一个输出要等待前一轮完成，这个依赖必须保留；能够合并的是已经就绪的工作。可以先用离散事件模拟比较固定批次与就绪队列的空槽，再把真实 kernel 的形状耗时接入。</p>
+<p>训练还涉及跨卡同步。各卡独立采样差异很大的轮数时，较快的卡可能在 collective 前等待；对齐轮数或分桶会改变负载分布。重入共享模块、梯度累加和参数分片的 hook 也要保持一致。一个可靠的诊断是先在小模型上把完整展开与共享实现的输出、梯度逐项比对，再加入 checkpoint、混合精度与分片，每次只改变一个执行条件。</p>
+<p>评估循环模型时，可以同时做固定参数、固定训练 FLOPs 和固定推理延迟三组比较。固定参数能看到复用计算的收益；固定训练 FLOPs 约束训练预算；固定延迟检验线上价值。与 <a href="/posts/hyper-connections/">HC</a> 的多路残差、<a href="/posts/attention-residuals/">AttnRes</a> 的历史聚合相比，深度循环增加的是同一变换被执行的机会；是否产生有用变化，可以继续用<a href="/posts/effective-depth/">有效深度的测量与干预</a>检查。</p>
+<h2 id="exercises">7. 受控实验与习题</h2>
+<p><a href="./lab.py">下载 NumPy 实验</a>。脚本用标量与小矩阵网络验证共享参数的梯度、截断边界、不同轮次的 KV 缓存，以及动态预算的调用数。</p><pre><code>python -m pip install numpy
+python lab.py</code></pre><p>正常运行会打印各组 PASS、完整与截断梯度 −0.5/−0.375，以及三种缓存协议的不同输出。再运行 <code>python lab.py --experiment-a 0.8</code>，比较末尾额外实验的状态曲线与完整/截断导数：增大保留系数后，状态更慢地接近固定点，早期轮次对最终状态的影响也更强。还可以在逐轮协议中故意复用一个缓存槽，观察逐 token 输出何时偏离逐轮参考结果。实验只验证这些小型算子与状态协议。</p>
+<div class="article-exercise"><h3>练习 1：参数量与执行深度</h3><p>前后共 4 个非循环层，中间模块有 4 层，每层 100M 参数，忽略 embedding。执行 8、32 轮时，独立参数量与展开深度分别是多少？一个完全不共享、深度相同的网络又有多少参数？</p><details><summary>展开解答</summary><p>独立参数始终为 \((4+4)\times100\mathrm M=800\mathrm M\)。展开深度分别为 \(4+4\times8=36\) 和 \(4+4\times32=132\)，完全不共享时对应 3.6B 和 13.2B 参数。层调用次数仍为 36 和 132；循环模型的计算规模要按这些调用核算。</p></details></div>
+<div class="article-exercise"><h3>练习 2：截断改变了哪一项？</h3><p>迭代 \(z^{(r+1)}=az^{(r)}+1\)，\(z^{(0)}=0,a=0.5,R=3\)。目标为 2，损失 \(\ell=\tfrac12(z^{(3)}-2)^2\)。求完整梯度与只反传最后一轮的梯度。checkpoint 全部轮次时应得到哪个？</p><details><summary>展开解答</summary><p>最终状态为 \(1+a+a^2=1.75\)，损失对最终状态的导数为 −0.25。完整状态导数为 \(1+2a=2\)，参数梯度是 −0.5。截断时边界 \(z^{(2)}=1.5\) 被当成常数，只剩最后一次乘法的导数 1.5，得到 −0.375。checkpoint 重算保留全图依赖，应得到 −0.5。</p></details></div>
+<div class="article-exercise"><h3>练习 3：权重共享后 KV 有多大？</h3><p>循环模块 3 层，每条序列长度 4096，batch 为 2，执行 6 轮，每层 4 个 KV head、每头 64 维，缓存为 BF16。分别计算逐轮全部缓存和只存第一轮的容量。</p><details><summary>展开解答</summary>$$M=2\times2\times4096\times6\times3\times4\times64\times2=150994944\ \mathrm B=144\ \mathrm{MiB}.$$<p>只存第一轮时，轮次轴由 6 变成 1，容量为 24 MiB。这仅统计循环部分的 K/V；前后层、状态和工作区另计。采用第一轮共享协议后，后续查询读取的是第一轮的历史表示。</p></details></div>
+<div class="article-exercise"><h3>练习 4：动态停止能节省多少调用？</h3><p>一个 batch 的执行轮数为 \((1,2,3,6)\)。计算补齐执行的槽位利用率；写出每轮活跃 token 数。若每轮只缓存活跃 token，每个 token-round 一份 KV，共有多少份？如何判断路由有没有偷看未来？</p><details><summary>展开解答</summary><p>有效调用为 12，补齐槽位为 \(4\times6=24\)，利用率为 50%。六轮活跃数为 \((4,3,2,1,1,1)\)，相加得到 12 份 KV。测试 causal 路由时，固定一个前缀，构造多个不同后缀，比较前缀位置每轮的路由决定；若它们改变，检查整段 top-k、归一化和辅助路由器的数据依赖。之后再分别测压紧活跃集合的索引成本、kernel 时间与端到端延迟。</p></details></div>
+<h2 id="references">参考与延伸阅读</h2><ol><li><a href="https://arxiv.org/abs/1807.03819">Universal Transformers</a>：共享变换、位置/轮次编码与动态停止。</li><li><a href="https://arxiv.org/abs/1909.11942">ALBERT: A Lite BERT for Self-supervised Learning of Language Representations</a>：跨层参数共享；<a href="https://github.com/google-research/albert">官方实现</a>。</li><li><a href="https://arxiv.org/abs/2502.05171">Scaling up Test-Time Compute with Latent Reasoning: A Recurrent Depth Approach</a>：随机轮次、输入注入与截断反传；<a href="https://github.com/seal-rg/recurrent-pretraining">官方训练与推理代码</a>。</li><li><a href="https://arxiv.org/abs/2507.10524">Mixture-of-Recursions: Learning Dynamic Recursive Depths for Adaptive Token-Level Computation</a>：§2 区分路由和两种 KV 协议，附录讨论缓存及吞吐测量。</li></ol>
+</article><nav class="series-pager" data-series="architectures"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"depth": {"label": "L_exec：展开执行深度", "description": "非循环层数 L₀ 加循环模块层数 K 乘执行轮数 R，统计层调用次数。"}, "rounds": {"label": "R：执行轮数", "description": "同一循环模块在一次前向中被调用多少轮；其内部参数跨轮共享。"}, "state": {"label": "Z⁽ʳ⁺¹⁾：下一轮状态", "description": "长度 T、宽度 d 的序列表示；上标标记深度循环轮次。"}, "key": {"label": "kₛ⁽ʳ⁾：第 r 轮的位置 s 的 key", "description": "由这一轮输入状态 zₛ⁽ʳ⁻¹⁾ 经过共享 W_K 投影得到；不同轮次可有不同数值。"}}}</script><script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="./figures.js"></script><script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script></body></html>

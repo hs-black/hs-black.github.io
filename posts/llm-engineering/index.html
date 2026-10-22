@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LLM 工程学习路径：从张量到推理服务 · Zunzhe Zhang</title>
-  <meta name="description" content="十个阶段串起模型计算、GPU 算子、缓存、推理服务、预训练算法、微调、深层信息流和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。">
+  <meta name="description" content="十个阶段串起模型计算、推理服务、预训练、稀疏与低精度训练、模型复用、递归结构和条件记忆；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/curriculum.css?v=dd0ca17259f8">
@@ -32,8 +32,9 @@
       <option value="all">完整体系 · 十个阶段</option>
       <option value="inference">推理工程 · 基础到综合项目</option>
       <option value="kernels">算子与运行时 · 基础 + GPU</option>
-      <option value="pretraining">预训练算法 · 预算、数据与深层信息流</option>
-      <option value="adapters">微调与多租户 · 基础到训练分支</option>
+      <option value="pretraining">预训练算法 · 数据、数值与稀疏训练</option>
+      <option value="architectures">模型结构 · 状态、深度与条件记忆</option>
+      <option value="adapters">模型复用 · 微调、合并与多租户</option>
       <option value="multimodal">多模态与 VLA · 基础到动作生成</option>
     </select>
     <span class="course-progress" id="course-progress" aria-live="polite"></span>
@@ -56,9 +57,9 @@
   </article>
 </main>
 <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a> · <a href="/blog/?view=curriculum">按学习路径浏览博客</a></footer>
-<script src="/assets/post-links.js?v=8a89387e7679"></script>
-<script src="/assets/posts.js?v=c2ffb7de30e3"></script>
-<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+<script src="/assets/post-links.js?v=fe48d4412e51"></script>
+<script src="/assets/posts.js?v=186761fcdc0a"></script>
+<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 <script>
 (() => {
   const stages = window.CURRICULUM.stages;
@@ -74,7 +75,8 @@
     all: stages.map(s => s.id),
     inference: ['foundations', 'kernels', 'memory', 'engine', 'serving', 'capstone'],
     kernels: ['foundations', 'kernels'],
-    pretraining: ['foundations', 'kernels', 'pretraining', 'architectures'],
+    pretraining: ['foundations', 'kernels', 'memory', 'pretraining', 'adaptation'],
+    architectures: ['foundations', 'kernels', 'memory', 'pretraining', 'architectures'],
     adapters: ['foundations', 'kernels', 'memory', 'engine', 'adaptation'],
     multimodal: ['foundations', 'kernels', 'memory', 'engine', 'serving', 'multimodal'],
   };

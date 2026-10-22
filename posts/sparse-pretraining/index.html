@@ -1,0 +1,87 @@
+<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>稀疏预训练：动态连接怎样变成真实加速 · Zunzhe Zhang</title><meta name="description" content="串起RigL、SR-STE与2:4 Transformer预训练，推导掩码更新、可转置约束、三个GEMM和优化器账本，配可操作数值图与实验。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script><style>
+.s-figure{margin:1.8em 0;padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}.s-figure h3{margin:0 0 12px;font-size:19px}.s-figure p,.s-figure figcaption{font-size:14px;line-height:1.8}.s-figure figcaption{color:var(--text-soft);margin-top:12px}.s-controls{display:flex;gap:12px;flex-wrap:wrap;align-items:center;font-size:14px;margin:12px 0}.s-controls label{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.s-controls select,.s-controls input[type=number]{font:inherit;color:var(--text);background:var(--bg);border:1px solid var(--border);padding:6px;border-radius:6px;max-width:100%}.s-controls input[type=range]{width:145px;max-width:100%}.s-result{padding:12px;background:var(--bg-soft);border-radius:8px;font-size:14px;line-height:1.85;font-variant-numeric:tabular-nums}.s-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:7px;margin:12px 0}.s-cell{padding:9px 3px;text-align:center;border:1px solid var(--border);border-radius:7px;background:var(--bg-soft);font-size:13px;line-height:1.7;font-variant-numeric:tabular-nums}.s-cell.on{border-color:var(--accent);background:var(--accent-soft)}.s-cell.dim{background:var(--bg-soft)}.s-cell button{background:none;border:0;color:inherit;font:inherit;cursor:pointer;width:100%;padding:0}.s-cell small{display:block;color:var(--text-soft);font-size:12px}.s-figure table{min-width:0;width:100%;font-size:13px}.s-figure th,.s-figure td{padding:8px 4px;white-space:normal}.s-figure svg{width:100%;height:auto;display:block}.s-bar{height:22px;position:relative;background:var(--bg-soft);border-radius:4px;overflow:hidden;margin:7px 0}.s-bar span{display:block;height:100%;background:var(--accent)}.s-bar.grey span{background:var(--text-soft)}.s-bar-label{font-size:13px;color:var(--text-soft)}.s-exercise{border-top:1px solid var(--border);padding-top:14px;margin-top:24px}.s-exercise h3{margin:4px 0 10px}.s-caption{font-size:13px;color:var(--text-soft)}.s-two{display:grid;grid-template-columns:1fr 1fr;gap:12px}.s-two>div{min-width:0}
+@media(max-width:480px){.s-figure{padding:12px 10px}.s-figure h3{font-size:18px}.s-two{grid-template-columns:1fr}.s-cell{font-size:12px;padding:8px 2px}.s-controls{gap:9px}.s-figure table{font-size:13px}.s-result{padding:9px}.s-grid{gap:4px}}
+</style></head><body><header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header><main class="wrap"><header class="post-header"><h1>稀疏预训练：动态连接怎样变成真实加速</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header><nav class="series" data-series="sparsity"></nav><article class="prose"><p class="lead">把一半权重设成零，训练会快一倍吗？一次线性层训练要做三次矩阵乘法，前向和反向沿不同方向读取权重，优化器还要保存未来可能重新启用的连接。稀疏预训练的关键，是让连接学习、数值更新和硬件执行共享一份一致的设计。</p>
+<p><a href="/posts/weight-pruning/">权重剪枝</a>从已有模型寻找可删除的连接。稀疏预训练还要回答：模型尚未学会任务时，哪些连接应该存在，连接怎样交换，以及省下的乘法能否覆盖选择与打包的成本。RigL、SR-STE 和面向 Transformer 的 2:4 训练，分别从动态拓扑、近似梯度和 GPU 执行推进这个问题。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#three">先画出一次训练的三个 GEMM</a></li><li><a href="#connections">被删除的连接怎样重新生长</a></li><li><a href="#stability">让掩码变化逐渐稳定</a></li><li><a href="#transpose">前后向共用的 2:4 掩码</a></li><li><a href="#time">算清一整步的时间</a></li><li><a href="#memory">影子权重与优化器账本</a></li><li><a href="#experiment">怎样验证一个稀疏训练方案</a></li><li><a href="#exercises">计算与诊断练习</a></li><li><a href="#lab">运行实验</a></li></ol></nav>
+<section id="three"><h2>1. 先画出一次训练的三个 GEMM</h2>
+<p>设输入为 \(X\in\mathbb R^{d_{\rm in}\times N}\)，一列对应一个 token；权重为 \(\htmlData{symbol=weight}{W}\in\mathbb R^{d_{\rm out}\times d_{\rm in}}\)。前向得到 \(Y=WX\)。损失对输出的梯度为 \(\htmlData{symbol=gradient}{G}=\partial L/\partial Y\)，形状与 Y 相同。反向传播需要</p>
+<div class="math-block">\[
+\underbrace{Y=WX}_{\text{前向}},\qquad
+\underbrace{\frac{\partial L}{\partial X}=W^\top G}_{\text{输入梯度}},\qquad
+\underbrace{\frac{\partial L}{\partial W}=GX^\top}_{\text{权重梯度}}.
+\]</div>
+<p>这三个 GEMM 各约需要 \(2Nd_{\rm in}d_{\rm out}\) 次浮点运算。让 W 稀疏，会直接影响前两个乘法。第三个的乘数是 G 和 X：在保留稠密梯度、寻找潜在新连接的训练中，这一步仍要计算完整结果。</p>
+<p>2:4 稀疏要求沿硬件规定的归约方向，每四个位置最多保留两个非零数。前向使用 W 的输入通道方向；输入梯度使用 W 的转置，归约方向随之改变。因此，一个对前向合法的掩码，需要额外设计才能同时服务反向。</p>
+<p>只把权重做成 2:4、并保留稠密权重梯度时，若前两个 GEMM 都达到理想的两倍吞吐，三次乘法的总耗时从 3 份降为 \(1/2+1/2+1=2\) 份，矩阵乘法部分加速 1.5 倍。接下来还要把掩码选择、打包、优化器和通信计入整步时间。</p></section>
+<section id="connections"><h2>2. 被删除的连接怎样重新生长</h2>
+<p>用 \(\htmlData{symbol=mask}{M}\) 表示二值掩码，实际参与前向的权重为 \(\widetilde W=M\odot W\)，其中 \(\odot\) 是逐元素相乘。固定 M 时，普通链式法则给出</p>
+<div class="math-block">\[
+\frac{\partial L}{\partial W}
+=M\odot\frac{\partial L}{\partial\widetilde W}.
+\]</div>
+<p>掩码为零的位置收不到任务梯度。只沿这条路径训练，连接集合就固定了。要探索新的连接，需要另外取得被删位置的信息。</p>
+<p>RigL 每隔若干训练步更新一次拓扑：先删除部分幅值最小的活跃权重，再依据候选连接的梯度幅值，长出相同数量的新连接。固定的活跃参数预算让模型在不同连接之间搜索。梯度大的位置，表示沿那个坐标做小幅变化，当前损失可能有明显下降。</p>
+<p>例如前向只有连接 1 和 2，候选连接 3 和 4 的梯度幅值分别为 0.02、0.8。若要替换一条较弱连接，第 4 条更值得尝试。新连接加入时的数值与优化器状态也必须规定：设为零、清空对应动量是一种容易验证的策略；恢复旧动量则会产生不同的首次位移。实现需要把这个选择纳入实验记录。</p>
+<p>RigL 的原始证据包括视觉任务与语言建模。它建立的是“周期性连接搜索”的方法，而落到大规模 LLM 时，还要测候选梯度扫描、非结构稀疏 kernel 和通信的成本。假设普通稀疏步耗时 \(T_s\)，每 K 步发生一次额外成本为 \(T_{\rm scan}\) 的完整扫描，则平均每步为 \(T_s+T_{\rm scan}/K\)。更低频的拓扑更新节省扫描，却也减少了搜索机会。</p>
+<p>另一种方法保留稠密的影子权重 W，每次用当前幅值选择稀疏掩码，反向时使用直通估计器 STE：</p>
+<div class="math-block">\[
+g_{\rm STE}=\frac{\partial L}{\partial\widetilde W},
+\qquad
+W_{t+1}=W_t-\htmlData{symbol=eta}{\eta}\,g_{\rm STE}.
+\]</div>
+<p>这里 \(\eta\) 是 SGD 的学习率。STE 让所有影子权重接收梯度；暂时被屏蔽的值仍能增长，并在以后进入前两名。它为离散选择规定了一条可训练的近似反向规则。检验这种实现时，应分别检查固定掩码的真实导数，以及 STE 约定传回的梯度；两者承担不同任务。</p></section>
+<section id="stability"><h2>3. 让掩码变化逐渐稳定</h2>
+<p>动态连接带来了一个特殊的优化现象：同组里第二大和第三大的权重很接近时，微小更新就会交换它们。层输出因此不断改变，优化器动量却还混合着过去不同拓扑下的梯度。</p>
+<p>SR-STE 在被剪位置加入收缩项。以 SGD 为例，令 \(\lambda\) 为稀疏正则强度，则更新写成</p>
+<div class="math-block">\[
+W_{t+1}=W_t-\eta\left[
+g_{\rm STE}+\lambda(1-M_t)\odot W_t
+\right].
+\]</div>
+<p>其中 \(M_t\) 是本步前向使用的掩码。活跃位置按任务梯度更新；被剪位置还受到朝零方向的力。这会拉开候选值之间的距离，让已形成的结构更稳定。过强的收缩也可能过早压住有用候选，因此需要同时看 loss 与连接变化。</p>
+<p>可用翻转率衡量相邻两步掩码的变化。若本层共有 D 个位置，定义</p>
+<div class="math-block">\[
+\htmlData{symbol=fliprate}{r_t}=\frac{\|M_t-M_{t-1}\|_1}{D}.
+\]</div>
+<p>一次“一条连接退出、另一条进入”会改变两个位置。如果 16 个位置里交换两条连接，翻转数为 4，\(r_t=25\%\)。训练早期探索不同连接，后期逐渐稳定，是有用的观察模式；它需要与验证误差和更新幅值一起解释。</p>
+<p>Hu 等人的 <em>Accelerating Transformer Pre-training with 2:4 Sparsity</em> 把这件事带到 Transformer：在 Adam 类优化器里，先把被剪权重的收缩项加入梯度，再更新一、二阶矩。它和直接在参数上做一次衰减有不同的效果。前者经过每个坐标自己的二阶矩归一化，也会影响后续动量。</p>
+<p>例如两个被剪权重同为 1，正则贡献同为 0.01，优化器的归一化分母分别为 0.1 和 1。在只看二阶矩归一化这一项时，它们引起的归一化贡献分别为 0.1 和 0.01。实现 Adam 时，把正则项放在矩估计之前还是之后，会改变算法。可用一个两坐标算例检查更新值，再观察小模型的翻转率，而不要只比超参数名称。</p>
+<p>这篇工作还用 warmup 阶段的翻转率筛选强度，并在训练末段加入 dense fine-tuning。最后的稠密恢复阶段也属于总训练成本。若目标是部署固定稀疏模型，还需要单独验证最终导出的稀疏权重；训练节省计算和部署压缩可以有不同的终点。</p></section>
+<section id="transpose"><h2>4. 前后向共用的 2:4 掩码</h2>
+<p>看看一个 4×4 权重块。每行都保留前两列时，行方向满足 2:4，列方向却分别有 4、4、0、0 个非零数。转置以后，前两行各有四个非零数，便无法按同样的 2:4 格式编码。</p>
+<p>如果前向按行选前两名、反向又独立按列选前两名，输入梯度乘到的就是另一组权重。要得到前向稀疏层的准确输入梯度，反向必须使用同一个有效矩阵的转置。因此，可以在每个 4×4 块内同时限制每行和每列各保留两个位置，构造可转置掩码。</p>
+<figure class="s-figure" id="transpose-demo"><h3>一个掩码同时通过两个方向的检查</h3><p>点击格子切换保留状态；或让算法选择当前块。紫色格子参与乘法，格子下方给出该权重的幅值。</p><div class="s-controls"><button class="btn" id="mask-row" type="button">每行取前二</button><button class="btn" id="mask-both" type="button">最佳可转置掩码</button><button class="btn" id="mask-reset" type="button">清空</button></div><div class="s-grid" id="transpose-cells"></div><div class="s-result" id="transpose-result" aria-live="polite"></div><figcaption>硬件模式允许每组至多两个非零数；这里的“最佳”在每行、每列恰好各两个的 90 种掩码中，最大化保留权重的幅值之和。按钮使用这个小块的穷举参考。</figcaption></figure>
+<p>每行从四个位置选两个，有 \(\binom42=6\) 种；四行共有 \(6^4=1296\) 种组合，再筛掉列计数不为 2 的，剩下 90 种。Hu 等人的实现把这 90 个候选整理成小卷积核，一次计算各候选保留的幅值总和，再选最大值。固定小候选集适合 GPU 批量比较，避免逐元素的分支搜索。</p>
+<p>PyTorch 的工程实现还展示了更轻量的贪心选择和同时打包 W、\(W^\top\) 的做法。满足每行每列“至多两个”的贪心结果有时会只保留七个位置；恰好八个与至多八个，应在有效密度统计里区分。多保留一个有价值的连接、减少选择时间，都是实际取舍。</p>
+<p>数据布局同样要一起设计。有的稀疏 GEMM 接口只支持一个固定操作数位置。可以利用 \((AB)^\top=B^\top A^\top\) 调整调用方向，再选择下游能直接消费的输出布局。若为适配接口额外读写整个激活矩阵，省下的乘法可能又被布局转换抵消。</p></section>
+<section id="time"><h2>5. 算清一整步的时间</h2>
+<p>设三个 dense GEMM 各耗时 t，前向与输入梯度的实测加速比分别为 \(s_f,s_x\)，每步掩码选择和打包耗时为 p，其他工作为 o。权重稀疏方案的时间为</p>
+<div class="math-block">\[
+T_{\rm dense}=3t+o,\qquad
+T_{\rm sparse}=\frac{t}{s_f}+\frac{t}{s_x}+t+p+o.
+\]</div>
+<p>t、p、o 都使用同一时间单位。这里把其他工作视为相同，便于隔离稀疏 GEMM 的收益。真实运行还应记录 kernel 融合、通信重叠与内存压力带来的变化。</p>
+<figure class="s-figure" id="time-demo"><h3>稀疏 GEMM 省下的时间，够打包使用吗</h3><div class="s-controls"><label>每个 dense GEMM / ms <input id="time-gemm" type="number" min="0.1" max="10" step="0.1" value="1"></label><label>前两项加速比 <input id="time-speed" type="range" min="1" max="2" step="0.1" value="2"><output id="time-speed-value"></output></label><label>选择与打包 / ms <input id="time-pack" type="number" min="0" max="10" step="0.1" value="0.2"></label><label>其他工作 / ms <input id="time-other" type="number" min="0" max="10" step="0.1" value="0.5"></label><button class="btn" id="time-reset" type="button">重置</button></div><div class="s-bar-label" id="dense-label"></div><div class="s-bar grey"><span id="dense-bar"></span></div><div class="s-bar-label" id="sparse-label"></div><div class="s-bar"><span id="sparse-bar"></span></div><div class="s-result" id="time-result" aria-live="polite"></div><figcaption>计算器用输入的时间进行预算；条形图共用从 0 到两种总耗时最大值的刻度。权重梯度保持 dense，三个 GEMM 的分项会显示在结果中。</figcaption></figure>
+<p>默认参数下，dense 用 3.5 ms；稀疏用 \(0.5+0.5+1+0.2+0.5=2.7\) ms，加速约 1.30 倍。收支平衡要求 \(p&lt;2t-2t/s\)，其中 s 是前两项共同加速比。打包成本达到 1 ms 时，这个例子就失去时间收益。</p>
+<p>Hu 等人的 fully sparse training 还对输出梯度做稀疏估计，让第三个 GEMM 的一个乘数也满足稀疏格式。其路线使用最小方差无偏估计：随机保留一些梯度并重标定，使估计的期望等于原梯度。这引入了额外方差，所以需要同时验证收敛、随机性与 kernel 收益。仅有权重稀疏的三项账本，可以作为加入这一步之前的基线。</p>
+<p>低密度也不自动解决小矩阵效率。小 batch、短序列或很窄的层可能受 kernel launch、数据搬运和占用率限制；大矩阵则更有机会发挥 Tensor Core。把本模型实际的 \(N,d_{\rm in},d_{\rm out}\)、数据类型、掩码生成频率列成形状表，按真实比例加权，得到的结论比单个最大矩阵的吞吐更有用。</p></section>
+<section id="memory"><h2>6. 影子权重与优化器账本</h2>
+<p>动态 2:4 训练通常要保留完整影子权重，才能让被剪位置继续竞争。Adam 的一阶、二阶矩也可能保持完整。于是，前向只用一半乘法，并不等于训练状态占用减半。</p>
+<p>例如 10 亿个参数，采用 BF16 工作权重 2 B、BF16 梯度 2 B、FP32 主权重 4 B、两个 FP32 矩状态合计 8 B，每个参数合计 16 B，约 16 GB。这里 GB 按十进制计算，尚未包含激活、通信缓存和分片。</p>
+<p>若再缓存正向和转置两份 2:4 BF16 权重，每四个原始位置保存两个 BF16 值与 4 bit 元数据，每份平均为 \(4.5/4=1.125\) B/原始参数。两份合计再占 2.25 GB。具体实现可以复用缓存，或按层临时打包；峰值应从生命周期测量。</p>
+<p>固定掩码训练可以设计只保存活跃连接的优化器，但它改变了新连接搜索的能力。动态搜索采用稠密状态、固定结构后再压缩状态，是另一种分阶段方案。无论选择哪条路线，都需要明确新连接的初值、动量，以及 checkpoint 恢复时的掩码版本。</p>
+<p>数据并行下，各副本若从完全同步的影子权重、相同规则和稳定的并列排序得到掩码，可以维持一致。若掩码依赖本地未同步梯度或随机采样，应安排同步或共同随机状态。梯度通信也有独立的账本：本地 GEMM 稀疏，传送的张量仍可能是完整梯度；只有在通信协议采用可合并的稀疏表示后，通信量才会相应下降。</p></section>
+<section id="experiment"><h2>7. 怎样验证一个稀疏训练方案</h2>
+<p>先用一个小线性层建立准确参考。固定掩码后，对比 dense-mask 前向与稀疏 kernel 前向；对输入梯度做有限差分，检查反向使用的是同一个有效权重。再单独检查 STE 是否把规定的梯度传回影子权重。这样可以把格式错误、转置错误和训练策略分开定位。</p>
+<p>然后跑一段可重复的小模型训练，记录验证 loss，以及每层翻转率、第二大与第三大幅值的间距、活跃与非活跃参数的更新 RMS。若翻转持续偏高，检查学习率、masked decay 的放置位置和候选间距；若早期就完全冻结，检查正则强度以及新连接是否真正收到了梯度。</p>
+<p>时间测试要覆盖一次完整 optimizer step，包括掩码、两个方向的打包、三个 GEMM、通信和参数更新。先比较固定总 token 下的质量，再比较达到同一验证 loss 的累计时间。动态连接方法可能需要不同的训练步数；训练末段的 dense 恢复也应计入总量。</p>
+<p>最后保留两个容易解释的对照：相同结构的固定随机掩码，以及相同计算预算的更窄 dense 网络。前者检验连接搜索的价值，后者检验这一硬件和训练规模下，复杂的稀疏路径是否比直接改变宽度更划算。关于输入激活也参与稀疏的情况，可继续看<a href="/posts/activation-sparsity/">激活稀疏</a>。</p></section>
+<section id="exercises"><h2>8. 计算与诊断练习</h2>
+<div class="s-exercise"><h3>练习 1：固定掩码与 STE 的一次更新</h3><p>输入 x=[1,2]，影子权重 w=[3,1]，掩码 M=[1,0]，目标为 5，损失为预测误差平方的一半。学习率 0.1。分别计算固定掩码梯度、STE 梯度和一次更新；再令 SR-STE 的 λ=0.5。</p><details><summary>展开完整解答</summary><p>当前输出是 3，误差为 −2，对有效权重的梯度为 [−2,−4]。固定掩码梯度乘以 M，得到 [−2,0]，更新后为 [3.2,1]。STE 保留完整梯度，更新为 [3.2,1.4]。SR-STE 在被剪位置增加 \(0.5\times1=0.5\)，梯度成为 [−2,−3.5]，更新后为 [3.2,1.35]。被剪权重仍能增长，但比纯 STE 增长得慢。</p></details></div>
+<div class="s-exercise"><h3>练习 2：检查一个双向掩码</h3><p>4×4 掩码的四行分别为 1100、0110、0011、1001。它能否同时用于前向和转置？如果从每行都是 1100 的掩码变成它，翻转率是多少？</p><details><summary>展开完整解答</summary><p>每行都有两个 1；各列依次也有两个 1，所以两个方向均满足 2:4。与原掩码相比，四行分别有 0、2、4、2 个位置变化，总计 8，翻转率为 8/16=50%。这对应删除四条连接并生长四条连接。翻转位置数量把退出和进入都算在内。</p></details></div>
+<div class="s-exercise"><h3>练习 3：稀疏 GEMM 带来多少训练收益</h3><p>三个 dense GEMM 各 2 ms，其他工作 1 ms。前两个的实际加速比为 1.6，权重梯度保持 dense，选择与打包共 0.4 ms。求整步加速比和打包成本的收支平衡点。</p><details><summary>展开完整解答</summary><p>dense 总时间为 7 ms。稀疏为 \(2/1.6+2/1.6+2+0.4+1=5.9\) ms，加速 \(7/5.9\approx1.186\) 倍。前两项共省 \(4-2.5=1.5\) ms，因此额外打包必须低于 1.5 ms 才能更快。超过这个值时，首先检查能否复用掩码、融合选择打包，或只对大矩阵启用。</p></details></div>
+<div class="s-exercise"><h3>练习 4：稀疏训练为什么可能占用更多显存</h3><p>10 亿参数按本节 16 B/参数的配方保存影子权重、梯度和 Adam 状态，另缓存正、转置两份 2:4 BF16 权重。求总字节数；若一个实现声称显存减半，应要求它列出哪些项目？</p><details><summary>展开完整解答</summary><p>基础状态 16 GB，两份压缩权重合计 \(10^9\times2\times1.125=2.25\) GB，总计 18.25 GB。还应核对激活、临时压缩缓冲、分片、通信缓存、单独掩码及峰值重叠。要证明减半，需要说明是否去掉稠密主权重或矩状态、是否固定掩码，以及比较基线使用相同的分片与 checkpointing。</p></details></div></section>
+<section id="lab"><h2>9. 运行实验</h2><p><a href="/posts/sparse-pretraining/lab.py" download>下载 lab.py</a>，在安装 NumPy 的环境中执行：</p><pre><code>python3 lab.py</code></pre><p>正常运行会逐项打印 PASS，随后给出当前数值实验的结果。</p><p>实验从显式循环独立验证三个 GEMM，再用有限差分检查固定掩码梯度；随后核对 STE 和 SR-STE 的手算更新，枚举全部 90 个可转置掩码，并验证时间与显存账本。它还运行一个小型动态 2:4 线性回归，输出固定、STE、SR-STE 三种策略的损失和翻转统计。</p><p>可以调整正则强度或学习率，观察翻转数和重建误差是否一起变化；把固定掩码的梯度乘法去掉，观察有限差分检查如何发现语义变化。这个实验让更新规则变得可测；GPU 加速需要在目标硬件上另测实际形状的 kernel 和完整训练步。</p></section>
+<h2 id="references">参考与延伸阅读</h2><ul><li><a href="https://proceedings.mlr.press/v119/evci20a.html">Rigging the Lottery: Making All Tickets Winners</a>：周期性剪枝与梯度生长；<a href="https://github.com/google-research/rigl">RigL 官方实现</a>。</li><li><a href="https://arxiv.org/abs/2102.04010">Learning N:M Fine-grained Structured Sparse Neural Networks From Scratch</a>：STE、SR-STE 与结构变化度量。</li><li><a href="https://proceedings.mlr.press/v235/hu24r.html">Accelerating Transformer Pre-training with 2:4 Sparsity</a>：三个稀疏乘法、masked decay、翻转率、90 种可转置掩码；<a href="https://github.com/yuezhouhu/2by4-pretrain">官方实现</a>。</li><li><a href="https://pytorch.org/blog/accelerating-neural-network-training/">Accelerating Neural Network Training with Semi-Structured (2:4) Sparsity</a>：双向压缩、选择成本与实际硬件布局。</li><li><a href="https://docs.pytorch.org/docs/stable/sparse.html#sparse-semi-structured-tensors">PyTorch 半结构稀疏张量文档</a>：数据类型、形状、元数据和支持的算子。</li></ul>
+</article><nav class="series-pager" data-series="sparsity"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer><script type="application/json" id="math-definitions">{"global": {"weight": {"label": "W：线性层权重", "description": "本节用行表示输出通道、列表示输入通道；稀疏化会改变其中的有效元素。"}, "calibration": {"label": "X：校准输入", "description": "每列是一个校准样本，每行是一个输入通道；层输出为 WX。"}, "gram": {"label": "H：输入二阶矩矩阵", "description": "本文归一化的重建损失中 H=XXᵀ/N，N 是校准样本数；用于刻画输入通道的尺度与相关性。"}, "mask": {"label": "M：稀疏掩码", "description": "与权重或激活同形状，二值掩码的 1 表示保留、0 表示置零；具体对象在公式附近给出。"}, "density": {"label": "ρ：密度", "description": "非零或活跃元素占全部元素的比例；稀疏率为 1−ρ。"}, "gradient": {"label": "G：输出梯度", "description": "损失对当前线性层输出的导数；形状与该层输出一致。"}, "eta": {"label": "η：学习率", "description": "当前优化步骤的步长，实际参数位移还取决于梯度、优化器与权重衰减。"}, "batch": {"label": "B：同时处理的 token 数", "description": "本节用来计算活跃集合的并集；可以来自多条请求或一段 prefill。"}, "threshold": {"label": "τ：激活截断阈值", "description": "绝对值小于该值的激活被设为零，保留其余激活。"}, "downweight": {"label": "W_down：FFN 下投影权重", "description": "采用列向量写法时，形状为模型宽度 d × 中间宽度 m；第 j 列乘以中间激活 h_j。"}, "activationerror": {"label": "e：输出误差向量", "description": "完整输出减去截断激活后的输出；其 2 范数表示这次近似引起的输出偏移。"}, "droppedactivation": {"label": "δ：被删激活向量", "description": "δ=h−ĥ，保留位置为零，删除位置保留原来的激活值；用于计算截断误差。"}, "fliprate": {"label": "r_t：本步掩码翻转率", "description": "相邻两步中掩码发生变化的位置数除以总位置数 D；退出和进入分别计数。"}, "uniondensity": {"label": "q_B：batch 活跃并集的期望密度", "description": "一个神经元至少被 B 个 token 中的一个使用的概率；独立活跃假设下为 1−(1−ρ)^B。"}, "correlation": {"label": "ρ：两个输入的相关系数", "description": "本节两个输入均值为零、方差为 1，因此相关系数也等于它们乘积的期望；范围为 −1 到 1。"}, "activation": {"label": "h：FFN 中间激活", "description": "上投影和非线性变换产生的向量，随后由下投影映射回模型宽度。"}}, "scopes": {}}</script><script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/sparse-pretraining/figures.js"></script><script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=fe48d4412e51"></script><script src="/assets/posts.js?v=186761fcdc0a"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script></body></html>

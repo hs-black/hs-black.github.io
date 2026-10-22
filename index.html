@@ -121,25 +121,35 @@
         </div>
         <!-- Series cards: first post of each series. -->
         <div class="series-cards">
+          <a class="series-card" href="/posts/state-space-models/">
+            <span class="sc-count">5 篇</span>
+            <h3>模型结构：状态、深度与条件记忆</h3>
+            <p>状态空间与共享深度、OE 与 Engram、概念模型，推导计算方式并核对状态和访存。</p>
+          </a>
+          <a class="series-card" href="/posts/weight-pruning/">
+            <span class="sc-count">3 篇</span>
+            <h3>稀疏计算：权重、训练与激活</h3>
+            <p>从数据感知剪枝到可转置的 2:4 训练，再看 token 活跃集合怎样改变实际访存。</p>
+          </a>
           <a class="series-card" href="/posts/pretraining-scaling/">
-            <span class="sc-count">6 篇</span>
+            <span class="sc-count">7 篇</span>
             <h3>预训练算法：从预算与数据到学习动态</h3>
-            <p>Scaling Laws、数据筛选与配比、μP、学习目标和训练稳定性，连接论文推导与实验。</p>
+            <p>预算、数据、μP、学习目标与稳定性，再把已有 dense 模型转换为 MoE。</p>
           </a>
           <a class="series-card" href="/posts/hyper-connections/">
-            <span class="sc-count">3 篇</span>
+            <span class="sc-count">4 篇</span>
             <h3>Hyper-Connections 与深层信息流</h3>
-            <p>多路残差、mHC 的双随机约束，以及 Attention Residuals 的深度选择与工程取舍。</p>
+            <p>多路残差、mHC、Attention Residuals，再用删层和提前退出测量有效深度。</p>
           </a>
           <a class="series-card" href="/posts/scaling-memory/">
             <span class="sc-count">13 篇</span>
             <h3>大模型规模化训练</h3>
-            <p>从显存账本、Roofline 到 5D 并行、FlashAttention、FP8 和推理，逐层拆开。</p>
+            <p>显存与 FLOPs、并行与通信、GPU 内核、低精度训练，从数学账本走到工程实现。</p>
           </a>
           <a class="series-card" href="/posts/smol-decisions/">
             <span class="sc-count">6 篇</span>
             <h3>从零训练一个 LLM</h3>
-            <p>消融方法、架构、优化器与数据、训练马拉松、后训练和基础设施。</p>
+            <p>沿着 SmolLM3 的训练过程，串起架构、数据、优化、长上下文、后训练和基础设施。</p>
           </a>
           <a class="series-card" href="/posts/deepseek-v4/">
             <span class="sc-count">5 篇</span>
@@ -150,9 +160,9 @@
 
         <!-- The newest 3 posts from /blog/. -->
         <ul class="post-list">
-          <li><a href="/posts/pretraining-scaling/"><span class="post-title">训练预算怎样分配：Scaling Laws 与模型、数据的取舍</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">从固定 FLOPs 的最优模型规模推导，到跨尺度拟合、重复数据与部署成本：用三个交互图、四道计算与诊断题和 NumPy 实验，学会制定预训练预算。</span></a></li>
-          <li><a href="/posts/pretraining-data-curation/"><span class="post-title">预训练数据怎样筛选：去重、质量与多样性</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">从 MinHash 与 SemDeDup 推导去重，再用 FineWeb、DCLM 理解质量过滤、快照分布和固定预算评估，附交互图、计算题与 CPU 实验。</span></a></li>
-          <li><a href="/posts/pretraining-data-mixture/"><span class="post-title">数据配比怎样学出来：DoReMi、DoGE 与 RegMix</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">推导参考相对 excess loss、梯度对齐与小模型回归，分析 token 归约、梯度累积和跨规模迁移，附交互图与 NumPy 实验。</span></a></li>
+          <li><a href="/posts/moe-upcycling/"><span class="post-title">已有模型怎样长成 MoE：从权重复用到专家分化</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">从复制 dense FFN 的函数保持条件，推导 router 梯度、SwiGLU 细粒度切分与专家分化，再核算 upcycling 的训练预算、GEMM 和通信。含交互图、四道习题和 NumPy 实验。</span></a></li>
+          <li><a href="/posts/sparse-pretraining/"><span class="post-title">稀疏预训练：动态连接怎样变成真实加速</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">串起RigL、SR-STE与2:4 Transformer预训练，推导掩码更新、可转置约束、三个GEMM和优化器账本，配可操作数值图与实验。</span></a></li>
+          <li><a href="/posts/recurrent-depth/"><span class="post-title">同一组参数多算几遍：共享深度与递归推理</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></span><span class="post-desc">从Universal Transformer和ALBERT到Recurrent Depth与MoR，推导共享参数的梯度、截断反传、动态轮数与每轮KV缓存协议，结合数值图与NumPy实验。</span></a></li>
         </ul>
       </section>
 

@@ -488,7 +488,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
       </div>
 
       <h2 id="merge">19. 模型合并（简述）</h2>
-      <p>后训练里还有一门「黑魔法」：模型合并。SmolLM3 用它解决了一个具体问题：APO 之后长上下文能力（RULER）下降，他们用 MergeKit 做了两步合并——先把各个 APO checkpoint 做成一个「model soup」（权重平均），再把 soup 和一个长上下文能力强的 mid-training checkpoint 做线性合并，权重 0.9 / 0.1。这样恢复了基座在 128k 以内的 RULER 分数，最终发布的就是这个合并后的模型。线性合并就是 \(\theta = \sum_k w_k\theta_k\)，能成立的前提是这些模型都从同一个初始化微调而来、位于同一个低损失区域附近。</p>
+      <p>模型合并把多个 checkpoint 的参数组合成一个模型。SmolLM3 用它解决了一个具体问题：APO 之后长上下文能力（RULER）下降，他们用 MergeKit 做了两步合并——先把各个 APO checkpoint 做成一个「model soup」（权重平均），再把 soup 和一个长上下文能力强的 mid-training checkpoint 做线性合并，权重 0.9 / 0.1。这样恢复了基座在 128k 以内的 RULER 分数，最终发布的就是这个合并后的模型。线性合并就是 \(\theta = \sum_k w_k\theta_k\)，共享基座使参数坐标自然对应；连接多个 checkpoint 的低损失区域，为权重平均提供了依据。<a href="/posts/model-merging/">模型合并专题</a>进一步推导任务向量、TIES 与 DARE，并用参数重排和词表对齐实验检查合并前提。</p>
       <p>SmolLM3 的经验可以归成几条：评测先行，SFT 配比迭代，偏好优化，再视情况上 RL；vibe test 能抓到指标抓不到的 bug；chat template 能悄无声息地破坏指令遵循；后训练的数据配比和预训练一样重要。训练只是故事的一半，另一半是<a href="/posts/smol-infrastructure/">基础设施</a>。</p>
 
       <h2 id="refs">参考与延伸阅读</h2>
@@ -513,7 +513,7 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=2a575d4a9e89"></script>
+  <script src="/assets/series.js?v=414d36fec9c5"></script>
   <script>
   (() => {
     const NS = 'http://www.w3.org/2000/svg';
@@ -702,8 +702,8 @@ Of course, even as a vampire, technology can be ...&lt;|im_end|&gt;</code></pre>
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=8a89387e7679"></script>
-  <script src="/assets/posts.js?v=c2ffb7de30e3"></script>
-<script src="/assets/curriculum.js?v=a2aeed39c1ba"></script>
+  <script src="/assets/post-links.js?v=fe48d4412e51"></script>
+  <script src="/assets/posts.js?v=186761fcdc0a"></script>
+<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
 </body>
 </html>
