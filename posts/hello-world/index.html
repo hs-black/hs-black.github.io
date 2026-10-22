@@ -6,7 +6,7 @@
   <title>新博客，从零开始 · Zunzhe Zhang</title>
   <meta name="description" content="这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <style>
     .bars { display: grid; gap: 8px; margin-top: 16px; }
     .bar-row { display: grid; grid-template-columns: 3.2em 1fr 3.6em; align-items: center; gap: 10px; font-size: 15px; }
@@ -44,11 +44,11 @@
       <p>以前的博客停在了 2020 年，那时候还在写 OI 题解。现在的兴趣在大模型上，干脆换一个新的地方重新开始。</p>
 
       <h2>为什么不用生成器</h2>
-      <p>Hexo、Hugo 这类工具适合「写 Markdown，统一套模板」。但我想写的东西里，有不少不是纯文字：一个能拖动的参数、一段跟着讲解动起来的图、一套能直接拿去讲的幻灯片。这些东西在 Markdown 里写起来很别扭。</p>
+      <p>Hexo、Hugo 这类工具适合「写 Markdown，统一套模板」。我希望把推导、可调参数和动态图放在同一篇文章里，让读者一边理解计算，一边改变输入观察结果。</p>
       <p>所以这个博客的规则很简单：</p>
       <ul>
         <li>每篇文章就是 <code>posts/&lt;名字&gt;/index.html</code>，一个完整的网页，想放什么交互就放什么；</li>
-        <li>所有页面共用一份样式 <code>assets/site.css</code>，幻灯片再加一个很小的翻页引擎 <code>assets/slides.js</code>；</li>
+        <li>所有页面共用 <code>assets/site.css</code>，文章中的图解可以使用 <code>assets/article-steps.js</code> 提供播放与回放控件；</li>
         <li>推到 GitHub 上，GitHub Pages 直接把文件原样发出去，没有构建步骤。</li>
       </ul>
       <p>文章和演示主要由 Claude 帮我写，我负责想法和把关。</p>
@@ -70,7 +70,7 @@
       </div>
 
       <p>T 越小，概率越集中在分数最高的「好」上，接近每次都选最可能的那个（贪心解码）；T 越大，分布越平，不太可能的词也会被抽到，输出更有变化，也更容易跑偏。</p>
-      <p>下一篇是一套幻灯片，用动画把这一步放回完整的生成循环里：<a href="/posts/next-token/">一次只猜一个 token</a>。</p>
+      <p>把这一步放回完整的生成循环，可以继续阅读 <a href="/posts/next-token/">一次只猜一个 token</a>。</p>
     </article>
   </main>
 
@@ -143,7 +143,7 @@
       update();
     })();
   </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
+  <script src="/assets/post-links.js?v=9057de45e84d"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
 </body>
 </html>

@@ -1,4 +1,4 @@
-// Timeline animation for decks and posts, in the spirit of Remotion: the
+// Timeline animation for inline article figures: the
 // whole scene is a pure function of time t, so it can play, rewind, scrub and
 // jump to any step and always look the same.
 //
@@ -9,7 +9,8 @@
 //     .to('#arrow', { draw: 1 })                                       // stroke-draw a path or line
 //     .to('#n', { text: 4096, fmt: (v) => Math.round(v) + ' tok' })
 //     .during((p) => drawTrail(p), { at: 0, dur: 3 });                  // custom per-frame drawing
-//   Anim.slide(document.getElementById('my-slide'), tl, { steps: true, controls: true });
+//   Anim.controls(tl, document.getElementById('my-figure'));
+//   tl.player.seek(0);
 //
 // Props: x, y, scale, rotate (deg), opacity, fill, stroke, color, background
 // (any CSS color incl. var(--token)), draw (0..1 of path length), text (a
@@ -285,50 +286,6 @@
     return bar;
   }
 
-  // Bind a timeline to a deck slide. steps: each label is a stop reached by
-  // one key press (hidden .fragment elements are added for slides.js).
-  // Otherwise the whole timeline plays when the slide is entered.
-  function slide(slideEl, tl, o = {}) {
-    const stops = tl.labels.map((l) => l.t);
-    if (!stops.length || stops[stops.length - 1] < tl.duration) stops.push(tl.duration);
-    let startTimer = 0;
-    if (o.steps) {
-      // The first stop plays on entry; only later stops need a key press.
-      for (let i = 1; i < stops.length; i++) {
-        const f = document.createElement('span');
-        f.className = 'fragment anim-step';
-        f.hidden = true;
-        slideEl.appendChild(f);
-      }
-    }
-    if (o.controls) controls(tl, o.controlsIn || slideEl);
-    tl.player.loop = !!o.loop;
-    tl.player.seek(0);
-    if (o.steps) tl.player.onupdate((time) => {
-      if (!slideEl.classList.contains('is-active') || tl.player.playing) return;
-      clearTimeout(startTimer);
-      const step = time >= tl.duration - 1e-3 ? stops.length - 1 :
-        Math.max(-1, stops.filter((t) => t <= time + 1e-3).length - 1);
-      document.dispatchEvent(new CustomEvent('animseek', { detail: { slide: slideEl, step } }));
-    });
-    const stopFor = (step) => (o.steps ? (step < stops.length ? stops[step] : tl.duration) : tl.duration);
-    document.addEventListener('slidechange', (e) => {
-      clearTimeout(startTimer);
-      if (e.detail.slide !== slideEl) { tl.player.pause(); return; }
-      const end = stopFor(e.detail.step);
-      if (e.detail.step > 0 && o.steps) tl.player.seek(stops[e.detail.step - 1]); else tl.player.seek(0);
-      startTimer = setTimeout(() => {
-        if (slideEl.classList.contains('is-active')) tl.player.playTo(end);
-      }, o.delay ?? 300);
-    });
-    document.addEventListener('fragmentchange', (e) => {
-      if (e.detail.slide !== slideEl || !o.steps) return;
-      const end = stopFor(e.detail.step);
-      if (end < tl.player.time) tl.player.seek(end); else tl.player.playTo(end);
-    });
-    return tl;
-  }
-
   // For articles: play when scrolled into view (once), with controls.
   function inView(el, tl, o = {}) {
     if (o.controls !== false) controls(tl, o.controlsIn || el);
@@ -341,5 +298,5 @@
     return tl;
   }
 
-  window.Anim = { timeline, slide, inView, controls, ease: EASE };
+  window.Anim = { timeline, inView, controls, ease: EASE };
 })();

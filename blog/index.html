@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Blog · Zunzhe Zhang</title>
-  <meta name="description" content="全部文章、交互演示和幻灯片：按时间轴、分类、系列和标签浏览。">
+  <meta name="description" content="全部文章与交互图解：按时间轴、分类、系列和标签浏览。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/curriculum.css?v=dd0ca17259f8">
   <style>
     .blog-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 8px 0 8px; }
@@ -66,7 +66,7 @@
   <main class="wrap">
     <header class="post-header">
       <h1>Blog</h1>
-      <p class="post-meta">大模型的原理、架构与系统：文章、交互演示和动画幻灯片。 · <a href="/feed.xml">RSS</a></p>
+      <p class="post-meta">大模型的原理、架构与系统：长文推导、交互图解与工程实践 · <a href="/feed.xml">RSS</a></p>
     </header>
 
     <div class="blog-tools">
@@ -83,7 +83,6 @@
           <button type="button" data-kind="all">全部</button>
           <button type="button" data-kind="article">文章</button>
           <button type="button" data-kind="interactive">交互</button>
-          <button type="button" data-kind="deck">幻灯片</button>
         </div>
         <span class="count" id="count"></span>
       </div>
@@ -97,8 +96,8 @@
   <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
 
   <script src="/assets/series.js?v=0db6ff6b7f47"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-  <script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
+  <script src="/assets/curriculum.js?v=cc75d107b740"></script>
   <script>
     (() => {
       const { POSTS, CATEGORIES, KINDS } = window.SITE;
@@ -117,6 +116,9 @@
         q: params.get('q') || '',
       };
       if (!['timeline', 'curriculum', 'category', 'series', 'tags'].includes(st.view)) st.view = 'timeline';
+      const availableKinds = new Set(POSTS.map(post => post.kind));
+      if (!availableKinds.has(st.kind)) st.kind = 'all';
+      if (availableKinds.size < 2) document.querySelector('.filters').style.display = 'none';
       search.value = st.q;
 
       function sync() {
@@ -184,7 +186,7 @@
       function byCurriculum(posts) {
         const ok = new Map(posts.map(p => [p.slug, p]));
         const stages = window.CURRICULUM.stages;
-        let html = '<p class="course-intro"><a href="/posts/llm-engineering/">完整学习路径、先修关系与阶段验收 →</a><br>主线按学习顺序排列；每门课仍然保留在时间轴与分类列表中。</p>';
+        let html = '<p class="course-intro"><a href="/posts/llm-engineering/">完整学习路径、先修关系与阶段验收 →</a><br>主线按先修关系排列，延伸阅读用于深入各阶段的技术。</p>';
         stages.forEach((s, i) => {
           const core = s.core.filter(slug => ok.has(slug));
           const extra = s.extra.filter(slug => ok.has(slug));

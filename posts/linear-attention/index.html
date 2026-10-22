@@ -1,325 +1,107 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Linear attention：把历史写进状态 · Zunzhe Zhang</title>
-<meta name="description" content="推导递推、并行与分块等价，分析状态容量、门控权重与 delta rule 稳定性；附数值动画、计算题和 NumPy 实验。">
+<meta name="description" content="从核 attention 推导递推、归一化、门控、Delta rule 与分块计算；结合 padding、状态复用和精度问题，附数值图解、习题与实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
-.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
-.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
-.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
-.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+.article-figure { margin:1.6em 0; }
+.article-figure h3 { margin:0 0 .6em; font-size:18px; }
+.article-figure p { font-size:15px; }
+.article-figure table { font-size:14px; width:100%; font-variant-numeric:tabular-nums; }
+.article-figure th,.article-figure td { padding:8px 6px; }
+.article-figure label { display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:14px;margin:10px 0; }
+.article-figure input[type=range] { flex:1;min-width:110px; }
+.article-figure output { font-variant-numeric:tabular-nums; }
+.article-figure svg { display:block;width:100%;height:auto; }
+.article-figure svg text { font-family:var(--font-sans);fill:var(--text-soft);font-size:13px; }
+.figure-metric { padding:12px;background:var(--accent-soft);border-radius:8px;font-size:16px;font-variant-numeric:tabular-nums; }
+.state-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px; }
+.state-grid div { border:1px solid var(--border);border-radius:8px;padding:10px;font-size:14px;overflow-wrap:anywhere; }
+.state-grid b { display:block;color:var(--accent);font-size:19px;margin:5px 0; }
+.diagram-row { display:flex;gap:6px;flex-wrap:wrap;margin:12px 0; }
+.diagram-token { padding:8px 12px;border:1px solid var(--border);border-radius:7px;background:var(--bg-soft);font:14px var(--font-mono); }
+.diagram-token.active { background:var(--accent-soft);border-color:var(--accent); }
+.figure-bars { display:grid;gap:9px;margin:12px 0; }
+.figure-bar { display:grid;grid-template-columns:70px 1fr 65px;align-items:center;gap:8px;font-size:14px; }
+.figure-bar i { display:block;height:18px;background:var(--accent);border-radius:4px;transition:width .18s; }
+.figure-bar .track { background:var(--bg-soft);border-radius:4px;overflow:hidden; }
+.article-figure figcaption { color:var(--text-soft);font-size:14px;line-height:1.6;margin-top:10px; }
+.article-exercise { margin:1.3em 0; }
+.article-exercise h3 { font-size:18px; }
+.article-exercise details { margin-top:8px; }
+.prose pre { max-width:100%;overflow-x:auto;font-size:13px;padding:14px;background:var(--code-bg);border-radius:8px; }
+.matrix-grid { display:grid;gap:3px;grid-template-columns:repeat(9,minmax(0,1fr));font-size:12px;text-align:center; }
+.matrix-grid span { border-radius:4px;padding:5px 0;background:var(--bg-soft); }
+.matrix-grid .kept { background:var(--accent-soft);color:var(--accent); }
+.matrix-grid .current { outline:1px solid var(--accent);outline-offset:-1px; }
+.matrix-grid .axis { background:transparent;color:var(--text-soft); }
+@media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
+@media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>Linear attention：把历史写进状态</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
+<nav class="series" data-series="systems"></nav><article class="prose"><p>普通 attention 会保存每个历史位置的 K/V，新 query 到来时再逐项读取。Linear attention 选择另一种记忆方式：把历史持续写入一个固定形状的状态，新 query 直接读取这个状态。上下文继续增长时，状态的张量形状保持不变。</p>
+<p>这种做法把问题从“保留每个位置”转成“怎样压缩和更新历史”。要理解它的速度、容量和质量，需要同时看求和的重排、归一化分母、遗忘门以及状态写入规则。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#kernel">把历史求和放到 query 之前</a></li><li><a href="#recurrence">每个输入怎样更新两个状态</a></li><li><a href="#capacity">固定状态究竟有多大</a></li><li><a href="#gates">遗忘门怎样分配历史权重</a></li><li><a href="#delta">Delta rule 先读旧答案，再写误差</a></li><li><a href="#chunks">训练时把历史和块内关系分开</a></li><li><a href="#engineering">Padding、状态复用与精度问题</a></li><li><a href="#exercises">计算与实现练习</a></li><li><a href="#lab">验证三种计算顺序</a></li><li><a href="#references">参考与延伸阅读</a></li></ol></nav>
+<h2 id="kernel">把历史求和放到 query 之前</h2>
+<p>先选择特征映射 \(\phi\)，把 query 和 key 映射到 \(r\) 维空间，并定义相似度 \(\phi(q_t)^\top\phi(k_j)\)。使用非负特征时，可以把这些相似度归一化成权重。位置 \(t\) 的输出为：</p>
+$$y_t=\frac{\sum_{j\le t}\phi(q_t)^\top\phi(k_j)v_j^\top}{\sum_{j\le t}\phi(q_t)^\top\phi(k_j)+\epsilon}.$$
+<p>这里把 value 看作列向量，公式的输出为行向量；\(v_j\) 有 \(d_v\) 个分量。分子利用矩阵乘法的结合律，把与历史有关的项先求和：</p>
+$$\htmlData{symbol=state}{S_t}=\sum_{j\le t}\phi(k_j)v_j^\top\in\mathbb R^{r\times d_v},\qquad z_t=\sum_{j\le t}\phi(k_j)\in\mathbb R^r,\qquad y_t=\frac{\phi(q_t)^\top S_t}{\phi(q_t)^\top z_t+\epsilon}.$$
+<p>这种重排精确计算的是所选特征核定义的 attention。标准 softmax 使用指数点积相似度；若希望逼近它，需要另外分析特征映射的近似能力。实际线性模型也可以直接学习适合递推状态的参数。</p>
+<h2 id="recurrence">每个输入怎样更新两个状态</h2>
+<p>新 token 到来时，只需追加一个外积和一个向量：\(S_t=S_{t-1}+\phi(k_t)v_t^\top\)，\(z_t=z_{t-1}+\phi(k_t)\)。然后用当前 query 读取它们。外积表示 key 的每个特征分量分别携带 value 的全部分量，因而状态是一个矩阵。</p>
+<figure class="article-figure" id="state-demo"><h3>把三条历史压入一个 2×2 状态</h3><p>映射后的 keys 依次为 [1,0]、[0,1]、[1,1]，values 为 [2,1]、[4,3]、[3,2]。每步写入一个外积，最后用 query=[2,1] 读取。</p><div class="table-wrap"><table><thead><tr><th>状态</th><th>第 0 行</th><th>第 1 行</th></tr></thead><tbody><tr><th>S</th><td id="state-row0"></td><td id="state-row1"></td></tr><tr><th>z</th><td id="state-z0"></td><td id="state-z1"></td></tr></tbody></table></div><div class="figure-metric" id="state-output"></div></figure>
+<p>三次更新后，\(S=\begin{bmatrix}5&amp;3\\7&amp;5\end{bmatrix}\)，\(z=[2,2]^\top\)。query 为 [2,1]，分子是 [17,11]，分母是 6，所以输出为 [17/6,11/6]。沿着原始定义逐项计算权重，也会得到同一个结果。</p>
+<p>分母维护了总权重的尺度。把相同 key/value 重复写入，分子和分母同时按次数增长，归一化后的输出保持一致。\(\epsilon\) 用来处理很小的分母；在误差比较中，dense、递推和分块三条路径应使用同一种加法或截断规则。</p>
+<h2 id="capacity">固定状态究竟有多大</h2>
+<p>一个头需要保存 \(rd_v+r\) 个元素。若使用 FP32 状态，每个元素 4 B，\(r=d_v=128\)，一个头占 \((128^2+128)\times4=66,048\) B，约 64.5 KiB。批量请求、层数和头数都会线性放大这份状态。</p>
+<p>作为比较，一个普通 KV 头在每个历史位置保存两份 128 维 BF16 向量，需要 \(2\times128\times2=512\) B。66,048/512=129，因此在这个具体配置下，线性状态的容量相当于 129 个 KV 位置。短序列时要直接比较两份实际账本；长序列时，固定状态会逐渐体现容量优势。</p>
+<p>计算成本同样取决于状态维度。一个 token 的状态更新和读取各涉及 \(r d_v\) 量级工作，总长度 \(T\) 时约为 \(O(Trd_v)\)。特征维度 \(r\) 提高了记忆表达能力，也增加了每步读写和乘加。</p>
+<p>把单头状态换成服务预算也很直接。若 32 层、每层 16 个线性状态头，每头 64.5 KiB，一条请求共需 32.25 MiB，32 条请求需 1032 MiB。卷积缓存、门控辅助状态和其他 attention 层还要另加。混合架构的一部分层使用固定状态，另一部分层仍保存随长度增长的 KV，应分别按层统计。</p>
+<p>计算上，每个 token 的外积更新与状态读取都要接触整个 \(r\times d_v\) 矩阵。单个很小的请求可能无法提供足够任务占满 GPU；把多条独立请求、多个头和各层调度起来，才能利用设备并行度。训练使用更大 chunk 时，矩阵乘获得更多复用，而块末状态更新与块内临时张量也会增长。因此 chunk 大小同时影响吞吐、峰值内存与数值累加顺序。</p>
+<h2 id="gates">遗忘门怎样分配历史权重</h2>
+<p>持续累加会让很早的内容长期占据状态。引入标量遗忘门 \(\htmlData{symbol=gate}{\alpha_t}\in[0,1]\)，令 \(S_t=\alpha_t S_{t-1}+\phi(k_t)v_t^\top\)，并对归一化状态使用相同门控。历史位置 \(j\) 到当前 \(t\) 的保留系数为 \(\prod_{u=j+1}^{t}\alpha_u\)。每经过一次更新，旧内容就乘上这一轮的门。</p>
+<figure class="article-figure" id="gate-demo"><h3>遗忘门怎样改变三个 value 的贡献</h3><p>keys 和 query 的特征都为 1，values 为 [2,4,8]。第二次更新使用门 0.5，最后一次门可调。</p><label>最后一次门 α <input id="gate-alpha" type="range" min="0" max="1" step="0.05" value="0.25"><output id="gate-alpha-value"></output></label><div class="figure-bars" id="gate-bars"></div><div class="figure-metric" id="gate-output"></div></figure>
+<p>最后一轮门为 0.25 时，三个保留系数为 [0.125,0.25,1]，分子为 \(0.125\times2+0.25\times4+8=9.25\)，分母为 1.375，输出 \(74/11\approx6.727\)。通道级门控则为状态的不同方向学习不同的衰减速度。</p>
+<p>递推变换 \(S\mapsto aS+b\) 可以组合为 \((a_2,b_2)\circ(a_1,b_1)=(a_2a_1,a_2b_1+b_2)\)。组合具有结合性，因此训练可以使用 parallel scan 或分块算法；生成时仍按 token 逐步更新。</p>
+<h2 id="delta">Delta rule 先读旧答案，再写误差</h2>
+<p>加法更新会把重复出现的相似 key 持续叠加。Delta rule 先用当前 key 读取旧状态，再写入目标与预测的差：</p>
+$$\widehat v_t=S_{t-1}^{\top}k_t,\qquad S_t=S_{t-1}+\beta_t k_t(v_t-\widehat v_t)^{\top}.$$
+<p>这里 \(S\) 采用 key 特征在行、value 分量在列的布局，\(\beta_t\) 控制更新幅度。对单位范数的 key，再次读取该 key 时，误差会乘以 \(1-\beta_t\)。标量状态从 2 逼近目标 5、\(\beta=0.5\) 时，连续三次得到 3.5、4.25、4.625。</p>
+<p>key 范数改变了实际更新力度。标量 key=2、旧状态=1、目标 value=5、\(\beta=0.5\)，旧读出为 2，新状态为 \(1+0.5\times2\times(5-2)=4\)，新读出达到 8。单位范数或其他稳定化约束因此是算法定义的重要组成部分。门控线性 attention、DeltaNet 和 Gated DeltaNet 使用不同的更新与归一化方案，部署时状态形状和 kernel 必须对应具体模型。</p>
+<h2 id="chunks">训练时把历史和块内关系分开</h2>
+<p>一个 chunk 的输出由两部分组成：当前 query 读取上一个 chunk 的状态，以及当前 chunk 内的因果关系。令 \(Q_c,K_c\) 已经完成特征映射，\(A_c=\operatorname{tril}(Q_cK_c^\top)\)，则分子为 \(Q_cS_{\mathrm{prev}}+A_cV_c\)，分母为 \(Q_cz_{\mathrm{prev}}+A_c\mathbf1+\epsilon\)。块末再更新 \(S\leftarrow S+K_c^\top V_c\)、\(z\leftarrow z+\sum K_c\)。</p>
+<p>这条分解让块内工作使用矩阵乘法，又让块间只传递固定状态。正确性可以用三角 dense 核、逐 token 递推和不同 chunk 大小互相校验。带门控或 delta 更新时，要使用对应的块内递推展开；边界状态仍需与逐 token 路径一致。</p>
+<p>跨 chunk 保存的状态要有清晰的提交时机。某个 chunk 完成后，状态应包含该 chunk 的所有有效 token；继续处理下一块时，只追加新的位置。若重试逻辑把同一块再次写入，状态会重复累加，即使张量形状完全合法，输出也会偏移。可以给状态附上“已消费 token 数”，并用前缀重跑与状态续写两条路径验证相同边界。</p>
+<p>Packed sequence 训练把多条短序列放进一个连续张量，kernel 需要明确的序列边界。在每条新序列开始处，状态回到该序列的初始值。有效 token 的梯度也应只依赖同一序列的历史。测试时把两条差异很大的序列拼接，逐条独立运行作参考，既能发现前向状态泄漏，也能发现反向的边界处理问题。</p>
+<h2 id="engineering">Padding、状态复用与精度问题</h2>
+<p><strong>加了左 padding 后，有效输出变小。</strong>检查 padding 是否同时影响分子和分母。只把 padding 的 value 置零，会让它对 \(S\) 的更新消失，但 \(\phi(k)\) 仍可能进入 \(z\)。例如有效项的分子为 6、分母为 2，额外 padding key 向分母加 1 后，输出从 3 降到 2。对加法归一化状态，padding 步应保持 \(S,z\) 均不变；也可以先 unpad，再用序列边界描述有效 token。</p>
+<p><strong>请求单独运行正常，复用状态后串内容。</strong>确认状态属于哪条请求、哪一层与哪一个模型版本。请求完成或新序列开始时重置状态；batch 重排时，状态槽位随请求 ID 一起移动。保存 prefix 状态时还要保存卷积等辅助状态，后续分支使用独立的可写副本。</p>
+<p><strong>长序列逐渐出现数值偏差。</strong>分别记录状态最大值、分母最小值和输出误差，先用 FP32 状态对照 BF16。非负特征累积会扩大数值范围，门控可限制历史增长；很小的分母会放大量化误差。评估时同时观察长距离检索、顺序记忆和语言建模质量，状态容量与任务中的信息量需要共同匹配。</p>
+<p>固定状态还改变了检索问题的形式。普通 KV 为每个位置保留独立向量，线性状态把多个关联压在同一个矩阵里；相似 key 可能竞争相同的状态方向。可以固定状态维度，逐步增加需要记住的独立 key-value 对，比较精确检索与重复覆盖。再分别增大特征维度、加入遗忘门和使用 delta 更新，观察容量、更新速度与任务质量怎样共同变化。</p>
+<h2 id="exercises">计算与实现练习</h2>
+<div class="article-exercise"><h3>1. 读取二维状态</h3><p>S=[[5,3],[7,5]]，z=[2,2]，query=[2,1]，ε=0。输出是多少？</p><details><summary>展开解答</summary><p>分子 [17,11]，分母 6，输出 [2.8333,1.8333]。可以再用 keys=[1,0]、[0,1]、[1,1] 对照得到权重 [2,1,3]/6。</p></details></div>
+<div class="article-exercise"><h3>2. 三次遗忘之后还剩多少</h3><p>某次写入之后的三个门依次为 0.8、0.5、0.25，这份历史的保留系数是多少？</p><details><summary>展开解答</summary><p>系数为 0.8×0.5×0.25=0.1。它仍需与其他历史的系数及 query-key 相似度共同归一化。</p></details></div>
+<div class="article-exercise"><h3>3. 非单位 key 的更新</h3><p>标量状态 S=1，key=2，目标 value=5，β=0.5。求 delta 更新后的状态和读出，并给出避免过冲的一个方向。</p><details><summary>展开解答</summary><p>旧读出 2，新状态 4，新读出 8。更新力度包含 key 范数平方，归一化 key 或让 β 随范数调整，都能控制有效步长；具体规则需要与训练算法保持一致。</p></details></div>
+<h2 id="lab">验证三种计算顺序</h2>
+<p><a href="/posts/linear-attention/lab.py" download>下载 NumPy 实验</a>，运行 <code>python3 lab.py --seed 7 --chunk 5 --length 19</code>。输出检查递推与 dense 核、分块路径、门控展开和 delta 更新。把 chunk 改为 1、4、7，再加入“在输入前插入 padding，但有效输出保持不变”的断言。若改用 ELU+1 特征映射，三条参考路径应一起更换映射。</p>
+<h2 id="references">参考与延伸阅读</h2><ul><li><a href="https://arxiv.org/abs/2006.16236">Transformers are RNNs</a>：线性 attention 的递推表示。</li><li><a href="https://github.com/fla-org/flash-linear-attention">Flash Linear Attention</a>：状态、chunk 与 recurrent kernels。</li><li><a href="https://github.com/fla-org/flash-linear-attention/issues/1263">FLA #1263</a>：归一化线性 attention 中 padding key 进入分母的复现。</li><li><a href="/posts/kimi-linear/">Kimi Linear</a>：带门控与纠错的实际架构。</li></ul>
+</article><nav class="series-pager" data-series="systems"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"state": {"label": "Sₜ · 关联状态", "description": "截至位置 t 的 key 特征与 value 外积累积，形状 r×dᵥ。", "unit": ""}, "gate": {"label": "αₜ · 遗忘门", "description": "本次更新前对旧状态乘上的保留系数，范围为 0 到 1。", "unit": ""}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script>
+(() => {
+ const states=[{s:[[0,0],[0,0]],z:[0,0],title:'空状态',caption:'S 保存 key-value 外积之和，z 保存 key 特征之和。'},{s:[[2,1],[0,0]],z:[1,0],title:'写入第 1 项',caption:'[1,0] 与 [2,1] 的外积只更新 S 的第 0 行。'},{s:[[2,1],[4,3]],z:[1,1],title:'写入第 2 项',caption:'[0,1] 与 [4,3] 的外积更新 S 的第 1 行。'},{s:[[5,3],[7,5]],z:[2,2],title:'写入第 3 项',caption:'key=[1,1] 把 value=[3,2] 加到两行。Query=[2,1] 读取后的归一化输出为 [17/6,11/6]。'}];
+ ArticleSteps.mount('#state-demo',{steps:states,render(s){document.getElementById('state-row0').textContent='['+s.s[0].join(', ')+']';document.getElementById('state-row1').textContent='['+s.s[1].join(', ')+']';document.getElementById('state-z0').textContent=s.z[0];document.getElementById('state-z1').textContent=s.z[1];const den=2*s.z[0]+s.z[1];document.getElementById('state-output').textContent=den?'Query=[2,1] · 分母 '+den+' · 输出 ['+s.s[0].map((x,i)=>(2*x+s.s[1][i])/den).map(x=>x.toFixed(3)).join(', ')+']':'等待第一份有效历史';}});
+ const a=document.getElementById('gate-alpha');function draw(){const v=+a.value,c=[.5*v,v,1],den=c.reduce((a,b)=>a+b);document.getElementById('gate-alpha-value').textContent=v.toFixed(2);document.getElementById('gate-bars').innerHTML=c.map((w,i)=>'<div class="figure-bar"><span>位置 '+i+'</span><div class="track"><i style="width:'+100*w/den+'%"></i></div><output>'+(w/den).toFixed(3)+'</output></div>').join('');document.getElementById('gate-output').textContent='分母 '+den.toFixed(3)+' · 输出 '+(c.reduce((sum,w,i)=>sum+w*[2,4,8][i],0)/den).toFixed(3);}
+ a.addEventListener('input',draw);draw();
+})();
 
-.slide.workshop .course-number-scene .cn-value{font:36px var(--font-mono);fill:var(--accent)}
-.slide.workshop .course-number-scene .cn-label{font-size:20px;fill:var(--text-soft)}
-.slide.workshop .course-number-scene .cn-detail{font-size:19px}
-</style>
-<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
-</head>
-<body class="deck-page">
-<main class="deck">
-<div class="stage">
-<section class="slide center">
-<div class="kicker rise">动画图解 LLM 系统</div>
-<h1 class="rise" style="--d:1">Linear attention：把历史写进状态</h1>
-<p class="muted rise" style="--d:2">不逐条翻 KV，能不能维护一个随时可查的“记事本”？</p>
-<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
-</section>
-<section class="slide lesson" id="softmax">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>先看普通 attention 在读什么</h2>
-<p class="intro">当前 Q 给每个 K 打分，softmax 归一化后，再把 V 加权相加。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="新查询重新扫描各个历史 KV，然后展示可替代的固定大小状态">
-</svg>
-<div class="captions">
-<p>一行 attention：y = Σ softmax(q·kᵢ / √d)ᵢ × vᵢ。每个历史位置都有一个权重。</p>
-<p>新 Q 到来后，所有匹配分数都可能改变，所以通常要重新读取历史 K、V。</p>
-<p>线性 attention 换一种相似度形式，让历史先合并成固定大小的状态，再由 Q 查询。</p>
-</div>
-</section>
-<section class="slide lesson" id="kernel">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>关键改写：让求和先发生</h2>
-<p class="intro">用 φ(q)ᵀφ(k) 作为相似度，并用权重总和归一化。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="历史的外积和被括成状态 S，特征和被括成状态 z，Q 从求和中移出">
-</svg>
-<div class="captions">
-<p>选非负特征映射 φ，例如 ELU(x) + 1。这样相似度非负，可以组成归一化加权平均。</p>
-<p>分子：Σ [φ(q)ᵀφ(kᵢ)]vᵢᵀ = φ(q)ᵀ [Σ φ(kᵢ)vᵢᵀ]。把 Q 从求和里提出来。</p>
-<p>分母同样提出来：Σ φ(q)ᵀφ(kᵢ) = φ(q)ᵀ [Σ φ(kᵢ)]。历史只需维护 S 和 z。</p>
-</div>
-<p class="note">这是核化相似度下的等价重排。一般有限维 φ 不等于原始 softmax attention。</p>
-</section>
-<section class="slide workshop" id="linear-matrix-identity">
-<div class="kicker">工程细节</div><h2>先确认我们在重排哪一种 attention</h2>
-<p class="ws-lead">记 Q̃ = φ(Q)、K̃ = φ(K)。每行 feature 维度是 r；V 每行有 dv 维。M 是只允许过去和当前的因果 mask。</p><div class="ws-equation">A = (Q̃K̃ᵀ) ⊙ M，A ∈ ℝᵀ×ᵀ<br>Y = (AV) / rowsum(A)</div><p class="ws-lead">逐行展开：分子 Σᵢ≤ₜ (q̃ₜᵀk̃ᵢ)vᵢᵀ，把 q̃ₜ 提到求和外，就得到 q̃ₜᵀSₜ。分母同理得到 q̃ₜᵀzₜ。</p><p class="ws-note">这里的除法按行广播。重排前后是同一个核化 attention；有限维 φ 通常并不精确等于 exp(qᵀk / √d)。</p>
-</section>
-<section class="slide workshop" id="linear-vector-example">
-<div class="kicker">工程细节</div><h2>value 有两维时，状态真的是矩阵</h2>
-<p class="ws-lead">k̃₁ = [1, 0]，v₁ = [2, 1]；k̃₂ = [0, 1]，v₂ = [4, 3]；q̃ = [2, 1]。</p><div class="ws-equation">S = k̃₁v₁ᵀ + k̃₂v₂ᵀ = [[2, 1], [4, 3]]<br>z = [1, 1]<br>q̃ᵀS = [8, 5]；q̃ᵀz = 3<br>y = [8/3, 5/3]</div><p class="ws-lead">逐项算也是一样：两个相似度为 2、1，归一化权重为 2/3、1/3。输出是 2/3[2,1] + 1/3[4,3]。</p>
-</section>
-
-<section class="slide lesson" id="state">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>每来一个 token，更新两个累加器</h2>
-<p class="intro">S 保存 key 与 value 的关联，z 保存用于归一化的 key 总量。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="三个 token 的外积依次流入两维累加器，S 和 z 数值逐步改变">
-</svg>
-<div class="captions">
-<p>状态从 S₀ = 0、z₀ = 0 开始。假设 φ(k) 有 2 维，v 为 1 维，方便把每个数画出来。</p>
-<p>第一个 token：φ(k₁) = [1, 0]，v₁ = 2。外积写入 S = [2, 0]，z = [1, 0]。</p>
-<p>第二个 token：φ(k₂) = [0, 1]，v₂ = 4。累加后 S = [2, 4]，z = [1, 1]。</p>
-<p>第三个 token：φ(k₃) = [1, 1]，v₃ = 3。累加后 S = [5, 7]，z = [2, 2]。</p>
-</div>
-<p class="note">所有数字为手算示例；先更新到位置 t，再读出，就包含当前 token。</p>
-</section>
-<section class="slide lesson" id="read">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>查询时，分子和分母一起读</h2>
-<p class="intro">继续用刚才的状态：S = [5, 7]，z = [2, 2]；当前 φ(q) = [2, 1]。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="查询向量与状态及归一化向量相乘，得到分子17分母6再相除">
-</svg>
-<div class="captions">
-<p>Q 不需要逐条拿出旧 token；直接对固定大小的 S、z 做两次乘法。</p>
-<p>分子 = 2 × 5 + 1 × 7 = 17。分母 = 2 × 2 + 1 × 2 = 6。</p>
-<p>输出 y = 17 / 6 ≈ 2.83。分母把“总贡献”变成“加权平均”，避免仅因历史变长而放大输出。</p>
-</div>
-<p class="note">实际实现会处理分母接近 0 的数值稳定性，例如加 ε。</p>
-</section>
-<section class="slide workshop" id="normalization-role">
-<div class="kicker">工程细节</div><h2>没有 z，输出会随重复次数增长</h2>
-<p class="ws-lead">让完全相同的 key / value 重复 m 次：每次相似度 a > 0，value 为 v。</p><div class="ws-equation">分子 = m a v；分母 = m a<br>y = (m a v) / (m a) = v</div><p class="ws-lead">如果只保留分子，结果变成 m a v。序列长一倍，输出也长一倍。基础归一化 linear attention 用 z 修正这个尺度。</p><p class="ws-note">一些现代线性模型采用其他归一化、门控或输出 norm，没有这个 z；它们是另一个明确定义的模型，不应混用公式。</p>
-</section>
-<section class="slide workshop" id="denominator-stability">
-<div class="kicker">工程细节</div><h2>ε 是数值保护，也会改变很小分母的结果</h2>
-<div class="ws-equation">y = numerator / (denominator + ε)</div><p class="ws-lead">若分子 = 2×10⁻⁶、分母 = 10⁻⁶，理想比值为 2。ε = 10⁻⁶ 时结果变成 1；ε = 10⁻⁸ 时约 1.9802。</p><p class="ws-lead">非负 φ 防止正负权重相消，但所有特征接近 0 时，分母仍可能很小。监测分母范围、状态精度与 NaN，比盲目增大 ε 更有效。</p><p class="ws-note">epsilon 与 max(denominator, epsilon) 是不同函数。实现、训练和参考计算必须使用同一种定义。</p>
-</section>
-
-<section class="slide lesson">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>公式里的每个维度</h2>
-<div class="formula">S<sub>t</sub> = S<sub>t−1</sub> + φ(k<sub>t</sub>) v<sub>t</sub>ᵀ<br>z<sub>t</sub> = z<sub>t−1</sub> + φ(k<sub>t</sub>)<br>y<sub>t</sub>ᵀ = φ(q<sub>t</sub>)ᵀ S<sub>t</sub> / [φ(q<sub>t</sub>)ᵀ z<sub>t</sub>]</div>
-<div class="two-col">
-<div class="card">
-<h3>状态的大小</h3>
-<p>φ(k) 有 d<sub>φ</sub> 维，v 有 d<sub>v</sub> 维。S 是 d<sub>φ</sub> × d<sub>v</sub> 的矩阵；z 是 d<sub>φ</sub> 维向量。</p>
-</div>
-<div class="card">
-<h3>为什么叫“线性”</h3>
-<p>固定这些维度后，每个 token 更新与查询的工作量不随历史长度增长，总工作量随 token 数线性增长。</p>
-</div>
-</div>
-</section>
-<section class="slide workshop" id="linear-state-bytes">
-<div class="kicker">工程细节</div><h2>固定大小的状态也可能不小</h2>
-<p class="ws-lead">B 个请求、L 层、H 个状态 heads；每个 head 保存 S ∈ ℝʳ×ᵈᵛ 与 z ∈ ℝʳ。</p><div class="ws-equation">Mstate = B × L × H × (r dv + r) × b</div><p class="ws-lead">单请求、32 层、16 heads、r = dv = 128、FP32 状态：512 × (16384 + 128) × 4 = 33,816,576 bytes = 32.25 MiB。</p><p class="ws-note">这个数与历史长度无关。若另有卷积状态、门参数缓存或 full-attention 层，必须另外相加。</p>
-</section>
-<section class="slide workshop" id="state-crossover">
-<div class="kicker">工程细节</div><h2>短序列时，线性状态未必更省</h2>
-<p class="ws-lead">按同一 head 比较：BF16 KV 的 K/V 各 128 维；FP32 线性状态 r = dv = 128。</p><div class="ws-equation">KV bytes = 2 × T × 128 × 2 = 512T<br>state bytes = (128×128 + 128) × 4 = 66048<br>两者相等：T = 66048 / 512 = 129</div><p class="ws-lead">T = 32 时，KV 只有 16 KiB，线性状态约 64.5 KiB；T = 8192 时，KV 是 4 MiB，固定状态的优势才明显。</p><p class="ws-note">这只是存储交点，不是速度交点。特征映射、投影、状态读写与 kernel 形状都会影响实际性能。</p>
-</section>
-
-<section class="slide lesson" id="forget">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>加一个门：让旧记忆逐渐淡出</h2>
-<p class="intro">把旧状态乘 α，再写入新信息；0 ≤ α ≤ 1 控制保留多少。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="旧状态柱随遗忘门缩小，新 token 贡献写入，归一化状态同步衰减">
-</svg>
-<div class="captions">
-<p>纯累加会把越来越多内容挤进同一状态。旧信息与新信息可能互相干扰。</p>
-<p>先把旧 S 缩为 αS，再加入新的 φ(k)vᵀ。α 较小，遗忘更快；α 接近 1，保留更久。</p>
-<p>在这个归一化示例里，z 也用相同门控更新。旧 token 的权重随之后各步门值的乘积衰减。</p>
-</div>
-<p class="note">动画取 α = 0.5。现代门控线性模型还会采用向量门、不同归一化与更复杂的状态更新。</p>
-</section>
-<section class="slide workshop" id="gate-weights">
-<div class="kicker">逐步算一遍</div><h2>遗忘门怎样改变历史的权重？</h2>
-<p class="ws-lead">一维特征都为 1，values 依次为 [2, 4, 8]；每步 α = 0.5，S 和 z 同时衰减。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="遗忘门怎样改变历史的权重？"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">t1：S = 2，z = 1，y = 2</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">t2：S = 0.5×2 + 4 = 5，z = 1.5</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">t3：S = 0.5×5 + 8 = 10.5，z = 1.75</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
-</section>
-<section class="slide workshop" id="gate-scan">
-<div class="kicker">工程细节</div><h2>门控递推为什么能做并行 scan？</h2>
-<p class="ws-lead">将一次更新写作仿射变换 f(S) = aS + B，其中 B = k̃vᵀ。两个相邻更新可以合并成一个。</p><div class="ws-equation">f₂(f₁(S)) = a₂(a₁S + B₁) + B₂<br>= (a₂a₁)S + (a₂B₁ + B₂)<br>(a₂, B₂) ∘ (a₁, B₁) = (a₂a₁, a₂B₁+B₂)</div><p class="ws-lead">函数复合具有结合性，所以可以树形合并并求每个前缀。顺序不能交换：后来的门会衰减前面的写入。</p><p class="ws-note">z 使用同样的组合，只把 B 换成 k̃。并行 scan 降低依赖深度，但中间状态流量与矩阵维度仍决定效率。</p>
-</section>
-
-<section class="slide lesson" id="delta">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>Delta rule：先读旧答案，再写误差</h2>
-<p class="intro">把状态看成一张关联表。遇到同一个 key，先问“我现在记得什么？”</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="读取 key 方向上的旧值2，与目标5相减得误差3，再以步长0.5改写到3.5">
-</svg>
-<div class="captions">
-<p>这里换成不带上页分母的 fast-weight 记忆。key k = [1, 0]，状态对它的旧预测是 2，新目标 value 是 5。</p>
-<p>误差 e = v − Sᵀk = 5 − 2 = 3。只把需要修正的部分写回，而不是再完整叠上一份 5。</p>
-<p>用 β = 0.5：S ← S + βkeᵀ。该方向的记忆从 2 变成 3.5；另一个正交 key 对应的 4 保持不变。</p>
-</div>
-<p class="note">示例 key 为单位向量；一般 key 会相互相关，更新也会影响相关方向。DeltaNet 是另一类状态更新规则。</p>
-</section>
-<section class="slide workshop" id="delta-repeat">
-<div class="kicker">逐步算一遍</div><h2>重复写同一个 key：累加和纠错差在哪？</h2>
-<p class="ws-lead">一维 key = 1，目标 value = 5，学习率 β = 0.5，初始记忆 S = 2。每次先算误差 e = 5 − S。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="重复写同一个 key：累加和纠错差在哪？"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">第一次：e = 3；S ← 2 + 0.5×3</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">第二次：e = 1.5；S ← 3.5 + 0.5×1.5</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">第三次：e = 0.75；S ← 4.25 + 0.5×0.75</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
-</section>
-<section class="slide workshop" id="delta-key-norm">
-<div class="kicker">工程细节</div><h2>key 的范数决定了纠错力度</h2>
-<div class="ws-equation">S′ = S + βk(v − kᵀS)<br>kᵀS′ = kᵀS + β||k||²(v − kᵀS)<br>新误差 = (1 − β||k||²) × 旧误差</div><p class="ws-lead">若 ||k|| = 1，β = 0.5，误差减半。若 ||k|| = 2，仍取 β = 1，误差乘 −3：反向过冲且放大。</p><p class="ws-lead">对一个固定 key 重复更新，收敛需 0 &lt; β||k||² &lt; 2。归一化 key 能让 β 的含义更稳定。</p><p class="ws-note">这里分析单 key 的误差递推；多个相关 key 的更新还会互相干扰，不能据此直接保证整个模型稳定。</p>
-</section>
-
-<section class="slide lesson" id="parallel">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>训练时，状态更新也能按块并行</h2>
-<p class="intro">逐 token 递推适合 decode；prefill 和训练更适合把工作组织成大块。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="串行 token 被组合为三个计算块，块内工作并行、块间通过状态相连">
-</svg>
-<div class="captions">
-<p>最朴素的执行方式依次处理 t₁、t₂、t₃……，很难喂满 GPU。</p>
-<p>对可结合的状态更新，可以用并行 scan 或 chunkwise 公式。每个 chunk 内做矩阵乘法，chunk 之间传递状态。</p>
-<p>Delta rule 需要更专门的块算法；目标相同：保留递推语义，同时让 GPU 做更多规整的大块运算。</p>
-</div>
-<p class="note">这是执行组织方式；具体块公式依赖累加、门控或 delta 更新规则。</p>
-</section>
-<section class="slide workshop" id="chunk-linear-formula">
-<div class="kicker">工程细节</div><h2>一个 chunk 的输出由两部分组成</h2>
-<p class="ws-lead">先看不带门的累加形式。chunk 开始前已有 Sprev、zprev；chunk 内有 Q̃c、K̃c、Vc，M 是块内因果 mask。</p><div class="ws-equation">分子 = Q̃c Sprev + [(Q̃cK̃cᵀ) ⊙ M] Vc<br>分母 = Q̃c zprev + rowsum[(Q̃cK̃cᵀ) ⊙ M]<br>Snext = Sprev + K̃cᵀVc<br>znext = zprev + Σrows K̃c</div><p class="ws-lead">第一项从跨块状态读取更早历史；第二项处理块内 token。最后一次矩阵乘法把整块写入下一块的状态。</p><p class="ws-note">这给出了独立于逐 token 循环的参考计算路径。门控版本要加入门乘积；delta 版本不能直接套这条累加公式。</p>
-</section>
-<section class="slide workshop" id="linear-reference-code">
-<div class="kicker">工程细节</div><h2>最小递推里，每一行都有张量意义</h2>
-<pre class="ws-code">S = zeros((feature_dim, value_dim), dtype=float64)
-z = zeros(feature_dim, dtype=float64)
-for q, k, v in zip(phi(Q), phi(K), V):
-    S += outer(k, v)    # [r, dv]，包含当前 token
-    z += k              # [r]
-    denominator = q @ z
-    y = (q @ S) / (denominator + epsilon)</pre><p class="ws-lead">先用 FP64、小尺寸确认公式；再替换 dtype 与 kernel，观察数值误差如何增长。只比较同一种特征映射与 epsilon。</p><p class="ws-note">NumPy 循环是教学参考，不能用它与优化后的 softmax GPU kernel 比吞吐。</p>
-</section>
-
-<section class="slide lesson">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>它省掉了什么，又把难题放在哪？</h2>
-<table>
-<thead>
-<tr>
-<th>
-</th>
-<th>Full softmax attention</th>
-<th>基础 linear attention</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Decode 的历史状态</td>
-<td>O(n(d<sub>k</sub> + d<sub>v</sub>))</td>
-<td>O(d<sub>φ</sub>d<sub>v</sub> + d<sub>φ</sub>)</td>
-</tr>
-<tr>
-<td>每步读历史的计算</td>
-<td>O(n(d<sub>k</sub> + d<sub>v</sub>))</td>
-<td>O(d<sub>φ</sub>d<sub>v</sub>)</td>
-</tr>
-<tr>
-<td>历史的形态</td>
-<td>保留每个位置，逐项匹配</td>
-<td>写进有限容量的状态</td>
-</tr>
-<tr>
-<td>关键挑战</td>
-<td>长历史的容量与带宽</td>
-<td>精确检索、干扰与遗忘</td>
-</tr>
-</tbody>
-</table>
-<p class="intro">混合架构可以让部分层维护线性状态，部分层保留 full attention。<a href="/posts/kimi-linear/">Kimi Linear</a> 与 <a href="/posts/qwen3-next/">Qwen3-Next</a> 可以接着看。</p>
-<p class="note">复杂度按一个 head、固定特征映射成本计算。FlashAttention 优化 softmax attention 的 IO，并未把它改成线性状态模型。</p>
-</section>
-<section class="slide workshop" id="linear-numerics">
-<div class="kicker">工程细节</div><h2>长历史下，状态的数值范围会增长</h2>
-<p class="ws-lead">非负特征累加让 z 持续变大；S 的正负项还可能相互抵消。低精度加法会逐渐丢失较小的新写入。</p><div class="ws-cols"><div class="ws-card"><h3>可复现的检查</h3><p>固定 Q/K/V，用 FP64 递推作参考；扫描长度、输入尺度和 chunk 大小，记录最大误差与分母最小值。</p></div><div class="ws-card"><h3>工程上的处理</h3><p>使用合适的累加精度；采用模型定义的归一化或遗忘机制。若重缩放 S / z，要同时调整后续写入尺度。</p></div></div><p class="ws-note">忽略 ε 时，S 和 z 同除常数保持当前比值；若保留 ε，它也要同比缩放。下一个 token 若仍原尺度写入，未来输出仍会改变。</p>
-</section>
-<section class="slide workshop" id="linear-diagnosis">
-<div class="kicker">工程细节</div><h2>速度平了，质量却可能随历史变难</h2>
-<p class="ws-lead">假想实验：decode attention 在 2K / 8K / 32K 都约 0.3 ms；但远距离精确检索准确率从 98% 降到 89%、61%。</p><table class="ws-table"><thead><tr><th>现象</th><th>优先调查</th><th>对照实验</th></tr></thead><tbody><tr><td>延迟基本不随 T 变</td><td>固定状态确实生效</td><td>测状态字节、kernel 读取量</td></tr><tr><td>近距离好、远距离差</td><td>遗忘与状态干扰</td><td>变证据位置，固定总长度</td></tr><tr><td>重复 key 容易覆盖</td><td>写入规则与关联容量</td><td>比较累加、门控、delta 结构</td></tr><tr><td>只有低精度长序列错</td><td>数值累加误差</td><td>FP64 / FP32 同输入参考</td></tr></tbody></table><p class="ws-note">这些数字只用于教学诊断。换线性结构通常需要训练适配，不能把 softmax 层的权重原样替换后期待等价。</p>
-</section>
-<section class="slide workshop" id="exercise-linear-state">
-<div class="kicker">练习 1</div><h2>不看逐项权重，算出二维输出</h2>
-<div class="ws-prompt">k̃₁=[1,0]，v₁=[2,1]；k̃₂=[0,1]，v₂=[4,3]；k̃₃=[1,1]，v₃=[3,2]。求 S、z，再用 q̃=[2,1] 读出 y。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">前两项 S=[[2,1],[4,3]]，第三个外积为 [[3,2],[3,2]]；所以 S=[[5,3],[7,5]]，z=[2,2]。</p><p class="ws-lead">分子 [2,1]S=[17,11]，分母 [2,1]·[2,2]=6。y=[17/6,11/6]≈[2.8333,1.8333]。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="exercise-gated">
-<div class="kicker">练习 2</div><h2>门控后的旧 token 还剩多少权重？</h2>
-<div class="ws-prompt">三个 token 的一维特征均为 1，values=[2,4,8]。α₂=0.5、α₃=0.25；S/z 从 0 开始。求最终输出。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">三个 token 的未归一化历史系数为 [α₂α₃, α₃, 1]=[0.125,0.25,1]。</p><p class="ws-lead">分子=0.125×2+0.25×4+8=9.25；分母=1.375；输出=9.25/1.375=74/11≈6.7273。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="exercise-delta">
-<div class="kicker">练习 3</div><h2>单位 key 的结论能直接套到 k=2 吗？</h2>
-<div class="ws-prompt">一维 S=1，k=2，目标 v=5，β=0.5。先算旧预测、误差、新 S、新预测。为什么这次没有把预测改成 5？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">旧预测 kS=2，误差 e=3；新 S=1+0.5×2×3=4，新预测 kS=8，发生过冲。</p><p class="ws-lead">有效修正率 βk²=2，误差从 3 变为 −3。若 β=1/k²=0.25，则 S′=2.5、预测=5；key 范数必须进入分析。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="engineering-lab">
-<div class="kicker">动手实验</div><h2>三种计算顺序，应该给出同一个输出</h2>
-<p class="ws-lead">用 NumPy 在 CPU 上跑一个可检查的参考实现。小尺寸便于把中间张量打印出来。</p><div class="ws-cols"><pre class="ws-code">python3 -m pip install numpy
-python3 lab.py
-python3 lab.py --seed 7</pre><pre class="ws-code">recurrent vs dense kernel: PASS
-recurrent vs chunkwise: PASS
-gated scan coefficients: PASS
-delta unit-key convergence: PASS</pre></div><p class="ws-lead">改变 chunk 大小，验证边界不改变语义；把 φ 换成 ELU+1，再用错误的 softmax 参考比较，观察为什么两类 attention 并不相等。</p><a class="ws-lab-link" download href="/posts/linear-attention/lab.py">下载实验代码 lab.py</a><p class="ws-note">这是正确性与成本的教学实验；耗时不代表 GPU kernel 性能。</p>
-</section>
-
-<section class="slide lesson">
-<div class="kicker">参考资料</div>
-<h2>参考与延伸阅读</h2>
-<ul class="reference-list">
-<li>
-<a href="https://arxiv.org/abs/2006.16236" target="_blank" rel="noopener noreferrer">Transformers are RNNs：核化相似度与线性递推</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2312.06635" target="_blank" rel="noopener noreferrer">Gated Linear Attention Transformers with Hardware-Efficient Training</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2406.06484" target="_blank" rel="noopener noreferrer">Parallelizing Linear Transformers with the Delta Rule over Sequence Length</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2412.06464" target="_blank" rel="noopener noreferrer">Gated Delta Networks：结合遗忘门与 delta 更新</a>
-</li>
-</ul>
-<p class="related">继续看：<a href="/posts/kv-cache/">KV cache</a> · <a href="/posts/sparse-attention/">Sparse attention</a> · <a href="/posts/kimi-linear/">Kimi Linear</a>
-</p>
-</section>
-</div>
-</main><script src="/assets/slides.js?v=33e153b61ac9"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
-const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
-const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
-const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
-const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
-function scene(id,svg,steps){
- const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
- const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
- steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
- const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
- Anim.slide(el,tl,{steps:true,controls:true});
-}
-const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
-
-
-let sm=B('query',55,125,150,70,'当前 Q','accentbox')+B('state',815,125,220,70,'固定状态 S','greenbox ghost');for(let i=0;i<4;i++)sm+=B('kv'+i,370,30+i*75,190,56,'K'+(i+1)+' / V'+(i+1))+L('match'+i,220,160,355,58+i*75,'hotwire ghost');scene('softmax',sm,[{name:'每个新 Q 都重新匹配',run:(tl,t)=>{a(tl,t,'[id^=match]',{opacity:1});[0,1,2,3].forEach(i=>a(tl,t,'#kv'+i,{x:-15},i*.1))}},{name:'用状态组织历史',run:(tl,t)=>{[0,1,2,3].forEach(i=>a(tl,t,'#kv'+i,{x:400,y:(1.5-i)*75,scale:.3,opacity:0},i*.12));a(tl,t,'#state',{opacity:1},.7)}}]);
-scene('kernel',T(560,50,'yᵀ = Σ [φ(q)ᵀφ(kᵢ)] vᵢᵀ / Σ [φ(q)ᵀφ(kᵢ)]','value')+B('q',70,135,170,70,'φ(q)ᵀ','accentbox')+B('sum',350,100,350,65,'S = Σ φ(kᵢ)vᵢᵀ')+B('z',350,220,350,65,'z = Σ φ(kᵢ)')+B('out',835,155,220,70,'分子 ÷ 分母','greenbox')+L('n',250,170,335,133,'wire ghost')+L('d',250,170,335,253,'wire ghost')+L('ny',715,133,820,188,'wire ghost')+L('dy',715,253,820,188,'wire ghost'),[{name:'历史先合并成 S',run:(tl,t)=>{a(tl,t,'#sum',{x:-20,scale:1.06});a(tl,t,'#n,#ny',{opacity:1})}},{name:'归一化也保存为 z',run:(tl,t)=>{a(tl,t,'#z',{x:-20,scale:1.06});a(tl,t,'#d,#dy',{opacity:1});a(tl,t,'#out',{scale:1.05},.4)}}]);
-let state=T(205,35,'当前写入','label')+T(610,35,'S：关联累加器','label')+T(930,35,'z：归一化累加器','label')+B('incoming',45,130,300,80,'[1,0] × 2','accentbox')+L('writeS',360,150,485,130)+L('writeZ',360,190,805,230);for(let i=0;i<2;i++)state+=B('s'+i,500,75+i*120,220,85,'0','accentbox')+B('z'+i,820,75+i*120,220,85,'0','greenbox');scene('state',state,[{name:'写入第一个 token',run:(tl,t)=>{a(tl,t,'#incoming',{x:65});a(tl,t,'#s0 text',{text:2});a(tl,t,'#z0 text',{text:1})}},{name:'累加第二个 token',run:(tl,t)=>{a(tl,t,'#incoming',{x:0});a(tl,t,'#incoming text',{text:2,fmt:()=> '[0,1] × 4'});a(tl,t,'#s1 text',{text:4});a(tl,t,'#z1 text',{text:1})}},{name:'累加第三个 token',run:(tl,t)=>{a(tl,t,'#incoming',{x:65});a(tl,t,'#incoming text',{text:3,fmt:()=> '[1,1] × 3'});a(tl,t,'#s0 text',{text:5});a(tl,t,'#s1 text',{text:7});a(tl,t,'#z0 text',{text:2});a(tl,t,'#z1 text',{text:2})}}]);
-scene('read',B('q',40,130,215,80,'φ(q) = [2,1]','accentbox')+B('s',350,55,240,75,'S = [5,7]')+B('z',350,215,240,75,'z = [2,2]')+B('num',680,55,165,75,'17','accentbox ghost')+B('den',680,215,165,75,'6','greenbox ghost')+B('result',915,130,160,80,'2.83','accentbox ghost')+L('qs',270,155,335,95)+L('qz',270,185,335,252)+L('sn',605,95,665,95)+L('zd',605,252,665,252),[{name:'算分子与分母',run:(tl,t)=>{a(tl,t,'#q',{x:20});a(tl,t,'#num,#den',{opacity:1});a(tl,t,'#s,#z',{scale:1.05})}},{name:'归一化得到输出',run:(tl,t)=>{a(tl,t,'#num',{x:55,y:35,scale:.8});a(tl,t,'#den',{x:55,y:-35,scale:.8});a(tl,t,'#result',{opacity:1},.5)}}]);
-scene('forget',T(195,35,'旧状态','label')+T(550,35,'门控后的状态','label')+T(925,35,'新写入','label')+R('old',90,90,260,120,'accentbox')+R('faded',425,90,260,120,'accentbox')+B('gate',400,250,300,55,'α = 0.5','greenbox')+B('new',825,120,200,75,'φ(k)vᵀ','accentbox')+T(220,280,'S 与 z 同步缩放','label'),[{name:'旧记忆乘遗忘门',run:(tl,t)=>{a(tl,t,'#faded',{attr:{width:130},opacity:.55});a(tl,t,'#gate',{scale:1.07})}},{name:'写入新贡献',run:(tl,t)=>{a(tl,t,'#new',{x:-260,y:0,scale:.6});a(tl,t,'#faded',{attr:{width:220},opacity:.9},.4)}}]);
-scene('delta',T(220,35,'状态 S 的两条方向','label')+B('first',60,70,300,75,'2','accentbox')+B('second',60,190,300,75,'4')+B('key',450,65,230,65,'k = [1,0]','greenbox')+B('target',450,205,230,65,'目标 v = 5','greenbox')+B('error',805,65,250,75,'误差 = 3','ghost accentbox')+B('write',805,205,250,65,'β × e = 1.5','ghost greenbox')+L('read',375,108,435,98)+L('err',695,98,790,98,'wire'),[{name:'先算预测误差',run:(tl,t)=>{a(tl,t,'#first',{x:25});a(tl,t,'#error',{opacity:1});a(tl,t,'#key',{scale:1.05})}},{name:'沿 key 方向修正',run:(tl,t)=>{a(tl,t,'#write',{opacity:1});a(tl,t,'#first text',{text:3.5,fmt:v=>v.toFixed(1)},.25);a(tl,t,'#first',{x:0,scale:1.07},.25)}}]);
-let par=T(180,65,'逐 token 递推','label')+T(180,230,'chunkwise','label');for(let i=0;i<9;i++)par+=B('token'+i,350+i*75,35,63,55,'t'+(i+1),'box');for(let i=0;i<3;i++)par+=B('chunk'+i,350+i*245,190,215,85,'chunk '+(i+1),'accentbox ghost');par+=L('link0',575,232,585,232,'hotwire ghost')+L('link1',820,232,830,232,'hotwire ghost');scene('parallel',par,[{name:'把 token 组织成块',run:(tl,t)=>{for(let i=0;i<9;i++)a(tl,t,'#token'+i,{y:135,opacity:.15,scale:.7},i*.04);a(tl,t,'[id^=chunk]',{opacity:1},.4)}},{name:'块内并行，块间传状态',run:(tl,t)=>{a(tl,t,'[id^=link]',{opacity:1});[0,1,2].forEach(i=>a(tl,t,'#chunk'+i,{y:-12},i*.2))}}]);
-
-function numberSteps(id,frames,captions){
- const el=document.getElementById(id),tl=Anim.timeline({root:el});
- const value=el.querySelector('.cn-value'),label=el.querySelector('.cn-label'),detail=el.querySelector('.cn-detail'),cap=el.querySelector('.cn-caption'),rows=[...el.querySelectorAll('.cn-row')];
- const packets=rows.map((row,i)=>{const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx','625');c.setAttribute('cy',String(54+i*73));c.setAttribute('r','7');c.setAttribute('fill','var(--accent)');c.style.opacity='0';el.querySelector('svg').appendChild(c);return c});
- const driver=document.createElement('span');driver.hidden=true;el.appendChild(driver);
- const draw=v=>{const n=Math.min(frames.length-1,Math.floor(v+1e-7)),f=frames[n];label.textContent=f.label;detail.textContent=f.detail;cap.textContent=captions[n];rows.forEach((r,i)=>r.style.opacity=i===n-1?'1':'.45');return String(v)};
- tl.set(driver,{text:0,fmt:draw},{at:0});tl.set(value,{text:frames[0].value,fmt:v=>v.toFixed(frames[0].digits??2)},{at:0});tl.label('起点',0);
- frames.slice(1).forEach((f,i)=>{const t=i*1.5;tl.to(packets[i],{opacity:1},{at:t+.1,dur:.1});tl.to(packets[i],{x:100,y:135-(54+i*73)},{at:t+.2,dur:.8,ease:'linear'});tl.to(packets[i],{opacity:0},{at:t+1.1,dur:.1});tl.to(value,{text:f.value,fmt:v=>v.toFixed(f.digits??2)},{at:t+.1,dur:1.15,ease:'linear'});tl.set(driver,{text:i+1,fmt:draw},{at:t+.05});tl.label(f.stop,t+1.5)});
- Anim.slide(el,tl,{steps:true,controls:true});
-}
-numberSteps("gate-weights",[{"value": 0, "label": "当前归一化输出", "detail": "S0 = z0 = 0"}, {"value": 2, "label": "当前归一化输出", "detail": "2 / 1 = 2", "stop": "第一个 token"}, {"value": 3.3333333333333335, "label": "当前归一化输出", "detail": "5 / 1.5 = 3.3333", "stop": "第二个 token"}, {"value": 6, "label": "当前归一化输出", "detail": "10.5 / 1.75 = 6", "stop": "第三个 token"}],["旧信息每经过一步都乘 0.5。", "当前 token 的权重系数为 1。", "两个 token 的未归一化系数是 [0.5, 1]。", "三个 token 的系数为 [0.25, 0.5, 1]；归一化后 [1/7, 2/7, 4/7]。"]);
-numberSteps("delta-repeat",[{"value": 2, "label": "key = 1 对应的记忆", "detail": "初始 S = 2"}, {"value": 3.5, "label": "key = 1 对应的记忆", "detail": "剩余误差 1.5", "stop": "第一次纠错"}, {"value": 4.25, "label": "key = 1 对应的记忆", "detail": "剩余误差 0.75", "stop": "第二次纠错"}, {"value": 4.625, "label": "key = 1 对应的记忆", "detail": "剩余误差 0.375", "stop": "第三次纠错"}],["这是不带 z 分母的 delta memory。", "误差减半，而不是把 value 5 整份叠加到 S。", "对同一个目标反复纠错，会逐渐逼近 5。", "β = 1 且 key 为单位向量时，一次即可把该方向改为目标值。"]);
-</script><script src="/assets/post-links.js?v=3173091271f1"></script><script src="/assets/posts.js?v=150c41e1230c"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</script>
+<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body></html>

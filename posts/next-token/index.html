@@ -1,183 +1,96 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>一次只猜一个 token · Zunzhe Zhang</title>
-  <meta name="description" content="用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。">
-  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
-  <link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
-  <style>
-    .chips { display: flex; flex-wrap: wrap; gap: 12px; font-family: var(--font-mono); font-size: 34px; }
-    .chip {
-      padding: 6px 16px; border-radius: 12px;
-      background: var(--surface); border: 1px solid var(--border); box-shadow: var(--shadow);
-      white-space: pre;
-    }
-    .chip .id { display: block; font-size: 16px; color: var(--text-faint); text-align: center; }
-    .slide.is-active .chips .chip { animation: deck-rise 0.6s cubic-bezier(0.2, 0.7, 0.2, 1) both; animation-delay: calc(var(--i) * 140ms + 200ms); }
-    .slide .chips .chip { opacity: 0; }
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>一次只猜一个 token · Zunzhe Zhang</title>
+<meta name="description" content="从 tokenizer、logits 与采样推导生成循环，跟踪输入和 KV cache 的交接，结合 padding 排错、交互图解与练习。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.article-figure { margin:1.6em 0; }
+.article-figure h3 { margin:0 0 .6em; font-size:18px; }
+.article-figure p { font-size:15px; }
+.article-figure table { font-size:14px; width:100%; font-variant-numeric:tabular-nums; }
+.article-figure th,.article-figure td { padding:8px 6px; }
+.article-figure label { display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:14px;margin:10px 0; }
+.article-figure input[type=range] { flex:1;min-width:110px; }
+.article-figure output { font-variant-numeric:tabular-nums; }
+.article-figure svg { display:block;width:100%;height:auto; }
+.article-figure svg text { font-family:var(--font-sans);fill:var(--text-soft);font-size:13px; }
+.figure-metric { padding:12px;background:var(--accent-soft);border-radius:8px;font-size:16px;font-variant-numeric:tabular-nums; }
+.state-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px; }
+.state-grid div { border:1px solid var(--border);border-radius:8px;padding:10px;font-size:14px;overflow-wrap:anywhere; }
+.state-grid b { display:block;color:var(--accent);font-size:19px;margin:5px 0; }
+.diagram-row { display:flex;gap:6px;flex-wrap:wrap;margin:12px 0; }
+.diagram-token { padding:8px 12px;border:1px solid var(--border);border-radius:7px;background:var(--bg-soft);font:14px var(--font-mono); }
+.diagram-token.active { background:var(--accent-soft);border-color:var(--accent); }
+.figure-bars { display:grid;gap:9px;margin:12px 0; }
+.figure-bar { display:grid;grid-template-columns:70px 1fr 65px;align-items:center;gap:8px;font-size:14px; }
+.figure-bar i { display:block;height:18px;background:var(--accent);border-radius:4px;transition:width .18s; }
+.figure-bar .track { background:var(--bg-soft);border-radius:4px;overflow:hidden; }
+.article-figure figcaption { color:var(--text-soft);font-size:14px;line-height:1.6;margin-top:10px; }
+.article-exercise { margin:1.3em 0; }
+.article-exercise h3 { font-size:18px; }
+.article-exercise details { margin-top:8px; }
+.prose pre { max-width:100%;overflow-x:auto;font-size:13px;padding:14px;background:var(--code-bg);border-radius:8px; }
+.matrix-grid { display:grid;gap:3px;grid-template-columns:repeat(9,minmax(0,1fr));font-size:12px;text-align:center; }
+.matrix-grid span { border-radius:4px;padding:5px 0;background:var(--bg-soft); }
+.matrix-grid .kept { background:var(--accent-soft);color:var(--accent); }
+.matrix-grid .current { outline:1px solid var(--accent);outline-offset:-1px; }
+.matrix-grid .axis { background:transparent;color:var(--text-soft); }
+@media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
+@media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>一次只猜一个 token</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time><span>更新于 2026-10-22</span></div></header>
+<nav class="series" data-series="systems"></nav><article class="prose"><p>给模型输入“今天的天气”，屏幕上的下一段文字怎样出现？一次前向计算会为整个词表产生一组分数，采样器从这些分数中选出一个 token。这个 token 随后成为新的输入，模型再计算下一轮。长答案就是这个循环累积的结果。</p>
+<p>要实现一个能正确生成文本的小程序，需要把三种对象接起来：tokenizer 负责文本与编号的转换，模型把编号序列变成分数，采样器把分数变成下一次选择。它们共同决定输出的内容、长度和停止时机。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#tokens">文本怎样变成模型的输入</a></li><li><a href="#distribution">从 logits 算出下一步概率</a></li><li><a href="#loop">一枚输出怎样进入下一轮</a></li><li><a href="#engineering">单条生成正常，组 batch 后为什么变了</a></li><li><a href="#exercises">练习</a></li><li><a href="#references">参考与延伸阅读</a></li></ol></nav>
+<h2 id="tokens">文本怎样变成模型的输入</h2>
+<p>Tokenizer 把文本分成词表中的片段，再把每个片段映射到整数编号。一个片段可能是完整单词、词的一部分、标点或若干字节。中文字符和 token 的数量关系由具体词表决定；统计上下文长度时，直接使用编码得到的编号数。</p>
+<p>例如，某个教学词表把三个候选片段记为“晴”“雨”“雪”。模型接收的是它们对应的编号，embedding 表再把每个编号映射成一个向量。实际模型必须使用训练时配套的 tokenizer 和特殊 token 约定，这样编号才能找到正确的 embedding 行。</p>
+<p>对聊天模型，输入还包含角色分隔符、轮次边界和 assistant 开始标记。应用通常先用模型提供的 chat template 组织消息，再编码成 token。手工拼接“用户：”可能改变模型实际看到的格式；把相同消息分别经过模板和手工路径编码，打印两组编号与解码结果，能直接定位这类差异。</p>
+<h2 id="distribution">从 logits 算出下一步概率</h2>
+<p>设词表大小为 \(V\)，最后一个有效输入位置输出向量 \(z\in\mathbb R^V\)。其中 \(z_j\) 叫第 \(j\) 个 token 的 logit。Softmax 用指数把分数转成非负数，再除以总和：</p>
+$$p_j=\frac{e^{z_j/\htmlData{symbol=temperature}{\tau}}}{\sum_{k=1}^{V}e^{z_k/\tau}}.$$
+<p>这里 \(\tau&gt;0\) 是采样温度。温度越小，分数差异越突出；温度越大，分布越平。数值实现先减去最大的 logit，利用 \(e^{(z_j-m)/\tau}\) 计算，避免很大的指数溢出。减去相同常数会同时改变分子和分母，最终概率保持一致。</p>
+<figure class="article-figure" id="distribution-demo"><h3>三项分数怎样变成概率</h3><p>三个候选的 logits 固定为 2、1、0。条形长度表示概率，横向满格为 100%。</p><label>温度 <input id="temperature" type="range" min="0.2" max="2" step="0.1" value="1"><output id="temperature-value">1.0</output></label><div id="prob-bars" class="figure-bars"></div><div class="figure-metric" id="prob-result"></div><figcaption>采样将这三个概率分配到区间 [0,1)。随机数落在哪一段，就选择对应 token。</figcaption></figure>
+<p>当 logits 是 \([2,1,0]\)、温度为 1 时，概率约为 \([0.665,0.245,0.090]\)。贪心解码每次选择分数最大的候选；随机采样按照概率抽取，因而相同输入可能产生不同结果。Top-k 保留分数最高的 k 项，top-p 保留累积概率达到阈值的最小候选集合，保留后再重新归一化。</p>
+<h2 id="loop">一枚输出怎样进入下一轮</h2>
+<p>第一次前向读入完整 prompt，这一步叫 prefill。最后一个有效位置的 logits 用来选择第一个输出。后续 decode 每轮输入刚刚选出的 token，并读取之前保存的 <a href="/posts/kv-cache/">KV cache</a>。它为这个输入计算各层的 K/V，追加到历史，再产生下一枚输出的 logits。</p>
+<figure class="article-figure" id="generation-demo"><h3>输入、缓存与输出的交接</h3><div class="diagram-row" id="token-row"></div><div class="state-grid"><div>本轮输入<b id="input-state"></b></div><div>缓存位置数<b id="cache-state"></b></div><div>刚选出的输出<b id="output-state"></b></div></div></figure>
+<p>假设 prompt 含 3 个 token，最终生成 2 个 token，并在选出第二个输出后立即停止。真正进入模型的输入共有 \(3+2-1=4\) 个位置：三个 prompt，加第一个输出。最后一个输出已经交给用户，下一轮前向尚未开始，因此它还没有对应的 K/V。这个边界关系会影响缓存复用、计时和流式服务的状态提交。</p>
+<pre><code>cache = empty_cache()
+logits, cache = forward(prompt_ids, cache)
+for step in range(max_new_tokens):
+    next_id = sample(logits[-1])
+    yield next_id
+    if next_id == eos_id or step + 1 == max_new_tokens:
+        break
+    logits, cache = forward([next_id], cache)</code></pre>
+<p>EOS 是模型词表中的结束标记。应用还可以设置最大新增 token 数和字符串停止条件。流式输出通常逐步把 token 解码成文本；字节级 tokenizer 的一个字符可能跨多个 token，因此解码器应维护未完成的字节序列，等片段完整后再显示。</p>
+<h2 id="engineering">单条生成正常，组 batch 后为什么变了</h2>
+<p>一个常见入口是 padding。很多 decoder-only 生成循环直接取 <code>logits[:, -1, :]</code>。两条 prompt 长度不同时，右填充会让短请求的最后一列落在 padding 上。Attention mask 控制可读取的 key，却不会替应用把最后一列换成“最后一个有效 query”。这种循环适合左填充；自己实现批处理时，也可以按各请求的有效长度显式 gather logits。</p>
+<p>排查时先固定采样策略，用贪心解码比较“单独运行”和“与长请求组成 batch”的第一步 logits。再核对有效 token 的 position ids、attention mask 和最后有效位置。只比较最终字符串容易被一次早期采样差异掩盖；逐步比较 logits 能找到最早发生分歧的位置。</p>
+<p>遇到乱码、空输出或 token 数异常少，先独立检查 tokenizer 的 encode/decode 往返。记录模型 revision、tokenizer revision、chat template，以及特殊 token 的编号。这样能把输入组织问题和模型前向问题分开复现。生成速度则分别记录 prefill、每次 decode 和文本解码的用时，服务端还需要加上排队和网络时间。</p>
+<h2 id="exercises">练习</h2>
+<div class="article-exercise"><h3>1. 手算一次采样</h3><p>概率为 [0.665, 0.245, 0.090]，按顺序对应晴、雨、雪。均匀随机数为 0.80，选哪一个？</p><details><summary>展开解答</summary><p>累计区间为 [0,0.665)、[0.665,0.910)、[0.910,1)。0.80 落在第二段，因此选雨。重复大量独立采样后，各候选频率会接近给定概率。</p></details></div>
+<div class="article-exercise"><h3>2. 缓存里有几个位置？</h3><p>Prompt 长度为 8，生成 5 枚 token 后立即结束。每层已有多少个缓存位置？</p><details><summary>展开解答</summary><p>共有 8+5−1=12 个位置完成前向。最后一枚输出留在采样结果中；若下一轮聊天要继续复用缓存，需要把它作为尚未消费的输入接上。</p></details></div>
+<div class="article-exercise"><h3>3. 找出 batch 的错误位置</h3><p>短请求有效长度为 3，右填充到 5，代码读取第 4 列 logits。怎样构造最小修复和验证？</p><details><summary>展开解答</summary><p>读取零基索引 2 对应的 logits；或者为采用末列读取的生成循环使用左填充。固定位置与 mask 后，比较该行与单条无 padding 运行的末行 logits，再比较第一个贪心 token。</p></details></div>
+<h2 id="references">参考与延伸阅读</h2><ul><li><a href="https://huggingface.co/docs/transformers/llm_tutorial">Transformers：LLM generation tutorial</a>，生成流程、padding 与聊天模板。</li><li><a href="https://huggingface.co/docs/transformers/chat_templating">Transformers chat templates</a>：角色消息、特殊 token 与生成提示。</li><li><a href="/posts/sampling-structured-decoding/">采样器与结构化解码</a>，进一步实现候选过滤、随机采样和语法约束。</li></ul>
+</article><nav class="series-pager" data-series="systems"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"temperature": {"label": "τ · 采样温度", "description": "词表 softmax 前用于缩放 logits 的正数；越小，概率越集中。", "unit": ""}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script>
+(() => {
+ const range=document.getElementById('temperature');
+ function probabilities(){const t=+range.value,e=[2,1,0].map(z=>Math.exp((z-2)/t)),sum=e.reduce((a,b)=>a+b);document.getElementById('temperature-value').textContent=t.toFixed(1);document.getElementById('prob-bars').innerHTML=e.map((v,i)=>'<div class="figure-bar"><span>'+['晴','雨','雪'][i]+'</span><div class="track"><i style="width:'+100*v/sum+'%"></i></div><output>'+(100*v/sum).toFixed(1)+'%</output></div>').join('');document.getElementById('prob-result').textContent='概率和 = '+e.map(v=>v/sum).reduce((a,b)=>a+b).toFixed(3);}
+ range.addEventListener('input',probabilities);probabilities();
+ const steps=[{title:'准备 prompt',caption:'三个输入位置等待第一次前向。',input:'x₀ x₁ x₂',cache:0,out:'待生成'},{title:'Prefill 完成',caption:'三个位置写入 KV cache，末行 logits 产生第一枚输出 y₀。',input:'x₀ x₁ x₂',cache:3,out:'y₀'},{title:'输入第一枚输出',caption:'y₀ 在位置 3 完成前向，缓存增长到 4，新的 logits 产生 y₁。',input:'y₀',cache:4,out:'y₁'},{title:'停止生成',caption:'已经输出两枚 token。缓存保留四个已处理位置，y₁ 留待需要继续生成时输入。',input:'已停止',cache:4,out:'y₁'}];
+ ArticleSteps.mount('#generation-demo',{steps,render(s){document.getElementById('input-state').textContent=s.input;document.getElementById('cache-state').textContent=s.cache;document.getElementById('output-state').textContent=s.out;document.getElementById('token-row').innerHTML=['x₀','x₁','x₂','y₀','y₁'].map((x,i)=>'<span class="diagram-token '+(i<s.cache?'active':'')+'">'+x+'</span>').join('');}});
+})();
 
-    .dist { display: grid; gap: 14px; width: 100%; }
-    .dist-row { display: grid; grid-template-columns: 120px 1fr 90px; align-items: center; gap: 20px; font-size: 26px; }
-    .dist-row .w { font-family: var(--font-mono); text-align: right; }
-    .dist-track { height: 34px; border-radius: 8px; background: var(--bg-soft); overflow: hidden; }
-    .dist-fill { height: 100%; width: 0; border-radius: 8px; background: var(--accent); transition: width 0.9s cubic-bezier(0.2, 0.7, 0.2, 1); }
-    .dist-row:first-child .dist-fill { background: var(--accent-2); }
-    .dist-row .p { font-family: var(--font-mono); font-size: 22px; color: var(--text-soft); }
-
-    .loop-text { font-family: var(--font-mono); font-size: 40px; line-height: 1.6; min-height: 3.2em; }
-    .loop-text .new { color: var(--accent-2); }
-    .loop-text .caret { display: inline-block; width: 0.5em; height: 1em; vertical-align: -0.12em; background: var(--accent); animation: blink 1s steps(1) infinite; }
-
-    .pipeline { display: flex; align-items: center; gap: 18px; font-size: 26px; }
-    .pipeline .box { padding: 18px 24px; border-radius: 14px; border: 1px solid var(--border); background: var(--surface); box-shadow: var(--shadow); text-align: center; }
-    .pipeline .box small { display: block; font-size: 17px; color: var(--text-faint); }
-    .pipeline .arrow { color: var(--text-faint); font-size: 30px; }
-    .pipeline .box.hot { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow); }
-
-    .big-number { font-size: 120px; font-weight: 700; line-height: 1; letter-spacing: -0.04em; }
-  </style>
-</head>
-<body class="deck-page">
-  <main class="deck"><div class="stage">
-
-    <section class="slide center">
-      <div class="kicker rise">LLM 101</div>
-      <h1 class="rise" style="--d: 1">一次只猜一个 token</h1>
-      <p class="muted rise" style="--d: 2">大模型生成文本的全部流程，其实是一个很短的循环</p>
-      <p class="small muted rise" style="--d: 4">按 → 或点击屏幕继续</p>
-    </section>
-
-    <section class="slide">
-      <div class="kicker">第 1 步 · 切词</div>
-      <h2>模型看到的不是字，是 token</h2>
-      <div class="chips">
-        <span class="chip" style="--i: 0">The<span class="id">464</span></span>
-        <span class="chip" style="--i: 1"> cat<span class="id">3797</span></span>
-        <span class="chip" style="--i: 2"> sat<span class="id">3332</span></span>
-        <span class="chip" style="--i: 3"> on<span class="id">319</span></span>
-        <span class="chip" style="--i: 4"> the<span class="id">262</span></span>
-      </div>
-      <p class="muted fragment">文本先被切成片段，每个片段对应词表里的一个编号。常见词通常是一个 token，生僻词会被拆成几块。</p>
-      <p class="small muted fragment">（编号仅为示意，不同模型的词表各不相同。）</p>
-    </section>
-
-    <section class="slide" id="scores">
-      <div class="kicker">第 2 步 · 打分</div>
-      <h2>对下一个 token，给整个词表打分</h2>
-      <p class="muted">「The cat sat on the ___」，下一个是什么？</p>
-      <div class="dist" id="dist">
-        <div class="dist-row"><span class="w">mat</span><div class="dist-track"><div class="dist-fill" data-p="0.41"></div></div><span class="p">41%</span></div>
-        <div class="dist-row"><span class="w">floor</span><div class="dist-track"><div class="dist-fill" data-p="0.18"></div></div><span class="p">18%</span></div>
-        <div class="dist-row"><span class="w">bed</span><div class="dist-track"><div class="dist-fill" data-p="0.12"></div></div><span class="p">12%</span></div>
-        <div class="dist-row"><span class="w">roof</span><div class="dist-track"><div class="dist-fill" data-p="0.06"></div></div><span class="p">6%</span></div>
-        <div class="dist-row"><span class="w">…</span><div class="dist-track"><div class="dist-fill" data-p="0.23"></div></div><span class="p">23%</span></div>
-      </div>
-      <p class="small muted">概率为示意。最后一行是词表里其余几万个 token 加起来的份额。</p>
-    </section>
-
-    <section class="slide">
-      <div class="kicker">第 3 步 · 采样</div>
-      <h2>从分布里抽一个</h2>
-      <ul>
-        <li class="fragment dim-after"><span class="accent">贪心</span>：永远选概率最高的，稳定但容易重复</li>
-        <li class="fragment dim-after"><span class="accent">temperature</span>：先把分数除以 T 再算概率，T 大更随机，T 小更保守</li>
-        <li class="fragment dim-after"><span class="accent">top-p</span>：只在累计概率达到 p 的头部 token 里抽，砍掉长尾</li>
-      </ul>
-      <p class="small muted fragment">想亲手拖一拖 T：<a href="/posts/hello-world/">新博客，从零开始</a> 里有交互演示。</p>
-    </section>
-
-    <section class="slide" id="loop">
-      <div class="kicker">第 4 步 · 再来一遍</div>
-      <h2>把新 token 接到末尾，重复</h2>
-      <div class="loop-text" id="loop-text"></div>
-      <p class="muted">这叫<span class="accent">自回归</span>：每一步的输出，都是下一步的输入。</p>
-    </section>
-
-    <section class="slide center">
-      <div class="kicker rise">整体</div>
-      <div class="pipeline rise" style="--d: 1" id="pipeline">
-        <div class="box">文本<small>prompt</small></div><span class="arrow">→</span>
-        <div class="box">切词<small>tokenizer</small></div><span class="arrow">→</span>
-        <div class="box">Transformer<small>算出分数</small></div><span class="arrow">→</span>
-        <div class="box">采样<small>选一个 token</small></div><span class="arrow">↺</span>
-      </div>
-      <p class="muted rise" style="--d: 3">箭头绕回去，直到抽到「结束」token 或达到长度上限。</p>
-    </section>
-
-    <section class="slide center">
-      <div class="kicker">所以</div>
-      <div class="big-number rise" style="--d: 1">1</div>
-      <p class="rise" style="--d: 2">模型每次只做一件事：预测<span class="accent-2">下一个</span> token</p>
-      <p class="muted fragment">回答问题、写代码、做推理，都是这一件事重复几百上千次的结果。</p>
-      <p class="muted fragment">难的部分全在中间那个 Transformer 怎么打分，那是以后的话题。</p>
-    </section>
-
-    <section class="slide center">
-      <h2 class="rise">谢谢</h2>
-      <p class="muted rise" style="--d: 1"><a href="/blog/">← 回到博客</a></p>
-    </section>
-
-  </div></main>
-
-  <script src="/assets/slides.js?v=33e153b61ac9"></script>
-  <script>
-    (() => {
-      // Slide "scores": grow the bars each time the slide is entered.
-      const fills = document.querySelectorAll('#dist .dist-fill');
-      // Slide "pipeline": light up the boxes one after another.
-      const boxes = document.querySelectorAll('#pipeline .box');
-      // Slide "loop": type the sentence out one token at a time.
-      const loopText = document.getElementById('loop-text');
-      const prompt = ['The', ' cat', ' sat', ' on', ' the'];
-      const generated = [' mat', '.', ' It', ' was', ' warm', '.'];
-      let timers = [];
-
-      function clearTimers() { timers.forEach(clearTimeout); timers = []; }
-      function later(fn, ms) { timers.push(setTimeout(fn, ms)); }
-
-      function playLoop() {
-        loopText.innerHTML = '';
-        const caret = document.createElement('span');
-        caret.className = 'caret';
-        loopText.append(prompt.join(''), caret);
-        generated.forEach((tok, i) => {
-          later(() => {
-            const s = document.createElement('span');
-            s.className = 'new';
-            s.textContent = tok;
-            loopText.insertBefore(s, caret);
-          }, 700 + i * 650);
-        });
-      }
-
-      function playPipeline() {
-        boxes.forEach((b) => b.classList.remove('hot'));
-        let k = 0;
-        const step = () => {
-          boxes.forEach((b, i) => b.classList.toggle('hot', i === k % boxes.length));
-          k++;
-          later(step, 700);
-        };
-        later(step, 900);
-      }
-
-      document.addEventListener('slidechange', (e) => {
-        clearTimers();
-        const id = e.detail.slide.id;
-        fills.forEach((f) => { f.style.width = '0'; });
-        if (id === 'scores') {
-          later(() => fills.forEach((f) => { f.style.width = f.dataset.p * 100 + '%'; }), 350);
-        }
-        if (id === 'loop') playLoop();
-        if (e.detail.slide.contains(boxes[0])) playPipeline();
-      });
-    })();
-  </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
-</body>
-</html>
+</script>
+<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script>
+</body></html>

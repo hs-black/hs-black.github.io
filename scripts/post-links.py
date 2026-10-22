@@ -27,7 +27,7 @@ body = json.dumps(links, ensure_ascii=False, indent=1)
 print(sum(len(v) for v in links.values()), 'links across', len(links), 'posts')
 
 # GitHub Pages caches assets independently from HTML. A new catalog or lesson
-# must load matching data, styles and player behavior.
+# must load matching data, styles and figure behavior.
 def version_assets(page, names):
     html = page.read_text(encoding='utf-8')
     for name in names:
@@ -40,12 +40,9 @@ def version_assets(page, names):
     page.write_text(html, encoding='utf-8')
 
 
-version_assets(root / 'blog' / 'index.html', ('posts.js', 'series.js', 'curriculum.js', 'curriculum.css'))
-for page in sorted((root / 'posts').rglob('*.html')):
-    html = page.read_text(encoding='utf-8')
-    names = ['posts.js', 'series.js', 'post-links.js', 'curriculum.js', 'curriculum.css', 'reader-math.js', 'reader-math.css']
-    if '/assets/slides.css' in html:
-        names += ['slides.css', 'slides.js', 'anim.js']
-    if '/assets/course.css' in html:
-        names += ['course.css']
-    version_assets(page, names)
+shared = ('site.css', 'posts.js', 'series.js', 'post-links.js', 'curriculum.js',
+          'curriculum.css', 'reader-math.js', 'reader-math.css', 'article.css',
+          'article-steps.js', 'anim.js')
+for page in sorted(root.rglob('*.html')):
+    if '.git' not in page.parts and 'vendor' not in page.parts:
+        version_assets(page, shared)

@@ -6,7 +6,7 @@
   <title>张量并行与序列并行 · Zunzhe Zhang</title>
   <meta name="description" content="从矩阵乘法的两种切法讲起：Megatron 张量并行、f/g 算子、词表并行、序列并行、通信量与为什么 TP 不出节点。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
@@ -76,7 +76,7 @@
     .chart-wrap { position: relative; }
     .warn-txt { color: var(--accent-2); font-size: 13.5px; min-height: 1.4em; margin-top: 6px; }
   </style>
-<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
@@ -701,8 +701,8 @@ class ReduceFromTP(torch.autograd.Function):    # g
         if (lay === 'full') inner = `<rect x="${x0}" y="${y0}" width="${W}" height="${H}" fill="var(--text-faint)" opacity="0.55" rx="3"/>`;
         else if (lay === 'rows') inner = `<rect x="${x0}" y="${y0 + H * rank / t}" width="${W}" height="${H / t}" fill="var(--accent)"/>`;
         else if (lay === 'cols') inner = `<rect x="${x0 + W * rank / t}" y="${y0}" width="${W / t}" height="${H}" fill="var(--accent)"/>`;
-        else if (lay === 'partial') inner = `<rect x="${x0}" y="${y0}" width="${W}" height="${H}" fill="url(#hatch)" rx="3"/>`;
-        return `<svg viewBox="0 0 78 62" aria-hidden="true"><defs><pattern id="hatch" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2" height="5" fill="var(--accent-2)"/></pattern></defs>${inner}${outline}</svg>`;
+        else if (lay === 'partial') inner = `<rect x="${x0}" y="${y0}" width="${W}" height="${H}" fill="url(#bd-hatch-${rank})" rx="3"/>`;
+        return `<svg viewBox="0 0 78 62" aria-hidden="true"><defs><pattern id="bd-hatch-${rank}" width="5" height="5" patternUnits="userSpaceOnUse" patternTransform="rotate(45)"><rect width="2" height="5" fill="var(--accent-2)"/></pattern></defs>${inner}${outline}</svg>`;
       }
       const stepsEl = document.getElementById('bd-steps');
       function actBytes(stp) {
@@ -923,7 +923,7 @@ class ReduceFromTP(torch.autograd.Function):    # g
     })();
   })();
   </script>
-  <script src="/assets/anim.js"></script>
+  <script src="/assets/anim.js?v=499c11838720"></script>
   <script id="anim-figs">
 (() => {
   if (!window.Anim) return;
@@ -1079,8 +1079,8 @@ class ReduceFromTP(torch.autograd.Function):    # g
   });
 })();
   </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+  <script src="/assets/post-links.js?v=9057de45e84d"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

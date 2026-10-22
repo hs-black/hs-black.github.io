@@ -1,728 +1,121 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DeepSeek-V4-Flash 架构：一个 token 的旅程 · Zunzhe Zhang</title>
-<meta name="description" content="从张量形状、mHC、逐通道压缩、因果边界和 MoE 路由深入理解 V4-Flash，含数值动画、工程分析、习题解答与可运行实验。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef"><style>
-.slide.ds {padding:52px 76px 80px;gap:16px;justify-content:flex-start}
-.ds .kicker{font-size:16px}.ds h1{font-size:72px}.ds h2{font-size:43px}.ds p{font-size:24px;line-height:1.5}.ds .intro{max-width:1000px;color:var(--text-soft)}
-.ds .scene{width:100%;height:330px;flex:none;display:block}.ds .scene.tall{height:360px}.ds p.intro + .scene{height:260px}.ds svg text{font-family:var(--font-sans);fill:var(--text);font-size:19px}.ds svg .tiny{font-size:15px}.ds svg .soft{fill:var(--text-soft)}
-.ds .box{fill:var(--surface);stroke:var(--border);stroke-width:1.6}.ds .purple{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.8}.ds .orange{fill:color-mix(in srgb,var(--accent-2) 12%,var(--surface));stroke:var(--accent-2);stroke-width:1.8}
-.ds .wire{fill:none;stroke:var(--border);stroke-width:2}.ds .flow{fill:none;stroke:var(--accent);stroke-width:3;stroke-linecap:round}.ds .token{fill:var(--accent);stroke:var(--surface);stroke-width:2}.ds .token2{fill:var(--accent-2);stroke:var(--surface);stroke-width:2}
-.ds .later{opacity:0}.ds .caption{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;font-size:20px;line-height:1.45}.ds .caption>div{border-top:2px solid var(--border);padding-top:12px}.ds .caption b{color:var(--accent);display:block;margin-bottom:4px}.ds .note{font-size:17px;color:var(--text-soft)}
-.ds .stats{display:flex;gap:48px;margin:24px 0}.ds .stats strong{font-size:60px;letter-spacing:-.04em;display:block;color:var(--accent)}.ds .stats span{font-size:20px;color:var(--text-soft)}
-.ds .pill{display:inline-block;border:1px solid var(--border);padding:8px 14px;border-radius:8px;font-size:19px}.ds .twocol{display:grid;grid-template-columns:1fr 1fr;gap:28px}.ds .panel{padding:22px 26px;background:var(--surface);border:1px solid var(--border);border-radius:16px}.ds .panel h3{font-size:26px;margin:0 0 12px}.ds .panel p{font-size:22px}.ds .formula{padding:20px 26px;background:var(--accent-soft);border-radius:14px;font-family:var(--font-mono);font-size:23px}
-.ds table{width:100%;border-collapse:collapse;font-size:21px}.ds td,.ds th{padding:10px 16px;border-bottom:1px solid var(--border);text-align:left}.ds th{color:var(--text-soft);font-weight:500}.ds .refs{font-size:22px;line-height:1.7;display:grid;gap:10px}.ds .refs small{display:block;color:var(--text-soft);font-size:18px}
-.slide.ds > .anim-bar{left:76px;right:76px;bottom:27px;opacity:.8}.ds .footer{font-size:18px;color:var(--text-soft);margin-top:auto}.ds a{position:relative;z-index:1}
-</style>
-<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
-<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
-<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
-<script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
-<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
-<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
-</head>
-<body class="deck-page">
-<main class="deck">
-<div class="stage">
-<section class="slide ds" style="justify-content:center">
-<div class="kicker">MODEL ARCHITECTURE · 2026-10-20</div>
-<h1>DeepSeek-V4-Flash 架构：<br><span class="accent">一个 token 的旅程</span>
-</h1>
-<p class="intro">近处看细节，远处读压缩记忆；每层只叫醒少量专家。</p>
-<div class="stats">
-<div><strong>43</strong><span>Transformer 层</span>
-</div>
-<div><strong>284B</strong><span>总参数</span>
-</div>
-<div><strong>13B</strong><span>每 token 激活参数</span>
-</div>
-</div>
-<p class="note">← → 逐步讲解 · 拖动进度条回看 · F 全屏</p>
-</section>
-<section class="slide ds" id="journey">
-<div class="kicker">01 / 从文字到预测</div>
-<h2>文字先变向量，再一层层改写</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="一个 token 依次经过 embedding、四路残差、Transformer 层和输出头">
-<g>
-<rect class="box" x="15" y="90" width="180" height="90" rx="12"/>
-<text x="105.0" y="142.0" text-anchor="middle">token ID</text>
-</g>
-<path class="wire" d="M195 135 L220 135"/>
-<g>
-<rect class="box" x="220" y="90" width="200" height="90" rx="12"/>
-<text x="320.0" y="142.0" text-anchor="middle">Embedding · 4096</text>
-</g>
-<path class="wire" d="M420 135 L445 135"/>
-<g>
-<rect class="box" x="445" y="90" width="180" height="90" rx="12"/>
-<text x="535.0" y="142.0" text-anchor="middle">4 路残差</text>
-</g>
-<path class="wire" d="M625 135 L660 135"/>
-<g>
-<rect class="purple" x="660" y="90" width="180" height="90" rx="12"/>
-<text x="750.0" y="142.0" text-anchor="middle">Block × 43</text>
-</g>
-<path class="wire" d="M840 135 L885 135"/>
-<g>
-<rect class="box" x="885" y="90" width="180" height="90" rx="12"/>
-<text x="975.0" y="142.0" text-anchor="middle">合并 + 输出头</text>
-</g>
-<circle id="traveler" class="token" cx="35" cy="160" r="9"/>
-<text x="565" y="235" class="" text-anchor="middle">每个 Block：mHC → Norm → Attention → mHC → Norm → MoE → mHC</text>
-<text x="565" y="280" class="soft" text-anchor="middle">残差流的宽度是 4 × 4096；Attention / MoE 的输入仍是 4096 维。</text>
-</svg>
-<div class="caption">
-<div><b>查表</b>token ID 找到一行 embedding。</div>
-<div><b>加工</b>Attention 汇总上下文，MoE 变换当前表示。</div>
-<div><b>预测</b>输出头为词表中的候选 token 打分。</div>
-</div>
-</section>
-<section class="slide workshop" id="tensor-contract"><div class="kicker">工程细节</div><h2>每个算子先对齐四个维度</h2><p class="ws-lead">B 是请求数，S 是本次处理的 token 数，d 是隐藏宽度。进入一个 Block 的残差多一条大小为 4 的轴。</p><table class="ws-table"><thead><tr><th>位置</th><th>完整形状</th><th>单 token 的元素数</th></tr></thead><tbody><tr><td>残差输入</td><td>[B, S, 4, 4096]</td><td>16,384</td></tr><tr><td>mHC 汇合后</td><td>[B, S, 4096]</td><td>4,096</td></tr><tr><td>Q / shared KV</td><td>[B,S,64,512] / [B,S,512]</td><td>32,768 / 512</td></tr><tr><td>专家中间态</td><td>[被路由的 token 数, 2048]</td><td>2,048</td></tr></tbody></table><p class="ws-note">decode 时通常 S=1；prefill 的 S 可以很大。B×S 决定 GEMM 行数。Mi 表示 2²⁰：1 MiB=2²⁰ 字节，1 Mi 个参数=2²⁰ 个参数。</p></section>
-<section class="slide workshop" id="query-projection"><div class="kicker">工程细节</div><h2>低秩 Q：两次矩阵乘法接起来</h2><div class="ws-equation">X[B·S,4096] → Qr[B·S,1024] → Q[B·S,64·512]</div><pre class="ws-code"><code>qr = rms_norm(X @ Wq_a.T)
-q = (qr @ Wq_b.T).reshape(B, S, H, 512)
-q = q / sqrt(mean(q*q, axis=-1) + eps)
-q[..., -64:] = RoPE(q[..., -64:], position)</code></pre><p class="ws-note">两块权重共有 4096×1024 + 1024×32768 = 36 Mi 个参数。直接投影需要 128 Mi；低秩节省权重，但多出一次中间读写与归一化。</p></section>
-
-<section class="slide ds" id="layers">
-<div class="kicker">02 / 层的节奏</div>
-<h2>每层看多远，由层号决定</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="真实的 Flash 或 Pro 注意力层顺序">
-<g id="layer0">
-<rect class="purple" x="30" y="80" width="115" height="75" rx="12"/>
-<text x="87.5" y="124.5" text-anchor="middle">SWA</text>
-</g>
-<text x="87" y="62" class="tiny" text-anchor="middle">L1</text>
-<g id="layer1">
-<rect class="purple" x="167" y="80" width="115" height="75" rx="12"/>
-<text x="224.5" y="124.5" text-anchor="middle">SWA</text>
-</g>
-<text x="224" y="62" class="tiny" text-anchor="middle">L2</text>
-<g id="layer2">
-<rect class="purple" x="304" y="80" width="115" height="75" rx="12"/>
-<text x="361.5" y="124.5" text-anchor="middle">CSA</text>
-</g>
-<text x="361" y="62" class="tiny" text-anchor="middle">L3</text>
-<g id="layer3">
-<rect class="orange" x="441" y="80" width="115" height="75" rx="12"/>
-<text x="498.5" y="124.5" text-anchor="middle">HCA</text>
-</g>
-<text x="498" y="62" class="tiny" text-anchor="middle">L4</text>
-<g id="layer4">
-<rect class="purple" x="578" y="80" width="115" height="75" rx="12"/>
-<text x="635.5" y="124.5" text-anchor="middle">CSA</text>
-</g>
-<text x="635" y="62" class="tiny" text-anchor="middle">L5</text>
-<g id="layer5">
-<rect class="orange" x="715" y="80" width="115" height="75" rx="12"/>
-<text x="772.5" y="124.5" text-anchor="middle">HCA</text>
-</g>
-<text x="772" y="62" class="tiny" text-anchor="middle">L6</text>
-<g id="layer6">
-<rect class="purple" x="852" y="80" width="115" height="75" rx="12"/>
-<text x="909.5" y="124.5" text-anchor="middle">…</text>
-</g>
-<text x="909" y="62" class="tiny" text-anchor="middle">中间层</text>
-<g id="layer7">
-<rect class="purple" x="989" y="80" width="115" height="75" rx="12"/>
-<text x="1046.5" y="124.5" text-anchor="middle">CSA</text>
-</g>
-<text x="1046" y="62" class="tiny" text-anchor="middle">L43</text>
-<g>
-<rect class="box" x="40" y="205" width="300" height="65" rx="12"/>
-<text x="190.0" y="244.5" text-anchor="middle">SWA：最近 128 token</text>
-</g>
-<g>
-<rect class="purple" x="408" y="205" width="300" height="65" rx="12"/>
-<text x="558.0" y="244.5" text-anchor="middle">CSA：局部 + 压缩后选读</text>
-</g>
-<g>
-<rect class="orange" x="776" y="205" width="300" height="65" rx="12"/>
-<text x="926.0" y="244.5" text-anchor="middle">HCA：局部 + 高压缩全读</text>
-</g>
-</svg>
-<div class="caption">
-<div><b>开头两层</b>Pro 用 HCA，Flash 用纯 SWA。</div>
-<div><b>从第 3 层开始</b>CSA、HCA 交替，主干最后一层为 CSA。</div>
-<div><b>一直保留局部窗口</b>CSA 和 HCA 都同时看最近 128 个 token。</div>
-</div>
-</section>
-<section class="slide ds" id="mhc">
-<div class="kicker">03 / 四路残差</div>
-<h2>四条信息通路，共用一个子层</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="mHC 将四路残差混成一份子层输入，再分配输出并混合原残差">
-<g>
-<rect class="purple" x="20" y="50" width="160" height="42" rx="12"/>
-<text x="100.0" y="78.0" text-anchor="middle">残差流 1</text>
-</g>
-<path class="wire" d="M180 71 L355 140"/>
-<path class="wire" d="M180 71 H245 V288 H425 M755 288 H910 V71 H930 M900 140 H920 V71 H930"/>
-<g>
-<rect class="purple" x="930" y="50" width="160" height="42" rx="12"/>
-<text x="1010.0" y="78.0" text-anchor="middle">新流 1</text>
-</g>
-<circle id="mix0" class="token" cx="180" cy="71" r="9"/>
-<g>
-<rect class="purple" x="20" y="115" width="160" height="42" rx="12"/>
-<text x="100.0" y="143.0" text-anchor="middle">残差流 2</text>
-</g>
-<path class="wire" d="M180 136 L355 140"/>
-<path class="wire" d="M180 136 H245 V288 H425 M755 288 H910 V136 H930 M900 140 H920 V136 H930"/>
-<g>
-<rect class="purple" x="930" y="115" width="160" height="42" rx="12"/>
-<text x="1010.0" y="143.0" text-anchor="middle">新流 2</text>
-</g>
-<circle id="mix1" class="token" cx="180" cy="136" r="9"/>
-<g>
-<rect class="purple" x="20" y="180" width="160" height="42" rx="12"/>
-<text x="100.0" y="208.0" text-anchor="middle">残差流 3</text>
-</g>
-<path class="wire" d="M180 201 L355 140"/>
-<path class="wire" d="M180 201 H245 V288 H425 M755 288 H910 V201 H930 M900 140 H920 V201 H930"/>
-<g>
-<rect class="purple" x="930" y="180" width="160" height="42" rx="12"/>
-<text x="1010.0" y="208.0" text-anchor="middle">新流 3</text>
-</g>
-<circle id="mix2" class="token" cx="180" cy="201" r="9"/>
-<g>
-<rect class="purple" x="20" y="245" width="160" height="42" rx="12"/>
-<text x="100.0" y="273.0" text-anchor="middle">残差流 4</text>
-</g>
-<path class="wire" d="M180 266 L355 140"/>
-<path class="wire" d="M180 266 H245 V288 H425 M755 288 H910 V266 H930 M900 140 H920 V266 H930"/>
-<g>
-<rect class="purple" x="930" y="245" width="160" height="42" rx="12"/>
-<text x="1010.0" y="273.0" text-anchor="middle">新流 4</text>
-</g>
-<circle id="mix3" class="token" cx="180" cy="266" r="9"/>
-<g>
-<rect class="orange" x="345" y="110" width="130" height="60" rx="12"/>
-<text x="410.0" y="147.0" text-anchor="middle">Pre-mix</text>
-</g>
-<g>
-<rect class="box" x="535" y="110" width="185" height="60" rx="12"/>
-<text x="627.5" y="147.0" text-anchor="middle">Norm + 子层</text>
-</g>
-<g>
-<rect class="orange" x="770" y="110" width="130" height="60" rx="12"/>
-<text x="835.0" y="147.0" text-anchor="middle">Post-mix</text>
-</g>
-<path class="wire" d="M475 140 L535 140"/>
-<path class="wire" d="M720 140 L770 140"/>
-<g id="resmix" class="later">
-<g>
-<rect class="box" x="425" y="265" width="330" height="45" rx="12"/>
-<text x="590.0" y="294.5" text-anchor="middle">B：4 × 4 残差混合矩阵</text>
-</g>
-</g>
-</svg>
-<div class="caption">
-<div><b>Pre-mix</b>把四路加权汇成一个 d 维输入。</div>
-<div><b>子层照常计算</b>Attention 和 MoE 各有一套 mHC 包裹。</div>
-<div><b>Post + residual mix</b>新结果分回四路；B 由 Sinkhorn 约束，行列和约为 1。</div>
-</div>
-</section>
-<section class="slide workshop" id="mhc-equation"><div class="kicker">工程细节</div><h2>mHC 真正混合的是什么</h2><div class="ws-equation">z = Σᵢ preᵢ · xᵢ　　yⱼ = postⱼ · F(z) + Σᵢ Bᵢⱼ · xᵢ</div><table class="ws-table"><thead><tr><th>张量</th><th>形状</th><th>如何得到</th></tr></thead><tbody><tr><td>x / z</td><td>[B,S,4,4096] / [B,S,4096]</td><td>4 路残差加权成一个子层输入</td></tr><tr><td>pre / post / B</td><td>4 / 4 / 4×4</td><td>24 个动态系数，经约束后参与混合</td></tr><tr><td>生成系数的权重</td><td>[24, 16384]</td><td>Attention 与 MoE 各有一套</td></tr></tbody></table><p class="ws-note">B 做 20 轮 Sinkhorn 行列归一化，使行列和接近 1；pre 与 post 有自己的门控约束，不需要加和为 1。B 的两个轴分别对应旧流和新流。</p></section>
-<section class="slide workshop" id="mhc-worked"><div class="kicker">逐步演算 · 教学数值</div><h2>四路残差，算出一个具体输入</h2><svg class="ws-visual" viewBox="0 0 1180 280" role="img" aria-label="依次将每个加权分量加入数值累加器"><rect x="60" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="175" y="57" text-anchor="middle">x₁ = 2</text><text x="175" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.1 → 0.2</text><circle id="mhc-worked-part0" cx="175" cy="128" r="8" fill="var(--accent)"/><rect x="325" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="440" y="57" text-anchor="middle">x₂ = 4</text><text x="440" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.2 → 0.8</text><circle id="mhc-worked-part1" cx="440" cy="128" r="8" fill="var(--accent)"/><rect x="590" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="705" y="57" text-anchor="middle">x₃ = 6</text><text x="705" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.3 → 1.8</text><circle id="mhc-worked-part2" cx="705" cy="128" r="8" fill="var(--accent)"/><rect x="855" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="970" y="57" text-anchor="middle">x₄ = 8</text><text x="970" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.4 → 3.2</text><circle id="mhc-worked-part3" cx="970" cy="128" r="8" fill="var(--accent)"/><rect x="410" y="180" width="320" height="78" rx="14" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="470" y="228">加权和</text><text id="mhc-worked-sum" x="660" y="229" text-anchor="middle">0.00</text></svg><p class="ws-caption">加权输入是 6。取 F(z)=2z=12、B=I、post=[.25,.5,.75,1]，新残差为 [5,10,15,20]。这些教学系数已给定；真实系数由当前残差动态生成。</p></section>
-
-<section class="slide ds" id="kv">
-<div class="kicker">04 / Shared-KV MQA</div>
-<h2>很多个问题，共用一本笔记</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="多个 query 头共享一份 512 维 KV 表示">
-<g>
-<rect class="box" x="30" y="105" width="195" height="75" rx="12"/>
-<foreignObject class="diagram-math-label" x="34" y="106" width="187" height="73"><div xmlns="http://www.w3.org/1999/xhtml" data-tex="h\in\mathbb{R}^{4096}" style="width:100%;height:100%;display:flex;align-items:center;justify-content:center;white-space:nowrap;font-size:15.702px;line-height:1.2;color:var(--text)">h ∈ R^4096</div></foreignObject>
-</g>
-<g>
-<rect class="purple" x="340" y="25" width="245" height="70" rx="12"/>
-<text x="462.5" y="67.0" text-anchor="middle">64 个 query 头</text>
-</g>
-<g>
-<rect class="orange" x="340" y="200" width="245" height="70" rx="12"/>
-<text x="462.5" y="242.0" text-anchor="middle">1 份 shared KV</text>
-</g>
-<path class="wire" d="M225 142 L340 60"/>
-<path class="wire" d="M225 142 L340 235"/>
-<g>
-<rect class="box" x="740" y="100" width="325" height="85" rx="12"/>
-<text x="902.5" y="149.5" text-anchor="middle">各头分别读同一份 KV</text>
-</g>
-<path class="wire" d="M585 60 L740 142"/>
-<path class="wire" d="M585 235 L740 142"/>
-<text x="465" y="305" class="tiny" text-anchor="middle">512 维 = 448 内容 + 64 RoPE</text>
-<text x="900" y="225" class="soft" text-anchor="middle">输出投影 → d 维</text>
-</svg>
-<div class="caption">
-<div><b>Query</b>不同头从不同角度询问上下文。</div>
-<div><b>Shared KV</b>同一个 512 维向量同时充当 K 和 V。</div>
-<div><b>位置</b>末尾 64 维用 RoPE 带上位置信息。</div>
-</div>
-</section>
-<section class="slide workshop" id="joint-softmax"><div class="kicker">工程细节</div><h2>局部和压缩记忆，共用一次归一化</h2><div class="ws-equation">aⱼ = q·kⱼ / √512　　Z = exp(sink) + Σⱼ exp(aⱼ)</div><div class="ws-equation">o = Σⱼ exp(aⱼ)·kvⱼ / Z</div><p class="ws-lead">局部条目和选中的压缩条目组成同一个候选集合。每个头还有 learned sink：它增加分母，没有对应的 value 输出。</p><div class="ws-cols"><div class="ws-card"><p class="ws-note">一维教学例：两个条目的分数为 log2、0，value 为 4、10，sink 分数为 0。</p><div class="ws-equation">o = (2×4 + 1×10)/(2+1+1) = 4.5</div></div><div class="ws-card"><p class="ws-note">如果删掉 sink，输出变为 6；如果先各自 softmax 再相加，权重也会改变。对齐参考实现时，这两处都要检查。</p></div></div></section>
-<section class="slide workshop" id="grouped-output"><div class="kicker">工程细节</div><h2>输出投影也分组，并且降低中间维度</h2><div class="ws-equation">[64,512] → [8,4096] → [8,1024] → [4096]</div><pre class="ws-code"><code>o = inverse_RoPE(o)
-o = o.reshape(B, S, groups, 4096)
-r = einsum(&quot;bsgd,grd-&gt;bsgr&quot;, o, Wo_a)
-y = r.flatten(-2) @ Wo_b.T</code></pre><p class="ws-note">每组包含 8 个头。第一段共 32 Mi 参数，第二段 32 Mi，共 64 Mi。把所有头直接映射回 d 需要 128 Mi 参数；这里两段合计 64 Mi。</p></section>
-
-<section class="slide ds" id="compress">
-<div class="kicker">05 / CSA 先压缩</div>
-<h2>把连续信息，整理成更少的条目</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="16 个示例 token 按步长 4 聚合成 4 条压缩 KV">
-<g id="raw0">
-<rect class="box" x="30" y="45" width="52" height="42" rx="12"/>
-<text x="56.0" y="73.0" text-anchor="middle" style="font-size:16px">1</text>
-</g>
-<g id="raw1">
-<rect class="box" x="96" y="45" width="52" height="42" rx="12"/>
-<text x="122.0" y="73.0" text-anchor="middle" style="font-size:16px">2</text>
-</g>
-<g id="raw2">
-<rect class="box" x="162" y="45" width="52" height="42" rx="12"/>
-<text x="188.0" y="73.0" text-anchor="middle" style="font-size:16px">3</text>
-</g>
-<g id="raw3">
-<rect class="box" x="228" y="45" width="52" height="42" rx="12"/>
-<text x="254.0" y="73.0" text-anchor="middle" style="font-size:16px">4</text>
-</g>
-<g id="raw4">
-<rect class="box" x="294" y="45" width="52" height="42" rx="12"/>
-<text x="320.0" y="73.0" text-anchor="middle" style="font-size:16px">5</text>
-</g>
-<g id="raw5">
-<rect class="box" x="360" y="45" width="52" height="42" rx="12"/>
-<text x="386.0" y="73.0" text-anchor="middle" style="font-size:16px">6</text>
-</g>
-<g id="raw6">
-<rect class="box" x="426" y="45" width="52" height="42" rx="12"/>
-<text x="452.0" y="73.0" text-anchor="middle" style="font-size:16px">7</text>
-</g>
-<g id="raw7">
-<rect class="box" x="492" y="45" width="52" height="42" rx="12"/>
-<text x="518.0" y="73.0" text-anchor="middle" style="font-size:16px">8</text>
-</g>
-<g id="raw8">
-<rect class="box" x="558" y="45" width="52" height="42" rx="12"/>
-<text x="584.0" y="73.0" text-anchor="middle" style="font-size:16px">9</text>
-</g>
-<g id="raw9">
-<rect class="box" x="624" y="45" width="52" height="42" rx="12"/>
-<text x="650.0" y="73.0" text-anchor="middle" style="font-size:16px">10</text>
-</g>
-<g id="raw10">
-<rect class="box" x="690" y="45" width="52" height="42" rx="12"/>
-<text x="716.0" y="73.0" text-anchor="middle" style="font-size:16px">11</text>
-</g>
-<g id="raw11">
-<rect class="box" x="756" y="45" width="52" height="42" rx="12"/>
-<text x="782.0" y="73.0" text-anchor="middle" style="font-size:16px">12</text>
-</g>
-<g id="raw12">
-<rect class="box" x="822" y="45" width="52" height="42" rx="12"/>
-<text x="848.0" y="73.0" text-anchor="middle" style="font-size:16px">13</text>
-</g>
-<g id="raw13">
-<rect class="box" x="888" y="45" width="52" height="42" rx="12"/>
-<text x="914.0" y="73.0" text-anchor="middle" style="font-size:16px">14</text>
-</g>
-<g id="raw14">
-<rect class="box" x="954" y="45" width="52" height="42" rx="12"/>
-<text x="980.0" y="73.0" text-anchor="middle" style="font-size:16px">15</text>
-</g>
-<g id="raw15">
-<rect class="box" x="1020" y="45" width="52" height="42" rx="12"/>
-<text x="1046.0" y="73.0" text-anchor="middle" style="font-size:16px">16</text>
-</g>
-<g id="c0" class="later">
-<g>
-<rect class="purple" x="90" y="200" width="160" height="60" rx="12"/>
-<text x="170.0" y="237.0" text-anchor="middle">压缩条目 1</text>
-</g>
-</g>
-<path class="wire" d="M30 105 L280 105"/>
-<path class="wire" d="M155 105 L170 195"/>
-<g id="c1" class="later">
-<g>
-<rect class="purple" x="354" y="200" width="160" height="60" rx="12"/>
-<text x="434.0" y="237.0" text-anchor="middle">压缩条目 2</text>
-</g>
-</g>
-<path class="wire" d="M294 105 L544 105"/>
-<path class="wire" d="M419 105 L434 195"/>
-<g id="c2" class="later">
-<g>
-<rect class="purple" x="618" y="200" width="160" height="60" rx="12"/>
-<text x="698.0" y="237.0" text-anchor="middle">压缩条目 3</text>
-</g>
-</g>
-<path class="wire" d="M558 105 L808 105"/>
-<path class="wire" d="M683 105 L698 195"/>
-<g id="c3" class="later">
-<g>
-<rect class="purple" x="882" y="200" width="160" height="60" rx="12"/>
-<text x="962.0" y="237.0" text-anchor="middle">压缩条目 4</text>
-</g>
-</g>
-<path class="wire" d="M822 105 L1072 105"/>
-<path class="wire" d="M947 105 L962 195"/>
-<text x="565" y="310" class="soft" text-anchor="middle">每新增 4 个 token 产出一条；CSA 的池化窗口还覆盖前一组，形成重叠。</text>
-</svg>
-<div class="caption">
-<div><b>学习怎么汇总</b>用投影和门控加权池化生成条目。</div>
-<div><b>每 4 个产出一条</b>重叠池化照顾组间边界。</div>
-<div><b>只用已到达的信息</b>完整组才可见；未完成组留在压缩状态中。</div>
-</div>
-</section>
-<section class="slide workshop" id="pool-formula"><div class="kicker">工程细节</div><h2>压缩是逐通道的 learned pooling</h2><div class="ws-equation">vₜ = Wkv xₜ　　gₜ = Wgate xₜ + apeₜ</div><div class="ws-equation">cⱼ = Σₜ softmaxₜ(gₜⱼ) · vₜⱼ</div><p class="ws-lead">softmax 沿 token 轴做；每个通道可以重视不同 token。pooling 后做 RMSNorm，再对末尾 64 维施加 RoPE。</p><div class="ws-cols"><div class="ws-card"><p class="ws-note">CSA 步长为 4。每个 token 投影成 2×512 维：上一组用前半，当前组用后半，合成最多 8 个 token 的重叠窗口。</p></div><div class="ws-card"><p class="ws-note">HCA 每 128 个 token 一组，无重叠。压缩条目的 RoPE 位置取当前组起点：0、128、256……。</p></div></div></section>
-<section class="slide workshop" id="pool-worked"><div class="kicker">逐步演算 · 教学数值</div><h2>一个通道，逐项算出压缩结果</h2><svg class="ws-visual" viewBox="0 0 1180 280" role="img" aria-label="依次将每个加权分量加入数值累加器"><rect x="60" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="175" y="57" text-anchor="middle">v₁ = 2</text><text x="175" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.1 → 0.2</text><circle id="pool-worked-part0" cx="175" cy="128" r="8" fill="var(--accent)"/><rect x="325" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="440" y="57" text-anchor="middle">v₂ = 4</text><text x="440" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.2 → 0.8</text><circle id="pool-worked-part1" cx="440" cy="128" r="8" fill="var(--accent)"/><rect x="590" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="705" y="57" text-anchor="middle">v₃ = 8</text><text x="705" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.3 → 2.4</text><circle id="pool-worked-part2" cx="705" cy="128" r="8" fill="var(--accent)"/><rect x="855" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="970" y="57" text-anchor="middle">v₄ = 10</text><text x="970" y="88" text-anchor="middle" fill="var(--text-soft)">权重 0.4 → 4</text><circle id="pool-worked-part3" cx="970" cy="128" r="8" fill="var(--accent)"/><rect x="410" y="180" width="320" height="78" rx="14" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="470" y="228">加权和</text><text id="pool-worked-sum" x="660" y="229" text-anchor="middle">0.00</text></svg><p class="ws-caption">结果为 7.4。这里展示四个有效候选；第一组没有前一组，缺失位置的 gate 为 −∞、权重为 0。这只是归一化前的一个通道。</p></section>
-<section class="slide workshop" id="causal-boundary"><div class="kicker">工程细节</div><h2>压缩条目必须等整组完成后才可见</h2><table class="ws-table"><thead><tr><th>刚处理的位置 t（从 0 开始）</th><th>CSA 已完成组数</th><th>可见的新条目</th></tr></thead><tbody><tr><td>2</td><td>⌊3/4⌋ = 0</td><td>无</td></tr><tr><td>3</td><td>⌊4/4⌋ = 1</td><td>第 0 组：token 0…3</td></tr><tr><td>6</td><td>⌊7/4⌋ = 1</td><td>仍只有第 0 组</td></tr><tr><td>7</td><td>⌊8/4⌋ = 2</td><td>第 1 组：前组+当前组重叠</td></tr></tbody></table><pre class="ws-code"><code>visible = (t + 1) // ratio
-valid = compressed_index &lt; visible
-if (t + 1) % ratio == 0:
-    cache[t // ratio] = pool(completed_group)</code></pre><p class="ws-note">prefill 可以并行算出整段的压缩条目，但每个 query 仍要加自己的因果 mask；否则前面的 token 会看到组内未来信息。</p></section>
-
-<section class="slide ds" id="select">
-<div class="kicker">06 / CSA 再选读</div>
-<h2>先用小索引器挑，再做大注意力</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="Indexer 对压缩条目评分并选中高分条目">
-<g>
-<rect class="orange" x="20" y="130" width="140" height="62" rx="12"/>
-<text x="90.0" y="168.0" text-anchor="middle">当前 query</text>
-</g>
-<g>
-<rect class="box" x="215" y="130" width="160" height="62" rx="12"/>
-<text x="295.0" y="168.0" text-anchor="middle">Indexer 打分</text>
-</g>
-<path class="wire" d="M160 161 L215 161"/>
-<g id="choice0">
-<rect class="box" x="430" y="40" width="85" height="56" rx="12"/>
-<text x="472.5" y="75.0" text-anchor="middle">c1</text>
-</g>
-<text x="472" y="120" class="tiny" text-anchor="middle">0.12</text>
-<g id="choice1">
-<rect class="box" x="536" y="40" width="85" height="56" rx="12"/>
-<text x="578.5" y="75.0" text-anchor="middle">c2</text>
-</g>
-<text x="578" y="120" class="tiny" text-anchor="middle">0.83</text>
-<g id="choice2">
-<rect class="box" x="642" y="40" width="85" height="56" rx="12"/>
-<text x="684.5" y="75.0" text-anchor="middle">c3</text>
-</g>
-<text x="684" y="120" class="tiny" text-anchor="middle">0.25</text>
-<g id="choice3">
-<rect class="box" x="748" y="40" width="85" height="56" rx="12"/>
-<text x="790.5" y="75.0" text-anchor="middle">c4</text>
-</g>
-<text x="790" y="120" class="tiny" text-anchor="middle">0.91</text>
-<g id="choice4">
-<rect class="box" x="854" y="40" width="85" height="56" rx="12"/>
-<text x="896.5" y="75.0" text-anchor="middle">c5</text>
-</g>
-<text x="896" y="120" class="tiny" text-anchor="middle">0.14</text>
-<g id="choice5">
-<rect class="box" x="960" y="40" width="85" height="56" rx="12"/>
-<text x="1002.5" y="75.0" text-anchor="middle">c6</text>
-</g>
-<text x="1002" y="120" class="tiny" text-anchor="middle">0.38</text>
-<g id="choice6">
-<rect class="box" x="430" y="150" width="85" height="56" rx="12"/>
-<text x="472.5" y="185.0" text-anchor="middle">c7</text>
-</g>
-<text x="472" y="230" class="tiny" text-anchor="middle">0.61</text>
-<g id="choice7">
-<rect class="box" x="536" y="150" width="85" height="56" rx="12"/>
-<text x="578.5" y="185.0" text-anchor="middle">c8</text>
-</g>
-<text x="578" y="230" class="tiny" text-anchor="middle">0.08</text>
-<g id="choice8">
-<rect class="box" x="642" y="150" width="85" height="56" rx="12"/>
-<text x="684.5" y="185.0" text-anchor="middle">c9</text>
-</g>
-<text x="684" y="230" class="tiny" text-anchor="middle">0.77</text>
-<g id="choice9">
-<rect class="box" x="748" y="150" width="85" height="56" rx="12"/>
-<text x="790.5" y="185.0" text-anchor="middle">c10</text>
-</g>
-<text x="790" y="230" class="tiny" text-anchor="middle">0.17</text>
-<g id="choice10">
-<rect class="box" x="854" y="150" width="85" height="56" rx="12"/>
-<text x="896.5" y="185.0" text-anchor="middle">c11</text>
-</g>
-<text x="896" y="230" class="tiny" text-anchor="middle">0.32</text>
-<g id="choice11">
-<rect class="box" x="960" y="150" width="85" height="56" rx="12"/>
-<text x="1002.5" y="185.0" text-anchor="middle">c12</text>
-</g>
-<text x="1002" y="230" class="tiny" text-anchor="middle">0.2</text>
-<g>
-<rect class="purple" x="440" y="270" width="595" height="45" rx="12"/>
-<text x="737.5" y="299.5" text-anchor="middle">Flash：最多 512 条　Pro：最多 1024 条</text>
-</g>
-</svg>
-<div class="caption">
-<div><b>小计算扫一遍</b>Indexer 看可见的压缩条目，产生相关性分数。</div>
-<div><b>大计算少读一些</b>Flash 的主注意力最多读 512 个压缩条目。</div>
-<div><b>局部细节另保留</b>最近 128 token 一起进入注意力；图中仅示意选 3 / 12。</div>
-</div>
-</section>
-<section class="slide workshop" id="index-compute"><div class="kicker">工程细节</div><h2>少读 KV 之前，Indexer 仍要给历史打分</h2><div class="ws-equation">scoreⱼ = Σₕ wₕ · ReLU(qₕᵀ kⱼ)　→　top-k(score)</div><p class="ws-lead">Indexer 使用 64 个 128 维头，共享一份 128 维压缩索引缓存。w = weights_proj(x) / √128 / √64，可正可负；它不是 softmax 概率。TP 时先 all-reduce 分数，再选条目。</p><table class="ws-table"><thead><tr><th>上下文长度</th><th>压缩候选 N/4</th><th>Flash 主注意力压缩读数</th></tr></thead><tbody><tr><td>32,768</td><td>8,192</td><td>512</td></tr><tr><td>131,072</td><td>32,768</td><td>512</td></tr><tr><td>1,048,576</td><td>262,144</td><td>512</td></tr></tbody></table><p class="ws-note">top-k 固定了主注意力读数，Indexer 的候选扫描仍随上下文增长。prefill 参考路径还会构建 query×候选分数，必须把这项计入临时显存。</p></section>
-
-<section class="slide ds" id="hca">
-<div class="kicker">07 / HCA 高压缩</div>
-<h2>把远处概括得更短，就能全部读</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="HCA 每 128 个 token 形成一条压缩 KV，再读取全部可见条目">
-<g>
-<rect class="box" x="20" y="35" width="245" height="65" rx="12"/>
-<text x="142.5" y="74.5" text-anchor="middle">128 token</text>
-</g>
-<path class="wire" d="M142 100 L142 160"/>
-<g id="hca0">
-<rect class="orange" x="62" y="160" width="162" height="65" rx="12"/>
-<text x="143.0" y="199.5" text-anchor="middle">1 条压缩 KV</text>
-</g>
-<g>
-<rect class="box" x="296" y="35" width="245" height="65" rx="12"/>
-<text x="418.5" y="74.5" text-anchor="middle">128 token</text>
-</g>
-<path class="wire" d="M418 100 L418 160"/>
-<g id="hca1">
-<rect class="orange" x="338" y="160" width="162" height="65" rx="12"/>
-<text x="419.0" y="199.5" text-anchor="middle">1 条压缩 KV</text>
-</g>
-<g>
-<rect class="box" x="572" y="35" width="245" height="65" rx="12"/>
-<text x="694.5" y="74.5" text-anchor="middle">128 token</text>
-</g>
-<path class="wire" d="M694 100 L694 160"/>
-<g id="hca2">
-<rect class="orange" x="614" y="160" width="162" height="65" rx="12"/>
-<text x="695.0" y="199.5" text-anchor="middle">1 条压缩 KV</text>
-</g>
-<g>
-<rect class="box" x="848" y="35" width="245" height="65" rx="12"/>
-<text x="970.5" y="74.5" text-anchor="middle">128 token</text>
-</g>
-<path class="wire" d="M970 100 L970 160"/>
-<g id="hca3">
-<rect class="orange" x="890" y="160" width="162" height="65" rx="12"/>
-<text x="971.0" y="199.5" text-anchor="middle">1 条压缩 KV</text>
-</g>
-<g>
-<rect class="purple" x="255" y="270" width="610" height="45" rx="12"/>
-<text x="560.0" y="299.5" text-anchor="middle">当前 query 读取所有已经完成的压缩组</text>
-</g>
-</svg>
-<div class="caption">
-<div><b>128 → 1</b>远处信息以更粗的粒度保留。</div>
-<div><b>不再做 top-k 选择</b>主注意力读全部可见的压缩条目。</div>
-<div><b>粗细两条路</b>远处用摘要，最近 128 token 保留细节。</div>
-</div>
-</section>
-<section class="slide workshop" id="flash-read-cost"><div class="kicker">工程细节</div><h2>长上下文时，先数真正访问的条目</h2><table class="ws-table"><thead><tr><th>32,768 token 的单层</th><th>每头访问条目</th><th>Attention 核心 FLOP / query</th></tr></thead><tbody><tr><td>普通全注意力</td><td>32,768</td><td>4×64×32768×512 ≈ 4.29G</td></tr><tr><td>Flash CSA</td><td>128+512=640</td><td>4×64×640×512 ≈ 83.9M</td></tr><tr><td>Flash HCA</td><td>128+256=384</td><td>4×64×384×512 ≈ 50.3M</td></tr></tbody></table><p class="ws-lead">两个乘加阶段分别是 QK 和加权 value，合计约 4HCd。读数少了，但 Indexer 与压缩器仍需要计算；小 batch 也可能被 kernel 启动和不连续访问拖慢。</p><p class="ws-note">N=65,536 时 HCA 的压缩读数达到 512，与 CSA 的 top-k 相同；再往后 HCA 继续增长。</p></section>
-
-<section class="slide ds" id="moe">
-<div class="kicker">08 / Mixture of Experts</div>
-<h2>256 个候选专家，每次选择 6 个</h2>
-<p class="intro">专家就是各自拥有权重的一小段前馈网络。图中只画出部分候选。</p>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="MoE router 从全部专家中选择六个，叠加共享专家结果">
-<g>
-<rect class="orange" x="20" y="130" width="145" height="60" rx="12"/>
-<text x="92.5" y="167.0" text-anchor="middle">token 向量</text>
-</g>
-<g>
-<rect class="box" x="220" y="130" width="145" height="60" rx="12"/>
-<text x="292.5" y="167.0" text-anchor="middle">Router</text>
-</g>
-<path class="wire" d="M165 160 L220 160"/>
-<g id="exp0">
-<rect class="box" x="430" y="45" width="86" height="60" rx="12"/>
-<text x="473.0" y="82.0" text-anchor="middle">E1</text>
-</g>
-<g id="exp1">
-<rect class="box" x="538" y="45" width="86" height="60" rx="12"/>
-<text x="581.0" y="82.0" text-anchor="middle">E2</text>
-</g>
-<g id="exp2">
-<rect class="box" x="646" y="45" width="86" height="60" rx="12"/>
-<text x="689.0" y="82.0" text-anchor="middle">E3</text>
-</g>
-<g id="exp3">
-<rect class="box" x="754" y="45" width="86" height="60" rx="12"/>
-<text x="797.0" y="82.0" text-anchor="middle">E4</text>
-</g>
-<g id="exp4">
-<rect class="box" x="862" y="45" width="86" height="60" rx="12"/>
-<text x="905.0" y="82.0" text-anchor="middle">E5</text>
-</g>
-<g id="exp5">
-<rect class="box" x="970" y="45" width="86" height="60" rx="12"/>
-<text x="1013.0" y="82.0" text-anchor="middle">E6</text>
-</g>
-<g id="exp6">
-<rect class="box" x="430" y="145" width="86" height="60" rx="12"/>
-<text x="473.0" y="182.0" text-anchor="middle">E7</text>
-</g>
-<g id="exp7">
-<rect class="box" x="538" y="145" width="86" height="60" rx="12"/>
-<text x="581.0" y="182.0" text-anchor="middle">E8</text>
-</g>
-<g id="exp8">
-<rect class="box" x="646" y="145" width="86" height="60" rx="12"/>
-<text x="689.0" y="182.0" text-anchor="middle">E9</text>
-</g>
-<g id="exp9">
-<rect class="box" x="754" y="145" width="86" height="60" rx="12"/>
-<text x="797.0" y="182.0" text-anchor="middle">E10</text>
-</g>
-<g id="exp10">
-<rect class="box" x="862" y="145" width="86" height="60" rx="12"/>
-<text x="905.0" y="182.0" text-anchor="middle">E11</text>
-</g>
-<g id="exp11">
-<rect class="box" x="970" y="145" width="86" height="60" rx="12"/>
-<text x="1013.0" y="182.0" text-anchor="middle">E12</text>
-</g>
-<g>
-<rect class="orange" x="430" y="260" width="250" height="55" rx="12"/>
-<text x="555.0" y="294.5" text-anchor="middle">共享专家：每 token 都算</text>
-</g>
-<g>
-<rect class="purple" x="810" y="260" width="240" height="55" rx="12"/>
-<text x="930.0" y="294.5" text-anchor="middle">加权和 → 输出</text>
-</g>
-</svg>
-<div class="caption">
-<div><b>前 3 层</b>token ID 查预定专家映射，仍然激活 6 个。</div>
-<div><b>后续层</b>Sqrt(Softplus) 评分，选择 6 个路由专家。</div>
-<div><b>每层都有共享专家</b>专家中间维度 2048；返回结果做加权合并。</div>
-</div>
-</section>
-<section class="slide workshop" id="routing-code"><div class="kicker">工程细节</div><h2>选谁和给多少权重，是两次计算</h2><pre class="ws-code"><code>scores = sqrt(softplus(x @ Wgate.T))
-if layer_id &lt; 3:
-    ids = tid2eid[token_id]        # 固定的 6 个专家 ID
-else:
-    ids = topk(scores + bias, k=6)
-w = scores[ids] / scores[ids].sum()
-w *= route_scale
-y = sum(w[j] * expert[ids[j]](x) for j in range(6))
-y += shared_expert(x)</code></pre><p class="ws-note">专家选择可受 bias 影响，归一化权重取未加 bias 的 scores。Flash 的 route_scale=1.5，因此六个路由权重之和是 1.5，共享专家另外相加。</p></section>
-<section class="slide workshop" id="expert-parameters"><div class="kicker">工程细节</div><h2>一个专家，三块矩阵</h2><div class="ws-equation">gate = W₁x　up = W₃x　E(x)=W₂[SiLU(gate) ⊙ up]</div><table class="ws-table"><thead><tr><th>项目</th><th>计算</th><th>参数量</th></tr></thead><tbody><tr><td>一个专家</td><td>3×4096×2048</td><td>24 Mi</td></tr><tr><td>43 层全部路由专家</td><td>43×256×3dm</td><td>277.025 B</td></tr><tr><td>每 token 经过的专家参数</td><td>43×(6+1)×3dm</td><td>7.575 B</td></tr></tbody></table><p class="ws-note">实际先把 up 限制在 [−10,10]、gate 上限设为 10，再做 SiLU 与逐元素乘法；路由权重融合在 W₂ 之前。表中未计 Attention、embedding、路由器、mHC 和 MTP。所有候选专家权重仍需存储。</p></section>
-
-<section class="slide ds" id="output">
-<div class="kicker">09 / 词表与 MTP</div>
-<h2>把理解变成下一步的选择</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="四路残差汇合后输出词表分数，MTP 提供额外预测">
-<g>
-<rect class="purple" x="20" y="90" width="230" height="75" rx="12"/>
-<text x="135.0" y="134.5" text-anchor="middle">最后一层：4 路残差</text>
-</g>
-<g>
-<rect class="box" x="325" y="90" width="205" height="75" rx="12"/>
-<text x="427.5" y="134.5" text-anchor="middle">合并 + RMSNorm</text>
-</g>
-<g>
-<rect class="box" x="605" y="90" width="180" height="75" rx="12"/>
-<text x="695.0" y="134.5" text-anchor="middle">词表 logits</text>
-</g>
-<g>
-<rect class="orange" x="870" y="90" width="220" height="75" rx="12"/>
-<text x="980.0" y="134.5" text-anchor="middle">采样下个 token</text>
-</g>
-<path class="wire" d="M250 127 L325 127"/>
-<path class="wire" d="M530 127 L605 127"/>
-<path class="wire" d="M785 127 L870 127"/>
-<circle id="outtok" class="token" cx="45" cy="150" r="9"/>
-<g>
-<rect class="box" x="335" y="240" width="455" height="60" rx="12"/>
-<text x="562.5" y="277.0" text-anchor="middle">MTP 深度 1：额外预测下一步</text>
-</g>
-<text x="565" y="325" class="soft" text-anchor="middle">主干预测下一个 token；MTP 可用于草稿生成，再由主干验证。</text>
-</svg>
-<div class="caption">
-<div><b>主干输出</b>词表中每个候选得到一个分数。</div>
-<div><b>采样</b>选出 token，追加到上下文，继续下一轮。</div>
-<div><b>MTP 辅助</b>多预测一步为投机解码提供草稿。</div>
-</div>
-</section>
-<section class="slide workshop" id="flash-diagnosis"><div class="kicker">工程细节</div><h2>短输入一致，长输入开始偏：检查边界</h2><p class="ws-lead">教学故障：参考输出与自写实现，在 3 token 时一致；4 token 时偏离；第 8 token 偏差再次增大。</p><table class="ws-table"><thead><tr><th>检查</th><th>应当满足</th><th>最有价值的证据</th></tr></thead><tbody><tr><td>压缩触发</td><td>处理 t=3、7 时追加条目</td><td>逐步打印 visible 和写入索引</td></tr><tr><td>重叠组</td><td>第二组使用前组前半+当前组后半</td><td>对比 pooling 前的 8×512 输入</td></tr><tr><td>prefill / decode</td><td>同一前缀最后位置输出接近</td><td>固定权重、禁用采样，比较中间张量</td></tr></tbody></table><p class="ws-note">从第一个不一致的张量往前找。若 pooled KV 已不同，调采样温度和路由器都不会修复；若 KV 一致，再检查因果索引与 joint softmax。</p></section>
-
-<section class="slide ds" id="compare">
-<div class="kicker">10 / 两种尺寸</div>
-<h2>同一套思路，不同的计算预算</h2>
-<table>
-<thead>
-<tr>
-<th>配置</th>
-<th>V4-Flash</th>
-<th>V4-Pro</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>主干层数 / 宽度</td>
-<td>43 / 4096</td>
-<td>61 / 7168</td>
-</tr>
-<tr>
-<td>总参数 / 每 token 激活</td>
-<td>284B / 13B</td>
-<td>1.6T / 49B</td>
-</tr>
-<tr>
-<td>开头两层</td>
-<td>纯 SWA</td>
-<td>HCA + 局部窗口</td>
-</tr>
-<tr>
-<td>Query 头 / 低秩维度</td>
-<td>64 / 1024</td>
-<td>128 / 1536</td>
-</tr>
-<tr>
-<td>CSA top-k</td>
-<td>512</td>
-<td>1024</td>
-</tr>
-<tr>
-<td>路由专家 / 中间维度</td>
-<td>256 / 2048</td>
-<td>384 / 3072</td>
-</tr>
-<tr>
-<td>输出投影分组</td>
-<td>8</td>
-<td>16</td>
-</tr>
-</tbody>
-</table>
-<p class="note">共同配置：4 路残差、512 维 shared KV、128 token 局部窗口、4 / 128 压缩比、6 个路由专家 + 1 共享专家、MTP 深度 1。总参数决定常驻权重规模，激活参数描述每 token 使用的权重规模。</p>
-</section>
-<section class="slide workshop" id="exercise-shapes"><div class="kicker">练习 1</div><h2>为一个真实输入写出形状和字节数</h2><div class="ws-prompt">B=2、S=16，Flash 的残差、Q、shared KV 均按 BF16。各有多少元素、占多少 KiB？只算这三个逻辑张量。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-note">残差：2×16×4×4096=524,288 元素，乘 2 B = 1024 KiB。Q：2×16×64×512=1,048,576 元素，占 2048 KiB。</p><p class="ws-note">shared KV：2×16×512=16,384 元素，占 32 KiB。头数改变 Q 的大小；shared KV 无须再乘 Q 头数，也没有额外一份 V。</p></details></div><p class="ws-note">先写出张量形状与单位，再代入数字。</p></section>
-<section class="slide workshop" id="exercise-route"><div class="kicker">练习 2</div><h2>给选择加 bias，别给权重加 bias</h2><div class="ws-prompt">教学路由器只有 4 个专家、选 2 个。scores=[1,2,3,4]，bias=[4,0,0,0]，route_scale=1.5。选哪些？最终权重多少？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-note">选择分数为 [5,2,3,4]，所以选 E1 和 E4。归一化仍使用原始分数 [1,4]，除以 5，再乘 1.5，得到 [0.3, 1.2]。</p><p class="ws-note">若误用 [5,4] 归一化，会得到 [0.8333, 0.6667]，改变模型。共享专家没有参加这个 top-k，也不参加这次归一化。</p></details></div><p class="ws-note">先写出张量形状与单位，再代入数字。</p></section>
-<section class="slide workshop" id="exercise-causal"><div class="kicker">练习 3</div><h2>定位一个只在整组边界出现的错误</h2><div class="ws-prompt">程序在 query 位置 t 使用 compressed_index ≤ ⌊(t+1)/4⌋。t=6、t=7 时分别会放行哪些索引？正确规则是什么？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-note">t=6 时错误规则放行 0、1，但只有第 0 组已完成。t=7 时放行 0、1、2，但只有前两组已完成。正确规则是严格小于完成组数：index &lt; ⌊(t+1)/4⌋。</p><p class="ws-note">decode 中可能读到尚未写入的缓存；prefill 中则可能读到已经并行算出的未来条目。两条路径都错，却不一定以同一种症状出现。</p></details></div><p class="ws-note">先写出张量形状与单位，再代入数字。</p></section>
-<section class="slide workshop" id="engineering-lab"><div class="kicker">动手实验</div><h2>把推导变成可以检查的程序</h2><p class="ws-lead">用 NumPy 对比整段与逐 token 的重叠 pooling，检查因果边界、路由 bias 与 mHC 数值。</p><pre class="ws-code"><code>python3 -m pip install numpy
-python3 lab.py</code></pre><pre class="ws-code"><code>prefill == streaming: True
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek-V4-Flash 架构：一个 token 的旅程 · Zunzhe Zhang</title><meta name="description" content="从真实张量形状推导 mHC、共享 KV、压缩因果边界与专家路由，结合可操作图解、移植排错、计算题和 NumPy 实验。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.ds-table{width:100%;border-collapse:collapse;font-size:15px}.ds-table td,.ds-table th{padding:9px 8px;text-align:left;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}.ds-table th{color:var(--text-soft)}
+.ds-controls{display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;margin:14px 0;font-size:14px}.ds-controls label{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.ds-controls input[type=range]{max-width:100%;width:210px}.ds-controls select{max-width:100%;padding:6px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:6px}
+.ds-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}.ds-stats>div{padding:12px;background:var(--bg-soft);border-radius:8px;min-width:0}.ds-stats small{display:block;color:var(--text-soft);font-size:13px}.ds-stats strong{display:block;font-size:23px;color:var(--accent);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.ds-caption{font-size:14px;color:var(--text-soft);line-height:1.65;margin:12px 0!important}
+.ds-row-active{background:var(--accent-soft)}.ds-mix-value{font-variant-numeric:tabular-nums}.ds-flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.ds-card{border:1px solid var(--border);padding:12px;border-radius:9px;min-width:0}.ds-card strong{display:block;font-size:17px}.ds-card small{display:block;color:var(--text-soft);font-size:12px}.ds-card .ds-operation{font-size:13px;color:var(--accent);min-height:3.8em;margin-top:9px}.ds-card.is-active{border-color:var(--accent);background:var(--accent-soft)}
+.ds-state{padding:12px;border-left:3px solid var(--accent);background:var(--accent-soft);font-size:14px;line-height:1.6;margin-top:14px}.ds-memory-track{display:flex;height:25px;border-radius:6px;overflow:hidden;background:var(--bg-soft)}.ds-memory-track span{display:block;min-width:0}.ds-memory-track .weight{background:var(--accent)}.ds-memory-track .shared{background:var(--accent-2)}.ds-memory-track .cache{background:var(--text-soft)}
+.ds-progress{height:18px;overflow:hidden;border-radius:4px;background:var(--bg-soft);margin:12px 0}.ds-progress span{display:block;height:100%;background:var(--accent);transition:width .15s}.ds-timeline{min-width:560px}.ds-lane{display:grid;grid-template-columns:90px 1fr;margin:10px 0;align-items:center;font-size:13px}.ds-lane-track{position:relative;height:36px;background:var(--bg-soft);border-radius:5px;overflow:hidden}.ds-wave{position:absolute;top:3px;height:30px;border-radius:4px;border:1px solid var(--accent);background:var(--accent-soft);text-align:center;font-size:12px;line-height:28px;overflow:hidden}.ds-wave.is-done{background:var(--accent);color:var(--surface)}.ds-cursor{position:absolute;top:0;bottom:0;width:2px;background:var(--accent-2);z-index:2}.ds-ticks{display:flex;justify-content:space-between;margin-left:90px;font-size:12px;color:var(--text-soft)}
+@media(max-width:600px){.ds-flow{grid-template-columns:repeat(2,minmax(0,1fr))}.ds-stats{grid-template-columns:1fr 1fr}.ds-stats>div:last-child{grid-column:1/-1}.ds-table{font-size:13px}.ds-table td,.ds-table th{padding:7px 5px}}
+@media(prefers-reduced-motion:reduce){.ds-progress span{transition:none}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>DeepSeek-V4-Flash 架构：一个 token 的旅程</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav>
+<article class="prose">
+<p>一个 token 走进 DeepSeek-V4-Flash 时，携带的是一个 4096 维向量。经过 43 层处理，它要完成两件事：从过去的上下文里取出相关信息，再用少量专家把当前表示向前推进。它有 284B 总参数，每个 token 激活约 13B。较小的激活规模来自稀疏专家，较小的历史读取来自局部窗口与压缩注意力。</p>
+<p>这两件事对应 attention 和 MoE。围在它们外面的 mHC 维护四路残差，让每个子层能够选择从哪些信息流读取、向哪些信息流写回。主干处理完成后，四路信息合并，输出头为 129,280 个词表项产生 logits，采样器再选出下一枚 token。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#shape">先把一个 Block 的张量画清楚</a></li><li><a href="#mhc">四路残差怎样混合</a></li><li><a href="#attention">共享 KV、分组投影与 attention sink</a></li><li><a href="#compression">压缩记忆的内容与可见时间</a></li><li><a href="#selection">CSA 与 HCA 的计算账本</a></li><li><a href="#moe">专家选择与专家内部计算</a></li><li><a href="#debug">把架构落实为一致性检查</a></li><li><a href="#practice">练习与实验</a></li></ol></nav>
+<section id="shape"><h2>1. 先把一个 Block 的张量画清楚</h2>
+<p>设 \(\htmlData{symbol=batch}{B}\) 是请求数，\(\htmlData{symbol=query}{S}\) 是每条请求本次处理的 token 数，\(\htmlData{symbol=width}{d}=4096\) 是隐藏宽度。Embedding 把输入映射成 \([B,S,d]\)，进入主干时扩展为 \([B,S,4,d]\)。每个 attention、MoE 子层先通过 mHC 将四路汇成一份 \([B,S,d]\)，完成计算后，再把输出写回四路。</p>
+<div class="table-wrap"><table class="ds-table"><thead><tr><th>位置</th><th>逻辑形状</th><th>每个输入 token 的元素数</th></tr></thead><tbody><tr><td>残差流</td><td>[B, S, 4, 4096]</td><td>16384</td></tr><tr><td>Attention / MoE 输入</td><td>[B, S, 4096]</td><td>4096</td></tr><tr><td>全部 query 头</td><td>[B, S, 64, 512]</td><td>32768</td></tr><tr><td>shared KV</td><td>[B, S, 512]</td><td>512</td></tr><tr><td>一个专家中间态</td><td>[路由到该专家的 token 数, 2048]</td><td>2048</td></tr></tbody></table></div>
+<p>Decode 时通常 \(S=1\)，prefill 时一条请求会提供多行输入。线性投影实际处理 \(BS\) 行，因此 batch、prompt 长度和专家分组共同决定矩阵乘能否形成足够大的工作块。四路残差增加的是每层持续传递的激活；attention 头数增加的是 query 及其输出的计算量。它们在内存账本中应分别计数。</p>
+<p>Flash 的前两层采用纯滑动窗口 attention。其余 41 层包含 21 个 CSA 层和 20 个 HCA 层。 从第 3 层起，CSA 与 HCA 交替，最后一层为 CSA。各层都保留最近 128 个 token 的局部窗口；CSA 再选读较细的压缩记忆，HCA 则读取较粗的全部压缩记忆。</p></section>
+<section id="mhc"><h2>2. 四路残差怎样混合</h2>
+<p>把四路旧残差记为 \(x_0,x_1,x_2,x_3\)，每一路都是 \(d\) 维。mHC 先生成 4 个 pre 系数，将它们加权成子层输入 \(z\)。子层 \(F\) 产生一份新结果，再由 4 个 post 系数分发。与此同时，一个 \(4\times4\) 矩阵把旧残差混入新残差：</p>
+$$z=\sum_{i=0}^{3}p_i x_i,\qquad y_j=q_jF(z)+\sum_{i=0}^{3}\htmlData{symbol=mix}{C_{ij}}x_i.$$
+<p>这里 \(p_i\) 是 pre 系数，\(q_j\) 是 post 系数；\(C_{ij}\) 的行表示旧流 \(i\)，列表示新流 \(j\)。将每条流放在矩阵的一行时，残差混合项就是 \(C^\top X\)。动态系数来自展开后的 \(4d\) 维输入：每个子层用 \([24,4d]\) 权重生成 4+4+16 个数。矩阵 \(C\) 经过 20 轮 Sinkhorn 行列归一化，行和与列和接近 1；pre 和 post 分别使用自己的门控约束。</p>
+<figure class="article-figure" id="mix-demo"><h3>四条流上的同一个坐标</h3><p class="ds-caption">取旧坐标 [2, 4, 6, 8]，pre=[0.1, 0.2, 0.3, 0.4]，post=[0.25, 0.5, 0.75, 1]，子层为 F(z)=2z。切换混合矩阵可以观察旧值被送到哪条新流。</p><div class="ds-controls"><label>残差混合<select id="mix-mode"><option value="identity">原位保留：C=I</option><option value="cycle">循环移位：旧 i → 新 i+1</option></select></label></div><div class="table-wrap"><table class="ds-table"><thead><tr><th>流</th><th>旧值 x</th><th>pre·x</th><th>混合后的旧值</th><th>新值 y</th></tr></thead><tbody id="mix-rows"></tbody></table></div><div class="ds-stats"><div><small>汇合输入 z</small><strong id="mix-z">待计算</strong></div><div><small>子层 F(z)</small><strong id="mix-f">待计算</strong></div><div><small>post 分发的贡献</small><strong id="mix-post">待计算</strong></div></div></figure>
+<p>这个坐标的汇合输入为 \(0.2+0.8+1.8+3.2=6\)。当 \(C=I\) 时，输出是 [5, 10, 15, 20]；循环移位时，旧值先变成 [8, 2, 4, 6]，再加上 [3, 6, 9, 12]，得到 [11, 8, 13, 18]。这个例子也提供了一个很有用的移植测试：用<strong>非对称</strong>混合矩阵验证转置方向。单位矩阵和对称矩阵会让两个方向得到相同结果，从而掩盖轴顺序错误。</p></section>
+<section id="attention"><h2>3. 共享 KV、分组投影与 attention sink</h2>
+<p>64 个 query 头分别提出问题，每个头有 512 个分量；同一个位置保存一份 512 维 shared KV，同时供 key 匹配和 value 汇总使用。它的前 448 维承载内容，末尾 64 维施加 RoPE。这样增加 query 头数主要扩大 query 侧，历史缓存仍按一份 shared KV 增长。</p>
+<p>Query 先经过 1024 维低秩中间态。将 \(BS\) 个输入展开为矩阵，形状变化为</p>
+$$[BS,4096]\longrightarrow[BS,1024]\longrightarrow[BS,64\times512].$$
+<p>两次投影之间有 RMSNorm；投影后还要按头做归一化，并对最后 64 维施加 RoPE。这两块投影权重共 \(4096\times1024+1024\times64\times512=36\text{ Mi}\) 个参数，而直接投影需要 128 Mi。Mi 表示 \(2^{20}\)。低秩减少权重，也引入中间张量和额外算子；实际耗时取决于形状与 kernel 融合。</p>
+<p>一个 query 的候选集合由局部位置与可见压缩条目组成。设 \(a_j=q^\top k_j/\sqrt{512}\) 是候选 \(j\) 的分数，\(s\) 是该 query 头的 learned sink 分数，输出为</p>
+$$o=\frac{\sum_j e^{a_j}v_j}{e^s+\sum_j e^{a_j}}.$$
+<p>Sink 提供一个 value 为零的额外选项，因此贡献分母。两个候选分数为 \(\ln2,0\)，value 为 4、10，sink 分数为 0 时，输出是 \((2\times4+10)/(2+1+1)=4.5\)。局部与压缩候选共享这一个分母。实现时可以先减去所有分数的最大值，再累计指数和，获得数值稳定的同一结果。</p>
+<p>Attention 输出先对 RoPE 部分做逆旋转，再按 8 组整理；每组 8 个头，即 4096 维。每组从 4096 映射到 1024，拼接后映射回 4096 维。于是输出投影的形状是 \([64,512]\to[8,4096]\to[8,1024]\to[4096]\)，共 64 Mi 参数。分组的 reshape、inverse RoPE 和矩阵转置都属于需要逐项复现的计算。</p></section>
+<section id="compression"><h2>4. 压缩记忆的内容与可见时间</h2>
+<p>压缩器需要回答两个不同的问题：怎样汇总一组 token，以及从哪个 query 开始允许读取这份汇总。先看内容。对组内 token \(t\)，投影生成 value \(v_t\) 与 gate \(g_t\)，gate 还带有组内位置偏置。对每个通道 \(j\) 单独归一化：</p>
+$$c_j=\sum_{t\in\mathcal G}\frac{e^{g_{tj}}}{\sum_{u\in\mathcal G}e^{g_{uj}}}\,v_{tj}.$$
+<p>\(\mathcal G\) 是参与池化的位置集合，\(j\) 是向量通道。同一组的不同通道可以强调不同 token。例如一条通道的 values 为 [2,4,8,10]，归一化权重为 [0.1,0.2,0.3,0.4]，池化结果就是 7.4；随后整个向量再做 RMSNorm 和 RoPE。</p>
+<p>CSA 的步长 \(\htmlData{symbol=ratio}{r}=4\)，每个 token 投影出两份 512 维内容。一次池化取上一组的前半投影与当前组的后半投影，形成最多 8 个 token 的重叠窗口。首组的缺失位置用 \(-\infty\) gate 得到零权重。HCA 的步长为 128，一组使用自己的 128 个位置；压缩条目的 RoPE 位置取当前组起点。</p>
+<p>位置从 0 编号。处理完位置 \(t\) 后，完成组数为 \(\lfloor(t+1)/r\rfloor\)，可见的压缩索引满足</p>
+$$0\le j\lt\left\lfloor\frac{t+1}{r}\right\rfloor.$$
+<p>CSA 在 \(t=3\) 产生第 0 条、\(t=7\) 产生第 1 条；HCA 在 \(t=127\) 产生第 0 条。未完成组保存在 value/gate 状态里，等待后续输入。Prefill 虽然能并行计算整段压缩结果，每个 query 仍使用自己的完成组数作为因果边界。</p>
+<figure class="article-figure" id="compress-demo"><h3>完成一组，才增加一条可读记忆</h3><div class="ds-controls"><label>压缩步长<select id="compress-ratio"><option value="4">CSA：4 token</option><option value="128">HCA：128 token</option></select></label><label>刚处理的位置 t<input id="compress-position" type="range" min="0" max="260" value="2"><output id="compress-t">2</output></label></div><div class="ds-stats"><div><small>已完成组数</small><strong id="compress-count">0</strong></div><div><small>当前未完成组</small><strong id="compress-fill">3 / 4</strong></div><div><small>最后一条压缩记忆的 RoPE 位置</small><strong id="compress-rope">尚无</strong></div></div><div class="ds-progress" aria-hidden="true"><span id="compress-progress"></span></div><p class="ds-state" id="compress-explain"></p></figure>
+<p>这个状态机决定了 chunked prefill 的交接内容。新 chunk 除了接收已经完成的压缩 KV，还要接收未完成组的 value、gate 和组内偏移。对 CSA 还需携带上一组，用于下一次重叠池化。只传压缩结果会丢掉这些继续计算所需的状态。</p></section>
+<section id="selection"><h2>5. CSA 与 HCA 的计算账本</h2>
+<p>CSA 先用一个较小的 Indexer 给所有可见压缩条目打分，再让主 attention 读取分数最高的 512 条。Indexer 有 64 个 128 维 query 头，共享一份 128 维压缩索引缓存；分数为 \(s_j=\sum_h w_h\operatorname{ReLU}(q_h^\top k_j)\)。权重 \(w_h\) 由输入线性投影和缩放得到，可以为正或负。多卡按头分工时，先合并各头的分数，再执行 top-k。</p>
+<p>设历史长度 \(\htmlData{symbol=context}{N}\) 足够填满 128 token 局部窗口。CSA 主 attention 访问 \(128+\min(512,\lfloor N/4\rfloor)\) 个条目，HCA 访问 \(128+\lfloor N/128\rfloor\) 个条目。每个 query 的两次矩阵乘分别计算 QK 与加权 value，粗略 FLOPs 为 \(4HC\times512\)，这里 \(\htmlData{symbol=heads}{H}=64\)，\(C\) 是访问条目数。</p>
+<figure class="article-figure" id="access-demo"><h3>上下文增长时，哪一项继续增长</h3><div class="ds-controls"><label>上下文长度<select id="access-context"><option value="32768">32,768 token</option><option value="131072">131,072 token</option><option value="1048576">1,048,576 token</option></select></label></div><div class="table-wrap"><table class="ds-table"><thead><tr><th>路径</th><th>主 attention 读数</th><th>QK + value FLOPs</th></tr></thead><tbody id="access-rows"></tbody></table></div><p class="ds-state" id="access-index"></p></figure>
+<p>固定 top-k 让 CSA 主 attention 的读数达到上限，Indexer 仍会扫描 \(N/4\) 个候选。HCA 压缩得更粗，随着历史增长继续读取更多摘要。在 N=65,536 时，HCA 有 512 个压缩条目，恰好达到 Flash 的 CSA 上限；之后 HCA 的读数继续上升。 在做性能预测时，把压缩器、Indexer、主 attention 分别计时，才能解释同样的主 attention 读数为什么会有不同延迟。</p></section>
+<section id="moe"><h2>6. 专家选择与专家内部计算</h2>
+<p>每层有 \(\htmlData{symbol=experts}{E}=256\) 个路由专家，每个 token 选择 6 个，再加一个总会执行的共享专家。前 3 层通过 token ID 查固定专家映射；后续层用 \(\sqrt{\operatorname{softplus}(xW_g^\top)}\) 得到路由分数。负载均衡 bias 参与选择，选中专家的组合权重由原始分数归一化，再乘 1.5：</p>
+<pre><code>scores = sqrt(softplus(x @ Wgate.T))
+ids = tid2eid[token_id] if layer_id &lt; 3 else topk(scores + bias, 6)
+weights = scores[ids] / scores[ids].sum() * 1.5
+y = sum(weights[j] * expert[ids[j]](x) for j in range(6))
+y += shared_expert(x)</code></pre>
+<p>这使 6 个路由权重之和为 1.5。共享专家独立贡献结果。用四个候选的简化算例检查实现：原始分数 [1,2,3,4]，bias=[4,0,0,0]，选择两个专家时选中第 0、3 个，权重是 [0.3, 1.2]。这样可以分别核对专家 ID 与加权结果。</p>
+<p>一个专家含三块矩阵，gate/up 从 \(d\) 映射到中间宽度 \(\htmlData{symbol=intermediate}{m}=2048\)，down 再映射回 \(d\)。对齐这份模型的计算顺序是先投影、做 FP32 中间运算，将 up 限在 [−10,10]、gate 上限设为 10，然后计算 SwiGLU：</p>
+$$E(x)=W_2\left[\operatorname{SiLU}(\min(W_1x,10))\odot\operatorname{clip}(W_3x,-10,10)\right].$$
+<p>路由权重可以乘在 down 投影之前。共享专家也使用相同的激活裁剪配置。单个专家有 \(3dm=24\) Mi 参数，主干全部路由专家合计 277.025 B；每个 token 经过的 6+1 个专家合计约 7.575 B 参数。完整模型的 284B 参数还包含 attention、embedding、路由与其他模块，整体每 token 激活约 13B。</p>
+<p>当 batch 有 128 个 token 时，共有 128×6=768 次路由分配。若均匀分布到 256 个专家，每个专家平均处理 3 行。把每个专家的行数画成直方图，可以区分小矩阵普遍偏小与少数专家形成热点；前者需要合批或 grouped GEMM，后者还涉及路由和负载分配。 最后一层残差经合并和 RMSNorm 进入词表头。深度为 1 的 MTP 分支额外预测后续 token，可用作投机草稿；草稿的接受率与验证成本决定它对服务延迟的贡献。</p></section>
+<section id="debug"><h2>7. 把架构落实为一致性检查</h2>
+<p>移植实现时，先固定输入 token、模型权重、dtype 和并行配置，按层保存中间检查点：mHC 汇合值、压缩 KV、Indexer 分数与 top-k IDs、attention 输出、专家输出。找到首次显著分歧后，只比较这一段算子。对于经过量化或改变归约顺序的实现，同时记录最大绝对误差、相对误差与最终 logits 排序。</p>
+<div class="table-wrap"><table class="ds-table"><thead><tr><th>具体症状</th><th>关键证据</th><th>下一步</th></tr></thead><tbody><tr><td>短输入正确，4 / 8 token 附近开始偏离</td><td>完成组数、写入槽位、pooling 前的 token 范围</td><td>核对严格小于边界、跨组 remainder、CSA 两半投影</td></tr><tr><td>mHC 输入一致，混合后立即不同</td><td>非对称 C 与四路旧残差</td><td>逐坐标检查旧流轴上的求和和 C 的转置</td></tr><tr><td>路由 ID 一致，MoE 输出不同</td><td>原始 scores、权重、共享专家 gate/up</td><td>核对 route scale、bias 的使用位置及激活裁剪</td></tr><tr><td>改变合批请求后才出现差异</td><td>首次分歧的 logit、top-k 次序与归约结果</td><td>固定 backend 与 batch，分别测试压缩状态和归约路径</td></tr></tbody></table></div>
+<p>这些检查能捕捉 shape 正确而语义错误的实现。mHC 的转置错误就属于这一类：矩阵仍是 4×4，运行时无法靠形状发现它。共享专家的裁剪顺序也需要与当前 checkpoint 的推理路径对应。将它们写成小张量回归测试，比只比较最终生成文本更容易定位问题。</p></section>
+<section id="practice"><h2>8. 练习与实验</h2>
+<div class="article-exercise"><h3>练习 1：把形状换成字节</h3><p>令 B=2、S=16，残差、全部 Q 和 shared KV 都按 BF16 存储。分别计算元素数与 KiB。</p><details><summary>展开解答</summary><p>残差为 2×16×4×4096=524288 个元素，占 1024 KiB；Q 为 2×16×64×512=1048576 个元素，占 2048 KiB；shared KV 为 16,384 个元素，占 32 KiB。BF16 每元素 2 字节，1 KiB=1024 字节。</p></details></div>
+<div class="article-exercise"><h3>练习 2：选择分数与组合权重</h3><p>scores=[1,2,3,4]，bias=[4,0,0,0]，选两个专家，route scale=1.5。求 ID、权重及权重之和。</p><details><summary>展开解答</summary><p>选择分数 [5,2,3,4] 得到 ID [0,3]。取原始分数 [1,4]，除以 5，再乘 1.5，得到 [0.3, 1.2]，和为 1.5。将选择分数直接归一化会改变这次输出。</p></details></div>
+<div class="article-exercise"><h3>练习 3：一个因果边界错误</h3><p>程序放行 j≤⌊(t+1)/4⌋ 的压缩条目。t=6、7 时分别多放行哪个条目？怎样改正？</p><details><summary>展开解答</summary><p>t=6 时完成 1 组，合法索引是 0，错误规则多放行 1；t=7 时完成 2 组，合法索引为 0、1，错误规则多放行 2。条件改为 j&lt;⌊(t+1)/4⌋。Prefill 中多出的条目可能含未来输入，decode 中则可能读取尚未写入的缓存。</p></details></div>
+<div class="article-exercise"><h3>练习 4：用非对称矩阵检查 mHC</h3><p>将上图 C 改成“旧流 i 送到新流 i+1，末流回到第 0 流”。旧值为 [2,4,6,8]，F(z)=12，post=[0.25,0.5,0.75,1]。求新四路坐标。</p><details><summary>展开解答</summary><p>残差项 Cᵀx=[8,2,4,6]，新计算贡献为 [3,6,9,12]，合计 [11,8,13,18]。若误算 Cx，会得到 [4,6,8,2]+[3,6,9,12]=[7,12,17,14]。两个结果可以直接作为转置方向的测试用例。</p></details></div>
+<h3>运行小张量实验</h3><p>下载 <a href="lab.py">lab.py</a>，用 NumPy 检验 整段与逐 token 的重叠 pooling、路由 bias 和 mHC 的数值：</p><pre><code>python3 -m pip install numpy
+python3 lab.py</code></pre><pre><code>prefill == streaming: True
 pooled scalar: 7.400000
 routing weights: [0.3, 1.2]
-all checks passed</code></pre><p class="ws-note"><a class="ws-lab-link" download href="/posts/deepseek-v4-flash/lab.py">下载 lab.py</a></p><p class="ws-note">修改参数前先预测结果，再运行检查。实验使用小张量和解析预算，在 CPU 上执行。</p></section>
-
-<section class="slide ds" id="references">
-<div class="kicker">11 / 参考与延伸阅读</div>
-<h2>继续沿着实现走</h2>
-<div class="refs">
-<div><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash 官方模型卡</a><small>Preview 模型的总参数、激活参数与权重精度。</small>
-</div>
-<div><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json">官方 config.json</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/inference/model.py">推理实现 model.py</a><small>层数、维度、压缩周期、mHC、路由与 cache 更新。</small>
-</div>
-<div><a href="https://arxiv.org/html/2606.19348v1">DeepSeek-V4 技术报告</a><small>§2 架构，§3.1 专家通信与计算重叠，§4.2 模型配置。</small>
-</div>
-<div><a href="/posts/deepseek-v4/">技术报告精读</a> · <a href="/posts/deepseek-v4-flash-inference/">Flash 逐卡推理</a> · <a href="/posts/deepseek-v4-pro/">V4-Pro 架构</a>
-</div>
-</div>
-<p class="note">配置核对：2026-10-20。动画中的 token、专家选择、显存块大小是教学示例。</p>
-</section>
-</div>
-</main><script src="/assets/slides.js?v=33e153b61ac9"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>window.deckTimelines=[];{const el=document.getElementById('journey'), t=Anim.timeline({root:el});t.to('#traveler',{"x": 275},{"dur": 0.7});t.label('Embedding');t.to('#traveler',{"x": 500},{"dur": 0.7});t.label('四路残差');t.to('#traveler',{"x": 710},{"dur": 0.7});t.label('穿过所有层');t.to('#traveler',{"x": 940},{"dur": 0.7});t.label('输出 logits');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('layers'), t=Anim.timeline({root:el});t.to('#layer0,#layer1',{"y": 18},{"dur": 0.7});t.label('开头两层');t.to('#layer2,#layer4,#layer7',{"y": 18},{"dur": 0.7});t.label('CSA 选读');t.to('#layer3,#layer5',{"y": 18},{"dur": 0.7});t.label('HCA 全读压缩记忆');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('mhc'), t=Anim.timeline({root:el});t.to('#mix0',{"x": 230, "y": 69},{"dur": 0.7, "at": 0});t.to('#mix1',{"x": 230, "y": 4},{"dur": 0.7, "at": 0});t.to('#mix2',{"x": 230, "y": -61},{"dur": 0.7, "at": 0});t.to('#mix3',{"x": 230, "y": -126},{"dur": 0.7, "at": 0});t.label('四路汇入');t.to('#mix0',{"x": 445, "y": 69},{"dur": 0.7, "at": 0.8});t.to('#mix1',{"x": 445, "y": 4},{"dur": 0.7, "at": 0.8});t.to('#mix2',{"x": 445, "y": -61},{"dur": 0.7, "at": 0.8});t.to('#mix3',{"x": 445, "y": -126},{"dur": 0.7, "at": 0.8});t.label('一个子层');t.to('#mix0',{"x": 765, "y": 0},{"dur": 0.7, "at": 1.6});t.to('#mix1',{"x": 765, "y": 0},{"dur": 0.7, "at": 1.6});t.to('#mix2',{"x": 765, "y": 0},{"dur": 0.7, "at": 1.6});t.to('#mix3',{"x": 765, "y": 0},{"dur": 0.7, "at": 1.6});t.to('#resmix',{"opacity": 1},{"dur": 0.7, "at": 1.6});t.label('分回四路并混合残差');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('compress'), t=Anim.timeline({root:el});t.to('#raw0',{"x": 114, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.0});t.to('#raw1',{"x": 48, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.0});t.to('#raw2',{"x": -18, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.0});t.to('#raw3',{"x": -84, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.0});t.to('#c0',{"opacity": 1, "y": -16},{"dur": 0.7, "at": 0.0});t.label('完成第 1 组');t.to('#raw4',{"x": 114, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.8});t.to('#raw5',{"x": 48, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.8});t.to('#raw6',{"x": -18, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.8});t.to('#raw7',{"x": -84, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 0.8});t.to('#c1',{"opacity": 1, "y": -16},{"dur": 0.7, "at": 0.8});t.label('完成第 2 组');t.to('#raw8',{"x": 114, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 1.6});t.to('#raw9',{"x": 48, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 1.6});t.to('#raw10',{"x": -18, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 1.6});t.to('#raw11',{"x": -84, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 1.6});t.to('#c2',{"opacity": 1, "y": -16},{"dur": 0.7, "at": 1.6});t.label('完成第 3 组');t.to('#raw12',{"x": 114, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 2.4000000000000004});t.to('#raw13',{"x": 48, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 2.4000000000000004});t.to('#raw14',{"x": -18, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 2.4000000000000004});t.to('#raw15',{"x": -84, "y": 100, "opacity": 0.3},{"dur": 0.7, "at": 2.4000000000000004});t.to('#c3',{"opacity": 1, "y": -16},{"dur": 0.7, "at": 2.4000000000000004});t.label('完成第 4 组');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('select'), t=Anim.timeline({root:el});t.to('#choice0,#choice2,#choice4,#choice5,#choice6,#choice7,#choice9,#choice10,#choice11',{"opacity": 0.25},{"dur": 0.7});t.label('按相关性选择');t.to('#choice1 rect,#choice3 rect,#choice8 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7});t.label('只读取被选条目');t.to('#choice1,#choice3,#choice8',{"scale": 1.04},{"dur": 0.7});t.label('与局部窗口一起做注意力');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('hca'), t=Anim.timeline({root:el});t.to('#hca0',{"y": -20},{"dur": 0.7, "at": 0.0});t.label('完成压缩组 1');t.to('#hca1',{"y": -20},{"dur": 0.7, "at": 0.45});t.label('完成压缩组 2');t.to('#hca2',{"y": -20},{"dur": 0.7, "at": 0.9});t.label('完成压缩组 3');t.to('#hca3',{"y": -20},{"dur": 0.7, "at": 1.35});t.label('完成压缩组 4');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('moe'), t=Anim.timeline({root:el});t.to('#exp1,#exp3,#exp5,#exp6,#exp9,#exp10',{"opacity": 0.25},{"dur": 0.7});t.label('路由选择六个');t.to('#exp0 rect,#exp2 rect,#exp4 rect,#exp7 rect,#exp8 rect,#exp11 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7});t.label('六个路由专家计算');t.to('#exp0,#exp2,#exp4,#exp7,#exp8,#exp11',{"y": 18},{"dur": 0.7});t.label('加权结果与共享专家相加');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('output'), t=Anim.timeline({root:el});t.to('#outtok',{"x": 380},{"dur": 0.7});t.label('合并四路');t.to('#outtok',{"x": 650},{"dur": 0.7});t.label('得到 logits');t.to('#outtok',{"x": 930},{"dur": 0.7});t.label('选出下一 token');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}</script><script>{const el=document.getElementById('mhc-worked'),t=Anim.timeline({root:el});t.to('#mhc-worked-part0',{x:395,y:85,opacity:0},{at:0.0,dur:.8});t.to('#mhc-worked-sum',{text:0.2,fmt:v=>v.toFixed(2)},{at:0.0,dur:.8,ease:'linear'});t.label('加入 x₁');t.to('#mhc-worked-part1',{x:130,y:85,opacity:0},{at:0.9,dur:.8});t.to('#mhc-worked-sum',{text:1.0,fmt:v=>v.toFixed(2)},{at:0.9,dur:.8,ease:'linear'});t.label('加入 x₂');t.to('#mhc-worked-part2',{x:-135,y:85,opacity:0},{at:1.8,dur:.8});t.to('#mhc-worked-sum',{text:2.8,fmt:v=>v.toFixed(2)},{at:1.8,dur:.8,ease:'linear'});t.label('加入 x₃');t.to('#mhc-worked-part3',{x:-400,y:85,opacity:0},{at:2.7,dur:.8});t.to('#mhc-worked-sum',{text:6.0,fmt:v=>v.toFixed(2)},{at:2.7,dur:.8,ease:'linear'});t.label('加入 x₄');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('pool-worked'),t=Anim.timeline({root:el});t.to('#pool-worked-part0',{x:395,y:85,opacity:0},{at:0.0,dur:.8});t.to('#pool-worked-sum',{text:0.2,fmt:v=>v.toFixed(2)},{at:0.0,dur:.8,ease:'linear'});t.label('加入 v₁');t.to('#pool-worked-part1',{x:130,y:85,opacity:0},{at:0.9,dur:.8});t.to('#pool-worked-sum',{text:1.0,fmt:v=>v.toFixed(2)},{at:0.9,dur:.8,ease:'linear'});t.label('加入 v₂');t.to('#pool-worked-part2',{x:-135,y:85,opacity:0},{at:1.8,dur:.8});t.to('#pool-worked-sum',{text:3.4,fmt:v=>v.toFixed(2)},{at:1.8,dur:.8,ease:'linear'});t.label('加入 v₃');t.to('#pool-worked-part3',{x:-400,y:85,opacity:0},{at:2.7,dur:.8});t.to('#pool-worked-sum',{text:7.4,fmt:v=>v.toFixed(2)},{at:2.7,dur:.8,ease:'linear'});t.label('加入 v₄');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}</script><script src="/assets/post-links.js?v=3173091271f1"></script><script src="/assets/posts.js?v=150c41e1230c"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+all checks passed</code></pre><p>先把输入长度改到 3、4、5、7、8、9，再比较整段与流式结果；随后把逐通道 gate 改成相同值，预测结果怎样变成等权池化。 将四路残差测试改为上题的循环矩阵，分别算 Cx 与 Cᵀx，并写出断言。保持每一步的预期数值，便能在换 kernel 或框架之后快速复查同一条语义。</p></section>
+<section id="references"><h2>参考与延伸阅读</h2><ul>
+<li><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash">DeepSeek-V4-Flash 模型卡</a>、<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/config.json">配置</a>与<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Flash/blob/main/inference/model.py">推理实现</a>：模型维度、压缩状态、mHC、路由与激活顺序。</li>
+<li><a href="https://arxiv.org/html/2606.19348v1">DeepSeek-V4 技术报告</a>：混合压缩注意力、专家系统与模型配置。</li>
+<li><a href="https://github.com/NVIDIA/Megatron-LM/issues/4957">Megatron-LM #4957：mHC 混合方向</a>：历史移植问题，维护者确认修复；适合作为非对称矩阵回归用例。</li>
+<li><a href="https://github.com/huggingface/transformers/issues/46018">Transformers #46018：共享专家激活裁剪</a>：对照不同实现时需要核验的计算细节。</li>
+<li><a href="https://github.com/sgl-project/sglang/issues/36174">SGLang #36174：V4 确定性推理需求</a>：固定软件版本下，合批、压缩状态和 kernel 选择的回归范围。</li>
+<li><a href="/posts/deepseek-v4-flash-inference/">Flash 逐卡推理</a> · <a href="/posts/deepseek-v4-pro/">V4-Pro 架构</a> · <a href="/posts/deepseek-v4/">技术报告精读</a>。</li></ul></section>
+</article><nav class="series-pager" data-series="systems"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"batch": {"label": "B · 请求数", "description": "本轮共同执行的请求数量。", "unit": "条请求"}, "query": {"label": "S · 本次输入长度", "description": "每条请求本轮送入模型的 token 数，普通 decode 为 1。", "unit": "token/请求"}, "context": {"label": "N · 上下文长度", "description": "已经处理的 token 数；在预分配公式中使用配置的长度上限。", "unit": "token/请求"}, "width": {"label": "d · 隐藏宽度", "description": "一个 attention 或 MoE 子层输入向量的维度。", "unit": "元素"}, "heads": {"label": "H · Query 头数", "description": "本层全部 query 头的数量；各头共用 shared KV。", "unit": "头"}, "ratio": {"label": "r · 压缩步长", "description": "每处理多少个 token 产出一条压缩记忆，CSA 为 4，HCA 为 128。", "unit": "token/条目"}, "tp": {"label": "G · 并行卡数", "description": "共同执行这个模型副本的 tensor parallel rank 数。", "unit": "张卡"}, "mix": {"label": "Cᵢⱼ · 残差混合系数", "description": "旧残差流 i 对新残差流 j 的贡献系数；行对应旧流，列对应新流。"}, "experts": {"label": "E · 路由专家总数", "description": "一层可供路由选择的专家总数，每个 token 选择其中 6 个。", "unit": "个专家"}, "intermediate": {"label": "m · 专家中间宽度", "description": "SwiGLU gate 和 up 投影的输出维度。", "unit": "元素"}, "payload": {"label": "M · 归约消息大小", "description": "一次 all-reduce 中，每个 rank 持有的完整输出张量的字节数。", "unit": "B"}, "alpha": {"label": "α · 每轮通信启动时间", "description": "ring 模型中一轮发送的固定启动时间。", "unit": "s"}, "beta": {"label": "β · 有效通信带宽", "description": "一次归约可获得的有效链路传输带宽。", "unit": "B/s"}}, "scopes": {}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script>
+(() => {
+ const $=id=>document.getElementById(id);
+ const old=[2,4,6,8],pre=[.1,.2,.3,.4],post=[.25,.5,.75,1];
+ const steps=[{title:'保留四路输入',caption:'每行是一条残差流的同一个坐标。pre 决定子层读入多少，post 决定子层输出写回多少。'},
+ {title:'汇成一个输入',caption:'pre 与旧值逐项相乘后相加：0.2+0.8+1.8+3.2=6。'},
+ {title:'执行子层',caption:'这个数值例子采用 F(z)=2z，所以子层输出为 12。'},
+ {title:'混合旧残差',caption:'按 C 的列累加旧流，得到每条新流接收的旧值。'},
+ {title:'写回新结果',caption:'每行把混合后的旧值与 post×12 相加，得到更新后的残差坐标。'}];
+ const mix=ArticleSteps.mount('#mix-demo',{steps,duration:1200,render(step,index){
+  const residual=$('mix-mode').value==='cycle'?[8,2,4,6]:old;
+  $('mix-rows').innerHTML=old.map((x,i)=>'<tr class="'+(index===4?'ds-row-active':'')+'"><td>'+i+'</td><td>'+x+'</td><td>'+(index>=1?(x*pre[i]).toFixed(1):'待汇合')+'</td><td>'+(index>=3?residual[i]:'待混合')+'</td><td>'+(index>=4?residual[i]+post[i]*12:'待写回')+'</td></tr>').join('');
+  $('mix-z').textContent=index>=1?'6':'待计算';$('mix-f').textContent=index>=2?'12':'待计算';$('mix-post').textContent=index>=4?'3, 6, 9, 12':'待分发';
+ }});
+ $('mix-mode').addEventListener('change',()=>mix.render());
+ function compressed(){const r=+$('compress-ratio').value,t=+$('compress-position').value,n=Math.floor((t+1)/r),left=(t+1)%r;
+  $('compress-t').textContent=t;$('compress-count').textContent=n;$('compress-fill').textContent=left+' / '+r;
+  $('compress-rope').textContent=n?(n-1)*r:'尚无';$('compress-progress').style.width=left/r*100+'%';
+  $('compress-explain').textContent=(n?'可读索引为 0…'+(n-1)+'。':'还没有可读的压缩条目。')+(left?'未完成组已保存位置 '+(n*r)+'…'+t+' 的状态，下一条在 t='+(n*r+r-1)+' 完成。':'当前位置刚好完成一组；下一枚 token 开始新的组。')+(r===4?' 下一次 CSA 池化还会读取上一组的前半投影。':' HCA 以 128 个位置为一组进行池化。');}
+ ['compress-ratio','compress-position'].forEach(id=>$(id).addEventListener('input',compressed));compressed();
+ function access(){const n=+$('access-context').value,rows=[['完整历史',n],['CSA',128+Math.min(512,Math.floor(n/4))],['HCA',128+Math.floor(n/128)]];
+  $('access-rows').innerHTML=rows.map(([name,c])=>'<tr><td>'+name+'</td><td>'+c.toLocaleString()+'</td><td>'+(4*64*c*512/1e6).toFixed(1)+' M</td></tr>').join('');
+  $('access-index').textContent='CSA Indexer 仍需给 '+Math.floor(n/4).toLocaleString()+' 个候选打分；主 attention 最多选 '+512+' 条压缩记忆。';}
+ $('access-context').addEventListener('change',access);access();
+})();
+</script>
+<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body></html>

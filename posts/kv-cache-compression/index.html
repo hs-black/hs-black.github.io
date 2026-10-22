@@ -1,308 +1,108 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>KV cache 压缩：把历史装得更小 · Zunzhe Zhang</title>
-<meta name="description" content="推导 GQA 与 MLA 的缓存形状，计算量化误差、分组元数据和残差区预算；附性能诊断、课后习题与可运行压缩实验。">
+<meta name="description" content="按状态形状、位置数和位宽推导 GQA、MLA 与 KV 量化，计算分组元数据、residual 和读取成本，附工程排查、习题与 NumPy 实验。">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
-.slide.lesson {padding:32px 64px 90px;gap:10px;justify-content:flex-start}
-.slide.lesson h2{font-size:40px;line-height:1.15}.slide.lesson .intro{font-size:23px;color:var(--text-soft);line-height:1.4}
-.scene{width:100%;height:320px;flex:none;overflow:visible}.scene text{font-family:var(--font-sans);fill:var(--text);font-size:23px}.scene .label{font-size:18px;fill:var(--text-soft)}.scene .tiny{font-size:15px;fill:var(--text-faint)}.scene .value{font-family:var(--font-mono);font-size:25px}.scene .box{fill:var(--surface);stroke:var(--border);stroke-width:2}.scene .accentbox{fill:var(--accent-soft);stroke:var(--accent);stroke-width:2}.scene .greenbox{fill:var(--bg-soft);stroke:var(--accent-2);stroke-width:2}.scene .wire{fill:none;stroke:var(--text-faint);stroke-width:2}.scene .hotwire{fill:none;stroke:var(--accent);stroke-width:3}.scene .ghost{opacity:0}.scene .soft{opacity:.23}.scene .strong{fill:var(--accent);font-weight:600}
-.captions{position:relative;height:70px;flex:none}.captions p{position:absolute;inset:0;opacity:0;font-size:23px;line-height:1.45;color:var(--text-soft)}.captions p:first-child{opacity:1}.captions b{color:var(--text)}.step-label{font-size:16px;color:var(--accent);position:absolute;right:68px;top:42px}.note{font-size:17px!important;color:var(--text-faint)}.formula{padding:18px 24px;border:1px solid var(--border);border-radius:12px;background:var(--surface);font-size:28px;font-family:var(--font-mono);line-height:1.5}.lesson .two-col{display:grid;grid-template-columns:1fr 1fr;gap:22px}.card{background:var(--surface);border:1px solid var(--border);border-radius:16px;padding:24px}.card h3{font-size:26px;margin:0 0 12px}.card p,.card li{font-size:23px;line-height:1.55}.lesson table{width:100%;font-size:22px;border-collapse:collapse}.lesson th,.lesson td{padding:15px 18px;border-bottom:1px solid var(--border);text-align:left}.lesson th{color:var(--accent)}.reference-list{font-size:22px!important;line-height:1.6}.reference-list li+li{margin-top:12px}.related{font-size:23px!important;margin-top:16px!important}.metric{font-size:56px;color:var(--accent);font-family:var(--font-mono)}.memory-inputs{display:grid;grid-template-columns:1fr 1fr;gap:18px 40px}.memory-inputs label{display:grid;grid-template-columns:92px 1fr 78px;gap:12px;align-items:center;font-size:20px}.memory-inputs input[type=range]{width:100%!important}.memory-inputs output{text-align:right}.readout-grid{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:20px}.readout-grid p{font-size:18px}.readout-grid strong{display:block;font-size:46px;color:var(--accent)}.slide.center h1{font-size:72px}.slide > .anim-bar{left:64px;right:64px;bottom:34px;opacity:.75}
+.article-figure { margin:1.6em 0; }
+.article-figure h3 { margin:0 0 .6em; font-size:18px; }
+.article-figure p { font-size:15px; }
+.article-figure table { font-size:14px; width:100%; font-variant-numeric:tabular-nums; }
+.article-figure th,.article-figure td { padding:8px 6px; }
+.article-figure label { display:flex;align-items:center;gap:10px;flex-wrap:wrap;font-size:14px;margin:10px 0; }
+.article-figure input[type=range] { flex:1;min-width:110px; }
+.article-figure output { font-variant-numeric:tabular-nums; }
+.article-figure svg { display:block;width:100%;height:auto; }
+.article-figure svg text { font-family:var(--font-sans);fill:var(--text-soft);font-size:13px; }
+.figure-metric { padding:12px;background:var(--accent-soft);border-radius:8px;font-size:16px;font-variant-numeric:tabular-nums; }
+.state-grid { display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px; }
+.state-grid div { border:1px solid var(--border);border-radius:8px;padding:10px;font-size:14px;overflow-wrap:anywhere; }
+.state-grid b { display:block;color:var(--accent);font-size:19px;margin:5px 0; }
+.diagram-row { display:flex;gap:6px;flex-wrap:wrap;margin:12px 0; }
+.diagram-token { padding:8px 12px;border:1px solid var(--border);border-radius:7px;background:var(--bg-soft);font:14px var(--font-mono); }
+.diagram-token.active { background:var(--accent-soft);border-color:var(--accent); }
+.figure-bars { display:grid;gap:9px;margin:12px 0; }
+.figure-bar { display:grid;grid-template-columns:70px 1fr 65px;align-items:center;gap:8px;font-size:14px; }
+.figure-bar i { display:block;height:18px;background:var(--accent);border-radius:4px;transition:width .18s; }
+.figure-bar .track { background:var(--bg-soft);border-radius:4px;overflow:hidden; }
+.article-figure figcaption { color:var(--text-soft);font-size:14px;line-height:1.6;margin-top:10px; }
+.article-exercise { margin:1.3em 0; }
+.article-exercise h3 { font-size:18px; }
+.article-exercise details { margin-top:8px; }
+.prose pre { max-width:100%;overflow-x:auto;font-size:13px;padding:14px;background:var(--code-bg);border-radius:8px; }
+.matrix-grid { display:grid;gap:3px;grid-template-columns:repeat(9,minmax(0,1fr));font-size:12px;text-align:center; }
+.matrix-grid span { border-radius:4px;padding:5px 0;background:var(--bg-soft); }
+.matrix-grid .kept { background:var(--accent-soft);color:var(--accent); }
+.matrix-grid .current { outline:1px solid var(--accent);outline-offset:-1px; }
+.matrix-grid .axis { background:transparent;color:var(--text-soft); }
+@media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
+@media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>KV cache 压缩：把历史装得更小</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
+<nav class="series" data-series="systems"></nav><article class="prose"><p>一条长请求占用的显存，常常逐渐从模型权重转向 KV cache。32 层、8 个 KV 头、每头 128 维、BF16 的模型，每保存一个位置就增加 128 KiB；8192 个位置是一条请求 1 GiB，32 条这样的请求就是 32 GiB。</p>
+<p>缓存压缩可以从几个不同维度入手：让多个 query 共享 KV 头，把多头表示写入低维 latent，合并或淘汰位置，以及降低每个元素的存储位宽。先把这些维度写进同一份容量公式，再判断每种方法需要模型训练、缓存管理和 kernel 分别做哪些工作。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#budget">一份历史的四个容量因素</a></li><li><a href="#architecture">GQA 与 MLA 怎样减少状态</a></li><li><a href="#quantization">把一组数映射到整数码</a></li><li><a href="#metadata">实际位宽还包括 scale 和残差区</a></li><li><a href="#axes">为什么 K 和 V 适合不同分组</a></li><li><a href="#positions">合并和淘汰位置需要未来查询的假设</a></li><li><a href="#engineering">容量收益怎样转成推理收益</a></li><li><a href="#exercises">预算与质量练习</a></li><li><a href="#lab">同时检查误差与字节</a></li><li><a href="#references">参考与延伸阅读</a></li></ol></nav>
+<h2 id="budget">一份历史的四个容量因素</h2>
+<p>普通 GQA 的缓存容量为：</p>
+$$M_{KV}=2\,L\,H_{kv}\,S\,\htmlData{symbol=head-dim}{d}\,\htmlData{symbol=bytes}{b_e}.$$
+<p>其中 \(L\) 是层数，\(H_{kv}\) 是每层 KV 头数，\(S\) 是已保存位置数，\(d\) 是每头维度，\(b_e\) 是每元素字节数。系数 2 对应 key 和 value 两份。同长度的 \(B\) 条请求再乘以 \(B\)；长度不同时，对各请求的 \(S\) 求和。</p>
+<p>GQA 减少 \(H_{kv}\)，位置淘汰减少 \(S\)，数值量化减少 \(b_e\)。MLA 则用另一种状态形状替代两份多头张量。模型架构决定可以采用哪些表示；缓存实现决定这些表示是否按紧凑布局实际保存。</p>
+<h2 id="architecture">GQA 与 MLA 怎样减少状态</h2>
+<p>GQA 让 \(H_q\) 个 query 头共享 \(H_{kv}\) 个 KV 头，每组大小 \(G=H_q/H_{kv}\)。例如 32 个 query 头共享 8 个 KV 头，KV 元素数降为 MHA 的 1/4。计算输出时，各 query 仍有自己的分数和加权和。Kernel 若在一组 query 之间复用同一份 K/V，还能把容量收益转成更少的读取。</p>
+<p>MLA 把每个位置的 K/V 内容共同压入 \(d_c\) 维 latent：\(c_j=W^{DKV}h_j\)，再由各头的矩阵恢复内容 key/value。内容点积可以调整结合顺序：</p>
+$$q_i^\top W_i^{UK}c_j=\big((W_i^{UK})^\top q_i\big)^\top c_j.$$
+<p>先把 query 投影到 latent 空间，就能直接读取缓存里的 \(c_j\)。Value 的上投影也可与输出投影结合。带位置的部分单独保存为 \(d_R\) 维 key，因而每层每位置缓存元素数是 \(d_c+d_R\)。具体执行路径还要匹配 prefill、decode、分片和 kernel 的成本。</p>
+<p>以 \(d_c=512,d_R=64\) 为例，每位置每层保存 576 个元素。对照 8 个 KV 头、每头 128 维的 GQA，元素数是 \(2\times8\times128=2048\)，比例为 \(2048/576\approx3.56\)。若使用 BF16、32 层和 8192 个位置，GQA 是 1 GiB，latent 缓存为 288 MiB。</p>
+<h2 id="quantization">把一组数映射到整数码</h2>
+<p>对称 INT4 量化的一种常见窄范围约定是使用整数码 −7 到 7。给一组实数选择 scale \(s=\max|x|/7\)，然后存储 \(q=\operatorname{clip}(\operatorname{round}(x/s),-7,7)\)，读取时重构 \(\hat x=sq\)。这里 round 取最近整数，恰好处在中点时取偶数。在没有裁剪的范围内，每个元素的舍入误差最多约为 \(s/2\)。</p>
+<figure class="article-figure" id="kv-quant-demo"><h3>四个缓存元素的量化与重构</h3><p>输入固定为 [−1,−0.2,0.3,1]。步长控制整数刻度；步长过小时，两端会被裁剪。</p><label>Scale s <input id="kv-scale" type="range" min="0.05" max="0.3" step="0.01" value="0.14"><output id="kv-scale-value"></output></label><table><thead><tr><th>输入</th><th>整数码</th><th>重构</th><th>误差</th></tr></thead><tbody id="kv-quant-rows"></tbody></table><div class="figure-metric" id="kv-quant-error"></div></figure>
+<p>取精确 scale \(1/7\)，整数码为 [−7,−1,2,7]，重构为 [−1,−1/7,2/7,1]，最大误差为 \(2/35\approx0.05714\)。K 和 V 的误差进入不同路径：K 误差先改变 logits，V 误差直接改变加权内容。</p>
+$$\Delta s_j=\frac{q^\top\Delta k_j}{\sqrt d},\qquad \Delta a\approx\big(\operatorname{diag}(a)-aa^\top\big)\Delta s,\qquad \Delta y_V=\sum_j a_j\Delta v_j.$$
+<p>这里 \(a\) 是原始 attention 权重，\(\Delta y_V\) 固定这些权重，仅观察 V 误差。对 K-only、V-only 和联合量化分别测试，能看清当前任务主要受哪条误差路径影响。</p>
+<h2 id="metadata">实际位宽还包括 scale 和残差区</h2>
+<p>若每 \(g\) 个元素共享一个 2 B scale 和一个 2 B zero-point，INT4 的平均存储为 \(0.5+4/g\) B/元素。\(g=64\) 时是 0.5625 B，较 BF16 的压缩倍数约为 3.56。最后一组不足 \(g\) 个元素时仍要保存一组元数据；底层布局还可能加入对齐填充。</p>
+<p>近期 token 常保留为高精度 residual 区，积累到合适粒度后再量化。设总长度 \(S\)，近期高精度长度 \(R\)，普通 GQA 维度仍为 \(L,H_{kv},d\)，预算可写为：</p>
+$$M=2LH_{kv}d\left[(S-R)\left(0.5+\frac4g\right)+2R\right].$$
+<figure class="article-figure" id="kv-budget-demo"><h3>分组元数据与近期缓存怎样分摊显存</h3><p>固定 32 层、8 个 KV 头、每头 128 维、8192 个位置；近期使用 BF16，较早位置使用带 scale/zero 的 INT4。</p><label>分组大小 g <select id="kv-group"><option>32</option><option selected>64</option><option>128</option></select></label><label>近期位置 R <input id="kv-residual" type="range" min="0" max="1024" step="128" value="128"><output id="kv-residual-value"></output></label><div class="figure-bars" id="kv-budget-bars"></div><div class="figure-metric" id="kv-budget-result"></div></figure>
+<p>上图默认 \(g=64,R=128\)，旧缓存约 283.5 MiB，近期缓存 16 MiB，总计 299.5 MiB，较原来的 1024 MiB 压缩约 3.42 倍。减小分组能更细地适应局部数值范围，但元数据和反量化工作会随之增加。</p>
+<h2 id="axes">为什么 K 和 V 适合不同分组</h2>
+<p>若某个 K 通道持续出现大值，把同一 token 的全部通道放进一组，会让这个大通道拉大整个组的 scale，小通道只能使用很粗的刻度。按通道沿历史位置分组，可以把不同通道的范围分开。V 的分布与使用方式不同，按 token 分组往往更方便保留当前位置的内容结构；最终选择应结合模型的离群分布和 kernel 布局。</p>
+<p>可以构造一个具有固定离群通道的 K 张量，分别进行按 token 与按通道分组。先比较 K 重构误差，再用相同 query 检查 logits 和最终输出。误差较小的存储布局还需要匹配批量读取、scale 寻址和解码路径，才能同时得到数值与性能收益。</p>
+<p>量化组的轴还决定增量写入方式。按时间轴组成一个 K 组时，新 token 到来可能让最后一个组继续增长；组的最大值变化后，scale 和已有整数码需要一起更新。近期高精度区域可以把这类频繁重写推迟到组满时完成。按 token 的 V 组通常在写入时就拥有该位置的全部通道，比较容易一次确定 scale。</p>
+<p>对分页缓存，量化组、物理页和 kernel tile 是三个粒度。若组跨越物理页，scale 的归属和尾部回收会更复杂；若每页独立量化，最后一组可能有填充。选择粒度时可以先列出一页的整数码字节、scale 数量、尾组元素数，再检查一次 attention tile 会读取多少页和多少份元数据。这样的布局预算能把“数学压缩率”接到真实显存访问上。</p>
+<h2 id="positions">合并和淘汰位置需要未来查询的假设</h2>
+<p>窗口模型可以在规定的可见范围之外释放 K/V。内容选择模型则需要评估未来 query 是否仍会需要那些位置。一次查询读取得少，说明的是这次读取集合；决定永久删除时，需要额外的保留或恢复策略。</p>
+<p>位置合并还会改变 attention 的位置语义。两个 key 分别经过不同 RoPE 角度旋转，合并后的向量对应怎样的逻辑位置、代表怎样的概率质量，都需要在算法中定义。评估时可以先做远距离数字检索、多轮指代和顺序任务，再看整体语言指标。这样能区分量化造成的小数值偏差与历史信息真正丢失的影响。</p>
+<h2 id="engineering">容量收益怎样转成推理收益</h2>
+<p>长上下文 decode 常受 KV 读取带宽限制，压缩后少搬的数据可能覆盖解码成本。短上下文时，量化、元数据寻址和反量化的固定开销占比更高。沿上下文长度和 batch 大小扫描，在相同权重、请求集合与输出长度下比较峰值显存、step 时间和输出误差，能找到压缩开始划算的区间。</p>
+<p>高效路径在消费每个 tile 时读取整数码与 scale，反量化后直接参与 attention。若先把全部历史展开成完整 BF16 临时张量，峰值内存和额外带宽会吞掉部分收益。Profiler 中要观察反量化输出的生命周期，以及量化后的缓存是否仍被另一份高精度副本长期持有。</p>
+<p>Residual 管理也需要按实际新增长度做预算。单 token decode 每次增加 1，chunked prefill 一次可能增加几百个位置；量化触发条件应计算“原 residual 长度 + 本次输入长度”。构造跨阈值的 chunk，逐次记录量化区与高精度区的长度及峰值内存，可以验证 flush 粒度和显存上界。</p>
+<p>还可以估算压缩的带宽回本点。设原始 KV 读取量为 1 GiB，压缩后为 0.3 GiB，有效带宽为 1 TB/s，理想节省约 0.75 ms。若新增解码与管理开销为 0.2 ms，这部分 attention 有机会净省约 0.55 ms；同样开销放到仅 64 MiB 的短历史上，节省量可能不足以抵偿。把同一路径实测的有效带宽和新增耗时代入，就能得到对应负载下的回本判断。</p>
+<p>质量实验也应覆盖缓存的生命周期。先量化一个固定前缀，然后让后续 query 逐步变化，观察早期 key 的小误差会不会在新的查询方向上被放大。多轮聊天、长文引用和精确数字提取适合暴露这种差异。再固定请求与随机种子，逐项比较 K-only、V-only、组大小和 residual 长度，让一次变化对应一个可解释的原因。</p>
+<h2 id="exercises">预算与质量练习</h2>
+<div class="article-exercise"><h3>1. 4 bit 实际压缩多少</h3><p>1,048,576 个元素，BF16；INT4 每 64 个元素存 4 B 元数据。量化后多少 KiB，压缩几倍？</p><details><summary>展开解答</summary><p>整数码占 512 KiB，元数据占 64 KiB，总计 576 KiB。原来是 2048 KiB，比例为 2048/576≈3.56。</p></details></div>
+<div class="article-exercise"><h3>2. Latent 状态容量</h3><p>32 层、8192 个位置、BF16，latent 512 维加位置 key 64 维。缓存多少 MiB？</p><details><summary>展开解答</summary><p>每层每位置保存 512+64=576 个 BF16 元素，占 1152 B。32 层、8192 个位置共有 262,144 份状态，乘以每份的字节数，合计 301,989,888 B，即 288 MiB。</p></details></div>
+<div class="article-exercise"><h3>3. 当前读取与长期保存</h3><p>一个动态选择器每步只读取 10% 的历史。需要什么额外条件，才可以释放另外 90% 的缓存？</p><details><summary>展开解答</summary><p>需要证明未来查询的可见性规则会永久排除这些位置，或提供恢复、重算、压缩替代等机制。固定滑动窗口有明确的淘汰边界；内容相关选择需要进一步的保留策略与质量评估。</p></details></div>
+<h2 id="lab">同时检查误差与字节</h2>
+<p><a href="/posts/kv-cache-compression/lab.py" download>下载 NumPy 实验</a>并运行 <code>python3 lab.py --seed 7 --group 32</code>。它检查 INT4 舍入界，分别测量 K-only、V-only 输出误差，并核对 576 KiB 元数据算例与 299.5 MiB residual 算例。将 group 改为 16、64，比较误差；实验中的整数码使用 int8 保存以便观察，容量计算按两个 INT4 打包进一个字节的布局进行。</p>
+<h2 id="references">参考与延伸阅读</h2><ul><li><a href="https://arxiv.org/abs/2305.13245">GQA</a>；<a href="https://arxiv.org/abs/2405.04434">DeepSeek-V2</a>：共享头与 latent 缓存。</li><li><a href="https://arxiv.org/abs/2402.02750">KIVI</a>：K/V 的分组轴与低位缓存。</li><li><a href="https://huggingface.co/docs/transformers/kv_cache">Transformers cache strategies</a>：量化后端、residual 与长度权衡。</li><li><a href="https://github.com/huggingface/transformers/issues/49393">Transformers #49393</a>：多 token 更新跨越 residual 阈值的复现。</li></ul>
+</article><nav class="series-pager" data-series="systems"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"head-dim": {"label": "d · 每头维度", "description": "普通 GQA 容量算例中，每个 key/value 头的分量数。", "unit": "元素/头"}, "bytes": {"label": "bₑ · 元素字节数", "description": "一个缓存元素的存储字节数；BF16 为 2 B。", "unit": "B/元素"}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script>
+(() => {
+ function roundEven(x){const n=Math.floor(x),f=x-n;return f<0.5?n:f>0.5?n+1:n%2===0?n:n+1;}
+ const scale=document.getElementById('kv-scale');function quant(){const s=+scale.value,x=[-1,-.2,.3,1];document.getElementById('kv-scale-value').textContent=s.toFixed(2);let error=0;document.getElementById('kv-quant-rows').innerHTML=x.map(v=>{const q=Math.max(-7,Math.min(7,roundEven(v/s))),y=q*s;error=Math.max(error,Math.abs(y-v));return '<tr><td>'+v.toFixed(2)+'</td><td>'+q+'</td><td>'+y.toFixed(3)+'</td><td>'+(y-v).toFixed(3)+'</td></tr>';}).join('');document.getElementById('kv-quant-error').textContent='可表示范围 ±'+(7*s).toFixed(2)+' · 最大绝对误差 '+error.toFixed(3);}
+ scale.addEventListener('input',quant);quant();
+ const group=document.getElementById('kv-group'),residual=document.getElementById('kv-residual');function budget(){const r=+residual.value,g=+group.value,n=2*32*8*128,old=n*(8192-r)*(.5+4/g)/2**20,recent=n*r*2/2**20,total=old+recent;document.getElementById('kv-residual-value').textContent=r;document.getElementById('kv-budget-bars').innerHTML=[['旧缓存',old],['近期',recent],['BF16',1024]].map(([name,v])=>'<div class="figure-bar"><span>'+name+'</span><div class="track"><i style="width:'+100*v/1024+'%"></i></div><output>'+v.toFixed(1)+' MiB</output></div>').join('');document.getElementById('kv-budget-result').textContent='合计 '+total.toFixed(1)+' MiB · 压缩 '+(1024/total).toFixed(2)+'×';}
+ group.addEventListener('change',budget);residual.addEventListener('input',budget);budget();
+})();
 
-.slide.workshop .course-number-scene .cn-value{font:36px var(--font-mono);fill:var(--accent)}
-.slide.workshop .course-number-scene .cn-label{font-size:20px;fill:var(--text-soft)}
-.slide.workshop .course-number-scene .cn-detail{font-size:19px}
-</style>
-<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
-</head>
-<body class="deck-page">
-<main class="deck">
-<div class="stage">
-<section class="slide center">
-<div class="kicker rise">动画图解 LLM 系统</div>
-<h1 class="rise" style="--d:1">KV cache 压缩：把历史装得更小</h1>
-<p class="muted rise" style="--d:2">同样一段历史，能不能用更少的字节记住？</p>
-<p class="small muted rise" style="--d:3">→ 逐步推进 · ← 回看 · 拖动时间轴观察数据流</p>
-</section>
-<section class="slide lesson" id="axes">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>先数清楚，缓存里有什么</h2>
-<p class="intro">一个标准 KV cache：层 × token × KV head × head dimension × 数值字节数。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="三维 KV 结构沿头数、token 数和每格表示大小逐步缩减">
-</svg>
-<div class="captions">
-<p>每个小格代表一份 KV。长上下文、更多并发、更多层，都会让这些格子继续堆起来。</p>
-<p>沿 head 轴做共享：GQA / MQA 减少每个 token 的 KV 头数。</p>
-<p>沿表示或 token 轴做压缩，再降低每个数的精度。不同方法省的是不同的一维。</p>
-</div>
-</section>
-<section class="slide lesson" id="gqa">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>GQA：几个 Q，共用一组 K、V</h2>
-<p class="intro">Q 的头数保持不变，K、V 的头数减少。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="八个 Q 头从各自 KV 改连到两组共享 KV，再连到一组 KV">
-</svg>
-<div class="captions">
-<p>左侧 8 个 query heads 原本各有一组 K、V，缓存需要保存 8 份。</p>
-<p>把 query heads 分成两组，每组 4 个 Q 共用一组 K、V。KV 头数从 8 变成 2。</p>
-<p>MQA 再走一步：所有 Q 共用一组 KV。不同 Q 仍会产生不同 attention 权重与输出。</p>
-</div>
-<p class="note">8 / 2 / 1 为结构示意；GQA / MQA 是模型结构选择，通常需要训练或 uptraining。</p>
-</section>
-<section class="slide workshop" id="compression-axes">
-<div class="kicker">工程细节</div><h2>把四种“更小”写成不同的变量</h2>
-<div class="ws-equation">M ≈ L × Tstored × Cstored × b + metadata</div><table class="ws-table"><thead><tr><th>符号</th><th>含义</th><th>对应选择</th></tr></thead><tbody><tr><td>L</td><td>需要保存状态的层数</td><td>混合架构的层布局</td></tr><tr><td>Tstored</td><td>实际保留的位置 / 摘要数</td><td>淘汰、窗口、序列压缩</td></tr><tr><td>Cstored</td><td>每个位置保存多少个数</td><td>MHA / GQA / MLA</td></tr><tr><td>b</td><td>每个数的字节数</td><td>BF16 / INT8 / INT4</td></tr></tbody></table><p class="ws-note">这是核算框架；不同层可有不同项，最后逐层求和。不要把多个“压缩倍数”不加条件地相乘。</p>
-</section>
-<section class="slide workshop" id="head-share-arithmetic">
-<div class="kicker">工程细节</div><h2>GQA 省 KV，不按比例省全部参数</h2>
-<p class="ws-lead">D = 4096、Hq = 32、Hkv = 8、d = 128。忽略 bias：</p><table class="ws-table"><thead><tr><th>投影</th><th>权重形状</th><th>参数数</th></tr></thead><tbody><tr><td>WQ</td><td>4096 × 4096</td><td>16,777,216</td></tr><tr><td>WK、WV</td><td>各 4096 × 1024</td><td>各 4,194,304</td></tr><tr><td>WO</td><td>4096 × 4096</td><td>16,777,216</td></tr></tbody></table><p class="ws-lead">KV 从 32 头降到 8 头，缓存缩小 4 倍；Q 与输出投影没变。四个投影合计从 67.11M 降到 41.94M 参数，缩小约 1.6 倍。</p><p class="ws-note">这是给定尺寸的结构算术。已训练的 MHA 不能直接丢弃 24 个头而保持原输出。</p>
-</section>
-
-<section class="slide lesson" id="mla">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>MLA：把多头 KV 存成低维 latent</h2>
-<p class="intro">多个头的内容可以先压进一小条联合表示 c，再用于 attention。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="展开的多头 KV 收缩为 latent，内容路径和单独的位置 key 一起供查询使用">
-</svg>
-<div class="captions">
-<p>标准多头缓存直接存展开的 K、V。MLA 为每个 token 缓存低维 latent c。</p>
-<p>内容路径由 c 提供多个头需要的 K、V 信息；推理中可通过矩阵乘法结合律，把部分上投影吸收到其他权重中。</p>
-<p>位置路径单独保存用于 RoPE 的 key。缓存由“内容 latent + 位置 key”组成；长度仍然随 token 数增长。</p>
-</div>
-<p class="note">示意结构来自 DeepSeek-V2 的 MLA；实际尺寸与权重吸收方式由架构决定。</p>
-</section>
-<section class="slide workshop" id="mla-shapes">
-<div class="kicker">工程细节</div><h2>MLA 缓存的到底是哪几个张量？</h2>
-<p class="ws-lead">用一个 head 推导：c ∈ ℝʳ 是内容 latent；kᴿ ∈ ℝᵖ 是位置 key。内容 key / value 在逻辑上仍存在。</p><div class="ws-equation">kᶜ = UK c，UK ∈ ℝᵈᶜ×ʳ<br>v = UV c，UV ∈ ℝᵈᵛ×ʳ<br>cache 每位置 = c + kᴿ，共 r + p 个数</div><p class="ws-lead">示例：32 heads、每头 K/V 各 128 维，展开后是 8192 个数；若 r = 512、p = 64，latent cache 是 576 个数。</p><p class="ws-note">此处尺寸是教学示例。DeepSeek-V2 的 MLA 结构是这一推导的参考，不是任意模型的可替换压缩器。</p>
-</section>
-<section class="slide workshop" id="mla-absorption">
-<div class="kicker">工程细节</div><h2>结合律怎样避免把 K、V 整份展开？</h2>
-<div class="ws-equation">qᶜᵀkᶜ = qᶜᵀUKc = (UKᵀqᶜ)ᵀc<br>aᵢ = softmax(scoreᵢ)<br>Σᵢ aᵢvᵢ = Σᵢ aᵢUVcᵢ = UV(Σᵢ aᵢcᵢ)</div><p class="ws-lead">先把 query 投到 latent 空间，再与缓存的 c 匹配；value 路径先求 latent 的加权和，最后做 UV 投影。</p><p class="ws-lead">每个 head 有自己的 query、UK、UV 与权重 a。位置分数 qᴿᵀkᴿ 另外加入 logits；不能把 RoPE 的位置旋转随意吸收到固定矩阵里。</p><p class="ws-note">减少缓存流量的同时，也改变了算子的维度与计算量。较小缓存不自动意味着任意 batch 都更快。</p>
-</section>
-
-<section class="slide lesson" id="tokens">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>少存 token：合并，或淘汰</h2>
-<p class="intro">头数和维度都不变时，还能减少历史位置的数量。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="八个历史位置的一组被压成摘要，另一路淘汰低优先级位置">
-</svg>
-<div class="captions">
-<p>一开始保存每个位置。越靠右越新，旧位置仍占着完整的 KV 空间。</p>
-<p>合并：把一组 token 表示汇成一个摘要。位置变少，但摘要要承载这组内容。</p>
-<p>淘汰：只保留被选中的 KV，例如重要历史加最近窗口；未来若要用到被丢弃的细节，就无法直接读取它。</p>
-</div>
-<p class="note">动画只展示两种操作；实际策略可能按层、头、query 或累积 attention 得分选择。</p>
-</section>
-<section class="slide workshop" id="retention-semantics">
-<div class="kicker">工程细节</div><h2>淘汰一个位置，需要承担未来查询的代价</h2>
-<p class="ws-lead">保存位置 [0, 1, 2, 3, 4, 5]，当前只读 [0, 4, 5]。这一步没有读取 1，不代表下一步不会读取 1。</p><div class="ws-cols"><div class="ws-card"><h3>稀疏读取</h3><p>保留完整 cache，只为当前 Q 选择子集。下个 Q 仍有机会找到先前没选中的 token。</p></div><div class="ws-card"><h3>真正释放</h3><p>删掉 KV 后，后续查询只能依靠保留内容或重新计算。要用任务质量来评估这个不可逆的信息损失。</p></div></div><p class="ws-note">摘要还必须满足因果性：位置 t 的 query 不能读取包含 t 之后信息的压缩块。</p>
-</section>
-<section class="slide workshop" id="compression-position">
-<div class="kicker">工程细节</div><h2>压缩了位置，位置编码也要有定义</h2>
-<p class="ws-lead">将位置 0…7 合成两个摘要。摘要内容、代表位置、可见时间，是三个需要分别规定的量。</p><table class="ws-table"><thead><tr><th>问题</th><th>一种明确的设计</th><th>要检查什么</th></tr></thead><tbody><tr><td>什么时候能读摘要？</td><td>组内最后一个 token 完成后</td><td>不能泄露尚未出现的 token</td></tr><tr><td>摘要位置信息来自哪？</td><td>采用模型训练时定义的位置规则</td><td>不能临时把位置重排成 0、1</td></tr><tr><td>最近 token 怎么处理？</td><td>保留原始局部窗口</td><td>摘要与原始 token 重叠是否被重复计权</td></tr></tbody></table><p class="ws-note">训练过的压缩 attention 会定义这些规则。对普通 softmax 模型直接平均 K/V，一般不保持原输出。</p>
-</section>
-
-<section class="slide lesson" id="quant">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>量化：位置都留着，每个数更短</h2>
-<p class="intro">用低位整数和少量 scale 元数据近似原来的 K、V。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="16 位宽的数据条缩成 4 位编码，同时保留 scale 元数据并重建近似浮点值">
-</svg>
-<div class="captions">
-<p>BF16 的每个数占 16 bit。降低位宽，就能让同一段历史少搬一些字节。</p>
-<p>按组量化：x 大致表示为 s × (q − z)。把浮点数映射到有限整数等级，并保存 scale 等元数据。</p>
-<p>attention kernel 读取后反量化，或使用支持低位数据的计算路径。压缩比例还要扣除元数据、残差区和对齐开销。</p>
-</div>
-<p class="note">4 bit 为示意；KIVI 对 K 按通道、对 V 按 token 分组，以适应不同的离群值分布。</p>
-</section>
-<section class="slide workshop" id="quantization-worked">
-<div class="kicker">逐步算一遍</div><h2>对一组数真的做一次 4 bit 量化</h2>
-<p class="ws-lead">教学方案：对称有符号 q ∈ [−7, 7]，scale s = max|x| / 7 = 1/7；x = [−1, −0.2, 0.3, 1]。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="对一组数真的做一次 4 bit 量化"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">量化 q = round(x / s)：[−7, −1, 2, 7]</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">反量化 x̂ = s q：[−1, −0.143, 0.286, 1]</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">最大误差：max |x − x̂| = 0.057143</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
-</section>
-<section class="slide workshop" id="quant-error-path">
-<div class="kicker">工程细节</div><h2>K 的误差会改变权重，V 的误差会改变内容</h2>
-<div class="ws-equation">K̂ = K + ΔK<br>Δlogitᵢ = qᵀΔkᵢ / √d<br>|Δlogitᵢ| ≤ ||q||₂ ||Δkᵢ||₂ / √d</div><div class="ws-cols"><div class="ws-card"><h3>K 误差经过 softmax</h3><p>相近 logits 的排序可能改变；某些 query 会比平均误差更敏感。只测 K 的均方误差不足以判断输出质量。</p></div><div class="ws-card"><h3>先固定权重看 V</h3><p>Δy = Σ aᵢΔvᵢ。若 aᵢ ≥ 0 且和为 1，则 ||Δy|| ≤ maxᵢ ||Δvᵢ||；K 也变化时还要计权重变化。</p></div></div><p class="ws-note">先分别量化 K 和 V，比较 logits、attention 输出与任务指标，能更快找到敏感路径。</p>
-</section>
-<section class="slide workshop" id="scale-overhead">
-<div class="kicker">工程细节</div><h2>4 bit 的实际压缩率由分组大小决定</h2>
-<p class="ws-lead">N 个数，每组 g 个，整数载荷 4 bit / 数；每组保存 BF16 scale 与 BF16 zero，共 4 bytes。</p><div class="ws-equation">bytes = ceil(N / 2) + ceil(N/g) × 4<br>每个数 ≈ 0.5 + 4/g bytes</div><table class="ws-table"><thead><tr><th>组大小 g</th><th>每数平均字节</th><th>相对 BF16 的压缩率</th></tr></thead><tbody><tr><td>32</td><td>0.625</td><td>2 / 0.625 = 3.2×</td></tr><tr><td>64</td><td>0.5625</td><td>3.556×</td></tr><tr><td>128</td><td>0.53125</td><td>3.765×</td></tr></tbody></table><p class="ws-note">这是仿射量化的示例存储格式。对称方案可不存 zero；实际 packing、对齐与残差区需另外核算。</p>
-</section>
-<section class="slide workshop" id="residual-budget">
-<div class="kicker">逐步算一遍</div><h2>带残差区的压缩预算，逐项加起来</h2>
-<p class="ws-lead">单层：T = 8192、8 KV heads、d = 128。最近 128 token 留 BF16，旧 token 用 INT4；g = 64，每组元数据 4 bytes。</p><svg class="ws-visual course-number-scene" viewBox="0 0 1120 285" role="img" aria-label="带残差区的压缩预算，逐项加起来"><g class="cn-row" data-row="0"><rect x="10" y="25" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="62" fill="var(--text)" font-size="23">旧载荷：2 × 8064 × 8 × 128 × 0.5 bytes</text></g><g class="cn-row" data-row="1"><rect x="10" y="98" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="135" fill="var(--text)" font-size="23">旧元数据：2 × 8064 × 8 × 128 / 64 × 4</text></g><g class="cn-row" data-row="2"><rect x="10" y="171" width="600" height="58" rx="10" fill="var(--surface)" stroke="var(--border)"/><text x="30" y="208" fill="var(--text)" font-size="23">最近 128 token：2 × 128 × 8 × 128 × 2</text></g><path d="M625 135H710" stroke="var(--accent)" stroke-width="3"/><rect x="730" y="40" width="365" height="190" rx="16" fill="var(--accent-soft)" stroke="var(--accent)"/><text class="cn-label" x="912" y="80" text-anchor="middle" fill="var(--text-soft)" font-size="20"></text><text class="cn-value" x="912" y="142" text-anchor="middle" fill="var(--accent)" font-size="36">0</text><text class="cn-detail" x="912" y="188" text-anchor="middle" fill="var(--text)" font-size="19"></text></svg><p class="ws-caption cn-caption"></p><p class="ws-note">所有数值为手算教学示例。</p>
-</section>
-<section class="slide workshop" id="group-axis">
-<div class="kicker">工程细节</div><h2>为什么分组轴会影响离群值？</h2>
-<p class="ws-lead">一个矩阵里，若某个 K 通道经常有大值，跨通道共享 scale 会把其他小通道挤在少数几个等级里。</p><div class="ws-cols"><div class="ws-card"><h3>按通道观察 K</h3><p>比较各通道跨 token 的分布。独立 scale 能把持续偏大的通道隔开；在线分组可能需要缓冲未满的一组。</p></div><div class="ws-card"><h3>按 token 观察 V</h3><p>一个 token 的 value 会一起被加权读出。按 token 分组更容易适应不同 token 的范围差异。</p></div></div><p class="ws-note">KIVI 的 K 按通道、V 按 token 是一套具体设计。是否适合新模型，要看实测分布与端到端质量。</p>
-</section>
-
-<section class="slide lesson">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>同一份缓存，四个节省杠杆</h2>
-<table>
-<thead>
-<tr>
-<th>方法</th>
-<th>减少什么</th>
-<th>保留什么</th>
-<th>主要代价</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>GQA / MQA</td>
-<td>KV heads</td>
-<td>每个历史位置</td>
-<td>结构与训练要配合</td>
-</tr>
-<tr>
-<td>MLA</td>
-<td>每个 token 的表示</td>
-<td>每个历史位置</td>
-<td>投影、kernel 与布局</td>
-</tr>
-<tr>
-<td>合并 / 淘汰</td>
-<td>历史位置数</td>
-<td>摘要 / 被选中位置</td>
-<td>细粒度检索能力</td>
-</tr>
-<tr>
-<td>KV 量化</td>
-<td>每个数的 bit 数</td>
-<td>位置与张量形状</td>
-<td>误差与反量化开销</td>
-</tr>
-</tbody>
-</table>
-<p class="note">PagedAttention 管理缓存的物理分块；prefix caching 复用相同前缀。这两者不属于数值或语义压缩。</p>
-</section>
-<section class="slide lesson" id="budget">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>把节省落实到字节数</h2>
-<p class="intro">以一个假想模型为例：32 层、8192 token、32 个 KV 头、head dim 128。</p>
-<svg class="scene" viewBox="0 0 1120 340" role="img" aria-label="KV 内存柱先因 GQA 缩为四分之一，再因四位量化缩为四分之一">
-</svg>
-<div class="captions">
-<p>BF16 缓存：2 × 32 × 8192 × 32 × 128 × 2 = <b>4 GiB</b>，每条序列一份。</p>
-<p>换成 8 个 KV 头的 GQA，其他维度不变：4 GiB ÷ 4 = <b>1 GiB</b>。</p>
-<p>再把数值编码从 16 bit 降到 4 bit：纯载荷降至 <b>0.25 GiB</b>。实际占用还要加量化元数据等开销。</p>
-</div>
-<p class="note">算术示例；模型需匹配相应的 GQA 结构与量化方案。</p>
-</section>
-<section class="slide lesson">
-<div class="kicker">动画图解 LLM 系统</div>
-<h2>怎么判断压得是否值得？</h2>
-<div class="two-col">
-<div class="card">
-<h3>先量准确性</h3>
-<p>在自己的长上下文、代码、检索任务上比较输出。尤其检查远距离细节、多轮对话和罕见实体。</p>
-</div>
-<div class="card">
-<h3>再量系统收益</h3>
-<p>看峰值 KV 占用、可用并发、prefill 延迟和 decode 延迟。压得更小不自动等于端到端更快。</p>
-</div>
-<div class="card">
-<h3>定位误差来源</h3>
-<p>头共享改变模型容量；位置压缩改变可见细节；低位量化改变数值。分别做消融，才知道瓶颈在哪。</p>
-</div>
-<div class="card">
-<h3>让 kernel 接住收益</h3>
-<p>紧凑布局、融合反量化、合适的 block 大小，才能把字节减少兑现成带宽节省。</p>
-</div>
-</div>
-</section>
-<section class="slide workshop" id="compression-latency">
-<div class="kicker">工程细节</div><h2>省带宽能否覆盖解码开销？</h2>
-<p class="ws-lead">假想 profiling：压缩前 KV 读取 4 ms，其他 6 ms；压缩后 KV 读取 1.2 ms，反量化 0.8 ms，其他仍 6 ms。</p><div class="ws-equation">原延迟 = 10 ms<br>新延迟 = 1.2 + 0.8 + 6 = 8 ms<br>加速 = 1.25×，延迟减少 20%</div><p class="ws-lead">如果 batch 很小、历史很短，原 KV 读取只有 0.4 ms，而新增反量化仍 0.8 ms，就可能变慢。融合 kernel 与选择性启用都值得测。</p><p class="ws-note">测量按阶段拆分，避免把容量允许的更大 batch 收益，误当成固定 batch 的单请求加速。</p>
-</section>
-<section class="slide workshop" id="quality-experiment">
-<div class="kicker">工程细节</div><h2>用成对实验寻找质量退化的位置</h2>
-<table class="ws-table"><thead><tr><th>实验轴</th><th>保持其他条件不变</th><th>观察指标</th></tr></thead><tbody><tr><td>仅量化 K / 仅量化 V</td><td>相同请求、种子与解码策略</td><td>逐层输出误差、logits KL</td></tr><tr><td>2K / 8K / 32K 历史</td><td>相同关键证据与问题</td><td>远距离检索、实体和数字准确率</td></tr><tr><td>分组 32 / 64 / 128</td><td>相同 bit 与残差区</td><td>质量、元数据占用、TPOT</td></tr><tr><td>近期保留 0 / 128 / 512</td><td>相同分组方式</td><td>稳定性与实际 KV 字节</td></tr></tbody></table><p class="ws-lead">先用固定 token 序列比较数值，再让模型自由生成比较任务表现。自由生成分叉后，逐 token logits 已不再对应同一段历史。</p>
-</section>
-<section class="slide workshop" id="exercise-metadata">
-<div class="kicker">练习 1</div><h2>一个“4 倍压缩”的说法少算了什么？</h2>
-<div class="ws-prompt">有 1,048,576 个 BF16 数。使用 INT4，g = 64；每组 scale 与 zero 合计 4 bytes。求总字节与压缩率。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">载荷 = 1,048,576 / 2 = 524,288 bytes。组数 = 16,384，元数据 = 65,536 bytes。</p><p class="ws-lead">合计 589,824 bytes = 576 KiB。基线 2,097,152 bytes = 2048 KiB；压缩率 = 2048 / 576 ≈ 3.556×。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="exercise-mla">
-<div class="kicker">练习 2</div><h2>latent 缓存减少了多少？</h2>
-<div class="ws-prompt">教学结构：32 heads，K/V 各 128 维；latent r = 512，位置 key p = 64，全部 BF16。求每 token 每层的两种字节数与压缩率。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">展开 KV：2 × 32 × 128 × 2 = 16,384 bytes。latent： (512 + 64) × 2 = 1,152 bytes。</p><p class="ws-lead">压缩率 = 16,384 / 1,152 ≈ 14.222×。还需检查吸收后的 query 维度、投影 FLOP 和 kernel；这个比值不是延迟加速比。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="exercise-policy">
-<div class="kicker">练习 3</div><h2>少读 90%，是否就能释放 90% KV？</h2>
-<div class="ws-prompt">一个动态选择器每步只读取 10% 历史。工程师据此释放另外 90% KV，并说下一步仍然等价。指出错误，并给出验证办法。</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-lead">当前 Q 的选择集合与下一个 Q 可能不同；被释放位置无法再次参与匹配，因此不再等价。</p><p class="ws-lead">固定完整历史，构造连续查询分别命中不同远处位置；比较保留全 cache 的稀疏读取与释放版本。若要真正淘汰，应单独评估这种策略的任务质量。</p></details></div><p class="ws-note">先写出假设和单位，再代入数字。</p>
-</section>
-<section class="slide workshop" id="engineering-lab">
-<div class="kicker">动手实验</div><h2>把压缩误差与字节预算一起跑通</h2>
-<p class="ws-lead">用 NumPy 在 CPU 上跑一个可检查的参考实现。小尺寸便于把中间张量打印出来。</p><div class="ws-cols"><pre class="ws-code">python3 -m pip install numpy
-python3 lab.py
-python3 lab.py --seed 7</pre><pre class="ws-code">INT4 round-trip bound: PASS
-K-only / V-only error measured
-metadata: 576 KiB; ratio = 3.556
-residual example: 299.500 MiB</pre></div><p class="ws-lead">把 group size 从 64 改成 32 / 128，分别记录误差与元数据；再给一个 K 通道放大 20 倍，比较按通道与按 token 的误差。</p><a class="ws-lab-link" download href="/posts/kv-cache-compression/lab.py">下载实验代码 lab.py</a><p class="ws-note">这是正确性与成本的教学实验；耗时不代表 GPU kernel 性能。</p>
-</section>
-
-<section class="slide lesson">
-<div class="kicker">参考资料</div>
-<h2>参考与延伸阅读</h2>
-<ul class="reference-list">
-<li>
-<a href="https://arxiv.org/abs/2305.13245" target="_blank" rel="noopener noreferrer">GQA · Ainslie et al.：头共享与 uptraining</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2405.04434" target="_blank" rel="noopener noreferrer">DeepSeek-V2：Multi-head Latent Attention</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2402.02750" target="_blank" rel="noopener noreferrer">KIVI：KV cache 的非对称低位量化</a>
-</li>
-<li>
-<a href="https://arxiv.org/abs/2306.14048" target="_blank" rel="noopener noreferrer">H₂O：保留重要历史与最近 token</a>
-</li>
-</ul>
-<p class="related">继续看：<a href="/posts/kv-cache/">KV cache</a> · <a href="/posts/sparse-attention/">Sparse attention</a> · <a href="/posts/llm-quantization/">LLM 量化</a>
-</p>
-</section>
-</div>
-</main><script src="/assets/slides.js?v=33e153b61ac9"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>
-const esc=s=>String(s).replace(/[&<>"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
-const T=(x,y,s,cls='')=>`<text x="${x}" y="${y}" text-anchor="middle" class="${cls}">${esc(s)}</text>`;
-const B=(id,x,y,w,h,s,cls='box')=>{const parts=cls.split(' '),fade=parts.filter(c=>c==='ghost'||c==='soft').join(' '),base=parts.filter(c=>c!=='ghost'&&c!=='soft').join(' ');return `<g id="${id}" class="${fade}"><rect x="${x}" y="${y}" width="${w}" height="${h}" rx="10" class="${base}"/>${T(x+w/2,y+h/2+8,s)}</g>`};
-const R=(id,x,y,w,h,cls='box')=>`<rect id="${id}" x="${x}" y="${y}" width="${w}" height="${h}" rx="6" class="${cls}"/>`;
-const L=(id,x1,y1,x2,y2,cls='wire')=>`<path id="${id}" d="M${x1},${y1} L${x2},${y2}" class="${cls}" marker-end="url(#arrow)"/>`;
-const defs=`<defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 1L9 5L0 9" fill="none" stroke="var(--text-faint)" stroke-width="1.5"/></marker></defs>`;
-function scene(id,svg,steps){
- const el=document.getElementById(id), fig=el.querySelector('svg');fig.innerHTML=defs+svg;fig.querySelectorAll('[id]').forEach(node=>{node.dataset.part=node.id;node.id=id+'-'+node.id});fig.querySelectorAll('[marker-end]').forEach(node=>node.setAttribute('marker-end','url(#'+id+'-arrow)'));
- const caps=[...el.querySelectorAll('.captions p')],tl=Anim.timeline({root:el});tl.label('观察起点',0);
- steps.forEach((s,i)=>{const t=i*1.5; s.run(tl,t);tl.to(caps[i],{opacity:0},{at:t+.1,dur:.2});tl.to(caps[i+1],{opacity:1},{at:t+.3,dur:.2});tl.label(s.name,t+1.5)});
- const badge=document.createElement('span');badge.className='step-label';el.appendChild(badge);tl.player.onupdate(t=>{const i=Math.min(steps.length,Math.floor((t+.01)/1.5));badge.textContent=`${i} / ${steps.length} · ${i?steps[i-1].name:'观察起点'}`});
- Anim.slide(el,tl,{steps:true,controls:true});
-}
-const a=(tl,t,s,p,d=0,dur=.85)=>tl.to(s.replace(/#([\w-]+)/g,'[data-part="$1"]').replace(/\[id\^=/g,'[data-part^='),p,{at:t+d,dur});
-
-
-let axes=T(230,35,'token 轴','label')+T(550,35,'head 轴','label')+T(880,35,'每个表示','label');for(let r=0;r<5;r++)for(let c=0;c<5;c++)axes+=R('cell'+r+c,120+c*90,65+r*48,76,34,'accentbox');axes+=B('payload',760,100,270,130,'16 bit × dim');scene('axes',axes,[{name:'减少 KV 头',run:(tl,t)=>{for(let r=0;r<5;r++)for(let c=2;c<5;c++)a(tl,t,'#cell'+r+c,{opacity:.12,x:-c*10},c*.08)}},{name:'缩短历史或表示',run:(tl,t)=>{for(let r=3;r<5;r++)for(let c=0;c<2;c++)a(tl,t,'#cell'+r+c,{opacity:.12,y:-35},r*.07);a(tl,t,'#payload',{scale:.65})}}]);
-let gqa=T(160,25,'Query heads','label')+T(550,25,'MHA：8 份 KV','label')+T(930,25,'共享后的 KV','label');for(let i=0;i<8;i++){gqa+=B('q'+i,100,48+i*34,120,29,'Q'+(i+1),'accentbox')+B('kv'+i,470,48+i*34,150,29,'KV'+(i+1))+L('oldwire'+i,230,62+i*34,460,62+i*34,'wire');gqa+=L('groupwire'+i,230,62+i*34,840,i<4?110:240,'hotwire ghost')+L('singlewire'+i,230,62+i*34,840,175,'hotwire ghost')}gqa+=B('group0',850,80,160,60,'KV 组 1','greenbox ghost')+B('group1',850,210,160,60,'KV 组 2','greenbox ghost')+B('single',850,145,160,60,'共享 KV','greenbox ghost');scene('gqa',gqa,[{name:'8 Q → 2 KV',run:(tl,t)=>{a(tl,t,'[id^=kv], [id^=oldwire]',{opacity:.08});a(tl,t,'[id^=group]',{opacity:1})}},{name:'8 Q → 1 KV',run:(tl,t)=>{a(tl,t,'[id^=group]',{opacity:0});a(tl,t,'#single, [id^=singlewire]',{opacity:1})}}]);
-let mla=T(200,30,'当前 token 的 hidden state','label')+B('hidden',80,75,240,160,'h')+L('compress',335,155,470,155,'wire')+B('latent',490,105,180,100,'内容 c','accentbox')+B('pos',490,250,180,50,'位置 key','greenbox ghost')+B('heads',820,55,240,200,'多头内容 K、V')+L('expand',685,155,805,155,'wire')+B('query',820,270,240,50,'当前 Q + 位置','accentbox ghost');scene('mla',mla,[{name:'缓存低维内容',run:(tl,t)=>{a(tl,t,'#heads',{scale:.55,opacity:.25});a(tl,t,'#latent',{scale:1.1});a(tl,t,'#expand',{stroke:'var(--accent)'})}},{name:'补上位置路径',run:(tl,t)=>{a(tl,t,'#pos, #query',{opacity:1});a(tl,t,'#latent',{y:-10});a(tl,t,'#pos',{y:-10})}}]);
-let toks=T(130,62,'合并','label')+T(130,222,'淘汰','label');for(let i=0;i<8;i++){toks+=B('merge'+i,240+i*95,30,80,62,'t'+(i+1),'accentbox')+B('evict'+i,240+i*95,190,80,62,'t'+(i+1),'greenbox')}toks+=B('summary',335,115,180,50,'摘要 c₁…₄','accentbox ghost');scene('tokens',toks,[{name:'四个位置合成摘要',run:(tl,t)=>{for(let i=0;i<4;i++)a(tl,t,'#merge'+i,{x:(1.5-i)*95,y:65,scale:.35,opacity:0},i*.08);a(tl,t,'#summary',{opacity:1},.55)}},{name:'保留重要与最近位置',run:(tl,t)=>{[1,2,4].forEach((i,j)=>a(tl,t,'#evict'+i,{y:45,opacity:.1},j*.12));[0,3,5,6,7].forEach(i=>a(tl,t,'#evict'+i,{scale:1.07}))}}]);
-scene('quant',T(215,35,'原始数据','label')+T(560,35,'压缩编码','label')+T(925,35,'读取时恢复','label')+B('float',65,85,300,90,'x = 0.73')+B('integer',450,85,220,90,'q = 7','accentbox ghost')+B('scale',450,220,220,60,'s = 0.1, z = 0','greenbox ghost')+B('approx',805,85,250,90,'x̂ = 0.7','ghost box')+L('encode',380,130,435,130)+L('decode',685,130,790,130)+R('bits',65,240,300,30,'accentbox'),[{name:'编码并保留 scale',run:(tl,t)=>{a(tl,t,'#integer, #scale',{opacity:1});a(tl,t,'#bits',{attr:{width:75}});a(tl,t,'#float',{scale:.85})}},{name:'读取近似值',run:(tl,t)=>{a(tl,t,'#integer',{x:30});a(tl,t,'#approx',{opacity:1});a(tl,t,'#scale',{y:-30})}}]);
-scene('budget',T(210,75,'单序列 KV 容量','label')+R('bar',130,120,860,100,'accentbox')+'<text id="gib" class="value" x="560" y="285" text-anchor="middle">4.00 GiB</text>',[{name:'GQA：32 → 8 头',run:(tl,t)=>{a(tl,t,'#bar',{attr:{width:215}});a(tl,t,'#gib',{text:1,fmt:v=>v.toFixed(2)+' GiB'})}},{name:'16 → 4 bit 载荷',run:(tl,t)=>{a(tl,t,'#bar',{attr:{width:53.75}});a(tl,t,'#gib',{text:.25,fmt:v=>v.toFixed(2)+' GiB + 元数据'})}}]);
-
-function numberSteps(id,frames,captions){
- const el=document.getElementById(id),tl=Anim.timeline({root:el});
- const value=el.querySelector('.cn-value'),label=el.querySelector('.cn-label'),detail=el.querySelector('.cn-detail'),cap=el.querySelector('.cn-caption'),rows=[...el.querySelectorAll('.cn-row')];
- const packets=rows.map((row,i)=>{const c=document.createElementNS('http://www.w3.org/2000/svg','circle');c.setAttribute('cx','625');c.setAttribute('cy',String(54+i*73));c.setAttribute('r','7');c.setAttribute('fill','var(--accent)');c.style.opacity='0';el.querySelector('svg').appendChild(c);return c});
- const driver=document.createElement('span');driver.hidden=true;el.appendChild(driver);
- const draw=v=>{const n=Math.min(frames.length-1,Math.floor(v+1e-7)),f=frames[n];label.textContent=f.label;detail.textContent=f.detail;cap.textContent=captions[n];rows.forEach((r,i)=>r.style.opacity=i===n-1?'1':'.45');return String(v)};
- tl.set(driver,{text:0,fmt:draw},{at:0});tl.set(value,{text:frames[0].value,fmt:v=>v.toFixed(frames[0].digits??2)},{at:0});tl.label('起点',0);
- frames.slice(1).forEach((f,i)=>{const t=i*1.5;tl.to(packets[i],{opacity:1},{at:t+.1,dur:.1});tl.to(packets[i],{x:100,y:135-(54+i*73)},{at:t+.2,dur:.8,ease:'linear'});tl.to(packets[i],{opacity:0},{at:t+1.1,dur:.1});tl.to(value,{text:f.value,fmt:v=>v.toFixed(f.digits??2)},{at:t+.1,dur:1.15,ease:'linear'});tl.set(driver,{text:i+1,fmt:draw},{at:t+.05});tl.label(f.stop,t+1.5)});
- Anim.slide(el,tl,{steps:true,controls:true});
-}
-numberSteps("quantization-worked",[{"value": 0, "label": "正在检查的数", "detail": "s = 1 / 7"}, {"value": -1, "label": "x = −0.2 的整数码", "detail": "round(−1.4) = −1", "digits": 0, "stop": "编码"}, {"value": -0.14285714285714285, "label": "x = −0.2 的重建值", "detail": "−1 × (1 / 7)", "digits": 6, "stop": "反量化"}, {"value": 0.05714285714285714, "label": "整组最大绝对误差", "detail": "来自 −0.2 → −0.142857", "digits": 6, "stop": "检查误差"}],["只存整数码还不够；恢复数值必须同时知道 scale。", "这里 4 bit 编码只使用 −7…7，便于对称量化。", "误差已经进入 attention 的 K 或 V。", "非饱和、就近舍入时单元素误差上界为 s / 2 ≈ 0.07143。"]);
-numberSteps("residual-budget",[{"value": 0, "label": "单层累计占用", "detail": "基线 BF16 = 32 MiB", "digits": 3}, {"value": 7.875, "label": "单层累计占用 / MiB", "detail": "INT4 载荷 7.875 MiB", "digits": 3, "stop": "加整数载荷"}, {"value": 8.859375, "label": "单层累计占用 / MiB", "detail": "+ scale / zero 0.984375 MiB", "digits": 3, "stop": "加元数据"}, {"value": 9.359375, "label": "单层累计占用 / MiB", "detail": "+ BF16 残差区 0.500 MiB", "digits": 3, "stop": "加近期残差"}],["保留最近一段高精度数据会减小误差，也会占用空间。", "旧 token 是 8192 − 128 = 8064 个。", "元数据不能按位宽一起除以 4。", "32 层合计 299.5 MiB；基线 1024 MiB，压缩约 3.419×。"]);
-</script><script src="/assets/post-links.js?v=3173091271f1"></script><script src="/assets/posts.js?v=150c41e1230c"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+</script>
+<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body></html>

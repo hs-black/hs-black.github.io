@@ -3,13 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script>if (/^#\d+$/.test(location.hash)) location.replace('/posts/kv-cache/slides.html' + location.hash);</script>
   <title>KV cache：记住已经算过的历史 · Zunzhe Zhang</title>
   <meta name="description" content="从一行 attention 的数值计算出发，推导 KV 为什么可复用、prefill/decode 怎样交接、位置与 mask 如何对齐，再算清 GQA 缓存的容量和读取成本；含可操作图解、符号释义、习题与 NumPy 实验。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
-  <link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
@@ -27,7 +26,6 @@
     .kv-caption { min-height: 4.8em; padding: 12px 14px; background: var(--accent-soft); border-radius: 9px; font-size: 15px; line-height: 1.7; }
     .kv-caption strong { color: var(--accent); }
     .kv-foot { font-size: 13px; color: var(--text-faint); }
-    .kv-symbol-note { font-size: 14px; color: var(--text-soft); }
     .kv-figure .table-wrap { margin: 12px 0; }
     .kv-figure table { width: 100%; font-size: 14px; border-collapse: collapse; }
     #attention-demo table { min-width: 0; table-layout: fixed; }
@@ -96,12 +94,11 @@
 <main class="wrap">
   <header class="post-header">
     <h1>KV cache：记住已经算过的历史</h1>
-    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span><a href="/posts/kv-cache/slides.html">旧版幻灯片</a></div>
+    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div>
   </header>
   <article class="prose">
     <p>模型已经读完一段 8000 token 的提示词，生成了第一个新 token。为了生成第二个，它需要再把前面 8000 个位置都跑一遍吗？如果每次都这样做，越长的对话就会积累越多重复工作。KV cache 的出发点很直接：找出下一步仍然需要、而且数值不会变化的结果，把它留下来。</p>
     <p>这个想法同时带来两个后果。旧 token 的投影和前向计算可以省掉，生成会快很多；留下来的结果却要占用显存，而且新 query 仍需读取它们。因此，“有缓存”并不意味着不再处理历史。理解缓存的关键，是分清<strong>不必再算什么、仍然要读什么、什么时候又要多存一份</strong>。</p>
-    <p class="kv-symbol-note">公式里的点线标记可以用鼠标悬停、键盘聚焦或手机点按查看符号含义。关键定义也会写在公式附近，方便直接顺着正文阅读。</p>
     <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
       <li><a href="#attention">先算清楚一行 attention</a></li>
       <li><a href="#reuse">旧 K/V 为什么不会变</a></li>
@@ -118,7 +115,7 @@
 
     <section id="attention" data-math-scope="attention">
       <h2>1. 先算清楚一行 attention</h2>
-      <p>假设我们只看一个 attention 层、一个头。位置 \(t\) 的 hidden state 经过三组投影，得到 query \(q_t\)、key \(k_t\) 和 value \(v_t\)。Query 用来询问“哪些历史位置与现在有关”；key 提供匹配用的向量；value 提供被加权汇总的内容。这里三者都是有 \(d\) 个分量的向量，并不是词语本身。</p>
+      <p>假设我们只看一个 attention 层、一个头。位置 \(t\) 的 hidden state 经过三组投影，得到 query \(q_t\)、key \(k_t\) 和 value \(v_t\)。Query 用来询问“哪些历史位置与现在有关”；key 提供匹配用的向量；value 提供被加权汇总的内容。三者都是有 \(d\) 个分量的向量。</p>
       <p>当前 query 与允许读取的每个 key 做点积。因果模型在位置 \(t\) 只能读取编号 \(0\) 到 \(t\) 的位置，所以包含自己。先把点积除以头维度的平方根，得到分数，再用 softmax 归一化：</p>
       $$z_{t,j}=\frac{\htmlData{symbol=q}{q_t}^{\mathsf T}\htmlData{symbol=k}{k_j}}{\sqrt{\htmlData{symbol=d}{d}}},\qquad
       a_{t,j}=\frac{e^{z_{t,j}}}{\sum_{r=0}^{t}e^{z_{t,r}}},\qquad 0\le j\le t.$$
@@ -151,7 +148,7 @@
 
     <section id="lifecycle">
       <h2>3. Prefill、decode 与待消费的 token</h2>
-      <p>生成并不是“先写 token 到缓存，再显示到屏幕”。缓存保存的是模型已经处理过的输入，而刚采样出的 token 还没有经过模型。这一个时间差很容易让代码里的长度错一位。</p>
+      <p>缓存保存模型已经处理过的输入位置所对应的 K/V。刚采样出的 token 会成为下一轮的输入，经过前向后才写入缓存。因此，输出长度和缓存长度之间有一个需要显式记录的时间差。</p>
       <p>例如提示词有三个 token，编号为 0、1、2。Prefill 把它们一起送入模型：第一层并行计算三个位置，在因果 mask 下做 attention，并保存第一层的 K/V；第二层再处理第一层输出，保存第二层的 K/V。层与层仍然有依赖，不能因为位置并行就认为所有层同时执行。</p>
       <p>全部层完成后，最后一个 prompt 位置产生 logits。采样器从 logits 选出第一个新 token，记为 \(y_0\)。这时缓存仍然只有 prompt 的三个位置。下一次前向才把 \(y_0\) 作为输入，使用绝对位置 3，算出并追加它的 K/V；随后得到预测 \(y_1\) 的 logits。</p>
       <figure class="kv-figure" id="lifecycle-demo" data-demo="lifecycle">
@@ -162,15 +159,15 @@
         <div class="life-status"><div>模型本轮消费的输入<b id="life-input"></b></div><div>已采样、尚未消费的 token<b id="life-pending"></b></div></div>
         <div class="kv-controls" data-controls><button type="button" data-action="prev">上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步</button><button type="button" data-action="reset">重置</button><input type="range" min="0" max="6" step="1" value="0" aria-label="prefill 与 decode 执行步骤"><output class="kv-step"></output></div>
         <div class="kv-caption" aria-live="polite"></div>
-        <figcaption>图中只画两层、每层一个头，以及三个 prompt token，便于追踪生命周期。每格代表一对向量，不代表一个字节，也不表示实际分词结果。</figcaption>
+        <figcaption>模型包含两层，每层一个头，prompt 长度为 3。每格表示当前层一个输入位置对应的一对 K/V 向量。</figcaption>
       </figure>
-      <p>Prefill 一次处理很多已知 token，线性层能在矩阵乘中复用权重；decode 每条请求通常只带来一个新输入。新的输出又决定下一轮输入，所以单条请求的这些 decode 步骤串行发生。增加 batch 是把不同请求放到同一轮，不是提前知道同一请求的未来 token。</p>
+      <p>Prefill 一次处理很多已知 token，线性层能在矩阵乘中复用权重；decode 每条请求通常只带来一个新输入。新的输出又决定下一轮输入，所以单条请求的这些 decode 步骤串行发生。增加 batch 可以让不同请求在同一轮并行推进。</p>
       <p>如果 prompt 长度为 \(P_0\)，最终生成 \(O\ge1\) 个输出，而且最后一个输出产生后立刻结束，那么最多有 \(P_0+O-1\) 个位置参与前向、写入 KV。最后采样出的那个 token 不必再被消费。容量准入也可以保守地按 \(P_0+O\) 预留，但统计“已用缓存长度”时应数已经处理的输入，不能直接拿已生成 token 数代替。</p>
     </section>
 
     <section id="shapes" data-math-scope="shapes">
       <h2>4. 从一条序列到 GQA batch</h2>
-      <p>单头的公式很清楚，真正实现时却必须知道每条轴代表什么。设本轮有 \(B\) 条请求，每条输入 \(C\) 个新 token，模型 hidden size 为 \(D\)。输入张量便是 \(X\in\mathbb R^{B\times C\times D}\)。这里 \(C\) 是<strong>本次输入的长度</strong>，不是完整历史长度；普通 decode 中 \(C=1\)。</p>
+      <p>单头的公式很清楚，真正实现时却必须知道每条轴代表什么。设本轮有 \(B\) 条请求，每条输入 \(C\) 个新 token，模型 hidden size 为 \(D\)。输入张量便是 \(X\in\mathbb R^{B\times C\times D}\)。这里 \(C\) 是<strong>本次输入的长度</strong>；普通 decode 中 \(C=1\)。</p>
       <p>Query 有 \(H_q\) 个头，缓存的 key/value 各有 \(H_{kv}\) 个头，每头维度为 \(d\)。先做投影，再拆出头这一维：</p>
       $$W_Q\in\mathbb R^{D\times H_qd},\qquad W_K,W_V\in\mathbb R^{D\times H_{kv}d}.$$
       <div class="table-wrap"><table><thead><tr><th>张量</th><th>按 batch、位置、头、分量排列</th><th>含义</th></tr></thead><tbody>
@@ -180,22 +177,22 @@
         <tr><td>追加后的 cache</td><td>各 \([B,P+C,H_{kv},d]\)</td><td>\(P\) 个旧位置加 \(C\) 个新位置</td></tr>
       </tbody></table></div>
       <p class="kv-equation-note">\(B\)：请求数；\(C\)：本次新输入长度；\(P\)：调用前已有缓存长度；\(D\)：模型宽度；\(H_q,H_{kv}\)：query 与 KV 头数；\(d\)：每头维度。不同实现会交换轴顺序，元素总数不变。</p>
-      <p>这里假设 query、key 和 value 的每头维度相同。模型常取 \(D=H_qd\)，但投影的输入维度和输出维度在数学上可以不同；附带的小实验就用不同的宽度，让读者能看见每次 reshape 的依据。真正的模型配置还可能采用不同的 K/V 维度，应按各自形状计数。</p>
+      <p>这里假设 query、key 和 value 的每头维度相同。模型常取 \(D=H_qd\)，但投影的输入维度和输出维度在数学上可以不同；小实验采用不同的输入、输出宽度，reshape 由投影后的元素数决定。真正的模型配置还可能采用不同的 K/V 维度，应按各自形状计数。</p>
       <p>在普通 MHA 中，query 和 KV 头一一对应，\(H_q=H_{kv}\)。GQA 让多个 query 头共享一组 K/V。例如 \(H_q=4,H_{kv}=2\)，query 头 0、1 读取 KV 头 0，query 头 2、3 读取 KV 头 1。共享的是 K/V 向量；每个 query 仍然计算自己的分数和权重。</p>
       $$\htmlData{symbol=g}{G}=\frac{\htmlData{symbol=hq}{H_q}}{\htmlData{symbol=hkv}{H_{kv}}},\qquad
       \operatorname{kvhead}(h)=\left\lfloor\frac{h}{G}\right\rfloor.$$
-      <p>上式中 \(G\) 是每组 query 头的数量，\(h\) 是从 0 开始的 query 头编号，假设头按组连续排列且 \(H_q\) 能被 \(H_{kv}\) 整除。GQA 缓存只需要存 \(H_{kv}\) 份，不必为了匹配 query 数量在显存里复制成 \(H_q\) 份。参考代码里的 <code>repeat</code> 只是让头对应关系显式可见；高效 kernel 应直接复用底层 K/V。</p>
-      <p>把请求组成 batch 后，还有一个独立问题：各请求的历史长度往往不同。短请求为了矩阵布局而补出的槽位必须被 mask。补零不等于排除它：零 key 与 query 的点积是 0，softmax 仍可能给它分配概率；零 value 也会因此稀释真实输出。</p>
+      <p>上式中 \(G\) 是每组 query 头的数量，\(h\) 是从 0 开始的 query 头编号，假设头按组连续排列且 \(H_q\) 能被 \(H_{kv}\) 整除。GQA 缓存保存 \(H_{kv}\) 份。参考代码用 <code>repeat</code> 展开头对应关系；高效 kernel 通过头索引直接复用底层 K/V。</p>
+      <p>把请求组成 batch 后，还有一个独立问题：各请求的历史长度往往不同。短请求为了矩阵布局而补出的槽位必须被 mask。零 key 与 query 的点积是 0，softmax 仍可能给它分配概率；对应的零 value 会稀释真实输出。将补齐位置的分数置为负无穷，才能使它的 softmax 权重归零。</p>
     </section>
 
     <section id="positions" data-math-scope="positions">
       <h2>5. 追加多个 token 时，位置与 mask 怎样对齐</h2>
-      <p>缓存把一次完整前向拆成了多次调用，但没有重置序列的位置。已有 \(P=3\) 个位置时，新送入的两个 token 应使用位置 3、4，而不是重新从 0、1 开始。RoPE 要用正确的位置旋转 query 和 key；缓存里的 key 也必须与当前 query 使用同一套位置编码约定。</p>
+      <p>缓存把一次完整前向拆成了多次调用，但没有重置序列的位置。已有 \(P=3\) 个位置时，新送入的两个 token 应使用位置 3、4。RoPE 要用正确的位置旋转 query 和 key；缓存里的 key 也必须与当前 query 使用同一套位置编码约定。</p>
       <p>位置编码之外，还要构造正确的 causal mask。记本次 chunk 长度为 \(C\)，本次 query 的局部编号为 \(i\)，则它的绝对位置是 \(P+i\)。追加后共有 \(P+C\) 个 key，key 的全局编号为 \(j\)。允许读取的条件是：</p>
       $$\operatorname{allowed}[i,j]=\bigl(j\le \htmlData{symbol=p}{P}+i\bigr),\qquad
       0\le i&lt;\htmlData{symbol=c}{C},\quad 0\le j&lt;P+C.$$
       <p class="kv-equation-note">\(P\) 是调用前已经缓存的 token 数；\(C\) 是本次新增输入数；\(i\) 从本次 chunk 的 0 开始，\(j\) 从整段历史的 0 开始。比较之前必须把它们放到同一个坐标系。</p>
-      <p>取 \(P=3,C=2\)，query 长度为 2，key 长度为 5，所以 mask 是 \(2\times5\)，而不是 \(2\times2\)。Query 3 可以看 key 0、1、2、3，不能看 key 4；query 4 则能看全部五个。两份新 K/V 可以一起算出、一起写入，但“已经在内存里”不代表“当前 query 可以读取”。</p>
+      <p>取 \(P=3,C=2\)，query 长度为 2，key 长度为 5，所以 mask 是 \(2\times5\)。Query 3 可以看 key 0、1、2、3，不能看 key 4；query 4 则能看全部五个。两份新 K/V 可以一起算出、一起写入；causal mask 根据各 query 的绝对位置决定本行的可见范围。</p>
       <figure class="kv-figure" id="mask-demo" data-demo="mask">
         <h3>缓存存在，但因果坐标不能从零重来</h3>
         <p class="fig-read">横轴是整段历史的 key 编号，纵轴是本轮 query 的绝对位置。勾选格参与 softmax；叉号格被排除。演示假设有效分数全相等，value 依次为 1、2、3…，这样可以直接用平均数核对输出。</p>
@@ -207,7 +204,7 @@
         <div class="kv-caption" aria-live="polite"></div>
         <figcaption>默认输入下，正确输出依次为 2.5、3；错误局部 mask 给出 1、1.5。张量形状完全兼容，因此这类错误通常不会触发 shape 报错。</figcaption>
       </figure>
-      <p>物理地址还会带来第三套编号。例如滑动窗口只分配 4 个槽位，位置 5 可以写入槽位 \(5\bmod4=1\)，但它的 RoPE 位置仍然是 5。窗口里当前保存了哪些绝对位置，必须由缓存管理器记录。使用 <a href="/posts/paged-attention/">PagedAttention</a> 后，页号也只是地址映射；不能拿页内槽位代替模型位置。</p>
+      <p>物理地址还会带来第三套编号。例如滑动窗口只分配 4 个槽位，位置 5 可以写入槽位 \(5\bmod4=1\)，但它的 RoPE 位置仍然是 5。窗口里当前保存了哪些绝对位置，必须由缓存管理器记录。使用 <a href="/posts/paged-attention/">PagedAttention</a> 后，页表负责定位物理地址，RoPE 继续使用序列的绝对位置。</p>
       <p>对不同长度的 batch，请求 A 可能已有 3 个位置，请求 B 只有 1 个。它们本轮新输入的位置、有效 key 长度和 mask 都要按请求计算。框架中用于表示当前位置的参数也不一定等于张量的物理长度，尤其在 padding、预分配或滑动窗口存在时，先检查 API 的具体语义。</p>
     </section>
 
@@ -223,7 +220,7 @@
       $$m_{\mathrm{token}}=2\times32\times8\times128\times2
       =131072\ \mathrm{B}=128\ \mathrm{KiB}.$$
       <p>这里使用二进制单位：1 KiB = 1024 B，1 GiB = 2³⁰ B。一条 8192 token 的历史占 \(8192\times128\,\mathrm{KiB}=1\,\mathrm{GiB}\)。32 条同长度请求就是 32 GiB。若只把 query 头数从 32 增到 64，同时保持 8 个 KV 头，缓存大小不变；query 的计算量可能增加，但它不在这个存储公式里。若把 KV 头从 8 改为 32，其余不变，缓存才会扩大到四倍。</p>
-      <p>模型权重占 16 GiB，不代表放进一张 24 GiB 的卡后还能服务任意长的请求。可用于 KV 的预算应先从设备总容量中扣除权重、临时工作区、通信缓冲区和其他常驻内存。假设扣除后确实剩下 16 GiB，而每条请求都要保证可存 10240 个已编码位置，每条需要 1.25 GiB，按这一项预算最多容纳 \(\lfloor16/1.25\rfloor=12\) 条。</p>
+      <p>请求的上下文越长，KV cache 占用越大。可用于 KV 的预算应先从设备总容量中扣除权重、临时工作区、通信缓冲区和其他常驻内存。假设扣除后确实剩下 16 GiB，而每条请求都要保证可存 10240 个已编码位置，每条需要 1.25 GiB，按这一项预算最多容纳 \(\lfloor16/1.25\rfloor=12\) 条。</p>
       <p>多卡也不能简单把整个缓存公式除以 GPU 数。若 KV 头被分片，每张卡保存较少的头；若某些 KV 头被复制，每张卡仍要为副本付出容量。先写出每张卡实际持有的 \(H_{kv}\) 和请求集合，再算本地缓存。这和 <a href="/posts/distributed-inference/">分布式推理</a> 中“权重分片、激活复制、缓存复制”是同一个问题。</p>
     </section>
 
@@ -254,7 +251,7 @@ allowed = key_positions[None, :] &lt;= positions[:, None]
 y = attention(q, k, v, allowed)
 return y, (k, v)</code></pre>
       <p>当前 token 的 K/V 必须在 attention 的可读集合里，因为因果注意力允许关注自己。处理完这一层后，输出再进入下一层；不能拿第一层的 K/V 供所有层共用。生产实现通常通过预分配或页表写入，避免每一步 <code>concatenate</code> 都复制整段历史，但地址优化不应该改变上述可见性和数值关系。</p>
-      <p>验证时保留一个独立的完整前向路径。对同一段随机输入，分别一次算完、逐 token 计算、按不同 chunk 长度计算，比较每个位置的 attention 输出或最终 logits。要比较数值误差，而不只是最终 argmax：两个不同的概率分布也可能选中同一个 token。</p>
+      <p>验证时保留一个独立的完整前向路径。对同一段随机输入，分别一次算完、逐 token 计算、按不同 chunk 长度计算，比较每个位置的 attention 输出或最终 logits。逐元素的数值误差可以暴露概率分布的变化；argmax 只能检查选中的 token 是否一致。</p>
       <div class="table-wrap"><table><thead><tr><th>现象</th><th>优先检查</th><th>能区分问题的输入</th></tr></thead><tbody>
         <tr><td>第一个位置对，后面开始错</td><td>RoPE 位置或历史 mask 偏移</td><td>逐 token 与完整前向对比</td></tr>
         <tr><td>单 token 正常，chunk 出错</td><td>非方形 causal mask 的对齐</td><td>先缓存 3 个，再输入 2 个</td></tr>
@@ -262,6 +259,17 @@ return y, (k, v)</code></pre>
         <tr><td>只在某些 query 头出错</td><td>GQA 的 query → KV 头映射</td><td>4 个 query 头、2 个 KV 头</td></tr>
         <tr><td>数值正确，长序列越来越慢</td><td>KV 扫描、重复复制与内存带宽</td><td>固定 batch，只改变历史长度</td></tr>
       </tbody></table></div>
+      <h3 id="sdpa-mask">接入 PyTorch SDPA 时，先检查 mask 的坐标</h3>
+      <p>一种典型故障是：完整 prompt 的输出正常，接上 KV cache 后，后续位置开始重复或偏离。此时可以先用三个历史位置、两个新 query 做最小复现，直接打印 2×5 的布尔 mask。PyTorch 2.14 的 SDPA 在非方形矩阵上将 <code>is_causal=True</code> 对齐到左上角；缓存追加需要用 query 的绝对位置判断可见范围。</p>
+      <p>以单头张量为例，Q 的形状为 <code>[1, 1, C, d]</code>，K/V 为 <code>[1, 1, P+C, d]</code>。P 是旧缓存长度，C 是新输入长度。显式构造 mask 后，把它作为这次调用的完整可见性规则：</p>
+      <pre><code>q_pos = P + torch.arange(C, device=q.device)
+k_pos = torch.arange(P + C, device=q.device)
+allowed = k_pos[None, :] &lt;= q_pos[:, None]
+y = torch.nn.functional.scaled_dot_product_attention(
+    q, k, v, attn_mask=allowed,
+    is_causal=False, dropout_p=0.0,
+)</code></pre>
+      <p>当 P=3、C=2，第一行允许位置 0～3，第二行允许位置 0～4。对于单 token decode，若 K/V 恰好包含全部有效历史和当前输入，整行都可见。不等长 batch 还需把每条请求的有效长度或 padding mask 与这条因果规则取交集。用相同输入对比显式 mask 路径和完整前向，可以把索引问题与 kernel 数值误差分开定位。</p>
       <p>浮点精度也属于接口。先用 FP64 的小输入建立参考，再检查 FP32/BF16 的合理误差范围。训练时的 dropout 应关闭，参考与增量路径应使用相同权重和位置配置。如果一个实现路径把中间结果舍入得更频繁，微小差异可能正常；明显的、随位置规律增长的差异则常常是索引或 mask 错误。</p>
     </section>
 
@@ -279,13 +287,13 @@ return y, (k, v)</code></pre>
 错误：Q3 → [1, 0, 0, 0, 0]
       Q4 → [1, 1, 0, 0, 0]</code></pre><p>等分数对应均匀权重。正确输出是 \((1+2+3+4)/4=2.5\) 和 \((1+2+3+4+5)/5=3\)。错误输出是 1 和 1.5。区别来自是否比较 \(j\le P+i\)，这里旧缓存长度 \(P=3\)。</p></details>
       </div>
-      <div class="kv-exercise" id="exercise-lifecycle"><h3>练习 3：生成了，不代表已经缓存</h3>
+      <div class="kv-exercise" id="exercise-lifecycle"><h3>练习 3：输出与缓存的交接时刻</h3>
         <p>prompt 长 5，要求生成 3 个输出 token。第一个输出由 prefill 末尾的 logits 采样产生；第三个输出产生后立即结束。总共执行几次 decode 前向？结束前缓存对应多少个已编码位置？</p>
         <details><summary>展开参考解答</summary><p>第一个输出还没有自己的 KV。需要两次 decode 前向：消费第一个输出以预测第二个，再消费第二个输出以预测第三个。</p><p>写入缓存的位置数是 \(5+2=7\)，也就是 prompt 长度 + 输出数 − 1。第三个输出已交给用户，但不再送回模型。如果之后继续生成，才需要把它消费并追加到缓存。</p></details>
       </div>
       <div class="kv-exercise" id="exercise-bandwidth"><h3>练习 4：缓存读一次要多久</h3>
         <p>沿用每 token 128 KiB 的缓存配置。本轮有 8 条请求，每条已有 4096 个可见位置。假设历史 K/V 从 HBM 各读一次，有效带宽为 1 TiB/s。读取这些历史约需多久？历史变为 8192 时呢？</p>
-        <details><summary>展开参考解答</summary><p>总字节数是 \(8\times4096\times128\,\mathrm{KiB}=4\,\mathrm{GiB}\)。1 TiB/s = 1024 GiB/s，所以 \(4/1024\,\mathrm{s}=3.90625\,\mathrm{ms}\)。</p><p>历史加倍后，读取量为 8 GiB，对应 7.8125 ms。这只是题目假设下的 KV 读取时间，还没有包含权重读取、其他算子和调度。公式前面的 K/V 两份已经计入 128 KiB/token，不能再乘一次 2。</p></details>
+        <details><summary>展开参考解答</summary><p>总字节数是 \(8\times4096\times128\,\mathrm{KiB}=4\,\mathrm{GiB}\)。1 TiB/s = 1024 GiB/s，所以 \(4/1024\,\mathrm{s}=3.90625\,\mathrm{ms}\)。</p><p>历史加倍后，读取量为 8 GiB，对应 7.8125 ms。端到端耗时还包括权重读取、其他算子和调度。128 KiB/token 已包含 K、V 两份数据。</p></details>
       </div>
     </section>
 
@@ -311,12 +319,14 @@ wrong mask detected: PASS
       <li><a href="/posts/rope-long-context/">RoPE 与长上下文扩展</a>：旋转、绝对位置与缓存一致性。</li>
       <li><a href="/posts/scaling-inference/">Transformer 推理的数学</a>：将缓存、权重、带宽和 batch 放进同一份服务账本。</li>
       <li><a href="/posts/mini-inference-engine/">最小推理引擎</a>：把数值正确的前向接上分页、调度和采样。</li>
+      <li><a href="https://github.com/pytorch/pytorch/issues/144858">PyTorch #144858</a> 与 <a href="https://github.com/pytorch/pytorch/issues/108108">#108108</a>：缓存追加时非方形 causal mask 的对齐讨论。</li>
+      <li><a href="https://docs.pytorch.org/docs/2.14/generated/torch.nn.functional.scaled_dot_product_attention.html">PyTorch 2.14 SDPA 接口</a>：布尔 mask、causal 对齐与 dropout 参数；<a href="https://docs.pytorch.org/docs/2.14/generated/torch.nn.attention.bias.causal_lower_right.html">causal_lower_right</a> 给出右下对齐的构造。</li>
     </ul></section>
   </article>
 </main>
 <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a> · <a href="/posts/llm-engineering/#foundations">学习路径：把一次前向算清楚</a></footer>
 <script type="application/json" id="math-definitions">
-{"global":{"q":{"label":"当前 query qₜ","description":"当前输入位置在一个 attention 头上的查询向量；用它与允许读取的历史 key 匹配。"},"k":{"label":"历史 key kⱼ","description":"历史位置 j 在当前层、当前 KV 头上的 key 向量；缓存的是已经算出的这个向量。"},"v":{"label":"历史 value vⱼ","description":"历史位置 j 的 value 向量；按本行 attention 权重加权求和形成输出。"},"d":{"label":"头维度 d","description":"每个 query/key/value 向量的分量数；本篇容量算例假设三者每头维度相同。","unit":"元素/头"},"hq":{"label":"Query 头数 Hq","description":"每层发出不同查询的 attention 头数量。GQA 中它可以大于 KV 头数。","unit":"头"},"hkv":{"label":"KV 头数 Hkv","description":"每层分别保存多少组 key/value 头。缓存容量取决于它，而不是 query 头数。","unit":"头"},"g":{"label":"GQA 组大小 G","description":"每一组 K/V 供多少个 query 头读取，G = Hq / Hkv。","unit":"query 头/KV 头"},"b":{"label":"请求数 B","description":"本轮 batch 内的请求数量；容量算例假设这些请求的历史长度相同。","unit":"条请求"},"l":{"label":"层数 L","description":"模型中需要分别保存 K/V 的 attention 层数；本篇假设各层的 KV 配置一致。","unit":"层"},"s":{"label":"历史长度 S","description":"每条请求当前存储且可被本轮 attention 读取的位置数。","unit":"token/请求"},"bytes":{"label":"元素字节数 bₑ","description":"一个缓存元素占多少字节；BF16 为 2 B。下标 e 提醒这是一个元素的大小，与请求数 B 不同。","unit":"B/元素"},"p":{"label":"旧缓存长度 P","description":"这次调用开始前已经缓存的输入位置数量。新 chunk 的位置从 P 开始。","unit":"token"},"c":{"label":"本次输入长度 C","description":"这次调用新增输入的 token 数；普通单步 decode 为 1，chunk 可以大于 1。","unit":"token"},"beta":{"label":"有效读取带宽 β","description":"用于当前 KV 读取的有效内存带宽。字节数除以它得到读取时间的估计。","unit":"B/s"}},"scopes":{"attention":{"d":{"label":"单头向量维度 d","description":"当前单个 attention 头中 q 与 k 的分量数；分数除以 √d 做缩放。","unit":"分量"}},"bandwidth":{"s":{"label":"本轮可见历史 S","description":"一个 decode 输入需要扫描的 key/value 位置数；这里假设各请求等长且读完整可见历史。","unit":"token/请求"}}}}
+{"global":{"q":{"label":"当前 query qₜ","description":"当前输入位置在一个 attention 头上的查询向量；用它与允许读取的历史 key 匹配。"},"k":{"label":"历史 key kⱼ","description":"历史位置 j 在当前层、当前 KV 头上的 key 向量；缓存的是已经算出的这个向量。"},"v":{"label":"历史 value vⱼ","description":"历史位置 j 的 value 向量；按本行 attention 权重加权求和形成输出。"},"d":{"label":"头维度 d","description":"每个 query/key/value 向量的分量数；容量算例采用三者每头维度相同。","unit":"元素/头"},"hq":{"label":"Query 头数 Hq","description":"每层发出不同查询的 attention 头数量。GQA 中它可以大于 KV 头数。","unit":"头"},"hkv":{"label":"KV 头数 Hkv","description":"每层分别保存多少组 key/value 头；它决定缓存中的头维度。","unit":"头"},"g":{"label":"GQA 组大小 G","description":"每一组 K/V 供多少个 query 头读取，G = Hq / Hkv。","unit":"query 头/KV 头"},"b":{"label":"请求数 B","description":"本轮 batch 内的请求数量；容量算例假设这些请求的历史长度相同。","unit":"条请求"},"l":{"label":"层数 L","description":"模型中需要分别保存 K/V 的 attention 层数；本篇假设各层的 KV 配置一致。","unit":"层"},"s":{"label":"历史长度 S","description":"每条请求当前存储且可被本轮 attention 读取的位置数。","unit":"token/请求"},"bytes":{"label":"元素字节数 bₑ","description":"一个缓存元素占多少字节；BF16 为 2 B。下标 e 表示元素。","unit":"B/元素"},"p":{"label":"旧缓存长度 P","description":"这次调用开始前已经缓存的输入位置数量。新 chunk 的位置从 P 开始。","unit":"token"},"c":{"label":"本次输入长度 C","description":"这次调用新增输入的 token 数；普通单步 decode 为 1，chunk 可以大于 1。","unit":"token"},"beta":{"label":"有效读取带宽 β","description":"用于当前 KV 读取的有效内存带宽。字节数除以它得到读取时间的估计。","unit":"B/s"}},"scopes":{"attention":{"d":{"label":"单头向量维度 d","description":"当前单个 attention 头中 q 与 k 的分量数；分数除以 √d 做缩放。","unit":"分量"}},"bandwidth":{"s":{"label":"本轮可见历史 S","description":"一个 decode 输入需要扫描的 key/value 位置数；这里假设各请求等长且读完整可见历史。","unit":"token/请求"}}}}
 </script>
 <script>
 (() => {
@@ -347,7 +357,7 @@ wrong mask detected: PASS
     ['先固定分数与 value','当前 query 对三个 key 的匹配分数已经给出。每个位置的 value 不变；此时还没有归一化，也没有输出。'],
     ['把分数变成正数','对每个分数取指数。指数之和是归一化的分母；只看某一项的大小，还不知道它最终占多少权重。'],
     ['除以同一个总和','三个指数都除以总和，得到加起来等于 1 的权重。后面的 value 只能按这些比例进入输出。'],
-    ['逐位置加权 value','每个位置的 value 乘自己的权重。条长显示加权贡献，统一刻度 0～8；不是原始分数，也不是缓存容量。'],
+    ['逐位置加权 value','每个位置的 value 乘自己的权重。条长显示加权贡献，统一刻度 0～8。'],
     ['把三份贡献相加','输出是加权平均。分数偏向第三个位置时，输出更接近它的 value=8；历史 value 本身没有被修改。']
   ];
   function attention(el,step){
@@ -405,8 +415,8 @@ wrong mask detected: PASS
   ['mask-prefix','mask-chunk','mask-wrong'].forEach(id=>document.getElementById(id).addEventListener('change',()=>maskPlayer.refresh()));
 })();
 </script>
-<script src="/assets/post-links.js?v=3173091271f1"></script>
-<script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+<script src="/assets/post-links.js?v=9057de45e84d"></script>
+<script src="/assets/posts.js?v=d0504bda181a"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

@@ -80,29 +80,13 @@
   const stage = stages.find(s => [...s.core, ...s.extra].includes(slug));
   if (!stage) return;
   const route = '/posts/llm-engineering/#' + stage.id;
-  const bar = document.querySelector('.deck-bar');
-  if (bar) {
-    const back = bar.querySelector('a');
-    const links = document.createElement('span');
-    links.className = 'deck-course-links';
-    back.replaceWith(links);
-    links.append(back);
-    const a = document.createElement('a');
-    a.href = route;
-    a.textContent = '学习路径 ↗';
-    a.title = stage.title;
-    links.append(a);
-    // The player measures toolbar height; refresh after the extra link is added.
-    dispatchEvent(new Event('resize'));
-  } else {
-    const header = document.querySelector('.post-header');
-    if (!header) return;
-    const p = document.createElement('p');
-    p.className = 'post-meta course-context';
-    const a = document.createElement('a');
-    a.href = route;
-    a.textContent = '学习路径 · ' + stage.title;
-    p.append(a);
-    header.append(p);
-  }
+  const header = document.querySelector('.post-header');
+  if (!header) return;
+  const p = document.createElement('p');
+  p.className = 'post-meta course-context';
+  const a = document.createElement('a');
+  a.href = route;
+  a.textContent = '学习路径 · ' + stage.title;
+  p.append(a);
+  header.append(p);
 })();

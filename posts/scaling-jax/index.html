@@ -6,7 +6,7 @@
   <title>JAX 分片编程与 Profiling · Zunzhe Zhang</title>
   <meta name="description" content="用 JAX 的 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 和 profile，在时间线上分出计算、通信与空闲。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
@@ -57,7 +57,7 @@
     .legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 4px; vertical-align: -1px; }
     .opinfo { margin-top: 8px; font-size: 13px; color: var(--text-soft); min-height: 1.5em; font-family: var(--font-mono); }
   </style>
-<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
@@ -930,8 +930,8 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(drawTL, 150); });
   })();
   </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+  <script src="/assets/post-links.js?v=9057de45e84d"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

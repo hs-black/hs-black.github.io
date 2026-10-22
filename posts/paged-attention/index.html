@@ -3,13 +3,12 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <script>if (/^#\d+$/.test(location.hash)) location.replace('/posts/paged-attention/slides.html' + location.hash);</script>
   <title>PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang</title>
   <meta name="description" content="从连续缓存的浪费讲到页表寻址、分块 softmax、容量预算和写时复制：用完整推导、三个可操作动态图、四道习题与 CPU 实验理解分页推理。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
-  <link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
   <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
@@ -93,13 +92,13 @@
 <main class="wrap">
   <header class="post-header">
     <h1>PagedAttention：让 KV cache 按需生长</h1>
-    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span><a href="/posts/paged-attention/slides.html">旧版幻灯片</a></div>
+    <div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div>
   </header>
   <nav class="series" data-series="systems"></nav>
   <article class="prose">
     <p>一条请求刚读完 100 个 token，接下来可能只生成 20 个，也可能生成 2000 个。服务端必须保存它的 <a href="/posts/kv-cache/">KV cache</a>，却不知道这段缓存最终会长到哪里。给它预留一个足够大的连续数组，短请求会占着不用的空间；等数组满了再扩容，又可能要搬动已经写好的历史。</p>
     <p>PagedAttention 把这个问题拆成两件事：<strong>请求认为历史是一条连续序列，显存只负责提供固定大小的块。</strong>一张很小的页表把两者接起来。请求增加一个 token 时，通常只写下一个槽位；跨过块边界时，再申请一块空闲显存。Attention 仍然按原来的逻辑位置计算，只是读取 K、V 前多了一次地址转换。</p>
-    <p>这改变的是缓存的组织方式。它不会自动减少模型要保存的 K、V 元素，也不会因为“分页”就省掉完整 attention 的历史读取。收益首先来自更少的预留浪费、更容易复用的空闲块，以及多个请求对相同历史的共享；这些收益再转化成可以容纳的并发和调度空间。</p>
+    <p>这改变的是缓存的组织方式。分页保持每个 token 的 K/V 元素数和完整 attention 的历史读取范围。容量收益来自更少的预留浪费、更容易复用的空闲块，以及多个请求对相同历史的共享；这些收益再转化成可以容纳的并发和调度空间。</p>
 
     <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
       <li><a href="#why-pages">连续缓存在哪里浪费</a></li>
@@ -116,9 +115,9 @@
       <h2>1. 连续缓存在哪里浪费</h2>
       <p>假设每条请求最多允许 4096 个 token。若一开始就给每条请求分配能装下 4096 个 token 的连续 KV 空间，当前只有 128 个 token 的请求也会占据整份配额。它尚未使用的 3968 个位置不能再分给别人。这是<strong>预留空间与实际长度之间的浪费</strong>，与 attention 的数学计算无关。</p>
       <p>另一种办法是按当前长度分配，再随着生成扩容。问题在于，请求结束的时间并不一致。显存里会留下大小不同的空洞：总空闲量可能够用，却没有一段足够大的连续空间。重新分配并复制缓存能解决一部分问题，但复制需要时间，也可能产生新旧两份缓存同时存在的峰值。</p>
-      <p>分页把缓存划成等大的物理块，每块容纳固定数量的 token。这里用小写 \(\htmlData{symbol=page-size}{b}\) 表示<strong>每块的 token 数</strong>，例如 \(b=16\)。这不是请求的 batch size。一个请求的第 0 个逻辑块、第 1 个逻辑块，可以分别位于物理块 5 和物理块 1；它们不需要在显存中相邻。</p>
+      <p>分页把缓存划成等大的物理块，每块容纳固定数量的 token。这里用小写 \(\htmlData{symbol=page-size}{b}\) 表示<strong>每块的 token 数</strong>，例如 \(b=16\)。一个请求的第 0 个逻辑块、第 1 个逻辑块，可以分别位于物理块 5 和物理块 1；它们不需要在显存中相邻。</p>
       <p>只要空闲池还有一块，任意请求就能拿来扩展。已经写好的块保持原位，页表末尾多一个物理块编号即可。整块之间的分配空洞因而不再要求整理成一段连续区域；但最后一块仍可能装不满，这部分叫<strong>块内碎片</strong>，后面会单独计算。</p>
-      <div class="callout"><p>“按需申请”通常指从预先建立的 KV 块池中取一块，而不是每生成一个 token 就调用一次 GPU 内存分配器。显存池的物理容量可以早已分配好，请求占用的块数仍然按需增长。</p></div>
+      <div class="callout"><p>“按需申请”指从预先建立的 KV 块池中取一块。显存池的物理容量可以早已分配好，请求占用的块数仍然按需增长。</p></div>
     </section>
 
     <section id="address" data-math-scope="address">
@@ -128,7 +127,7 @@
       \htmlData{symbol=offset}{r}=t\bmod b,\qquad
       \htmlData{symbol=physical-page}{p}=\operatorname{page\_table}[j].$$
       <p class="notation">本式中，\(j\) 是逻辑块编号，\(r\) 是块内偏移，\(p\) 是物理块编号；三者都从 0 开始计数。页表把逻辑块编号映射到物理块编号，块内偏移不变。</p>
-      <p>例如块大小为 4，页表是 <code>[5, 1]</code>。逻辑位置 0～3 在物理块 5，位置 4～7 在物理块 1。读取位置 6 时，先算出 \(j=1\)、\(r=2\)，再查到 <code>page_table[1]=1</code>，最终读取<strong>物理块 1 的槽位 2</strong>。物理块编号较小，不代表它存的是较早的 token。</p>
+      <p>例如块大小为 4，页表是 <code>[5, 1]</code>。逻辑位置 0～3 在物理块 5，位置 4～7 在物理块 1。读取位置 6 时，先算出 \(j=1\)、\(r=2\)，再查到 <code>page_table[1]=1</code>，最终读取<strong>物理块 1 的槽位 2</strong>。历史顺序由页表项的排列决定。</p>
 
       <figure class="fig" id="address-figure">
         <div class="pa-demo" data-demo="address">
@@ -147,7 +146,7 @@
           <p class="pa-caption" aria-live="polite"></p>
           <div class="pa-controls"><button type="button" data-action="prev">← 上一步</button><button type="button" data-action="play">播放</button><button type="button" data-action="next">下一步 →</button><button type="button" data-action="reset">重置</button><output></output><label>回放位置<input type="range" min="0" max="3000" value="0" aria-label="地址转换回放位置"></label></div>
         </div>
-        <figcaption>页表改变的是“到哪里读取”，不是“这个 token 在序列的第几个位置”。RoPE 与 causal mask 仍然使用逻辑位置 6；物理块 1 和槽位 2 都不能替代它。</figcaption>
+        <figcaption>页表将逻辑位置 6 映射到物理块 1 的槽位 2。RoPE 与 causal mask 使用逻辑位置 6。</figcaption>
       </figure>
 
       <h3>再往下一层：算出字节偏移</h3>
@@ -176,7 +175,7 @@
       <p>这里 \(m\) 和 \(\ell\) 是标量，\(u\) 与 value 同维度；处理完所有块后，输出就是 \(y=u/\ell\)。要合并两个状态 \((m_1,\ell_1,u_1)\) 和 \((m_2,\ell_2,u_2)\)，先把二者换到同一个最大值 \(m=\max(m_1,m_2)\) 下，再相加：</p>
       $$\ell=e^{m_1-m}\ell_1+e^{m_2-m}\ell_2,$$
       $$u=e^{m_1-m}u_1+e^{m_2-m}u_2,\qquad y=u/\ell.$$
-      <p>前面的缩放因子不是额外的近似。第一块原本保存的是“减去 \(m_1\) 后的和”，乘 \(e^{m_1-m}\) 正好把它改成“减去 \(m\) 后的和”。分子和分母同时换尺度，最终比值不变。这与 <a href="/posts/flash-attention/">FlashAttention 的在线 softmax</a> 使用的是同一条恒等式；分页解决存储地址，在线合并解决分块计算后的归一化。</p>
+      <p>缩放因子来自指数运算的恒等式。第一块原本保存的是“减去 \(m_1\) 后的和”，乘 \(e^{m_1-m}\) 正好把它改成“减去 \(m\) 后的和”。分子和分母同时换尺度，最终比值不变。这与 <a href="/posts/flash-attention/">FlashAttention 的在线 softmax</a> 使用的是同一条恒等式；分页解决存储地址，在线合并解决分块计算后的归一化。</p>
 
       <figure class="fig" id="merge-figure">
         <div class="pa-demo" data-demo="merge">
@@ -208,6 +207,10 @@
       $$\text{尾部空槽}=\left\lceil\frac{\htmlData{symbol=sequence-length}{S}}{\htmlData{symbol=page-size}{b}}\right\rceil b-S,\qquad 0\le\text{尾部空槽}\le b-1.$$
       <p>对于多条独立请求，把每条请求向上取整后再相加，不能先把总 token 数相加再取整。长度为 17、32、63 的三条请求，块大小为 4 时，块数为 \(5+8+16=29\)，总共 116 个槽位，实际用了 112 个，浪费 4 个；块大小改成 16 后，块数为 \(2+2+4=8\)，128 个槽位中有 16 个未使用。</p>
 
+      <h3 id="gpu-layout">页内布局怎样配合 GPU 读取</h3>
+      <p>页表决定访问哪个物理块，块内布局决定相邻线程能否读到相邻地址。QK 点积沿头维度累加，value 的加权和沿历史位置累加，这两次归约可以采用不同的存储顺序。</p>
+      <p>一种向量化布局将 K 写成 <code>[块, KV头, d/x, b, x]</code>，V 写成 <code>[块, KV头, d, b]</code>。这里 d 是每头维度，b 是每块 token 数，x 是一组连续加载的元素数。BF16 每元素 2 B，取 x=8 时，一组恰好 16 B；K 中同一 token 的连续分量便于组成点积，V 中连续的历史位置便于沿 token 维度归约。</p>
+      <p>例如 d=128、b=16，一个头的单个 K 块包含 \(128\times16\times2=4096\) B，K 和 V 合计 8 KiB。换一个页大小会同时改变尾部浪费、每块数据量和线程的工作划分。因此选择页大小时，应同时比较容量利用率和 attention kernel 耗时；同一页表算法可以对应多种高效的 GPU 布局。</p>
       <h3>块越小越好吗？</h3>
       <p>小块通常减少尾部空槽，也让共享与回收更细。但相同历史会对应更多页表项、更多块边界，kernel 的访存、工作划分和元数据处理也会变化。大块通常减少这些管理工作，却增加短请求的尾部浪费，并可能扩大一次写时复制需要复制的内容。</p>
       <p>页大小因而是容量与执行效率的共同选择。先用真实长度分布计算尾部浪费，再比较对应 kernel 在目标 batch、上下文长度下的时间。仅凭“页表更短”或“碎片更少”，都不能直接推出整体服务更快。</p>
@@ -217,7 +220,7 @@
     <section id="sharing" data-math-scope="sharing">
       <h2>5. 共享前缀之后，谁可以写入</h2>
       <p>两条请求若有完全相同的有效前缀，并且模型、adapter、位置与 attention 配置一致，这段前缀对应的 K/V 也相同。它们可以让各自的页表指向同一组物理块。区别在于，<strong>页表属于请求，物理块可以同时被多个请求引用</strong>。</p>
-      <p>共享需要计数。一个物理块的引用计数为 2，意味着仍有两个所有者依赖它，不能因为其中一条请求完成就释放。若缓存管理器还要把这块留给后续请求复用，管理器的持有关系也必须纳入生命周期设计。下面的图只考虑两个活动请求，不额外保留 prefix cache，因此引用归零就能归还空闲池。</p>
+      <p>共享需要计数。一个物理块的引用计数为 2，意味着仍有两个所有者依赖它，不能因为其中一条请求完成就释放。若缓存管理器还要把这块留给后续请求复用，管理器的持有关系也必须纳入生命周期设计。图中的引用来自两个活动请求，引用归零后块被归还空闲池。</p>
       <p>完整块里的历史不会再写入，共享比较直接；真正容易出错的是<strong>未填满的共享尾块</strong>。假设一块能装 4 个 token，现在已经存了 3 个。A、B 都指向它，A 想把自己的下一个 token 写进最后一槽。若直接写，B 随后追加自己的 token 时就会覆盖 A 的内容。B 的有效长度仍为 3 时还不会读取这个槽位，但同一个槽位无法同时保存两条分支各自的第 4 个 token。</p>
       <p>解决办法是写时复制（copy-on-write，COW）：A 先申请一个新块，把旧尾块中有效的 3 个位置复制过去，再让自己的页表改指新块，最后追加 A 的 token。B 保持指向旧块。已经共享的完整前缀块不需要一起复制。</p>
 
@@ -259,7 +262,7 @@ write_KV(page_table[-1], next_slot)
 valid_length += 1</code></pre>
       <p>为什么先申请，再改旧引用？因为申请可能失败。若先把旧块引用减掉、甚至释放，再发现没有空闲块，原来的有效状态已经被破坏。CPU 实验中会专门制造这个失败：一个块被两条请求共享，池里没有空块，此时 COW 必须报告容量不足，并保持两个页表、原内容和引用计数完全不变。</p>
       <p>GPU 上还多了一层时间关系：复制尚未完成时不能开始读取新块；读取旧块的 kernel 尚未完成时不能把它复用给别人。引用计数表达“谁拥有”，event 或其他完成协议表达“谁还在使用”。这两个条件都满足，回收才成立。它们与 <a href="/posts/cuda-streams/">跨 stream 的缓冲区生命周期</a> 是同一个问题。</p>
-      <p>有时不是某一个请求太长，而是所有活动请求都快跨越块边界。每条请求当前看起来都能继续，下一轮却一起申请新块。调度器需要结合可用块、增长预算和抢占策略作出准入决定。保守预留上界可以避免这类同时增长耗尽容量，但会降低利用率；更积极的策略则需要可靠的等待、重算或换出路径。分页给出了可管理的块，并没有替调度器完成这个选择。</p>
+      <p>所有活动请求也可能在同一轮跨越块边界。每条请求当前看起来都能继续，下一轮却一起申请新块。调度器需要结合可用块、增长预算和抢占策略作出准入决定。保守预留上界可以避免这类同时增长耗尽容量，但会降低利用率；更积极的策略则需要可靠的等待、重算或换出路径。分页提供可管理的块，调度器据此决定准入和抢占。</p>
     </section>
 
     <section id="diagnosis">
@@ -274,6 +277,11 @@ valid_length += 1</code></pre>
       </tbody></table></div>
       <p>再加两个很实用的不变量。第一，空闲块不能同时出现在任何有效页表中；第二，每个物理块的引用数，应等于当前所有拥有者对它的引用总数。对于没有持久 prefix cache 的小实验，全部请求结束后，空闲块数量应回到初始值。实际引擎若保留 prefix cache，要把“仍被缓存持有”与“泄漏”区分开。</p>
       <p>比较 attention 时，参考路径可以先按逻辑顺序把 K/V 拼回连续数组，显式构造 mask，再做标准 softmax。优化路径通过页表直接读取；二者只共享模型输入，尽量不共享地址转换代码。否则同一个地址错误可能同时出现在实现和“参考”里，让测试错误地通过。</p>
+      <h3 id="async-readers">外部缓存接入后，引用还要覆盖异步读者</h3>
+      <p>如果冷启动的结果正常，打开外部 prefix cache、运行一段时间后才出现结果漂移，可以沿着块的生命周期检查：后台任务何时开始读取 GPU 数据，请求何时被抢占，物理块何时被重新分配。页表和哈希都正确时，后台任务仍可能在物理块已经改归另一条请求后，读出新请求的 K/V，再把它存到旧缓存键下。</p>
+      <p>解决这类竞争需要把在途搬运纳入所有权。提交异步读取时持有块，等待完成事件后释放；或者先把有效数据复制到具有独立寿命的 staging buffer。请求取消、抢占和正常完成都要经过这套释放协议。调试时给块分配增加 generation 编号，同时记录任务提交、完成、归还、重新分配四类事件；这样一次错误命中能追溯到具体的复用时刻。</p>
+      <h3 id="preemption">缓存池频繁满：把抢占次数和尾延迟一起看</h3>
+      <p>当空闲块反复降到零，服务仍能输出，但长请求的尾延迟突然上升，检查抢占与重算计数。重算会重新执行已处理的前缀，占用计算与调度预算。先固定请求长度分布，降低活动请求上限，观察抢占次数和 P99 延迟是否同步下降；再根据剩余显存调整 KV 池预算。比较配置时一起记录有效吞吐、等待队列和峰值占用，才能判断容量增加带来的实际收益。</p>
     </section>
 
     <section id="practice">
@@ -311,10 +319,12 @@ PASS: dense oracle, COW isolation, refcounts, release, transactional OOM, addres
       <h2 id="references">参考与延伸阅读</h2>
       <ul>
         <li><a href="https://arxiv.org/abs/2309.06180">Efficient Memory Management for Large Language Model Serving with PagedAttention</a>：分页缓存、块共享与写时复制的原始论文。</li>
-        <li><a href="https://docs.vllm.ai/en/stable/design/paged_attention/">vLLM：Paged Attention</a>：原始 kernel 设计中的页表访问与分块计算；该文档保留的是历史实现说明。</li>
+        <li><a href="https://docs.vllm.ai/en/stable/design/paged_attention/">vLLM：Paged Attention</a>：经典 kernel 的页表访问、向量化布局与 warp 归约。</li>
         <li><a href="https://docs.vllm.ai/en/stable/design/prefix_caching/">vLLM：Automatic Prefix Caching</a>：块身份、引用、空闲队列与前缀复用。</li>
         <li><a href="/posts/prefix-caching/">Prefix caching</a> 与 <a href="/posts/continuous-batching/">Continuous batching</a>：共享缓存如何与请求调度配合。</li>
-      </ul>
+            <li><a href="https://github.com/vllm-project/vllm/issues/52360">在途 KV 读取与块回收的所有权讨论</a>：异步任务参与存储生命周期的一个具体案例。</li>
+      <li><a href="https://docs.vllm.ai/en/latest/configuration/optimization/#preemption">vLLM：Preemption 调优</a>：KV 预算、并发与重算开销。</li>
+</ul>
     </section>
   </article>
   <nav class="series-pager" data-series="systems"></nav>
@@ -323,11 +333,11 @@ PASS: dense oracle, COW isolation, refcounts, release, transactional OOM, addres
 <script type="application/json" id="math-definitions">
 {
   "global": {
-    "page-size": {"label":"b：块大小","description":"一个物理 KV 块可以容纳的 token 数。这里不是请求的 batch size。","unit":"token / 块"},
+    "page-size": {"label":"b：块大小","description":"一个物理 KV 块可以容纳的 token 数。","unit":"token / 块"},
     "position": {"label":"t：逻辑位置","description":"当前请求内部的 token 位置编号，从 0 开始；不随物理页布局改变。","unit":"位置编号"},
     "logical-page": {"label":"j：逻辑块编号","description":"逻辑位置 t 除以块大小 b 后向下取整，作为请求页表的索引。","unit":"从 0 开始的编号"},
     "offset": {"label":"r：块内偏移","description":"逻辑位置 t 对块大小 b 取余，表示要访问块中的第几个槽位。","unit":"从 0 开始的槽位编号"},
-    "physical-page": {"label":"p：物理块编号","description":"从请求页表查出的 KV 池物理块编号；它不表示时间顺序或 RoPE 位置。","unit":"物理块编号"},
+    "physical-page": {"label":"p：物理块编号","description":"从请求页表查出的 KV 池物理块编号；逻辑顺序由请求页表记录。","unit":"物理块编号"},
     "kv-heads": {"label":"Hkv：KV 头数","description":"当前计算范围内，每层保存的 key/value 头数；GQA 时通常小于 query 头数。","unit":"个头"},
     "head-dim": {"label":"d：每头维度","description":"一个 key 或 value 向量中的元素数；容量公式假设 K 与 V 维度相同。","unit":"元素 / 头"},
     "layers": {"label":"L：缓存层数","description":"在当前容量预算中，每个 token 都要保存 K/V 的模型层数。","unit":"层"},
@@ -405,7 +415,7 @@ PASS: dense oracle, COW isolation, refcounts, release, transactional OOM, addres
       '起点：要读取请求 A 的逻辑位置 ' + t + '。P1、P5 是物理块编号；槽位旁的 K/V 数字表示原来的逻辑位置。',
       '拆开位置：' + t + ' ÷ 4 的商是 ' + j + '，余数是 ' + r + '。商用来查页表，余数会一直带到最后。',
       '查询页表：page_table[' + j + '] = P' + physical + '。只转换块编号，块内偏移仍为 ' + r + '。',
-      '完成读取：P' + physical + ' 的槽位 ' + r + '，存放的正是 K' + t + ' / V' + t + '。模型看到的位置仍为 ' + t + '，不是物理块编号。'
+      '完成读取：P' + physical + ' 的槽位 ' + r + '，存放的正是 K' + t + ' / V' + t + '。模型看到的位置仍为 ' + t + '。'
     ];
     address.querySelector('.pa-caption').textContent = captions[step];
   });
@@ -475,9 +485,9 @@ PASS: dense oracle, COW isolation, refcounts, release, transactional OOM, addres
   [address,merge,cow].forEach(el => observer.observe(el));
 })();
 </script>
-<script src="/assets/post-links.js?v=3173091271f1"></script>
-<script src="/assets/posts.js?v=150c41e1230c"></script>
+<script src="/assets/post-links.js?v=9057de45e84d"></script>
+<script src="/assets/posts.js?v=d0504bda181a"></script>
 <script src="/assets/series.js?v=0db6ff6b7f47"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

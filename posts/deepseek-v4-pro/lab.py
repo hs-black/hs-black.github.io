@@ -31,7 +31,7 @@ def main():
     b = sinkhorn(rng.normal(size=(4, 4)))
     np.testing.assert_allclose(b.sum(0), np.ones(4), atol=1e-10)
     np.testing.assert_allclose(b.sum(1), np.ones(4), atol=1e-10)
-    # 明确的 doubly-stochastic 矩阵，复核幻灯片上的手算。
+    # 明确的 doubly-stochastic 矩阵，复核正文中的手算。
     residual = np.array([1., 3., 5., 7.])
     pre, post = np.array([.1, .2, .3, .4]), np.array([.25, .5, .75, 1.])
     combination = .5*np.eye(4) + .125*np.ones((4, 4))

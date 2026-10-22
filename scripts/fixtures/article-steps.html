@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex,follow">
+  <title>Article figure regression fixture</title>
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+</head>
+<body>
+  <main class="wrap prose">
+    <figure class="article-figure" id="example">
+      <h3>分配中的块</h3>
+      <svg viewBox="0 0 300 60" aria-label="已用块数">
+        <rect id="used" width="0" height="40" fill="var(--accent)"></rect>
+      </svg>
+      <p id="value"></p>
+    </figure>
+  </main>
+  <script src="/assets/article-steps.js?v=1c7283b439be"></script>
+  <script>
+    const options = {
+      duration: 100,
+      steps: [{title:'空闲',caption:'共有三个空闲块。',used:0},
+              {title:'分配',caption:'请求持有一个块。',used:1},
+              {title:'扩展',caption:'请求持有三个块。',used:3}],
+      render(step, index, fraction) {
+        const counts = [0, 1, 3];
+        const next = counts[Math.min(2, index + 1)];
+        document.querySelector('#used').setAttribute('width', 100 * (step.used + fraction * (next - step.used)));
+        document.querySelector('#value').textContent = '已用 ' + step.used + ' 块';
+      }
+    };
+    window.figure = ArticleSteps.mount('#example', options);
+    window.sameFigure = ArticleSteps.mount('#example', options);
+  </script>
+</body>
+</html>

@@ -6,7 +6,7 @@
   <title>GPU 内核与 FlashAttention · Zunzhe Zhang</title>
   <meta name="description" content="从 SM、warp、内存层级讲起，到访存合并、分块、融合、Triton，再到 FlashAttention 1–3 的推导与实现。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
@@ -68,7 +68,7 @@
     /* timeline */
     pre code .cm { color: var(--text-faint); }
   </style>
-<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
@@ -90,7 +90,7 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <div class="callout"><a href="/posts/flash-attention/">FlashAttention 1 / 2 / 3 动画幻灯片</a>：从 HBM 里的大矩阵走到 SRAM 分块，再看 GPU 上怎样把计算与搬运重叠起来。</div>
+      <div class="callout"><a href="/posts/flash-attention/">FlashAttention 1 / 2 / 3 图解</a>：从 HBM 里的大矩阵走到 SRAM 分块，再看 GPU 上怎样把计算与搬运重叠起来。</div>
       <p>在 H100 上，一个形状合适的大矩阵乘能跑到接近峰值，一个 LayerNorm 却只能用到算力的零头；序列一长，标准注意力的大部分时间也花在搬数据上，而不是计算上。多卡并行的账默认单张卡上的每个算子都跑得足够快，这个前提成不成立，要看单张 GPU 内部：硬件长什么样，一个内核（kernel）怎么被调度执行，数据从哪里来、要花多久、怎样少搬几次。FlashAttention 就是把这些知识用到极致的结果。</p>
       <p>硬件数字都以 H100 SXM 为准。</p>
 
@@ -1247,7 +1247,7 @@ C[localRow * N + localCol] = sum;</code></pre>
 })();
 
   </script>
-  <script src="/assets/anim.js"></script>
+  <script src="/assets/anim.js?v=499c11838720"></script>
   <script id="anim-figs">
 (() => {
   if (!window.Anim) return;
@@ -1569,8 +1569,8 @@ C[localRow * N + localCol] = sum;</code></pre>
   })();
 })();
   </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+  <script src="/assets/post-links.js?v=9057de45e84d"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

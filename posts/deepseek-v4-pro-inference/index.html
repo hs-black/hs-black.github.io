@@ -1,650 +1,137 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>DeepSeek-V4-Pro 推理：一枚 token，8 张卡 · Zunzhe Zhang</title>
-<meta name="description" content="逐卡推导 V4-Pro 推理的权重与缓存容量、FP4 scale、prefill 峰值、FP32 通信和关键路径，含计算题、排错案例与 CPU 实验。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css">
-<link rel="stylesheet" href="/assets/slides.css?v=cc08023fb5ef"><style>
-.slide.ds {padding:52px 76px 80px;gap:16px;justify-content:flex-start}
-.ds .kicker{font-size:16px}.ds h1{font-size:72px}.ds h2{font-size:43px}.ds p{font-size:24px;line-height:1.5}.ds .intro{max-width:1000px;color:var(--text-soft)}
-.ds .scene{width:100%;height:330px;flex:none;display:block}.ds .scene.tall{height:360px}.ds p.intro + .scene{height:260px}.ds svg text{font-family:var(--font-sans);fill:var(--text);font-size:19px}.ds svg .tiny{font-size:15px}.ds svg .soft{fill:var(--text-soft)}
-.ds .box{fill:var(--surface);stroke:var(--border);stroke-width:1.6}.ds .purple{fill:var(--accent-soft);stroke:var(--accent);stroke-width:1.8}.ds .orange{fill:color-mix(in srgb,var(--accent-2) 12%,var(--surface));stroke:var(--accent-2);stroke-width:1.8}
-.ds .wire{fill:none;stroke:var(--border);stroke-width:2}.ds .flow{fill:none;stroke:var(--accent);stroke-width:3;stroke-linecap:round}.ds .token{fill:var(--accent);stroke:var(--surface);stroke-width:2}.ds .token2{fill:var(--accent-2);stroke:var(--surface);stroke-width:2}
-.ds .later{opacity:0}.ds .caption{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;font-size:20px;line-height:1.45}.ds .caption>div{border-top:2px solid var(--border);padding-top:12px}.ds .caption b{color:var(--accent);display:block;margin-bottom:4px}.ds .note{font-size:17px;color:var(--text-soft)}
-.ds .stats{display:flex;gap:48px;margin:24px 0}.ds .stats strong{font-size:60px;letter-spacing:-.04em;display:block;color:var(--accent)}.ds .stats span{font-size:20px;color:var(--text-soft)}
-.ds .pill{display:inline-block;border:1px solid var(--border);padding:8px 14px;border-radius:8px;font-size:19px}.ds .twocol{display:grid;grid-template-columns:1fr 1fr;gap:28px}.ds .panel{padding:22px 26px;background:var(--surface);border:1px solid var(--border);border-radius:16px}.ds .panel h3{font-size:26px;margin:0 0 12px}.ds .panel p{font-size:22px}.ds .formula{padding:20px 26px;background:var(--accent-soft);border-radius:14px;font-family:var(--font-mono);font-size:23px}
-.ds table{width:100%;border-collapse:collapse;font-size:21px}.ds td,.ds th{padding:10px 16px;border-bottom:1px solid var(--border);text-align:left}.ds th{color:var(--text-soft);font-weight:500}.ds .refs{font-size:22px;line-height:1.7;display:grid;gap:10px}.ds .refs small{display:block;color:var(--text-soft);font-size:18px}
-.slide.ds > .anim-bar{left:76px;right:76px;bottom:27px;opacity:.8}.ds .footer{font-size:18px;color:var(--text-soft);margin-top:auto}.ds a{position:relative;z-index:1}
-</style>
-<link rel="stylesheet" href="/assets/course.css?v=89be0a17cfd4">
-</head>
-<body class="deck-page">
-<main class="deck">
-<div class="stage">
-<section class="slide ds" style="justify-content:center">
-<div class="kicker">INFERENCE WALKTHROUGH · 2026-10-20</div>
-<h1>DeepSeek-V4-Pro 推理：<br><span class="accent">一枚 token，8 张卡</span>
-</h1>
-<p class="intro">权重留在显存，计算把它读进芯片；上下文记忆逐步增长，token 的表示在卡间流动。</p>
-<div class="stats">
-<div><strong>8</strong><span>教学划分的 GPU 数</span>
-</div>
-<div><strong>61</strong><span>每步经过的主干层</span>
-</div>
-<div><strong>4 × 7168</strong><span>mHC 残差形状</span>
-</div>
-</div>
-<p class="note">采用 TP=8 的分片拓扑教学示意：按头、按专家分权重。8×80 GiB 放不下 Pro；后面的容量演算会推到合法的16路划分。</p>
-</section>
-<section class="slide ds" id="placement">
-<div class="kicker">01 / 先摆好模型</div>
-<h2>每张卡都有自己的权重和上下文记忆</h2>
-<svg class="scene tall" viewBox="0 0 1128 360" role="img" aria-label="8 张 GPU 各自持有权重分片、注意力头和 KV cache">
-<g id="gpu0">
-<rect class="box" x="18" y="30" width="245" height="132" rx="12"/>
-</g>
-<text x="34" y="56" class="" text-anchor="start">GPU 0</text>
-<text x="34" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="34" y="108" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident0">
-<rect class="purple" x="32" y="123" width="215" height="26" rx="12"/>
-<text x="139.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu1">
-<rect class="box" x="298" y="30" width="245" height="132" rx="12"/>
-</g>
-<text x="314" y="56" class="" text-anchor="start">GPU 1</text>
-<text x="314" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="314" y="108" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident1">
-<rect class="purple" x="312" y="123" width="215" height="26" rx="12"/>
-<text x="419.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu2">
-<rect class="box" x="578" y="30" width="245" height="132" rx="12"/>
-</g>
-<text x="594" y="56" class="" text-anchor="start">GPU 2</text>
-<text x="594" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="594" y="108" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident2">
-<rect class="purple" x="592" y="123" width="215" height="26" rx="12"/>
-<text x="699.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu3">
-<rect class="box" x="858" y="30" width="245" height="132" rx="12"/>
-</g>
-<text x="874" y="56" class="" text-anchor="start">GPU 3</text>
-<text x="874" y="83" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="874" y="108" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident3">
-<rect class="purple" x="872" y="123" width="215" height="26" rx="12"/>
-<text x="979.5" y="143.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu4">
-<rect class="box" x="18" y="190" width="245" height="132" rx="12"/>
-</g>
-<text x="34" y="216" class="" text-anchor="start">GPU 4</text>
-<text x="34" y="243" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="34" y="268" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident4">
-<rect class="purple" x="32" y="283" width="215" height="26" rx="12"/>
-<text x="139.5" y="303.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu5">
-<rect class="box" x="298" y="190" width="245" height="132" rx="12"/>
-</g>
-<text x="314" y="216" class="" text-anchor="start">GPU 5</text>
-<text x="314" y="243" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="314" y="268" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident5">
-<rect class="purple" x="312" y="283" width="215" height="26" rx="12"/>
-<text x="419.5" y="303.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu6">
-<rect class="box" x="578" y="190" width="245" height="132" rx="12"/>
-</g>
-<text x="594" y="216" class="" text-anchor="start">GPU 6</text>
-<text x="594" y="243" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="594" y="268" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident6">
-<rect class="purple" x="592" y="283" width="215" height="26" rx="12"/>
-<text x="699.5" y="303.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-<g id="gpu7">
-<rect class="box" x="858" y="190" width="245" height="132" rx="12"/>
-</g>
-<text x="874" y="216" class="" text-anchor="start">GPU 7</text>
-<text x="874" y="243" class="tiny" text-anchor="start">16 个 query 头</text>
-<text x="874" y="268" class="tiny" text-anchor="start">48 个本地路由专家</text>
-<g id="resident7">
-<rect class="purple" x="872" y="283" width="215" height="26" rx="12"/>
-<text x="979.5" y="303.0" text-anchor="middle" style="font-size:14px">W 分片 + 本地 KV 副本</text>
-</g>
-</svg>
-<p class="note">每层 384 个路由专家均分；Q / O 按头分片。这组划分中，shared KV、mHC 与共享专家在各卡保留副本。4 路残差是模型维度，与 GPU 数量无关。</p>
-</section>
-<section class="slide workshop" id="per-rank-shapes"><div class="kicker">工程细节</div><h2>一张卡负责哪些维度，复制哪些状态</h2><table class="ws-table"><thead><tr><th>项目</th><th>Pro 全局</th><th>TP=8 每张卡</th></tr></thead><tbody><tr><td>Query 头</td><td>128</td><td>16</td></tr><tr><td>输出投影组</td><td>16</td><td>2</td></tr><tr><td>Indexer 头</td><td>64</td><td>8</td></tr><tr><td>每层路由专家</td><td>384</td><td>48</td></tr><tr><td>shared KV / 残差</td><td>[B,N,512] / [B,S,4,7168]</td><td>各卡复制；N 是缓存条目数</td></tr></tbody></table><p class="ws-note">Q 的后一段投影按输出切分，O 的后一段按输入切分。完整 residual、shared KV、mHC 参数与 shared expert 留在各 rank；不要把这些复制项再除以卡数。</p></section>
-<section class="slide workshop" id="weight-bytes"><div class="kicker">工程细节</div><h2>FP4 的四个位之外，还要存 scale</h2><div class="ws-equation">P路由 = 61×384×3×7168×3072 = 1547.396 B</div><div class="ws-equation">bytes/参数 = 4/8 + 1/32 = 0.53125 B</div><p class="ws-lead">每 32 个 FP4 元素对应 1 个 8-bit scale。主干路由专家裸 FP4 为 720.5625 GiB，含 scale 后为 765.5977 GiB，均分到 8 卡是 95.6997 GiB / 卡。</p><p class="ws-note">GiB=2³⁰ 字节。共享专家采用 FP8 权重、每 128×128 块一个 8-bit scale，并在各卡复制。embedding、Attention、mHC、路由表、输出头、MTP、workspace 和 allocator 还要分别记账。</p></section>
-<section class="slide workshop" id="capacity-accumulator"><div class="kicker">逐步演算 · 教学数值</div><h2>把每卡确定的三笔开销加起来</h2><svg class="ws-visual" viewBox="0 0 1180 280" role="img" aria-label="依次将每个加权分量加入数值累加器"><rect x="60" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="175" y="57" text-anchor="middle">路由权重 = 95.6997</text><text x="175" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → 95.6997</text><circle id="capacity-accumulator-part0" cx="175" cy="128" r="8" fill="var(--accent)"/><rect x="325" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="440" y="57" text-anchor="middle">共享专家 = 3.75316</text><text x="440" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → 3.75316</text><circle id="capacity-accumulator-part1" cx="440" cy="128" r="8" fill="var(--accent)"/><rect x="590" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="705" y="57" text-anchor="middle">8 请求缓存 = 2.60327</text><text x="705" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → 2.60327</text><circle id="capacity-accumulator-part2" cx="705" cy="128" r="8" fill="var(--accent)"/><rect x="410" y="180" width="320" height="78" rx="14" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="470" y="228">加权和</text><text id="capacity-accumulator-sum" x="660" y="229" text-anchor="middle">0.00</text></svg><p class="ws-caption">单位 GiB；32K 上下文、BF16 参考 cache，主干权重和 scale。合计 102.056 GiB / 卡。已经超过 80 GiB，其他开销还未加入；8 卡只是分片拓扑示意。</p></section>
-
-<section class="slide ds" id="prefill">
-<div class="kicker">02 / Prefill</div>
-<h2>先把提示词读完，建好每层 KV</h2>
-<p class="intro">图中展示 GPU 0–3；GPU 4–7 同时执行自己的分片。</p>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="Prompt 的 token 批量进入多张卡，生成各层 KV cache">
-<g>
-<rect class="orange" x="15" y="95" width="245" height="110" rx="12"/>
-<text x="137.5" y="157.0" text-anchor="middle">Prompt：一批 token</text>
-</g>
-<text x="135" y="243" class="soft" text-anchor="middle">prefill</text>
-<g id="prefgpu0">
-<rect class="box" x="390" y="20" width="245" height="58" rx="12"/>
-<text x="512.5" y="56.0" text-anchor="middle">GPU 0：Q / KV / MoE</text>
-</g>
-<g id="prefkv0">
-<rect class="purple" x="805" y="20" width="275" height="58" rx="12"/>
-<text x="942.5" y="56.0" text-anchor="middle">本层 KV（按类型保存）</text>
-</g>
-<path class="wire" d="M260 150 L390 49"/>
-<path class="wire" d="M635 49 L805 49"/>
-<circle id="pref0" class="token" cx="260" cy="150" r="9"/>
-<g id="prefgpu1">
-<rect class="box" x="390" y="98" width="245" height="58" rx="12"/>
-<text x="512.5" y="134.0" text-anchor="middle">GPU 1：Q / KV / MoE</text>
-</g>
-<g id="prefkv1">
-<rect class="purple" x="805" y="98" width="275" height="58" rx="12"/>
-<text x="942.5" y="134.0" text-anchor="middle">本层 KV（按类型保存）</text>
-</g>
-<path class="wire" d="M260 150 L390 127"/>
-<path class="wire" d="M635 127 L805 127"/>
-<circle id="pref1" class="token" cx="260" cy="150" r="9"/>
-<g id="prefgpu2">
-<rect class="box" x="390" y="176" width="245" height="58" rx="12"/>
-<text x="512.5" y="212.0" text-anchor="middle">GPU 2：Q / KV / MoE</text>
-</g>
-<g id="prefkv2">
-<rect class="purple" x="805" y="176" width="275" height="58" rx="12"/>
-<text x="942.5" y="212.0" text-anchor="middle">本层 KV（按类型保存）</text>
-</g>
-<path class="wire" d="M260 150 L390 205"/>
-<path class="wire" d="M635 205 L805 205"/>
-<circle id="pref2" class="token" cx="260" cy="150" r="9"/>
-<g id="prefgpu3">
-<rect class="box" x="390" y="254" width="245" height="58" rx="12"/>
-<text x="512.5" y="290.0" text-anchor="middle">GPU 3：Q / KV / MoE</text>
-</g>
-<g id="prefkv3">
-<rect class="purple" x="805" y="254" width="275" height="58" rx="12"/>
-<text x="942.5" y="290.0" text-anchor="middle">本层 KV（按类型保存）</text>
-</g>
-<path class="wire" d="M260 150 L390 283"/>
-<path class="wire" d="M635 283 L805 283"/>
-<circle id="pref3" class="token" cx="260" cy="150" r="9"/>
-</svg>
-<div class="caption">
-<div><b>一批 token 一起算</b>矩阵乘法可复用权重，因果 mask 保证只看过去。</div>
-<div><b>每层都有自己的 KV</b>不是只在输入端存一份；61 层各自更新。</div>
-<div><b>读完开始生成</b>最后一个位置的 logits 给出首个输出 token。</div>
-</div>
-</section>
-<section class="slide workshop" id="cache-ledger"><div class="kicker">工程细节</div><h2>先把每一层的主 KV 逐项相加</h2><div class="ws-equation">M主 = 1024 × [61×128 + 30⌊N/4⌋ + 31⌊N/128⌋] B</div><table class="ws-table"><thead><tr><th>N=32,768，单请求、单卡</th><th>含义</th><th>结果</th></tr></thead><tbody><tr><td>每条 512 维 × BF16</td><td>一个向量同时作 K/V</td><td>1,024 B</td></tr><tr><td>局部环形区</td><td>61 层 × 128 条</td><td>7.625 MiB</td></tr><tr><td>CSA + HCA 压缩区</td><td>30×8192 + 31×256 条</td><td>247.75 MiB</td></tr><tr><td>主 KV 合计</td><td>所有主干层</td><td>255.375 MiB</td></tr></tbody></table><p class="ws-note">参考代码的量化调用模拟数值精度，缓存张量仍是 BF16；这份预算按实际张量存储计算。生产中的 packed cache 应改用真实格式、scale 和对齐后的大小。</p></section>
-<section class="slide workshop" id="cache-hidden-state"><div class="kicker">工程细节</div><h2>还有 Indexer 和未完成压缩组</h2><table class="ws-table"><thead><tr><th>单请求、单卡额外项</th><th>公式</th><th>32K 大小</th></tr></thead><tbody><tr><td>Indexer cache</td><td>30×8192×128×2</td><td>60 MiB</td></tr><tr><td>每个 CSA 的主+索引暂存</td><td>2×8×1024×4 + 2×8×256×4</td><td>80 KiB / 层</td></tr><tr><td>每个 HCA 的暂存</td><td>2×128×512×4</td><td>512 KiB / 层</td></tr><tr><td>全部压缩暂存</td><td>30×80 KiB + 31×512 KiB</td><td>17.8438 MiB</td></tr></tbody></table><p class="ws-lead">两份暂存分别保存 value 与 gate，使用 FP32。主 KV、Indexer、暂存合计 333.219 MiB / 请求 / 卡；这些复制项增加卡数也不会自动缩小。</p><p class="ws-note">以上不含 RoPE 频率表、MTP 缓存和运行时临时张量；部署账本中给它们单独的行。</p></section>
-<section class="slide workshop" id="prefill-peak"><div class="kicker">工程细节</div><h2>长 prefill 的峰值，常出现在临时分数</h2><p class="ws-lead">参考 Indexer 先构造每个头的 query×候选分数，再把头求和。设 B=1、S=N=32,768；CSA 候选 C=8,192。</p><div class="ws-equation">[B,S,Hindex/TP,C] = [1,32768,8,8192]</div><p class="ws-lead">按 BF16，每个 CSA 层这一项为 4 GiB；头求和后的 [B,S,C] 仍有 512 MiB。最终保留 top-k 并不能消除计算途中的大张量。</p><div class="ws-cols"><div class="ws-card"><p class="ws-note">优化方向：融合 score 与 top-k、按 query/candidate 分块、减小本轮 prefill token 数；用峰值 allocated 与 memory snapshot 找到真正的大分配。</p></div><div class="ws-card"><p class="ws-note">参考 forward 在 start_pos>0 的路径按逐 token 更新压缩状态。实现 chunked prefill 时必须同时支持块内因果 mask、跨块 remainder 和重叠组，不能仅把输入切片循环调用。</p></div></div></section>
-
-<section class="slide ds" id="hbm">
-<div class="kicker">03 / 放大一张 GPU</div>
-<h2>一次 kernel：读显存，算，写回</h2>
-<p class="intro">各张 GPU 都重复这个过程；这里放大 GPU 0。</p>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="常驻权重和 KV 从 HBM 被读取到片上计算，再写回临时激活">
-<g>
-<rect class="box" x="20" y="35" width="360" height="260" rx="12"/>
-</g>
-<text x="40" y="68" class="" text-anchor="start">GPU 0 · HBM 显存</text>
-<g>
-<rect class="purple" x="45" y="90" width="310" height="52" rx="12"/>
-<text x="200.0" y="123.0" text-anchor="middle">常驻 W：本层权重</text>
-</g>
-<g>
-<rect class="orange" x="45" y="160" width="310" height="52" rx="12"/>
-<text x="200.0" y="193.0" text-anchor="middle">常驻 KV：历史状态</text>
-</g>
-<g>
-<rect class="box" x="45" y="230" width="310" height="42" rx="12"/>
-<text x="200.0" y="258.0" text-anchor="middle">临时：激活 / 通信工作区</text>
-</g>
-<g>
-<rect class="box" x="530" y="85" width="240" height="165" rx="12"/>
-</g>
-<text x="650" y="117" class="" text-anchor="middle">SM：计算单元</text>
-<text x="650" y="158" class="tiny" text-anchor="middle">片上 SRAM / 寄存器</text>
-<text x="650" y="203" class="tiny" text-anchor="middle">矩阵乘 · 归一化 · 注意力</text>
-<g>
-<rect class="purple" x="900" y="115" width="205" height="90" rx="12"/>
-<text x="1002.5" y="167.0" text-anchor="middle">新激活 h′</text>
-</g>
-<path class="wire" d="M355 116 L530 155"/>
-<path class="wire" d="M355 186 L530 180"/>
-<path class="wire" d="M770 166 L900 160"/>
-<circle id="wread" class="token" cx="355" cy="116" r="9"/>
-<circle id="kvread" class="token2" cx="355" cy="186" r="9"/>
-<circle id="compute" class="token" cx="650" cy="230" r="9"/>
-</svg>
-<div class="caption">
-<div><b>读</b>本轮需要的权重块和 KV 块搬到片上。</div>
-<div><b>算</b>SM 用片上数据计算，分块反复推进。</div>
-<div><b>写</b>输出写入激活 / 通信 buffer；原权重和历史 KV 仍在。</div>
-</div>
-</section>
-<section class="slide workshop" id="allocation-capacity"><div class="kicker">工程细节</div><h2>申请多少缓存，由上限决定</h2><pre class="ws-code"><code>slots = window + (max_seq_len // ratio if ratio else 0)
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DeepSeek-V4-Pro 推理：一枚 token，8 张卡 · Zunzhe Zhang</title><meta name="description" content="逐卡推导原生 FP4 权重、复制缓存、prefill 峰值、FP32 归约与专家调度；用可操作容量账本和时间线连接工程排错、习题与 CPU 实验。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.ds-table{width:100%;border-collapse:collapse;font-size:15px}.ds-table td,.ds-table th{padding:9px 8px;text-align:left;border-bottom:1px solid var(--border);font-variant-numeric:tabular-nums}.ds-table th{color:var(--text-soft)}
+.ds-controls{display:flex;gap:10px 18px;flex-wrap:wrap;align-items:center;margin:14px 0;font-size:14px}.ds-controls label{display:flex;gap:8px;align-items:center;flex-wrap:wrap}.ds-controls input[type=range]{max-width:100%;width:210px}.ds-controls select{max-width:100%;padding:6px;color:var(--text);background:var(--surface);border:1px solid var(--border);border-radius:6px}
+.ds-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}.ds-stats>div{padding:12px;background:var(--bg-soft);border-radius:8px;min-width:0}.ds-stats small{display:block;color:var(--text-soft);font-size:13px}.ds-stats strong{display:block;font-size:23px;color:var(--accent);overflow-wrap:anywhere;font-variant-numeric:tabular-nums}.ds-caption{font-size:14px;color:var(--text-soft);line-height:1.65;margin:12px 0!important}
+.ds-row-active{background:var(--accent-soft)}.ds-mix-value{font-variant-numeric:tabular-nums}.ds-flow{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:10px}.ds-card{border:1px solid var(--border);padding:12px;border-radius:9px;min-width:0}.ds-card strong{display:block;font-size:17px}.ds-card small{display:block;color:var(--text-soft);font-size:12px}.ds-card .ds-operation{font-size:13px;color:var(--accent);min-height:3.8em;margin-top:9px}.ds-card.is-active{border-color:var(--accent);background:var(--accent-soft)}
+.ds-state{padding:12px;border-left:3px solid var(--accent);background:var(--accent-soft);font-size:14px;line-height:1.6;margin-top:14px}.ds-memory-track{display:flex;height:25px;border-radius:6px;overflow:hidden;background:var(--bg-soft)}.ds-memory-track span{display:block;min-width:0}.ds-memory-track .weight{background:var(--accent)}.ds-memory-track .shared{background:var(--accent-2)}.ds-memory-track .cache{background:var(--text-soft)}
+.ds-progress{height:18px;overflow:hidden;border-radius:4px;background:var(--bg-soft);margin:12px 0}.ds-progress span{display:block;height:100%;background:var(--accent);transition:width .15s}.ds-timeline{min-width:560px}.ds-lane{display:grid;grid-template-columns:90px 1fr;margin:10px 0;align-items:center;font-size:13px}.ds-lane-track{position:relative;height:36px;background:var(--bg-soft);border-radius:5px;overflow:hidden}.ds-wave{position:absolute;top:3px;height:30px;border-radius:4px;border:1px solid var(--accent);background:var(--accent-soft);text-align:center;font-size:12px;line-height:28px;overflow:hidden}.ds-wave.is-done{background:var(--accent);color:var(--surface)}.ds-cursor{position:absolute;top:0;bottom:0;width:2px;background:var(--accent-2);z-index:2}.ds-ticks{display:flex;justify-content:space-between;margin-left:90px;font-size:12px;color:var(--text-soft)}
+@media(max-width:600px){.ds-flow{grid-template-columns:repeat(2,minmax(0,1fr))}.ds-stats{grid-template-columns:1fr 1fr}.ds-stats>div:last-child{grid-column:1/-1}.ds-table{font-size:13px}.ds-table td,.ds-table th{padding:7px 5px}}
+@media(prefers-reduced-motion:reduce){.ds-progress span{transition:none}}
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>DeepSeek-V4-Pro 推理：一枚 token，8 张卡</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav>
+<article class="prose">
+<p>把 DeepSeek-V4-Pro 放到 8 张卡上，首先要确定每张卡保存什么、计算什么、何时需要等其他卡。这里沿参考推理实现的分工展开：query 与输出投影按头切分，路由专家按 ID 分配；每个 rank 保存完整 shared KV、mHC 状态与共享专家。8 路划分的路由专家权重本身就需要约 95.7 GiB/卡；使用 80 GiB 设备时，需要进一步选择满足容量与整除约束的划分。</p>
+<p>一个 decode step 消费每条请求的一枚输入 token，逐层更新状态，最后产生下一枚输出 token。权重持续驻留 HBM，kernel 将本轮需要的权重和 KV 分块搬到片上计算，再把激活和新缓存写回。理解容量与时间，分别需要一份<strong>常驻张量账本</strong>和一条<strong>计算依赖时间线</strong>。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#partition">先分清分片与副本</a></li><li><a href="#weights">权重与量化 scale 的容量</a></li><li><a href="#cache">逐层计算历史状态</a></li><li><a href="#prefill">长 prefill 的峰值从哪里来</a></li><li><a href="#flow">一个 Block 怎样经过各张卡</a></li><li><a href="#communication">从张量形状推导通信量</a></li><li><a href="#schedule">专家负载与通信重叠</a></li><li><a href="#debug">容量、并行与数值的工程取舍</a></li><li><a href="#practice">练习与实验</a></li></ol></nav>
+<section id="partition"><h2>1. 先分清分片与副本</h2>
+<p>Pro 有 61 个主干层，隐藏宽度为 7168。设 \(\htmlData{symbol=tp}{G}=8\) 是共同执行一个副本的卡数。每张卡都执行所有层，Q 的后一段投影切分输出头，O 的后一段投影切分输入通道。每卡产生 O 的一份部分和，再通过 all-reduce 汇成完整结果。</p>
+<div class="table-wrap"><table class="ds-table"><thead><tr><th>对象</th><th>全局大小</th><th>每 rank 的分工</th></tr></thead><tbody><tr><td>Query 头</td><td>128</td><td>16 个</td></tr><tr><td>输出投影组</td><td>16</td><td>2 组</td></tr><tr><td>Indexer 头</td><td>64</td><td>8 个</td></tr><tr><td>每层路由专家</td><td>384</td><td>48 个</td></tr><tr><td>shared KV / mHC 残差</td><td>每条目 512 维 / 每输入 [4, 7168]</td><td>完整副本</td></tr><tr><td>每层共享专家</td><td>1 个</td><td>完整副本</td></tr></tbody></table></div>
+<p>增加并行卡数会缩小路由权重和头分片，却保留每卡复制项。这里“共享 KV”指同卡上的多个 query 头共同读取一份向量；在这套分工中，各张卡有自己的相同 KV 副本。四路残差则是模型内部的激活轴，随每张卡上的输入共同流动。</p>
+<p>并行度还受可整除约束。头数、输出组数、Indexer 头数和专家数，都要能被 \(G\) 整除。Pro 的输出投影有 16 组，满足这些维度的均匀切分可选 G=1、2、4、8、16。 算出容量所需卡数后，还应与合法分片集合、设备拓扑和通信成本一起选择。</p></section>
+<section id="weights"><h2>2. 权重与量化 scale 的容量</h2>
+<p>路由专家占据大部分权重。一个专家由三块矩阵组成，每层专家数为 \(E=384\)，隐藏宽度 \(d=7168\)，中间宽度 \(m=3072\)，层数 \(L=61\)，所以主干路由专家参数量为</p>
+$$P_{\mathrm{route}}=L E\,3dm=1,547,396,186,112.$$
+<p>这份原生 FP4 布局沿矩阵的输入维度，每 32 个元素保存一个 8-bit scale。元素本体每个占半字节，scale 摊销每个占 1/32 字节，合计</p>
+$$b_{\mathrm{FP4}}=\frac{4}{8}+\frac{1}{32}=0.53125\ \mathrm{B/参数}.$$
+<p>于是主干路由权重共 765.5977 GiB，均分 8 卡后为 95.6997 GiB/卡。GiB 为 \(2^{30}\) 字节。每层共享专家使用 FP8，本体每元素 1 字节、每个 128×128 权重块配 1 字节 scale，所有层合计约 3.753159 GiB，并在各卡复制。</p>
+<p>把其余权重继续列成独立行：Q/KV/O 投影、embedding 与词表头、mHC、router、MTP。加载器和 kernel 使用的量化布局也要对应 checkpoint：packed 元素、scale 轴、块大小和转置顺序共同确定矩阵语义。将 checkpoint 转为另一种 FP4 格式时，需要重新计算这些元数据和对齐开销。</p>
+<p>FP4 的容量收益还要连接到实际 GEMM 路径。一个 Pro 专家有 63 Mi 个参数，原生 packed 权重和 scale 占 33.46875 MiB，完整展开成 BF16 会占 126 MiB。高效路径将解包、scale 应用与矩阵乘分块衔接，让当前 tile 在片上消费；若先在 HBM 写出整个 BF16 权重矩阵，再启动 GEMM，就会增加临时容量以及一遍写入、读取流量。检查 trace 中反量化 kernel 的输出形状和生命周期，才能判断 checkpoint 的压缩是否延伸到了执行阶段。</p>
+<figure class="article-figure" id="budget-demo"><h3>每卡容量：改变卡数、上下文与请求上限</h3><div class="ds-controls"><label>并行卡数<select id="budget-tp"><option value="1">1 卡</option><option value="2">2 卡</option><option value="4">4 卡</option><option value="8" selected>8 卡</option><option value="16">16 卡</option></select></label><label>上下文上限<select id="budget-context"><option value="32768">32,768</option><option value="131072">131,072</option><option value="1048576">1,048,576</option></select></label><label>请求上限<input id="budget-batch" type="range" min="1" max="32" value="8"><output id="budget-batch-out">8</output></label><label>每卡容量<select id="budget-capacity"><option value="80">80 GiB</option><option value="141">141 GiB</option></select></label></div><div class="ds-memory-track" aria-hidden="true"><span class="weight" id="budget-bar-weights"></span><span class="shared" id="budget-bar-shared"></span><span class="cache" id="budget-bar-cache"></span></div><div class="table-wrap"><table class="ds-table"><thead><tr><th>已计算项</th><th>每卡 GiB</th></tr></thead><tbody><tr><td>紫色：主干路由专家及 scale</td><td id="budget-weights"></td></tr><tr><td>橙色：主干共享专家及 scale</td><td id="budget-shared"></td></tr><tr><td>灰色：主 KV、Indexer、压缩状态</td><td id="budget-cache"></td></tr><tr><th>三项合计</th><th id="budget-total"></th></tr></tbody></table></div><p class="ds-state" id="budget-remaining"></p><p class="ds-caption">剩余预算用于其他权重、MTP、位置频率表、激活、通信 workspace 与分配器余量。缓存按 BF16，压缩状态按 FP32 计算。</p></figure>
+<p>在 8 卡、8 请求、32K 上限时，三项合计 102.056 GiB/卡，已经超过 80 GiB。将 TP 调到 16 后，路由权重变成 47.850 GiB/卡，三项降至约 54.206 GiB/卡。完整容量还需把剩余权重与执行峰值填入账本；实际部署也可以结合 PP 或其他并行组组织专家。 这也说明，部署的第一道判断是完整常驻量能否进入每张卡；每 token 激活约 49B 描述的是计算涉及的参数规模。</p></section>
+<section id="cache"><h2>3. 逐层计算历史状态</h2>
+<p>主 attention 每条 shared KV 为 512 个 BF16 元素，即 1024 字节。所有 61 层各有 128 条局部环形缓存；此外 30 个 CSA 层各保存约 \(N/4\) 条压缩记忆，31 个 HCA 层各保存约 \(N/128\) 条。设 \(\htmlData{symbol=context}{N}\) 是分配的上下文长度，单请求、单卡主 KV 为</p>
+$$M_{\mathrm{main}}=1024\left[61\times128+30\left\lfloor\frac{N}{4}\right\rfloor+31\left\lfloor\frac{N}{128}\right\rfloor\right]\ \mathrm B.$$
+<p>CSA 的 Indexer 还保存 128 维 BF16 索引向量，因此单请求索引缓存为 \(30\lfloor N/4\rfloor\times128\times2\) 字节。压缩器有未完成组的 value 与 gate 状态，两份都用 FP32。每个 CSA 层主压缩器和索引压缩器共 80 KiB，每个 HCA 层 512 KiB。</p>
+<div class="table-wrap"><table class="ds-table"><thead><tr><th>N=32,768，单请求/单卡</th><th>容量</th><th>增长因素</th></tr></thead><tbody><tr><td>全部主 KV</td><td>255.375 MiB</td><td>局部固定，压缩条目随 N 增长</td></tr><tr><td>Indexer cache</td><td>60 MiB</td><td>随 N/4 增长</td></tr><tr><td>未完成压缩组状态</td><td>17.843750 MiB</td><td>固定长度状态</td></tr><tr><th>合计</th><th>333.218750 MiB</th><th>各 rank 保存完整副本</th></tr></tbody></table></div>
+<p>这里区分“已使用的长度”和“预先分配的长度”尤其重要。参考实现创建缓存时按 <code>max_batch_size</code> 与 <code>max_seq_len</code> 分配。即使实际只来了一条短请求，分配上限也已经决定张量容量：</p>
+<pre><code>slots = window + (max_seq_len // ratio if ratio else 0)
 kv_cache = zeros(max_batch_size, slots, 512)
-if ratio == 4:  # CSA 的 Indexer
-    index_cache = zeros(max_batch_size, max_seq_len // 4, 128)</code></pre><p class="ws-lead">这类预分配创建模型时就占显存。实际只输入 32K token，也不会把 max_seq_len=1M 的大张量自动缩小。</p><table class="ws-table"><thead><tr><th>配置上限</th><th>32K × 8 请求</th><th>1,048,576 × 8 请求</th></tr></thead><tbody><tr><td>主 KV + Indexer + 暂存</td><td>2.603 GiB / 卡</td><td>77.136 GiB / 卡</td></tr></tbody></table><p class="ws-note">增大 max_batch_size 与 max_seq_len 之前先算乘积。动态按页分配可以按实际请求增长，但需要相应的 cache 管理与 kernel 支持。</p></section>
-
-<section class="slide ds" id="tensor">
-<div class="kicker">04 / Tensor Parallel</div>
-<h2>各卡算自己的头，再把输出加起来</h2>
-<p class="intro">图中展示 GPU 0–3；总共 128 个头分到 8 张卡。</p>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="各 GPU 并行完成局部注意力头，输出投影部分和通过 all-reduce 汇合">
-<g>
-<rect class="purple" x="15" y="25" width="205" height="56" rx="12"/>
-<text x="117.5" y="60.0" text-anchor="middle">GPU 0 · 16 Q 头</text>
-</g>
-<g>
-<rect class="box" x="315" y="25" width="280" height="56" rx="12"/>
-<text x="455.0" y="60.0" text-anchor="middle">读本地 KV → 注意力</text>
-</g>
-<g>
-<rect class="orange" x="690" y="25" width="160" height="56" rx="12"/>
-<text x="770.0" y="60.0" text-anchor="middle">O 的部分和</text>
-</g>
-<path class="wire" d="M220 53 L315 53"/>
-<path class="wire" d="M595 53 L690 53"/>
-<path class="wire" d="M850 53 L965 165"/>
-<circle id="tp0" class="token" cx="220" cy="53" r="9"/>
-<g>
-<rect class="purple" x="15" y="102" width="205" height="56" rx="12"/>
-<text x="117.5" y="137.0" text-anchor="middle">GPU 1 · 16 Q 头</text>
-</g>
-<g>
-<rect class="box" x="315" y="102" width="280" height="56" rx="12"/>
-<text x="455.0" y="137.0" text-anchor="middle">读本地 KV → 注意力</text>
-</g>
-<g>
-<rect class="orange" x="690" y="102" width="160" height="56" rx="12"/>
-<text x="770.0" y="137.0" text-anchor="middle">O 的部分和</text>
-</g>
-<path class="wire" d="M220 130 L315 130"/>
-<path class="wire" d="M595 130 L690 130"/>
-<path class="wire" d="M850 130 L965 165"/>
-<circle id="tp1" class="token" cx="220" cy="130" r="9"/>
-<g>
-<rect class="purple" x="15" y="179" width="205" height="56" rx="12"/>
-<text x="117.5" y="214.0" text-anchor="middle">GPU 2 · 16 Q 头</text>
-</g>
-<g>
-<rect class="box" x="315" y="179" width="280" height="56" rx="12"/>
-<text x="455.0" y="214.0" text-anchor="middle">读本地 KV → 注意力</text>
-</g>
-<g>
-<rect class="orange" x="690" y="179" width="160" height="56" rx="12"/>
-<text x="770.0" y="214.0" text-anchor="middle">O 的部分和</text>
-</g>
-<path class="wire" d="M220 207 L315 207"/>
-<path class="wire" d="M595 207 L690 207"/>
-<path class="wire" d="M850 207 L965 165"/>
-<circle id="tp2" class="token" cx="220" cy="207" r="9"/>
-<g>
-<rect class="purple" x="15" y="256" width="205" height="56" rx="12"/>
-<text x="117.5" y="291.0" text-anchor="middle">GPU 3 · 16 Q 头</text>
-</g>
-<g>
-<rect class="box" x="315" y="256" width="280" height="56" rx="12"/>
-<text x="455.0" y="291.0" text-anchor="middle">读本地 KV → 注意力</text>
-</g>
-<g>
-<rect class="orange" x="690" y="256" width="160" height="56" rx="12"/>
-<text x="770.0" y="291.0" text-anchor="middle">O 的部分和</text>
-</g>
-<path class="wire" d="M220 284 L315 284"/>
-<path class="wire" d="M595 284 L690 284"/>
-<path class="wire" d="M850 284 L965 165"/>
-<circle id="tp3" class="token" cx="220" cy="284" r="9"/>
-<g>
-<rect class="purple" x="930" y="130" width="185" height="74" rx="12"/>
-<text x="1022.5" y="174.0" text-anchor="middle">all-reduce</text>
-</g>
-</svg>
-<div class="caption">
-<div><b>输入可见于各卡</b>mHC 预混合得到 d 维输入，Q 投影按头分工。</div>
-<div><b>KV 共用的含义</b>同卡内多个头读一份 KV；此划分中各卡有 KV 副本。</div>
-<div><b>输出再合起来</b>分片输出投影产生部分和，all-reduce 得到完整结果。</div>
-</div>
-</section>
-<section class="slide workshop" id="collective-cost"><div class="kicker">工程细节</div><h2>all-reduce 的消息大小，先看 dtype</h2><div class="ws-equation">M = B·S·d·4 B　　ring 每卡发送量 ≈ 2(G−1)/G × M</div><p class="ws-lead">参考 O 投影在 all-reduce 前转成 FP32；MoE 的部分和也用 FP32。通信后再转回激活 dtype。</p><table class="ws-table"><thead><tr><th>B=32、S=1 的教学 ring 模型</th><th>算式</th><th>结果</th></tr></thead><tbody><tr><td>单个完整输出张量</td><td>32×7168×4</td><td>896 KiB</td></tr><tr><td>一次 all-reduce 每卡发送</td><td>2×(8−1)/8×M</td><td>1568 KiB</td></tr><tr><td>理想时间模型</td><td>2(G−1)α + 2(G−1)M/(Gβ)</td><td>启动延迟 + 带宽时间</td></tr></tbody></table><p class="ws-note">一层至少有 O 与 MoE 两次合并；CSA 还要合并 Indexer 分数。真实 collective 可能选择 tree 或其他算法，先从 trace 中确认消息形状、dtype 和算法。</p></section>
-<section class="slide workshop" id="reduce-worked"><div class="kicker">逐步演算 · 教学数值</div><h2>同一个输出坐标，把各卡部分和相加</h2><svg class="ws-visual" viewBox="0 0 1180 280" role="img" aria-label="依次将每个加权分量加入数值累加器"><rect x="60" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="175" y="57" text-anchor="middle">GPU 0 = 2</text><text x="175" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → 2</text><circle id="reduce-worked-part0" cx="175" cy="128" r="8" fill="var(--accent)"/><rect x="325" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="440" y="57" text-anchor="middle">GPU 1 = 3</text><text x="440" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → 3</text><circle id="reduce-worked-part1" cx="440" cy="128" r="8" fill="var(--accent)"/><rect x="590" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="705" y="57" text-anchor="middle">GPU 2 = -1</text><text x="705" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → -1</text><circle id="reduce-worked-part2" cx="705" cy="128" r="8" fill="var(--accent)"/><rect x="855" y="25" width="230" height="88" rx="12" fill="var(--surface)" stroke="var(--border)"/><text x="970" y="57" text-anchor="middle">GPU 3 = 4</text><text x="970" y="88" text-anchor="middle" fill="var(--text-soft)">权重 1 → 4</text><circle id="reduce-worked-part3" cx="970" cy="128" r="8" fill="var(--accent)"/><rect x="410" y="180" width="320" height="78" rx="14" fill="var(--accent-soft)" stroke="var(--accent)"/><text x="470" y="228">加权和</text><text id="reduce-worked-sum" x="660" y="229" text-anchor="middle">0.00</text></svg><p class="ws-caption">演算 Pro 8 卡中的一个坐标，GPU 4–7 对它的贡献设为 0。合并结果为 8，每张卡都得到这个完整结果；如果少加一张卡，后续 mHC 与路由都会随之改变。这里只画求和语义，ring 实际按块传输。</p></section>
-
-
-<section class="slide ds" id="local-experts">
-<div class="kicker">05 / 按专家分权重</div>
-<h2>专家待在原卡，token 在那里计算</h2>
-<p class="intro">这组划分中：各卡都有 token 表示，执行本地专家后合并。GPU 4–7 对该示例 token 无路由专家任务。</p>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="六个路由专家分布在四张卡，每张卡计算本地被选专家并归约">
-<g>
-<rect class="orange" x="15" y="120" width="195" height="80" rx="12"/>
-<text x="112.5" y="167.0" text-anchor="middle">相同 token 表示</text>
-</g>
-<g>
-<rect class="box" x="350" y="15" width="370" height="58" rx="12"/>
-<text x="535.0" y="51.0" text-anchor="middle">GPU 0 计算：E0、E2</text>
-</g>
-<path class="wire" d="M210 160 L350 44"/>
-<path class="wire" d="M720 44 L920 160"/>
-<circle id="ep0" class="token" cx="210" cy="160" r="9"/>
-<g>
-<rect class="box" x="350" y="93" width="370" height="58" rx="12"/>
-<text x="535.0" y="129.0" text-anchor="middle">GPU 1 计算：E48</text>
-</g>
-<path class="wire" d="M210 160 L350 122"/>
-<path class="wire" d="M720 122 L920 160"/>
-<circle id="ep1" class="token" cx="210" cy="160" r="9"/>
-<g>
-<rect class="box" x="350" y="171" width="370" height="58" rx="12"/>
-<text x="535.0" y="207.0" text-anchor="middle">GPU 2 计算：E96、E97</text>
-</g>
-<path class="wire" d="M210 160 L350 200"/>
-<path class="wire" d="M720 200 L920 160"/>
-<circle id="ep2" class="token" cx="210" cy="160" r="9"/>
-<g>
-<rect class="box" x="350" y="249" width="370" height="58" rx="12"/>
-<text x="535.0" y="285.0" text-anchor="middle">GPU 3 计算：E144</text>
-</g>
-<path class="wire" d="M210 160 L350 278"/>
-<path class="wire" d="M720 278 L920 160"/>
-<circle id="ep3" class="token" cx="210" cy="160" r="9"/>
-<g>
-<rect class="purple" x="900" y="118" width="215" height="85" rx="12"/>
-<text x="1007.5" y="167.5" text-anchor="middle">加权部分和归约</text>
-</g>
-<text x="1000" y="250" class="soft" text-anchor="middle">再加共享专家</text>
-</svg>
-<div class="caption">
-<div><b>路由一次选 6 个</b>图中专家 ID 是一组示例，可能集中或分散在各卡。</div>
-<div><b>本地权重留在 HBM</b>本轮没选中的专家仍然常驻，只是不参与该 token。</div>
-<div><b>汇合后继续</b>本地加权结果 all-reduce，再加共享专家。</div>
-</div>
-</section>
-<section class="slide workshop" id="expert-occupancy"><div class="kicker">工程细节</div><h2>batch 变大，读取的专家权重也会变多</h2><div class="ws-equation">E[本轮不同专家数] = E × [1 − (1 − 6/E)ᴮ]</div><p class="ws-lead">在均匀、各 token 独立选择的教学模型下，B=1 激活 6 个路由专家；B=32 时，Pro 每层预计访问约 152.0 / 384 个专家。</p><table class="ws-table"><thead><tr><th>看起来矛盾的现象</th><th>原因</th><th>该记录什么</th></tr></thead><tbody><tr><td>batch 变大、吞吐升高</td><td>一个 GEMM 处理更多 token</td><td>tokens/s、tokens/expert</td></tr><tr><td>本轮读权重更多</td><td>多请求覆盖更多专家</td><td>不同专家数、HBM bytes</td></tr><tr><td>平均负载低但尾延迟高</td><td>少数热点拖住同步</td><td>每 rank 的专家计数与耗时</td></tr></tbody></table><p class="ws-note">公式只描述均匀路由基线。真实请求常有关联，必须看实际路由分布；不能把“单 token 激活参数×batch”当作实际权重读取字节数。</p></section>
-
-<section class="slide ds" id="dispatch">
-<div class="kicker">06 / 高吞吐 Expert Parallel</div>
-<h2>token 分片时：发输入，收结果</h2>
-<p class="intro">服务系统还可以把 token 分散到各卡，再按需交换激活。这样就得到典型的 EP dispatch / combine。</p>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="EP 将 token 激活发送给专家所在卡，专家读取本地权重并返回结果">
-<g>
-<rect class="purple" x="15" y="105" width="205" height="110" rx="12"/>
-<text x="117.5" y="167.0" text-anchor="middle">token 所属卡</text>
-</g>
-<g>
-<rect class="box" x="430" y="30" width="255" height="70" rx="12"/>
-<text x="557.5" y="72.0" text-anchor="middle">专家所在卡 1</text>
-</g>
-<g id="epresult0">
-<rect class="orange" x="830" y="30" width="275" height="70" rx="12"/>
-<text x="967.5" y="72.0" text-anchor="middle">专家结果</text>
-</g>
-<path class="wire" d="M220 160 L430 65"/>
-<path class="wire" d="M685 65 L830 65"/>
-<circle id="dispatch0" class="token" cx="220" cy="160" r="9"/>
-<g>
-<rect class="box" x="430" y="133" width="255" height="70" rx="12"/>
-<text x="557.5" y="175.0" text-anchor="middle">专家所在卡 2</text>
-</g>
-<g id="epresult1">
-<rect class="orange" x="830" y="133" width="275" height="70" rx="12"/>
-<text x="967.5" y="175.0" text-anchor="middle">专家结果</text>
-</g>
-<path class="wire" d="M220 160 L430 168"/>
-<path class="wire" d="M685 168 L830 168"/>
-<circle id="dispatch1" class="token" cx="220" cy="160" r="9"/>
-<g>
-<rect class="box" x="430" y="236" width="255" height="70" rx="12"/>
-<text x="557.5" y="278.0" text-anchor="middle">专家所在卡 3</text>
-</g>
-<g id="epresult2">
-<rect class="orange" x="830" y="236" width="275" height="70" rx="12"/>
-<text x="967.5" y="278.0" text-anchor="middle">专家结果</text>
-</g>
-<path class="wire" d="M220 160 L430 271"/>
-<path class="wire" d="M685 271 L830 271"/>
-<circle id="dispatch2" class="token" cx="220" cy="160" r="9"/>
-</svg>
-<div class="caption">
-<div><b>Dispatch</b>按专家目的地打包 token 激活，发给对应卡。</div>
-<div><b>本地专家计算</b>先算 gate / up，再做 SwiGLU 和 down 投影。</div>
-<div><b>Combine</b>结果回到 token 所属卡，按路由权重相加。</div>
-</div>
-</section>
-<section class="slide workshop" id="dispatch-ledger"><div class="kicker">工程细节</div><h2>换成 token 分片，通信账本也要换</h2><div class="ws-equation">朴素 dispatch payload = B·S·k·d·bytes</div><p class="ws-lead">全局 32 个 token、k=6、BF16：输入 payload 为 32×6×7168×2 = 2688 KiB；返回每个专家结果也是这个数量级。</p><div class="ws-cols"><div class="ws-card"><p class="ws-note">同一 token 的多个专家在同一 rank 时，可以先按目的 rank 合并发送，再在目标卡展开。算网络量时还要扣掉本地专家，加入 IDs、权重与对齐。</p></div><div class="ws-card"><p class="ws-note">参考路径已在各 rank 复制 token，只执行本地专家，然后 all-reduce。token 分片路径要有 dispatch、反向 combine，以及保持 token 顺序的索引。</p></div></div><p class="ws-note">两种路径可以表达同一个 MoE 结果，但不能把 token 分片的通信量直接套到复制输入的代码上。</p></section>
-
-<section class="slide ds" id="append">
-<div class="kicker">07 / Decode cache</div>
-<h2>每来一个 token，更新局部；满一组，再记长期</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="局部 KV 环形覆盖，四个新 token 组成一个新的 CSA 压缩条目">
-<text x="20" y="35" class="soft" text-anchor="start">最近窗口：环形更新，始终只保留最近 128 个位置</text>
-<g id="ring0">
-<rect class="box" x="20" y="60" width="115" height="45" rx="12"/>
-<text x="77.5" y="89.5" text-anchor="middle">KV 0</text>
-</g>
-<g id="ring1">
-<rect class="box" x="155" y="60" width="115" height="45" rx="12"/>
-<text x="212.5" y="89.5" text-anchor="middle">KV 1</text>
-</g>
-<g id="ring2">
-<rect class="box" x="290" y="60" width="115" height="45" rx="12"/>
-<text x="347.5" y="89.5" text-anchor="middle">KV 2</text>
-</g>
-<g id="ring3">
-<rect class="box" x="425" y="60" width="115" height="45" rx="12"/>
-<text x="482.5" y="89.5" text-anchor="middle">KV 3</text>
-</g>
-<g id="ring4">
-<rect class="box" x="560" y="60" width="115" height="45" rx="12"/>
-<text x="617.5" y="89.5" text-anchor="middle">KV 4</text>
-</g>
-<g id="ring5">
-<rect class="box" x="695" y="60" width="115" height="45" rx="12"/>
-<text x="752.5" y="89.5" text-anchor="middle">KV 5</text>
-</g>
-<g id="ring6">
-<rect class="box" x="830" y="60" width="115" height="45" rx="12"/>
-<text x="887.5" y="89.5" text-anchor="middle">KV 6</text>
-</g>
-<g id="ring7">
-<rect class="box" x="965" y="60" width="115" height="45" rx="12"/>
-<text x="1022.5" y="89.5" text-anchor="middle">KV 7</text>
-</g>
-<text x="20" y="153" class="soft" text-anchor="start">CSA：新 token 先进入压缩状态，每满 4 个追加一条</text>
-<g id="append0">
-<rect class="orange" x="20" y="180" width="115" height="55" rx="12"/>
-<text x="77.5" y="214.5" text-anchor="middle">t+1</text>
-</g>
-<g id="append1">
-<rect class="orange" x="155" y="180" width="115" height="55" rx="12"/>
-<text x="212.5" y="214.5" text-anchor="middle">t+2</text>
-</g>
-<g id="append2">
-<rect class="orange" x="290" y="180" width="115" height="55" rx="12"/>
-<text x="347.5" y="214.5" text-anchor="middle">t+3</text>
-</g>
-<g id="append3">
-<rect class="orange" x="425" y="180" width="115" height="55" rx="12"/>
-<text x="482.5" y="214.5" text-anchor="middle">t+4</text>
-</g>
-<g>
-<rect class="purple" x="700" y="180" width="380" height="55" rx="12"/>
-<text x="890.0" y="214.5" text-anchor="middle">长期压缩 KV：… cₙ</text>
-</g>
-<g id="newentry" class="later">
-<g>
-<rect class="purple" x="960" y="253" width="120" height="45" rx="12"/>
-<text x="1020.0" y="282.5" text-anchor="middle">cₙ₊₁</text>
-</g>
-</g>
-<text x="20" y="305" class="soft" text-anchor="start">HCA 每满 128 个才产出一条；CSA indexer 也维护自己的压缩 key。</text>
-</svg>
-<div class="caption">
-<div><b>窗口更新</b>新 KV 写入当前位置，最老的局部位置被复用。</div>
-<div><b>压缩追加</b>只在组完成后追加条目；未满组保留在状态 buffer。</div>
-<div><b>严格因果</b>每个 query 只读当时已完成、已可见的压缩条目。</div>
-</div>
-</section>
-<section class="slide workshop" id="cache-correctness"><div class="kicker">工程细节</div><h2>把整段和逐 token 路径对在一起</h2><pre class="ws-code"><code>full = forward_all(tokens)          # 每层截取检查点
-reset_cache()
-for t in range(len(tokens)):
-    step = forward_one(tokens[t], position=t)
-    compare(step, full[t], atol, rtol)</code></pre><p class="ws-lead">按顺序检查：局部环形区 → 主压缩 KV → 索引压缩 KV → top-k IDs → attention 输出 → MoE 输出。先固定模型权重与 token，暂时移除随机采样。</p><p class="ws-note">重点长度：3/4/5、7/8/9、127/128/129；同时检查不同请求的 cache 是否隔离。浮点路径不同可能产生小误差，首次显著偏差的位置最有诊断价值。</p></section>
-
-<section class="slide ds" id="decode">
-<div class="kicker">08 / Decode 循环</div>
-<h2>生成一个，再接着生成一个</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="每个 decode token 依次经过所有层和输出头，然后进入下一轮">
-<g>
-<rect class="orange" x="15" y="110" width="160" height="85" rx="12"/>
-<text x="95.0" y="159.5" text-anchor="middle">当前 token</text>
-</g>
-<g>
-<rect class="purple" x="270" y="80" width="265" height="145" rx="12"/>
-<text x="402.5" y="159.5" text-anchor="middle">全部 61 层</text>
-</g>
-<g>
-<rect class="box" x="625" y="110" width="185" height="85" rx="12"/>
-<text x="717.5" y="159.5" text-anchor="middle">输出头</text>
-</g>
-<g>
-<rect class="orange" x="910" y="110" width="195" height="85" rx="12"/>
-<text x="1007.5" y="159.5" text-anchor="middle">采样新 token</text>
-</g>
-<path class="wire" d="M175 152 L270 152"/>
-<path class="wire" d="M535 152 L625 152"/>
-<path class="wire" d="M810 152 L910 152"/>
-<path class="wire" d="M1007 195 V285 H95 V195"/>
-<circle id="cycle" class="token" cx="95" cy="178" r="9"/>
-<text x="565" y="325" class="soft" text-anchor="middle">每一轮：逐层计算并更新 cache → 采样 → 追加 token → 下一轮</text>
-</svg>
-<div class="caption">
-<div><b>计算要穿过所有层</b>每层都包含 Attention、MoE 和 mHC。</div>
-<div><b>KV 留着复用</b>历史 token 的每层表示无需从头再算。</div>
-<div><b>权重反复被读取</b>模型有 1.6T 参数；每 token 激活约 49B，所选专家随 token 变化。</div>
-</div>
-</section>
-<section class="slide ds" id="budget">
-<div class="kicker">09 / 计算与内存账</div>
-<h2>快在哪里，取决于本轮在等什么</h2>
-<div class="twocol">
-<div class="panel">
-<h3>Prefill：一批 token</h3>
-<p>大矩阵乘法更容易占满计算单元；长序列还要读写注意力状态和生成压缩 KV。</p>
-</div>
-<div class="panel">
-<h3>Decode：每请求一个 token</h3>
-<p>小 batch 常受权重 / KV 读取和通信延迟影响。合批增加权重复用；请求也会争用 KV 空间。</p>
-</div>
-</div>
-<div class="formula">每卡显存 = 本地权重 + KV 副本 + 压缩状态 + 激活 / 工作区</div>
-<p class="intro">估容量用完整权重的实际存储精度、分片与复制方式，再加请求的 KV。49B 激活参数描述每 token 计算规模。</p>
-<p class="note">MTP 可先给出草稿，再由主干验证；收益还取决于接受率、验证开销与 batch。</p>
-</section>
-<section class="slide workshop" id="critical-path"><div class="kicker">工程细节</div><h2>先优化端到端关键路径上的最大空档</h2><p class="ws-lead">教学测量：一次 decode 的 attention 6 ms、专家计算 8 ms、未隐藏通信 12 ms、CPU/调度 2 ms，共 28 ms。</p><p class="ws-lead">把专家计算优化 2 倍，仅节省 4 ms，整轮降到 24 ms（1.17×）。若先减少 8 ms 的暴露通信，整轮变 20 ms（1.40×）。</p><div class="ws-cols"><div class="ws-card"><p class="ws-note">记录一次完整请求：排队、prefill、每步 decode。区分 TTFT、TPOT、吞吐和 p95/p99；显存利用率不是算力利用率。</p></div><div class="ws-card"><p class="ws-note">GPU kernel 时间之和可包含重叠，CPU 计时又可能只测到异步提交。沿时间线找暴露在关键路径上的部分，再算优化上限。</p></div></div></section>
-<section class="slide workshop" id="timing-code"><div class="kicker">工程细节</div><h2>测量前同步，计时区间包住真实计算</h2><pre class="ws-code"><code>torch.cuda.synchronize()
-start, end = torch.cuda.Event(enable_timing=True), torch.cuda.Event(enable_timing=True)
+index_cache = zeros(max_batch_size, max_seq_len // 4, 128)</code></pre>
+<p>Pro 设 8 请求、32K 上限时，上述缓存约 2.603 GiB/卡；改为 1,048,576 长度上限后约 77.136 GiB/卡。调大上下文上限会在请求到来前改变显存占用。服务框架的分页管理可以按需分配实际页面，但容量估算应使用它实际实现的压缩状态布局和量化格式。</p>
+<p>更新缓存时，当前位置写入局部槽 \(t\bmod128\)；CSA 在 \((t+1)\bmod4=0\) 追加一条压缩记忆，HCA 在 \((t+1)\bmod128=0\) 追加一条。压缩组完成后才对当前及后续 query 可见。跨 chunk 保存的 remainder 决定下一组能否继续正确池化。</p></section>
+<section id="prefill"><h2>4. 长 prefill 的峰值从哪里来</h2>
+<p>常驻缓存能放下，prefill 仍可能在构造中间张量时触及容量上限。以一条 32K prompt 为例，CSA 候选数为 8192。参考 Indexer 先为每个本地索引头计算 query×候选分数，张量形状为</p>
+$$[B,S,H_{\mathrm{index}}/G,C]=[1,32768,8,8192].$$
+<p>这里 \(B\) 为请求数，\(S\) 为这次 prefill 的 query 数，\(H_{\mathrm{index}}=64\)，\(C\) 为压缩候选数。按 BF16，这个中间张量单层就达到 4 GiB；按头求和后的 \([1,32768,8192]\) 仍有 512 MiB。最终留下 1024 条 top-k 结果，只描述结果大小；执行峰值取决于它之前产生了什么。</p>
+<p>如果报错出现在 Indexer 的 score 分配，先保留同一批输入，记录每层峰值与分配形状，再尝试缩短本轮 prefill chunk 或启用分块、融合的 score/top-k 路径。分块把中间态限制在较小的 query/candidate 范围，逐步合并选择结果。验证时同时检查 chunk 边界：局部窗口顺序、CSA 重叠组、未完成 remainder 和 query 的因果可见范围。</p>
+<p>参考 forward 的 <code>start_pos&gt;0</code> 路径使用逐 token 的状态更新。为它添加多 token chunk 时，需要让状态机显式覆盖整个 chunk 内的多个组完成点。测试长度选 3/4/5、7/8/9、127/128/129，再分别用整段、单 token、不同 chunk 切分读取同一输入，比较每个位置的输出。</p></section>
+<section id="flow"><h2>5. 一个 Block 怎样经过各张卡</h2>
+<p>同一层开始时，每卡都有相同的四路残差。mHC 汇合后得到 \([B,S,7168]\)，各卡用自己的 query 头读取本地 KV。输出投影把本地头的结果映射为 \([B,S,7168]\) 的部分和，归约后各卡得到完整 attention 输出。接着 MoE 执行分到本卡的路由专家，再归约各卡的加权部分和，最后加上本地共享专家结果。</p>
+<figure class="article-figure" id="flow-demo"><h3>固定各卡的位置，跟踪一层的数据状态</h3><p class="ds-caption">每格是一张卡。attention 归约使用一个输出坐标的数值例子：各卡部分和为 [2, 3, -1, 4, 5, -2, 1, 4]。当前位置为 t=32,768，局部缓存写入槽位 0。</p><div class="ds-flow" id="flow-cards"></div><p class="ds-state" id="flow-result"></p></figure>
+<p>图中的归约将 [2, 3, -1, 4, 5, -2, 1, 4] 相加得到 16，并把结果交给所有 rank。GPU 实际执行时，每个 rank 处理的是整批向量和多个通道。只要某个 rank 的局部计算尚未完成，依赖它的 collective 就要等待；所以时间线中一张卡上的“通信耗时”也可能含有等待其他卡到达的时间。</p>
+<p>层与层之间还有严格依赖：当前层的 mHC 输出决定下一层输入。一次 decode 依次经过全部 61 层，再经输出头和采样器生成下一枚 token。下一枚 token 在下一次模型调用中被消费并写入各层缓存，这正是缓存生命周期与输出计数需要分开跟踪的原因。</p></section>
+<section id="communication"><h2>6. 从张量形状推导通信量</h2>
+<p>参考 O 投影在 all-reduce 前将输出转为 FP32，MoE 部分和也用 FP32。设 \(\htmlData{symbol=batch}{B}\) 为请求数，\(\htmlData{symbol=query}{S}\) 为本轮每请求输入数，\(d=7168\)，一次归约的完整消息大小为</p>
+$$\htmlData{symbol=payload}{M}=BSd\times4\ \mathrm B.$$
+<p>Ring 的 reduce-scatter 与 all-gather 各运行 \(G-1\) 轮，每轮发送 \(M/G\) 字节。因此每卡发送总量为 \(2(G-1)M/G\)。若每轮启动时间为 \(\htmlData{symbol=alpha}{\alpha}\)，有效链路带宽为 \(\htmlData{symbol=beta}{\beta}\)，粗略时间模型为</p>
+$$T_{\mathrm{ring}}\approx2(G-1)\alpha+\frac{2(G-1)M}{G\beta}.$$
+<p>B=32、S=1、G=8 时，完整输出张量为 896 KiB，一次 ring 每卡发送 1568 KiB。一层至少包含 O 与 MoE 两次合并，CSA 还包含 Indexer 分数归约。实际 collective 可以采用不同算法；trace 中的张量形状、dtype、参与 rank 与拓扑，决定该用哪一份时间账本。</p>
+<p>用一组假设链路参数估算：每轮启动 1 μs、有效带宽 100 GB/s，上述归约的固定项为 14 μs，字节项约 16.056 μs，合计约 30.056 μs。扩展到更多卡时，权重分片继续缩小，而 ring 的轮数增加；跨节点链路还会改变启动时间与有效带宽。选择 TP 时，可以将每层计算节省量与新增通信时间放在同一张表中。</p>
+<p>如果将通信 dtype 改成 BF16，payload 减半，固定启动成本仍然存在。小 batch 下，大量小 collective 的启动延迟可能占主要部分；大 batch 下，字节与链路带宽的比值更重要。改归约精度后，应重新比较 logits、top-k 专家和长生成结果。</p></section>
+<section id="schedule"><h2>7. 专家负载与通信重叠</h2>
+<p>一个 token 选择 6 个路由专家。合批之后，不同 token 可能选择不同专家，因此本轮读取的专家集合也会变大。令 \(E=384\) 是一层路由专家数，假设每个 token 均匀独立选择 6 个专家，一个专家未被 B 条请求选中的概率为 \((1-6/E)^B\)，于是</p>
+$$\mathbb E[\text{本轮不同专家数}]=E\left[1-\left(1-\frac6E\right)^B\right].$$
+<p>B=32 时，预计访问约 152.0 个专家。这个基线帮助解释合批的双重效果：每个专家可以处理更多 token 行，同时更多专家的权重被读取。实际分布需要记录每专家 token 数、每 rank 的不同专家数和耗时，才能区分大量小 GEMM 与少数热点。</p>
+<p>另一种服务组织方式是先把 token 分给不同 rank，再将激活 dispatch 到专家所在卡，计算完成后 combine 回 token 所属卡。全局 32 个 token、每个选 6 个专家、BF16 输入时，朴素输入 payload 为 \(32\times6\times7168\times2=2688\) KiB。按目标 rank 合并同一 token 的发送、扣除本地专家后，网络字节数会变化；IDs、路由权重与对齐还形成元数据。</p>
+<p>Dispatch、expert GEMM、combine 可以分波次流水。以下时间线为四个波次设定 dispatch=2 ms、计算=3 ms、combine=2 ms，并让三种资源分别处理各自队列。第一个波次在 7 ms 结束，后续每 3 ms 完成一个，总长 16 ms；全部串行则为 28 ms。</p>
+<figure class="article-figure" id="wave-demo"><h3>依赖满足后，下一种资源立即接手</h3><div class="figure-scroll"><div class="ds-timeline" id="wave-lanes"></div></div><div class="ds-stats"><div><small>当前时刻</small><strong id="wave-time">0 ms</strong></div><div><small>完成的波次</small><strong id="wave-done">0 / 4</strong></div><div><small>流水 / 串行总时长</small><strong>16 / 28 ms</strong></div></div></figure>
+<p>重叠收益来自独立资源并行工作，关键路径仍受最长服务阶段控制。若 dispatch 与 combine 争用同一链路，或某个专家波次变成热点，应把共享资源约束加入调度。优化评估沿依赖关系找出实际空档，并计算每阶段对端到端耗时的贡献。</p></section>
+<section id="debug"><h2>8. 容量、并行与数值的工程取舍</h2>
+<h3>模型刚加载就 OOM</h3><p>先分开记录权重加载完成、cache 创建完成、第一次 prefill 三个时刻的 allocated 与 reserved 显存。权重阶段超限，核对 packed dtype、scale、每 rank 的专家范围和复制权重；cache 阶段跃升，核对 batch/sequence 上限；第一次 prefill 跃升，再定位 score、临时激活或 workspace 的分配。这三个时刻对应三种不同调整对象。</p>
+<h3>同一个求和，为什么改变并行组织后数值会变</h3><p>浮点加法的舍入与求和顺序有关。改变 batch、分块大小或归约树，会改变部分和在哪一级相加；低精度输入与 FP32 累积又形成另一组数值边界。如果两个 Indexer 候选分数十分接近，小差异就可能改变 top-k 集合，随后放大为 attention 输出差异。应先测固定输入下的分数误差与第 k、第 k+1 名的间隔，再判断这次选择变化来自正常舍入还是状态更新错误。</p><p>对吞吐优化采用固定的硬件、软件和输入集合建立基线，分别记录最大误差、logprob 与选择结果。在确定性配置下做回归，可以压缩运行间波动；在高吞吐配置下改变 batch 和并行度，则检验系统对实际调度的数值稳定性。</p>
+<h3>同一输入在换 batch 或换 TP 后生成不同</h3><p>先用固定 token 做 teacher forcing，逐位置比较 logprob 与关键中间张量，定位第一次分歧。若压缩 KV 相同而 top-k 不同，检查分数归约和并列项的选择规则；若专家 ID 相同而输出不同，继续比较局部 GEMM、共享专家激活裁剪和归约精度。生成过程会将一个早期 token 差异放大为完全不同的后续序列，因此逐位置证据比末尾文本更有效。</p>
+<h3>GPU 时间变短，用户仍觉得慢</h3><p>将请求拆成排队、prefill 与逐步 decode，分别记录 TTFT、ITL、吞吐和尾分位数。设一次 decode 的暴露开销为 attention 3 ms、专家 5 ms、通信 2 ms、CPU/调度 6 ms，总计 16 ms。专家加速两倍得到 13.5 ms，即 1.19×；CPU 降至 1 ms 则得到 11 ms，即 1.45×。优化顺序由实际关键路径决定。</p>
+<pre><code># 已加载模型上的设备计时；warm-up 后测量
+start = torch.cuda.Event(enable_timing=True)
+end = torch.cuda.Event(enable_timing=True)
+torch.cuda.synchronize()
 start.record()
-with torch.profiler.record_function(&quot;decode_step&quot;):
-    logits = model(tokens, start_pos=position)
+logits = model(tokens, start_pos=position)
 end.record()
 end.synchronize()
-print(start.elapsed_time(end), &quot;ms&quot;)</code></pre><p class="ws-note">先 warm-up，再重复多轮。CUDA event 只覆盖所在设备/stream 的时间线；多卡用每个 rank 的时间和通信 trace 定位最慢的一张卡，端到端延迟另用 wall clock 记录。</p><p class="ws-note">运行这段示意代码需要 PyTorch、CUDA 和已加载模型；配套 lab 使用 CPU 解析模拟。</p></section>
-
-<section class="slide ds" id="waves">
-<div class="kicker">10 / 通信与计算重叠</div>
-<h2>切成小波次，让传输和计算接上</h2>
-<svg class="scene" viewBox="0 0 1128 330" role="img" aria-label="多个专家 wave 在 dispatch、计算和 combine 阶段交错推进">
-<text x="20" y="64" class="" text-anchor="start">Dispatch</text>
-<g id="wave00">
-<rect class="orange" x="180" y="30" width="145" height="55" rx="12"/>
-<text x="252.5" y="64.5" text-anchor="middle">wave 1</text>
-</g>
-<g id="wave01">
-<rect class="orange" x="385" y="30" width="145" height="55" rx="12"/>
-<text x="457.5" y="64.5" text-anchor="middle">wave 2</text>
-</g>
-<g id="wave02">
-<rect class="orange" x="590" y="30" width="145" height="55" rx="12"/>
-<text x="662.5" y="64.5" text-anchor="middle">wave 3</text>
-</g>
-<text x="20" y="154" class="" text-anchor="start">专家计算</text>
-<g id="wave10">
-<rect class="purple" x="330" y="120" width="145" height="55" rx="12"/>
-<text x="402.5" y="154.5" text-anchor="middle">wave 1</text>
-</g>
-<g id="wave11">
-<rect class="purple" x="535" y="120" width="145" height="55" rx="12"/>
-<text x="607.5" y="154.5" text-anchor="middle">wave 2</text>
-</g>
-<g id="wave12">
-<rect class="purple" x="740" y="120" width="145" height="55" rx="12"/>
-<text x="812.5" y="154.5" text-anchor="middle">wave 3</text>
-</g>
-<text x="20" y="244" class="" text-anchor="start">Combine</text>
-<g id="wave20">
-<rect class="orange" x="480" y="210" width="145" height="55" rx="12"/>
-<text x="552.5" y="244.5" text-anchor="middle">wave 1</text>
-</g>
-<g id="wave21">
-<rect class="orange" x="685" y="210" width="145" height="55" rx="12"/>
-<text x="757.5" y="244.5" text-anchor="middle">wave 2</text>
-</g>
-<g id="wave22">
-<rect class="orange" x="890" y="210" width="145" height="55" rx="12"/>
-<text x="962.5" y="244.5" text-anchor="middle">wave 3</text>
-</g>
-<path class="flow" id="waveclock" d="M180 15 L180 285"/>
-<text x="1070" y="300" class="tiny" text-anchor="end">时间 →</text>
-<text x="565" y="325" class="soft" text-anchor="middle">下一波在传输入，这一波在计算，上一波在传结果。</text>
-</svg>
-<div class="caption">
-<div><b>分成 waves</b>每波只放一部分专家任务。</div>
-<div><b>就绪就开算</b>当前波收齐输入，立即进入计算。</div>
-<div><b>看剩下的等待</b>性能由关键路径决定；重叠程度取决于负载与互连。</div>
-</div>
-</section>
-<section class="slide workshop" id="exercise-capacity"><div class="kicker">练习 1</div><h2>8×80 GiB 不够，下一步怎么选</h2><div class="ws-prompt">Pro 主干路由专家含 scale 为 765.5977 GiB。暂时只按这项算容量下界：至少几张 80 GiB 卡？再要求 TP 整除输出组16、Q头128、Indexer头64、专家384，最小合法卡数是多少？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-note">字节下界是 ceil(765.5977/80)=10；10 不整除这些维度。可选 TP 为 1、2、4、8、16，因此最小满足这个下界的是 16。路由权重变为 47.8499 GiB / 卡。</p><p class="ws-note">这仍不是完整部署容量证明。再加共享权重、每卡复制缓存、MTP 与峰值 workspace；若硬件/通信拓扑不适合16路TP，还可设计 PP 或不同并行组。</p></details></div><p class="ws-note">先写出张量形状与单位，再代入数字。</p></section>
-<section class="slide workshop" id="exercise-cache"><div class="kicker">练习 2</div><h2>上下文翻四倍，为什么缓存不是整整四倍</h2><div class="ws-prompt">Pro 单请求 32K 时 cache 为 333.219 MiB。把 N 改为131,072，求主 KV+Indexer+暂存。哪些项不随 N 增长？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-note">主 KV = 1024×[61×128+30×32768+31×1024] B = 998.625 MiB。Indexer = 30×32768×128×2 B = 240 MiB。</p><p class="ws-note">再加固定暂存 17.8438 MiB，总计 1256.47 MiB。局部128窗口和未完成组暂存不随 N 增长，所以总量小于原先的4倍。</p></details></div><p class="ws-note">先写出张量形状与单位，再代入数字。</p></section>
-<section class="slide workshop" id="exercise-allreduce"><div class="kicker">练习 3</div><h2>有一张卡慢，合并就得等它</h2><div class="ws-prompt">TP=8、B=32、S=1，O 投影的 FP32 输出大小为 M。算 ring 每卡发送字节数；若另一份实现用 BF16 通信，payload 会变多少？何时延迟却不会减半？</div><div class="widget" data-interactive><details class="ws-answer"><summary>展开参考解答</summary><p class="ws-note">M=32×7168×4=917,504 B。发送量 2×(8−1)/8×M=1,605,632 B，即 1568 KiB。BF16 payload 减半。</p><p class="ws-note">小消息受启动延迟 α 支配；rank 等待、拥塞或计算失衡也不会随 dtype 减半。改变通信精度还要重新检验归约误差。</p></details></div><p class="ws-note">先写出张量形状与单位，再代入数字。</p></section>
-<section class="slide workshop" id="engineering-lab"><div class="kicker">动手实验</div><h2>把推导变成可以检查的程序</h2><p class="ws-lead">逐层计算真实形状对应的 cache、FP4 scale 开销和并行容量条件，并模拟环形 cache、归约与调度账本。</p><pre class="ws-code"><code>python3 lab.py
-python3 lab.py --context 131072 --batch 8</code></pre><pre class="ws-code"><code>cache @ 32768: 333.218750 MiB/request/rank
+print(start.elapsed_time(end), "ms")</code></pre>
+<p>CUDA event 记录所在设备和 stream 的时间线。多卡为每个 rank 保存事件与通信 trace，再用 wall clock 记录完整请求；最慢 rank 与请求排队会共同影响服务延迟。改变 batch 时，也要同时记录缓存容量、专家负载与 SLO 达标吞吐。</p></section>
+<section id="practice"><h2>9. 练习与实验</h2>
+<div class="article-exercise"><h3>练习 1：容量与合法并行度</h3><p>主干路由专家含 scale 共 765.597656 GiB。先求 80 GiB 卡的字节下界，再要求 TP 整除输出组 16、Q 头 128、Indexer 头 64、专家 384，求最小合法 TP。</p><details><summary>展开解答</summary><p>仅按路由权重，ceil(765.597656/80)=10 张。合法均匀 TP 是 1、2、4、8、16，其中满足该容量下界的最小值为 16，路由权重变为 47.849854 GiB/卡。共享权重、缓存和运行时峰值继续加在这项之上。</p></details></div>
+<div class="article-exercise"><h3>练习 2：上下文扩大四倍</h3><p>单请求上下文上限由 32,768 改为 131,072，仍使用 BF16 缓存与 FP32 压缩状态。计算主 KV、Indexer、状态与合计容量。</p><details><summary>展开解答</summary><p>主 KV 为 998.625 MiB，Indexer 为 240 MiB，压缩状态保持 17.843750 MiB，总计 1256.468750 MiB。固定的局部窗口和未完成组状态使总量小于原来的四倍。每 rank 保存这些副本，所以增加 TP 不改变本题的每卡缓存数。</p></details></div>
+<div class="article-exercise"><h3>练习 3：小消息归约</h3><p>G=8、B=32、S=1，输出为 FP32。计算一次 O all-reduce 的消息大小、ring 每卡发送量，并说明改为 BF16 后哪个时间项会缩小。</p><details><summary>展开解答</summary><p>M=32×7168×4=917504 B，即 896 KiB；每卡发送 2(G−1)M/G=1568 KiB。BF16 将字节项减半，固定启动项 2(G−1)α 保持不变；实际还需要重新测量并验证数值。</p></details></div>
+<div class="article-exercise"><h3>练习 4：手推一个流水时间线</h3><p>四波任务，各需 dispatch 2 ms、计算 3 ms、combine 2 ms，三阶段独立且各阶段按波次顺序处理。写出四波 combine 完成时刻。</p><details><summary>展开解答</summary><p>Dispatch 完成于 2、4、6、8 ms；计算完成于 5、8、11、14 ms；combine 完成于 7、10、13、16 ms。相邻波次的节拍由 3 ms 计算阶段决定，串行总时间为 4×7=28 ms。</p></details></div>
+<h3>运行容量与数据流实验</h3><p><a href="lab.py">下载 lab.py</a>。它使用 Python 标准库，逐项计算权重与缓存，并检查局部环形区、ring 归约和流水调度：</p><pre><code>python3 lab.py
+python3 lab.py --context 131072 --batch 8</code></pre><pre><code>cache @ 32768: 333.218750 MiB/request/rank
 routed FP4+scale: 765.597656 GiB total
 minimum TP for routed weights on 80 GiB: 16
-all checks passed</code></pre><p class="ws-note"><a class="ws-lab-link" download href="/posts/deepseek-v4-pro-inference/lab.py">下载 lab.py</a></p><p class="ws-note">先预测上下文翻四倍时哪些项不变，再运行第二条命令。只需 Python 标准库，在 CPU 上检查容量与数据流。</p></section>
-
-<section class="slide ds" id="references">
-<div class="kicker">11 / 参考与延伸阅读</div>
-<h2>从架构走到真正的推理系统</h2>
-<div class="refs">
-<div><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro">DeepSeek-V4-Pro 官方模型卡</a><small>Preview 模型的总参数、激活参数与权重精度。</small>
-</div>
-<div><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json">官方 config.json</a> · <a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/model.py">推理实现 model.py</a><small>层数、维度、压缩周期、mHC、路由与 cache 更新。</small>
-</div>
-<div><a href="https://arxiv.org/html/2606.19348v1">DeepSeek-V4 技术报告</a><small>§2 架构，§3.1 专家通信与计算重叠，§4.2 模型配置。</small>
-</div>
-<div><a href="/posts/deepseek-v4/">技术报告精读</a> · <a href="/posts/deepseek-v4-pro/">Pro 架构</a> · <a href="/posts/deepseek-v4-flash-inference/">V4-Flash 推理</a>
-</div>
-</div>
-<p class="note">配置核对：2026-10-20。动画中的 token、专家选择、显存块大小是教学示例。</p>
-</section>
-</div>
-</main><script src="/assets/slides.js?v=33e153b61ac9"></script><script src="/assets/anim.js?v=9b723aa5f47d"></script><script>window.deckTimelines=[];{const el=document.getElementById('prefill'), t=Anim.timeline({root:el});t.to('#pref0',{"x": 145, "y": -101},{"dur": 0.7, "at": 0});t.to('#pref1',{"x": 145, "y": -23},{"dur": 0.7, "at": 0});t.to('#pref2',{"x": 145, "y": 55},{"dur": 0.7, "at": 0});t.to('#pref3',{"x": 145, "y": 133},{"dur": 0.7, "at": 0});t.label('批量计算各卡分片');t.to('#pref0',{"x": 565, "y": -101},{"dur": 0.7, "at": 0.9});t.to('#pref1',{"x": 565, "y": -23},{"dur": 0.7, "at": 0.9});t.to('#pref2',{"x": 565, "y": 55},{"dur": 0.7, "at": 0.9});t.to('#pref3',{"x": 565, "y": 133},{"dur": 0.7, "at": 0.9});t.label('形成各层 cache');t.to('#prefkv0,#prefkv1,#prefkv2,#prefkv3',{"y": 5},{"dur": 0.7});t.label('保留给后续 decode');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('hbm'), t=Anim.timeline({root:el});t.to('#wread',{"x": 250, "y": 114},{"dur": 0.7, "at": 0});t.to('#kvread',{"x": 340, "y": 44},{"dur": 0.7, "at": 0});t.label('HBM 读取');t.to('#compute',{"scale": 2},{"dur": 0.7});t.label('片上计算');t.to('#compute',{"scale": 1, "x": 350, "y": -40},{"dur": 0.7});t.label('写入新激活');t.to('#compute',{"x": -310, "y": 21},{"dur": 0.7});t.label('临时 buffer 可复用');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('tensor'), t=Anim.timeline({root:el});t.to('#tp0',{"x": 115},{"dur": 0.7, "at": 0});t.to('#tp1',{"x": 115},{"dur": 0.7, "at": 0});t.to('#tp2',{"x": 115},{"dur": 0.7, "at": 0});t.to('#tp3',{"x": 115},{"dur": 0.7, "at": 0});t.label('本地注意力计算');t.to('#tp0',{"x": 485},{"dur": 0.7, "at": 0.9});t.to('#tp1',{"x": 485},{"dur": 0.7, "at": 0.9});t.to('#tp2',{"x": 485},{"dur": 0.7, "at": 0.9});t.to('#tp3',{"x": 485},{"dur": 0.7, "at": 0.9});t.label('各自产生部分和');t.to('#tp0',{"x": 725, "y": 112},{"dur": 0.7, "at": 1.8});t.to('#tp1',{"x": 725, "y": 35},{"dur": 0.7, "at": 1.8});t.to('#tp2',{"x": 725, "y": -42},{"dur": 0.7, "at": 1.8});t.to('#tp3',{"x": 725, "y": -119},{"dur": 0.7, "at": 1.8});t.label('all-reduce 汇总');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('local-experts'), t=Anim.timeline({root:el});t.to('#ep0',{"x": 155, "y": -116},{"dur": 0.7, "at": 0});t.to('#ep1',{"x": 155, "y": -38},{"dur": 0.7, "at": 0});t.to('#ep2',{"x": 155, "y": 40},{"dur": 0.7, "at": 0});t.to('#ep3',{"x": 155, "y": 118},{"dur": 0.7, "at": 0});t.label('执行本地选中专家');t.to('#ep0',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.to('#ep1',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.to('#ep2',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.to('#ep3',{"x": 705, "y": 0},{"dur": 0.7, "at": 0.9});t.label('加权归约六份专家结果');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('dispatch'), t=Anim.timeline({root:el});t.to('#dispatch0',{"x": 225, "y": -95},{"dur": 0.7, "at": 0});t.to('#dispatch1',{"x": 225, "y": 8},{"dur": 0.7, "at": 0});t.to('#dispatch2',{"x": 225, "y": 111},{"dur": 0.7, "at": 0});t.label('Dispatch 激活');t.to('#dispatch0',{"x": 625, "y": -95},{"dur": 0.7, "at": 0.9});t.to('#dispatch1',{"x": 625, "y": 8},{"dur": 0.7, "at": 0.9});t.to('#dispatch2',{"x": 625, "y": 111},{"dur": 0.7, "at": 0.9});t.label('专家计算结果');t.to('#dispatch0',{"x": -190, "y": 0},{"dur": 0.7, "at": 1.8});t.to('#dispatch1',{"x": -190, "y": 0},{"dur": 0.7, "at": 1.8});t.to('#dispatch2',{"x": -190, "y": 0},{"dur": 0.7, "at": 1.8});t.label('Combine 返回并加权');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('append'), t=Anim.timeline({root:el});t.to('#append0',{"x": 730, "y": 32},{"dur": 0.7, "at": 0.0});t.to('#ring0 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 0.0});t.label('新增 token 1');t.to('#append1',{"x": 595, "y": 32},{"dur": 0.7, "at": 0.8});t.to('#ring1 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 0.8});t.label('新增 token 2');t.to('#append2',{"x": 460, "y": 32},{"dur": 0.7, "at": 1.6});t.to('#ring2 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 1.6});t.label('新增 token 3');t.to('#append3',{"x": 325, "y": 32},{"dur": 0.7, "at": 2.4000000000000004});t.to('#ring3 rect',{"fill": "var(--accent-soft)", "stroke": "var(--accent)"},{"dur": 0.7, "at": 2.4000000000000004});t.label('新增 token 4');t.to('#append0,#append1,#append2,#append3',{"opacity": 0},{"dur": 0.7, "at": 3.3});t.to('#newentry',{"opacity": 1},{"dur": 0.7, "at": 3.3});t.label('完成组，追加压缩条目');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('decode'), t=Anim.timeline({root:el});t.to('#cycle',{"x": 300},{"dur": 0.7});t.label('逐层处理');t.to('#cycle',{"x": 625},{"dur": 0.7});t.label('输出词表分数');t.to('#cycle',{"x": 910},{"dur": 0.7});t.label('采样新 token');t.to('#cycle',{"y": 107},{"dur": 0.7});t.to('#cycle',{"x": 0},{"dur": 0.7});t.to('#cycle',{"y": 0},{"dur": 0.7});t.label('下一轮解码');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('waves'), t=Anim.timeline({root:el});t.to('#waveclock',{"x": 150},{"dur": 0.7});t.label('第一波进入计算');t.to('#waveclock',{"x": 285},{"dur": 0.7});t.label('计算与下一波传输重叠');t.to('#waveclock',{"x": 430},{"dur": 0.7});t.label('三种工作同时推进');t.to('#waveclock',{"x": 855},{"dur": 0.7});t.label('最后一波完成回传');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}</script><script>{const el=document.getElementById('capacity-accumulator'),t=Anim.timeline({root:el});t.to('#capacity-accumulator-part0',{x:395,y:85,opacity:0},{at:0.0,dur:.8});t.to('#capacity-accumulator-sum',{text:95.69970703125,fmt:v=>v.toFixed(2)},{at:0.0,dur:.8,ease:'linear'});t.label('加入 路由权重');t.to('#capacity-accumulator-part1',{x:130,y:85,opacity:0},{at:0.9,dur:.8});t.to('#capacity-accumulator-sum',{text:99.45286577939987,fmt:v=>v.toFixed(2)},{at:0.9,dur:.8,ease:'linear'});t.label('加入 共享专家');t.to('#capacity-accumulator-part2',{x:-135,y:85,opacity:0},{at:1.8,dur:.8});t.to('#capacity-accumulator-sum',{text:102.05613726377487,fmt:v=>v.toFixed(2)},{at:1.8,dur:.8,ease:'linear'});t.label('加入 8 请求缓存');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}{const el=document.getElementById('reduce-worked'),t=Anim.timeline({root:el});t.to('#reduce-worked-part0',{x:395,y:85,opacity:0},{at:0.0,dur:.8});t.to('#reduce-worked-sum',{text:2,fmt:v=>v.toFixed(2)},{at:0.0,dur:.8,ease:'linear'});t.label('加入 GPU 0');t.to('#reduce-worked-part1',{x:130,y:85,opacity:0},{at:0.9,dur:.8});t.to('#reduce-worked-sum',{text:5,fmt:v=>v.toFixed(2)},{at:0.9,dur:.8,ease:'linear'});t.label('加入 GPU 1');t.to('#reduce-worked-part2',{x:-135,y:85,opacity:0},{at:1.8,dur:.8});t.to('#reduce-worked-sum',{text:4,fmt:v=>v.toFixed(2)},{at:1.8,dur:.8,ease:'linear'});t.label('加入 GPU 2');t.to('#reduce-worked-part3',{x:-400,y:85,opacity:0},{at:2.7,dur:.8});t.to('#reduce-worked-sum',{text:8,fmt:v=>v.toFixed(2)},{at:2.7,dur:.8,ease:'linear'});t.label('加入 GPU 3');Anim.slide(el,t,{steps:true,controls:true});window.deckTimelines.push(t);}</script><script src="/assets/post-links.js?v=3173091271f1"></script><script src="/assets/posts.js?v=150c41e1230c"></script><script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+all checks passed</code></pre><p>先根据练习 2 预测第二次运行的 cache 数值，再运行核对。将通信乘数从 4 字节改为 2 字节，检验 payload 的变化。实验中的两阶段 dispatch/compute 模型为四波 14 ms；给它加入第三条 combine 资源后，应得到上题的 16 ms。</p></section>
+<section id="references"><h2>参考与延伸阅读</h2><ul><li><a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/config.json">Pro 配置</a>与<a href="https://huggingface.co/deepseek-ai/DeepSeek-V4-Pro/blob/main/inference/model.py">参考推理实现</a>：预分配、量化 scale、分片、FP32 归约与压缩状态。</li><li><a href="https://arxiv.org/html/2606.19348v1">DeepSeek-V4 技术报告</a>：专家通信、计算重叠与模型配置。</li><li><a href="https://github.com/sgl-project/sglang/issues/36174">SGLang #36174：V4 确定性推理支持</a>：合批、压缩状态与并行归约的确定性回归范围。</li><li><a href="https://github.com/NVIDIA/Model-Optimizer/blob/main/examples/deepseek/README.md">NVIDIA Model Optimizer：DeepSeek V4 量化流程</a>：routed-expert NVFP4 转换、checkpoint 格式与部署衔接。</li><li><a href="https://docs.pytorch.org/docs/stable/notes/cuda.html#asynchronous-execution">PyTorch：CUDA 异步执行与计时</a>：同步、CUDA event 与 stream。</li><li><a href="/posts/deepseek-v4-pro/">Pro 架构</a> · <a href="/posts/deepseek-v4-flash-inference/">V4-Flash 推理</a> · <a href="/posts/distributed-inference/">分布式推理</a> · <a href="/posts/inference-benchmarking/">服务压测与 SLO</a>。</li></ul></section>
+</article><nav class="series-pager" data-series="systems"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"batch": {"label": "B · 请求数", "description": "本轮共同执行的请求数量。", "unit": "条请求"}, "query": {"label": "S · 本次输入长度", "description": "每条请求本轮送入模型的 token 数，普通 decode 为 1。", "unit": "token/请求"}, "context": {"label": "N · 上下文长度", "description": "已经处理的 token 数；在预分配公式中使用配置的长度上限。", "unit": "token/请求"}, "width": {"label": "d · 隐藏宽度", "description": "一个 attention 或 MoE 子层输入向量的维度。", "unit": "元素"}, "heads": {"label": "H · Query 头数", "description": "本层全部 query 头的数量；各头共用 shared KV。", "unit": "头"}, "ratio": {"label": "r · 压缩步长", "description": "每处理多少个 token 产出一条压缩记忆，CSA 为 4，HCA 为 128。", "unit": "token/条目"}, "tp": {"label": "G · 并行卡数", "description": "共同执行这个模型副本的 tensor parallel rank 数。", "unit": "张卡"}, "mix": {"label": "Cᵢⱼ · 残差混合系数", "description": "旧残差流 i 对新残差流 j 的贡献系数；行对应旧流，列对应新流。"}, "experts": {"label": "E · 路由专家总数", "description": "一层可供路由选择的专家总数，每个 token 选择其中 6 个。", "unit": "个专家"}, "intermediate": {"label": "m · 专家中间宽度", "description": "SwiGLU gate 和 up 投影的输出维度。", "unit": "元素"}, "payload": {"label": "M · 归约消息大小", "description": "一次 all-reduce 中，每个 rank 持有的完整输出张量的字节数。", "unit": "B"}, "alpha": {"label": "α · 每轮通信启动时间", "description": "ring 模型中一轮发送的固定启动时间。", "unit": "s"}, "beta": {"label": "β · 有效通信带宽", "description": "一次归约可获得的有效链路传输带宽。", "unit": "B/s"}}, "scopes": {}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script>
+(() => {
+ const $=id=>document.getElementById(id),cfg={d:7168,layers:61,experts:384,m:3072,csa:30,hca:31,heads:128,g:8};
+ const routed=cfg.layers*cfg.experts*3*cfg.d*cfg.m*(.5+1/32),shared=cfg.layers*3*cfg.d*cfg.m*(1+1/16384);
+ function cache(n){return 1024*(cfg.layers*128+cfg.csa*Math.floor(n/4)+cfg.hca*Math.floor(n/128))+cfg.csa*Math.floor(n/4)*128*2+cfg.csa*80*1024+cfg.hca*512*1024;}
+ function budget(){const g=+$('budget-tp').value,n=+$('budget-context').value,b=+$('budget-batch').value,cap=+$('budget-capacity').value;
+  const w=routed/g/2**30,s=shared/2**30,c=cache(n)*b/2**30,total=w+s+c;$('budget-batch-out').textContent=b;
+  [['weights',w],['shared',s],['cache',c],['total',total]].forEach(([id,value])=>$('budget-'+id).textContent=value.toFixed(3));
+  const denominator=Math.max(cap,total);[['weights',w],['shared',s],['cache',c]].forEach(([id,value])=>$('budget-bar-'+id).style.width=value/denominator*100+'%');
+  $('budget-remaining').textContent=total<=cap?'这三项使用 '+total.toFixed(3)+' GiB/卡，剩余 '+(cap-total).toFixed(3)+' GiB/卡用于其余权重与运行时内存。':'这三项需要 '+total.toFixed(3)+' GiB/卡，超过当前容量 '+(total-cap).toFixed(3)+' GiB/卡。增大合法并行度会缩小路由权重分片。';}
+ ['budget-tp','budget-context','budget-batch','budget-capacity'].forEach(id=>$(id).addEventListener('input',budget));budget();
+ const partial=[2, 3, -1, 4, 5, -2, 1, 4],sum=partial.reduce((a,b)=>a+b,0);
+ const flowSteps=[{title:'同一层的输入',caption:'每卡保存四路残差和本地权重，mHC 汇成同一个 d 维输入。'},
+  {title:'更新局部 KV，计算本地头',caption:'当前位置 32,768 写入局部槽位 0。各卡的 shared KV 副本同步更新，本地 query 头读取它。'},
+  {title:'本地 O 投影',caption:'本地头经过输出投影，产生完整 d 维形状的一份部分和。表中显示其中一个坐标。'},
+  {title:'归约 attention 输出',caption:'all-reduce 将各卡的部分和相加，再将完整结果交给每个 rank，供 mHC 写回。'},
+  {title:'本地路由专家计算',caption:'各卡执行本轮选中的本地专家，将路由加权结果累积为一份 FP32 部分和。'},
+  {title:'归约 MoE，再加共享专家',caption:'路由专家的部分和完成 all-reduce 后，每卡加入本地共享专家的同一结果。'},
+  {title:'写回四路残差',caption:'mHC 将子层输出写回四路，当前层完成；这些结果成为下一层输入。'}];
+ const ops=['mHC 汇合输入','更新 KV；计算本地 Q 头','O 投影部分和','attention 完整结果','本地路由专家加权和','完整 MoE + 共享专家','下一层输入就绪'];
+ ArticleSteps.mount('#flow-demo',{steps:flowSteps,duration:1600,render(step,i){
+  $('flow-cards').innerHTML=partial.map((v,r)=>'<div class="ds-card '+(i>0?'is-active':'')+'"><strong>GPU '+r+'</strong><small>'+cfg.heads/cfg.g+' Q 头 · '+cfg.experts/cfg.g+' 本地专家</small><small>权重：常驻 HBM</small><small>局部槽 0：'+(i>=1?'位置 32,768':'位置 32,640')+'</small><div class="ds-operation">'+ops[i]+(i===2?'：'+v:i===3?'：'+sum:'')+'</div></div>').join('');
+  $('flow-result').textContent=i===3?'归约坐标：'+partial.join(' + ')+' = '+sum+'，所有卡得到相同结果。':i===1?'shared KV 的逻辑内容在各卡同步更新；Q 头与专家权重按 rank 分工。':i===6?'一层完成。完整 decode 继续经过 '+cfg.layers+' 个主干层，再到词表头和采样器。':step.caption;
+ }});
+ const tasks=[];let dispatch=0,compute=0,combine=0;
+ for(let j=0;j<4;j++){const ds=dispatch;dispatch+=2;const cs=Math.max(dispatch,compute);compute=cs+3;const rs=Math.max(compute,combine);combine=rs+2;tasks.push({dispatch:[ds,dispatch],compute:[cs,compute],combine:[rs,combine]});}
+ const max=28;
+ $('wave-lanes').innerHTML=[['dispatch','Dispatch'],['compute','专家计算'],['combine','Combine']].map(([key,label])=>'<div class="ds-lane"><span>'+label+'</span><div class="ds-lane-track">'+tasks.map((t,i)=>'<span class="ds-wave" data-start="'+t[key][0]+'" data-end="'+t[key][1]+'" style="left:'+t[key][0]/max*100+'%;width:'+(t[key][1]-t[key][0])/max*100+'%">'+(i+1)+'</span>').join('')+'<i class="ds-cursor"></i></div></div>').join('')+'<div class="ds-ticks"><span>0 ms</span><span>7</span><span>14</span><span>21</span><span>28 ms</span></div>';
+ ArticleSteps.mount('#wave-demo',{steps:Array.from({length:17},(_,t)=>({title:'时刻 '+t+' ms',caption:t===16?'四波 combine 全部完成，流水总长 16 ms。':'观察每条资源队列的开始条件：上一阶段已完成，且当前资源已空闲。'})),duration:700,render(step,i,p){const t=Math.min(16,i+p);$('wave-time').textContent=t.toFixed(1)+' ms';$('wave-done').textContent=tasks.filter(x=>x.combine[1]<=t).length+' / 4';document.querySelectorAll('#wave-demo .ds-cursor').forEach(e=>e.style.left=t/max*100+'%');document.querySelectorAll('#wave-demo .ds-wave').forEach(e=>{e.classList.toggle('is-done',t>=+e.dataset.end);e.style.opacity=t<+e.dataset.start?'.35':'1';});}});
+})();
+</script>
+<script src="/assets/series.js?v=0db6ff6b7f47"></script><script src="/assets/post-links.js?v=9057de45e84d"></script><script src="/assets/posts.js?v=d0504bda181a"></script><script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body></html>

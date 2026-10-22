@@ -76,7 +76,7 @@ def main():
     print(f'ring estimate = {time_us:.3f} us; pipeline total = {total:.1f} ms')
     # 64B 总参数，而不是 8B 每 token 激活参数，决定常驻权重。
     weight_gib = 64e9 * 2 / 4 / 2**30
-    print(f'capacity: weights={weight_gib:.2f} GiB; with KV/workspace={weight_gib+12:.2f} GiB')
+    print(f'capacity: weights={weight_gib:.2f} GiB; with KV/workspace={weight_gib+11:.2f} GiB')
     print('checks: PASS')
 
 

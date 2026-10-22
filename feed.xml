@@ -18,119 +18,119 @@
       <link>https://hs-black.github.io/posts/mini-inference-engine/</link>
       <guid>https://hs-black.github.io/posts/mini-inference-engine/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>用可运行的 NumPy Transformer 串起正确前向、GQA、RoPE、分页 KV、连续调度、采样和测量；含独立参考检查、三种故障注入、四道习题与实验记录模板。</description>
+      <description>用可运行 NumPy Transformer 连起 GQA、RoPE、分页 KV、逐轮调度与采样，从独立 dense 参考、容量承诺和故障注入建立推理引擎的正确性。</description>
     </item>
     <item>
       <title>张量布局、stride 与 GPU 访存</title>
       <link>https://hs-black.github.io/posts/tensor-layouts/</link>
       <guid>https://hs-black.github.io/posts/tensor-layouts/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从逻辑索引推导真实地址，拆解 transpose、reshape、合并访存与 shared memory bank；含逐步动画、复制成本计算、排错习题和 NumPy 实验。</description>
+      <description>从索引与 stride 推导真实地址，解释转置、切片、复制与别名，再用 sector 和 bank 分析 GPU 访存；含交互图、工程排错、四道习题和 NumPy 实验。</description>
     </item>
     <item>
       <title>GEMM：从三重循环到 Tensor Core</title>
       <link>https://hs-black.github.io/posts/gemm-optimization/</link>
       <guid>https://hs-black.github.io/posts/gemm-optimization/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从矩阵乘法的 FLOPs 与字节账本推导分块复用、shared memory、寄存器与 Tensor Core，含尾块动画、性能诊断、计算题、CPU 实验和完整 Triton 示例。</description>
+      <description>从三重循环推导分块复用、shared memory 与寄存器预算，解释 Tensor Core、尾块和调度，再用实测证据定位性能问题；含动态图、计算题与 NumPy/Triton 实验。</description>
     </item>
     <item>
       <title>CUDA streams、events 与异步流水</title>
       <link>https://hs-black.github.io/posts/cuda-streams/</link>
       <guid>https://hs-black.github.io/posts/cuda-streams/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从命令队列、跨流依赖与双缓冲到存储寿命、关键路径和正确计时；含可回放时间线、计算题、CPU 调度实验与 CUDA 示例。</description>
+      <description>从命令队列与依赖边推导异步流水，算清 event、pinned memory、跨流寿命和缓冲复用；含时间线、工程故障分析、四道习题及 CPU/CUDA 实验。</description>
     </item>
     <item>
       <title>torch.compile：从 Python 到 GPU kernel</title>
       <link>https://hs-black.github.io/posts/torch-compile/</link>
       <guid>https://hs-black.github.io/posts/torch-compile/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从 FX 图、算子融合与 guards 到动态形状、重编译、分桶和冷启动摊销；含内存流量动画、计算题、缓存模型与真实 PyTorch 实验。</description>
+      <description>连接融合、图捕获、guards、动态形状与分桶成本，结合实际编译日志定位重编译和数据依赖问题；含动态图、四道习题与 NumPy/PyTorch 实验。</description>
     </item>
     <item>
       <title>RoPE 与长上下文扩展</title>
       <link>https://hs-black.github.io/posts/rope-long-context/</link>
       <guid>https://hs-black.github.io/posts/rope-long-context/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从二维旋转推导相对位置，逐步计算频率、插值与 YaRN，排查 KV cache 位置和精度问题；含旋转动画、计算题与 NumPy 实验。</description>
+      <description>从二维旋转推导相对位置，连接频率、长上下文缩放与 KV 生命周期；含可操作图解、精度与分块排错、习题和 NumPy 实验。</description>
     </item>
     <item>
       <title>采样器与结构化解码</title>
       <link>https://hs-black.github.io/posts/sampling-structured-decoding/</link>
       <guid>https://hs-black.github.io/posts/sampling-structured-decoding/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从 logits、temperature、top-k/top-p 到 token 级语法约束、状态回滚与投机验证，结合概率动画、JSON 栈、计算题和可运行采样实验。</description>
+      <description>从稳定 softmax、temperature 与 top-p 推导采样，再把 token 级语法状态、EOS 和回滚接入生成循环，配数值交互、四道练习及 JSON 实验。</description>
     </item>
     <item>
       <title>推理压测与 SLO：测出真正可用的容量</title>
       <link>https://hs-black.github.io/posts/inference-benchmarking/</link>
       <guid>https://hs-black.github.io/posts/inference-benchmarking/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从请求时间戳、开放负载与尾延迟到 goodput：用排队动画、容量计算、诊断案例和 CPU 实验建立可复现的压测方法。</description>
+      <description>用请求时间线推导 TTFT、TPOT、ITL 和 goodput，理解开放负载、客户端排队与可复现的推理评测。</description>
     </item>
     <item>
       <title>Prefill / Decode 分离：把计算与缓存交接清楚</title>
       <link>https://hs-black.github.io/posts/prefill-decode-disaggregation/</link>
       <guid>https://hs-black.github.io/posts/prefill-decode-disaggregation/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从逐卡数据流与 KV 传输算起，推导排队、资源配比、缓存生命周期和多轮一致性；配计算题与可运行的交接实验。</description>
+      <description>从 KV 传输字节、P/D 时间线和固定 GPU 容量分析分离推理，推导队列、交接协议与多轮会话取舍。</description>
     </item>
     <item>
       <title>LoRA / QLoRA：参数高效微调</title>
       <link>https://hs-black.github.io/posts/lora-qlora/</link>
       <guid>https://hs-black.github.io/posts/lora-qlora/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从低秩更新、梯度与初始化到 NF4、double quant 和完整显存账本；含数值动画、工程诊断、计算题与 NumPy 微调实验。</description>
+      <description>从低秩前向与梯度推导到 NF4 账本、checkpoint 梯度排查、保存合并和量化误差；含数值图解、四道习题与 NumPy 实验。</description>
     </item>
     <item>
       <title>多 Adapter 推理服务</title>
       <link>https://hs-black.github.io/posts/multi-adapter-serving/</link>
       <guid>https://hs-black.github.io/posts/multi-adapter-serving/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从共享底座与异构 rank 分组到 adapter 驻留、原子准入、预取、版本和 KV 隔离；含数据流动画、计算题与 CPU 服务实验。</description>
+      <description>从分组矩阵乘法、异构 rank 与显存准入，到 GPU 权重寿命、版本切换、KV 隔离和冷请求排错；含图解、四道习题与 CPU 实验。</description>
     </item>
     <item>
       <title>图像与视频推理：token、计算与显存账本</title>
       <link>https://hs-black.github.io/posts/multimodal-inference/</link>
       <guid>https://hs-black.github.io/posts/multimodal-inference/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从图像 patch、视频时间网格到视觉编码、语言 KV、调度与缓存，逐项计算多模态推理成本，附动画、计算题和可运行 CPU 实验。</description>
+      <description>沿像素、patch、视觉token与语言KV推导图像视频成本，分析动态batch、两级缓存、特征占位不变量与资源调度；含图解、四道习题与实验。</description>
     </item>
     <item>
       <title>VLA：从视觉 token 到机器人动作</title>
       <link>https://hs-black.github.io/posts/vla-inference/</link>
       <guid>https://hs-black.github.io/posts/vla-inference/</guid>
       <pubDate>Tue, 20 Oct 2026 08:00:00 +0800</pubDate>
-      <description>从视觉语言输入到动作 token、flow matching 与 action chunk，推导单位、坐标、时延和闭环误差，附动画、习题与纯 CPU 仿真。</description>
+      <description>从动作归一化、离散token与flow matching，推导条件KV复用、计算供给、动作队列和观察年龄；结合坐标变换、闭环误差、习题与仿真。</description>
     </item>
     <item>
       <title>DeepSeek-V4-Flash 架构：一个 token 的旅程</title>
       <link>https://hs-black.github.io/posts/deepseek-v4-flash/</link>
       <guid>https://hs-black.github.io/posts/deepseek-v4-flash/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从张量形状、mHC、逐通道压缩、因果边界和 MoE 路由深入理解 V4-Flash，含数值动画、工程分析、习题解答与可运行实验。</description>
+      <description>从真实张量形状推导 mHC、共享 KV、压缩因果边界与专家路由，结合可操作图解、移植排错、计算题和 NumPy 实验。</description>
     </item>
     <item>
       <title>DeepSeek-V4-Flash 推理：一枚 token，4 张卡</title>
       <link>https://hs-black.github.io/posts/deepseek-v4-flash-inference/</link>
       <guid>https://hs-black.github.io/posts/deepseek-v4-flash-inference/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>逐卡推导 V4-Flash 推理的权重与缓存容量、FP4 scale、prefill 峰值、FP32 通信和关键路径，含计算题、排错案例与 CPU 实验。</description>
+      <description>逐卡推导原生 FP4 权重、复制缓存、prefill 峰值、FP32 归约与专家调度；用可操作容量账本和时间线连接工程排错、习题与 CPU 实验。</description>
     </item>
     <item>
       <title>DeepSeek-V4-Pro 架构：一个 token 的旅程</title>
       <link>https://hs-black.github.io/posts/deepseek-v4-pro/</link>
       <guid>https://hs-black.github.io/posts/deepseek-v4-pro/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从张量形状、mHC、逐通道压缩、因果边界和 MoE 路由深入理解 V4-Pro，含数值动画、工程分析、习题解答与可运行实验。</description>
+      <description>从真实张量形状推导 mHC、共享 KV、压缩因果边界与专家路由，结合可操作图解、移植排错、计算题和 NumPy 实验。</description>
     </item>
     <item>
       <title>DeepSeek-V4-Pro 推理：一枚 token，8 张卡</title>
       <link>https://hs-black.github.io/posts/deepseek-v4-pro-inference/</link>
       <guid>https://hs-black.github.io/posts/deepseek-v4-pro-inference/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>逐卡推导 V4-Pro 推理的权重与缓存容量、FP4 scale、prefill 峰值、FP32 通信和关键路径，含计算题、排错案例与 CPU 实验。</description>
+      <description>逐卡推导原生 FP4 权重、复制缓存、prefill 峰值、FP32 归约与专家调度；用可操作容量账本和时间线连接工程排错、习题与 CPU 实验。</description>
     </item>
     <item>
       <title>KV cache：记住已经算过的历史</title>
@@ -144,21 +144,21 @@
       <link>https://hs-black.github.io/posts/kv-cache-compression/</link>
       <guid>https://hs-black.github.io/posts/kv-cache-compression/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>推导 GQA 与 MLA 的缓存形状，计算量化误差、分组元数据和残差区预算；附性能诊断、课后习题与可运行压缩实验。</description>
+      <description>按状态形状、位置数和位宽推导 GQA、MLA 与 KV 量化，计算分组元数据、residual 和读取成本，附工程排查、习题与 NumPy 实验。</description>
     </item>
     <item>
       <title>Sparse attention：只看需要的历史</title>
       <link>https://hs-black.github.io/posts/sparse-attention/</link>
       <guid>https://hs-black.github.io/posts/sparse-attention/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从稀疏 softmax 到选择器成本、块利用率、因果索引与 kernel 布局；用数值动画、算术练习和 CPU 实验验证正确性。</description>
+      <description>推导稀疏归一化、窗口配对数、内容选择与块布局，结合 mask 构建、块利用率与端到端性能排查，附交互图解、练习与实验。</description>
     </item>
     <item>
       <title>Linear attention：把历史写进状态</title>
       <link>https://hs-black.github.io/posts/linear-attention/</link>
       <guid>https://hs-black.github.io/posts/linear-attention/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>推导递推、并行与分块等价，分析状态容量、门控权重与 delta rule 稳定性；附数值动画、计算题和 NumPy 实验。</description>
+      <description>从核 attention 推导递推、归一化、门控、Delta rule 与分块计算；结合 padding、状态复用和精度问题，附数值图解、习题与实验。</description>
     </item>
     <item>
       <title>PagedAttention：让 KV cache 按需生长</title>
@@ -172,84 +172,84 @@
       <link>https://hs-black.github.io/posts/continuous-batching/</link>
       <guid>https://hs-black.github.io/posts/continuous-batching/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>手算每轮调度、TTFT 和 ITL，理解 chunked prefill、显存准入、公平性与过载；附时间轴动画、习题和离散事件实验。</description>
+      <description>从一轮调度的 token 预算推导 chunked prefill、KV 准入和公平性，手算 TTFT、ITL 与吞吐，用时间轴和预算实验定位长尾与抢占。</description>
     </item>
     <item>
       <title>Prefix caching：相同的开头，只算一次</title>
       <link>https://hs-black.github.io/posts/prefix-caching/</link>
       <guid>https://hs-black.github.io/posts/prefix-caching/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从哈希链与满块边界，到计算身份、引用驱逐、显存收益和延迟模型；附数值演算、三道练习与缓存模拟代码。</description>
+      <description>推导前缀 KV 的计算身份、哈希链和满块边界，量化重算量与 TTFT 收益，分析 tokenizer 差异、共享池容量、缓存驱逐和命中后的性能问题。</description>
     </item>
     <item>
       <title>投机解码</title>
       <link>https://hs-black.github.io/posts/speculative-decoding/</link>
       <guid>https://hs-black.github.io/posts/speculative-decoding/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从概率质量守恒推导投机采样，手算接受长度与加速比，排查 logits/KV 对齐；含数值动画、4 道练习和可运行 CPU 实验。</description>
+      <description>从接受概率与残差分布证明投机采样，推导有效输出长度和加速条件，追踪验证行、KV 回滚与纠正 token，并定位高接受率却变慢的工程问题。</description>
     </item>
     <item>
       <title>DSpark</title>
       <link>https://hs-black.github.io/posts/dspark/</link>
       <guid>https://hs-black.github.io/posts/dspark/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>深入 DSpark 的 Markov 张量、接受率训练、置信度校准与因果预算调度；手算吞吐和选择偏差，配 3 道练习及 CPU 模拟实验。</description>
+      <description>拆开 DSpark 的并行 backbone、低秩 Markov head、条件置信度和硬件感知调度，手算校准、预算与因果依赖，理解草稿质量怎样转化成服务吞吐。</description>
     </item>
     <item>
       <title>LLM 量化</title>
       <link>https://hs-black.github.io/posts/llm-quantization/</link>
       <guid>https://hs-black.github.io/posts/llm-quantization/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从 INT4 编码与元数据算到量化 kernel、GPTQ 补偿、AWQ 和 SmoothQuant；含显存/带宽账本、4 道计算练习及可运行实验。</description>
+      <description>从整数码、打包与元数据到 GPTQ、AWQ、SmoothQuant，连接输出误差与实际 kernel 的带宽、计算和对齐，配数值图解、四道习题与实验。</description>
     </item>
     <item>
       <title>分布式推理：数据怎样走过每张卡</title>
       <link>https://hs-black.github.io/posts/distributed-inference/</link>
       <guid>https://hs-black.github.io/posts/distributed-inference/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从张量形状和手算 MLP 推导 TP、PP、EP，计算每卡显存、ring 通信与流水线空泡，用诊断案例、习题和 Python 实验分析部署方案。</description>
+      <description>从分片矩阵乘法、TP 通信到 PP、EP 与显存，推导多卡推理的部署取舍，配交互算例和实验。</description>
     </item>
     <item>
       <title>CPU overhead：GPU 为什么在等</title>
       <link>https://hs-black.github.io/posts/cpu-overhead/</link>
       <guid>https://hs-black.github.io/posts/cpu-overhead/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>用异步队列递推、CUDA 计时、Nsight trace 和 Amdahl 定律定位 CPU 开销，分析吞吐与尾延迟，配计算题和可运行的提交队列实验。</description>
+      <description>用异步队列递推、同步语义与 trace 解释 GPU 空闲，区分提交、排队和执行时间，再计算优化上限与尾延迟；含交互时间线、习题和 CPU 排程实验。</description>
     </item>
     <item>
       <title>CUDA Graph：把一轮计算录下来</title>
       <link>https://hs-black.github.io/posts/cuda-graph/</link>
       <guid>https://hs-black.github.io/posts/cuda-graph/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>从固定存储与输出别名到真实 PyTorch capture/replay，计算形状桶、显存预算和回本次数，配习题、CPU 模拟及可下载 CUDA 实验。</description>
+      <description>从捕获与固定存储推导 replay、输出别名、KV 元数据更新和形状桶，计算空算、持久显存与回本点；含交互图、工程排查、习题及 CPU/CUDA 实验。</description>
     </item>
     <item>
       <title>FlashAttention 1、2、3</title>
       <link>https://hs-black.github.io/posts/flash-attention/</link>
       <guid>https://hs-black.github.io/posts/flash-attention/</guid>
       <pubDate>Tue, 20 Oct 2026 00:00:00 +0800</pubDate>
-      <description>推导 online softmax 与 attention 反向，演算 tile 资源、并行与流水线成本；含 PyTorch 用法、排查案例、三道习题和可运行的 NumPy 前反向实验。</description>
+      <description>从 HBM 流量与在线 softmax 推导分块前反向，再理解 FA2 工作划分与 FA3 异步流水，结合 mask、硬件和性能排查，附习题与实验。</description>
     </item>
     <item>
       <title>RMSNorm 与 GPU 算子优化</title>
       <link>https://hs-black.github.io/posts/rmsnorm-kernel/</link>
       <guid>https://hs-black.github.io/posts/rmsnorm-kernel/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从逐项数值与反向推导到 CUDA/Triton 归约、向量化、寄存器与带宽账本；加入精度排查、计算题、梯度差分验证和可运行 CPU 实验。</description>
+      <description>从 RMSNorm 前反向推导到 FP32 归约、寄存器、向量化与融合，分析精度契约、资源瓶颈和带宽账本；含可操作图、计算题、Triton 核心与 NumPy 梯度实验。</description>
     </item>
     <item>
       <title>Gradient checkpointing</title>
       <link>https://hs-black.github.io/posts/gradient-checkpointing/</link>
       <guid>https://hs-black.github.io/posts/gradient-checkpointing/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从激活生命周期推导分段重算的显存和时间成本，分析随机数、non-reentrant、FSDP 与排查；含计算题、梯度验证和 NumPy/PyTorch 动手实验。</description>
+      <description>从反向依赖推导激活寿命、最优分段和选择性重算，排查冻结输入、RNG、FSDP 与反向峰值；含动态图、计算题和 NumPy/PyTorch 实验。</description>
     </item>
     <item>
       <title>优化器：从 SGD 到 Muon</title>
       <link>https://hs-black.github.io/posts/optimizers/</link>
       <guid>https://hs-black.github.io/posts/optimizers/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>一套动画幻灯片：把 GD、动量、Nesterov、AdaGrad、RMSProp、Adam、AdamW、Lion、Adafactor、Shampoo 和 Muon 放到同一片 loss 地形上实际跑一遍，附可交互的优化器游乐场。</description>
+      <description>从曲率和动量推导AdamW、Lion、Adafactor、Shampoo/SOAP与Muon，连接状态显存、更新尺度和GPU执行；保留交互地形，加入计算题与数值实验。</description>
     </item>
     <item>
       <title>DeepSeek-V4 技术报告精读</title>
@@ -263,77 +263,77 @@
       <link>https://hs-black.github.io/posts/qwen3-next/</link>
       <guid>https://hs-black.github.io/posts/qwen3-next/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从线性注意力推到 Gated DeltaNet、门控注意力、3:1 混合、512 专家 MoE 与 MTP。</description>
+      <description>从线性注意力推到 Gated DeltaNet、门控注意力、3:1 混合、512 expert MoE 与 MTP。</description>
     </item>
     <item>
       <title>Kimi K3：KDA、注意力残差与 Stable LatentMoE</title>
       <link>https://hs-black.github.io/posts/kimi-k3/</link>
       <guid>https://hs-black.github.io/posts/kimi-k3/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>精读 Kimi K3：有下界的 KDA、注意力残差、Stable LatentMoE 与分位数均衡，以及 1M 上下文系统。</description>
+      <description>精读 Kimi K3 技术报告：有下界的 KDA、注意力残差、Stable LatentMoE 与分位数均衡，以及 1M 上下文的训练、RL 与推理系统。</description>
     </item>
     <item>
       <title>Kimi K2：MuonClip 与万亿参数 Agent 模型</title>
       <link>https://hs-black.github.io/posts/kimi-k2/</link>
       <guid>https://hs-black.github.io/posts/kimi-k2/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>精读 Kimi K2：Muon 与 QK-Clip 推导、数据改写、超稀疏 MoE、训练基础设施、Agent 数据合成与 RL。</description>
+      <description>逐节精读 Kimi K2 技术报告：Muon 与 QK-Clip、数据改写、超稀疏 MoE、训练基础设施、Agent 数据合成与 RL。</description>
     </item>
     <item>
       <title>Kimi Linear：Kimi Delta Attention</title>
       <link>https://hs-black.github.io/posts/kimi-linear/</link>
       <guid>https://hs-black.github.io/posts/kimi-linear/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从线性注意力、DeltaNet 到 KDA：通道级门控、分块并行算法、3:1 混合与 NoPE、效率实验。</description>
+      <description>从线性注意力、DeltaNet、Gated DeltaNet 推到 KDA：通道级门控、分块并行算法、3:1 混合与 NoPE，以及效率实验。</description>
     </item>
     <item>
       <title>从目标到决策：训练什么、怎么做消融</title>
       <link>https://hs-black.github.io/posts/smol-decisions/</link>
       <guid>https://hs-black.github.io/posts/smol-decisions/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>该不该训、训什么、怎样用小规模消融做决策，以及评测噪声与消融成本。</description>
+      <description>训练大模型之前的决策方法：该不该训、训什么、怎样用小规模消融验证每个决定，以及评测噪声、消融成本与 scaling law。</description>
     </item>
     <item>
       <title>架构选择：注意力、位置编码、MoE 与混合模型</title>
       <link>https://hs-black.github.io/posts/smol-architecture/</link>
       <guid>https://hs-black.github.io/posts/smol-architecture/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>MHA/GQA/MLA 与 KV cache、文档掩码、RoPE/NoPE、稳定性技巧、MoE 设计与混合模型。</description>
+      <description>现代 LLM 的结构选择：MHA/GQA/MLA 与 KV cache、文档掩码、RoPE 与 NoPE、稳定性技巧、MoE 设计与混合模型，以及怎么在三者之间选。</description>
     </item>
     <item>
       <title>分词器、优化器、超参与数据配比</title>
       <link>https://hs-black.github.io/posts/smol-optim-data/</link>
       <guid>https://hs-black.github.io/posts/smol-optim-data/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>BPE 与分词器评估、AdamW 与 Muon、学习率调度、batch size 与超参 scaling law、数据配比。</description>
+      <description>预训练的另一半决定：BPE 与分词器评估、AdamW 与 Muon、学习率调度、batch size 与超参 scaling law、数据配比与多阶段训练。</description>
     </item>
     <item>
       <title>训练马拉松：吞吐、loss spike 与中途调整</title>
       <link>https://hs-black.github.io/posts/smol-marathon/</link>
       <guid>https://hs-black.github.io/posts/smol-marathon/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>SmolLM3 长跑实录：起跑清单、四个谜案、loss spike 诊断、多阶段 mid-training 与长上下文扩展。</description>
+      <description>按下开始键之后会发生什么：吞吐与完成时间的账、起跑检查清单、SmolLM3 训练中的四个谜案、loss spike 的诊断与处理、多阶段 mid-training 与 4k→128k 长上下文扩展。</description>
     </item>
     <item>
       <title>后训练：SFT、偏好优化与 RL</title>
       <link>https://hs-black.github.io/posts/smol-post-training/</link>
       <guid>https://hs-black.github.io/posts/smol-post-training/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>后训练全流程：评测先行、chat template 与掩码、SFT 调参、推理 mid-training、DPO/APO 推导、GRPO 与长度惩罚。</description>
+      <description>把 3B 基座变成混合推理助手：评测先行、chat template 与 loss 掩码、SFT 超参与 packing、推理 mid-training、DPO/APO 推导、GRPO 与长度惩罚、on-policy 蒸馏。</description>
     </item>
     <item>
       <title>基础设施：GPU 集群、通信与存储</title>
       <link>https://hs-black.github.io/posts/smol-infrastructure/</link>
       <guid>https://hs-black.github.io/posts/smol-infrastructure/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>H100 内部、PCIe/NVLink/EFA 实测带宽、nccl-tests、存储分层、节点健康与 checkpoint，以及该用多少卡。</description>
+      <description>训练大模型的基础设施：H100 内部、PCIe/NVLink/EFA 实测带宽、nccl-tests、存储分层、节点健康与 checkpoint，以及需要多少张 GPU。</description>
     </item>
     <item>
       <title>训练的账本：显存、FLOPs 与 MFU</title>
       <link>https://hs-black.github.io/posts/scaling-memory/</link>
       <guid>https://hs-black.github.io/posts/scaling-memory/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>一步训练里显存花在哪、FLOPs 怎么数、MFU 怎么算：从 16 字节/参数推到 6ND，附显存计算器与训练时长估算器。</description>
+      <description>一步训练里显存花在哪、FLOPs 怎么数、MFU 怎么算：从 16 字节/参数和激活公式推到 6ND，附显存计算器与训练时长估算器。</description>
     </item>
     <item>
       <title>Roofline：算力、带宽与算术强度</title>
@@ -347,56 +347,56 @@
       <link>https://hs-black.github.io/posts/scaling-collectives/</link>
       <guid>https://hs-black.github.io/posts/scaling-collectives/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从 broadcast 到 all-to-all，推导环形集合通信的代价，再用分片记号讲清分片矩阵乘法。</description>
+      <description>从 ring 字节账本和延迟模型，到 device mesh、分片矩阵乘法与梯度通信，保留可操作的通信与布局探索器。</description>
     </item>
     <item>
       <title>数据并行、ZeRO 与 FSDP</title>
       <link>https://hs-black.github.io/posts/scaling-data-parallel/</link>
       <guid>https://hs-black.github.io/posts/scaling-data-parallel/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从朴素数据并行讲到 ZeRO-1/2/3 与 FSDP：通信重叠、分桶、no_sync、显存公式与通信瓶颈。</description>
+      <description>从朴素数据并行讲到 ZeRO-1/2/3 与 FSDP：通信重叠、分桶、no_sync、显存公式，以及什么时候会被通信卡住。</description>
     </item>
     <item>
       <title>张量并行与序列并行</title>
       <link>https://hs-black.github.io/posts/scaling-tensor-parallel/</link>
       <guid>https://hs-black.github.io/posts/scaling-tensor-parallel/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从矩阵乘法的两种切法讲起：Megatron 张量并行、f/g 算子、词表并行、序列并行与通信量。</description>
+      <description>从矩阵乘法的两种切法讲起：Megatron 张量并行、f/g 算子、词表并行、序列并行、通信量与为什么 TP 不出节点。</description>
     </item>
     <item>
       <title>上下文并行与 Ring Attention</title>
       <link>https://hs-black.github.io/posts/scaling-context-parallel/</link>
       <guid>https://hs-black.github.io/posts/scaling-context-parallel/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>长序列训练怎么切激活：online softmax 合并、Ring Attention、zig-zag 负载均衡与 Ulysses。</description>
+      <description>长序列训练的激活怎么切：online softmax 合并、Ring Attention、zig-zag 负载均衡、All-Gather 式 CP 与 DeepSpeed-Ulysses。</description>
     </item>
     <item>
       <title>流水线并行：从 GPipe 到 DualPipe</title>
       <link>https://hs-black.github.io/posts/scaling-pipeline/</link>
       <guid>https://hs-black.github.io/posts/scaling-pipeline/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>交互幻灯片：推导 AFAB、1F1B、交错、Zero Bubble 与 DualPipe 的气泡与显存，附调度模拟器。</description>
+      <description>从 micro-batch 依赖推导流水线空泡、激活峰值和通信成本，交互比较 AFAB、1F1B、交错、Zero Bubble 与 DualPipe。</description>
     </item>
     <item>
       <title>MoE 与专家并行</title>
       <link>https://hs-black.github.io/posts/scaling-moe/</link>
       <guid>https://hs-black.github.io/posts/scaling-moe/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从路由器、容量、负载均衡损失到无辅助损失偏置，再到专家并行的 all-to-all 与通信成本。</description>
+      <description>从路由器讲起：top-k、softmax 与 sigmoid 门控、容量与丢 token、负载均衡损失的推导、z-loss、细粒度与共享专家、无辅助损失均衡，再到专家并行的 all-to-all、通信量和与 DP/TP/PP 的组合。</description>
     </item>
     <item>
       <title>5D 并行：组合与选型</title>
       <link>https://hs-black.github.io/posts/scaling-5d/</link>
       <guid>https://hs-black.github.io/posts/scaling-5d/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>DP、TP、CP、PP、EP 各切什么、通信放在网络哪层、怎么组合，附配置规划器与设备网格演示。</description>
+      <description>DP、TP、CP、PP、EP 各切什么、通信放在网络哪一层、怎么在设备网格上组合，以及一套选配置的流程和一个配置规划器。</description>
     </item>
     <item>
       <title>JAX 分片编程与 Profiling</title>
       <link>https://hs-black.github.io/posts/scaling-jax/</link>
       <guid>https://hs-black.github.io/posts/scaling-jax/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>用 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 与 profile，分清计算、通信与空闲。</description>
+      <description>用 JAX 的 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 和 profile，在时间线上分出计算、通信与空闲。</description>
     </item>
     <item>
       <title>GPU 内核与 FlashAttention</title>
@@ -417,14 +417,14 @@
       <link>https://hs-black.github.io/posts/scaling-inference/</link>
       <guid>https://hs-black.github.io/posts/scaling-inference/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>从 KV cache 到投机解码：推导带宽与算力瓶颈、延迟下界、吞吐权衡和多卡服务账本；公式旁解释符号与单位，并提供可悬停、点击的变量释义。</description>
+      <description>从 KV cache 到投机解码：推导带宽与算力瓶颈、延迟下界、吞吐权衡和多卡服务账本，结合数值计算与服务排查。</description>
     </item>
     <item>
       <title>一次只猜一个 token</title>
       <link>https://hs-black.github.io/posts/next-token/</link>
       <guid>https://hs-black.github.io/posts/next-token/</guid>
       <pubDate>Mon, 19 Oct 2026 00:00:00 +0000</pubDate>
-      <description>用 8 页动画讲清楚大模型生成文本的循环：切词、打分、采样、再来一遍。</description>
+      <description>从 tokenizer、logits 与采样推导生成循环，跟踪输入和 KV cache 的交接，结合 padding 排错、交互图解与练习。</description>
     </item>
     <item>
       <title>新博客，从零开始</title>

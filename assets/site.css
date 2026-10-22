@@ -1,6 +1,5 @@
 /* ==========================================================================
    hs-black.github.io — shared styles for the home page and article posts.
-   Slide decks use assets/slides.css on top of this file.
    ========================================================================== */
 
 :root {
@@ -201,7 +200,6 @@ img, svg, video, canvas { max-width: 100%; }
   border: 1px solid var(--border);
   color: var(--text-soft);
 }
-.kind.deck { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 40%, transparent); }
 .kind.interactive { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, transparent); }
 
 /* ---------- article ---------- */
@@ -252,6 +250,7 @@ img, svg, video, canvas { max-width: 100%; }
   line-height: 1.6;
 }
 .prose pre code { padding: 0; background: none; font-size: inherit; }
+.prose :not(pre) > code { overflow-wrap: anywhere; }
 
 .prose figure { margin-left: 0; margin-right: 0; }
 .prose figcaption {
@@ -492,7 +491,7 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
 .toc li + li { margin-top: 2px; }
 
 /* Rows of labelled controls inside a .demo. */
-.ctrls { display: grid; gap: 10px; margin: 12px 0; }
+.ctrls { display: grid; grid-template-columns: minmax(0, 1fr); gap: 10px; margin: 12px 0; }
 .ctrl {
   display: grid;
   grid-template-columns: minmax(7em, auto) 1fr minmax(4.5em, auto);
@@ -500,7 +499,9 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
   gap: 12px;
   font-size: 15px;
 }
+.ctrl > * { min-width: 0; }
 .ctrl input[type="range"] { width: 100%; }
+.demo select { max-width: 100%; }
 .ctrl output, .ctrl .val { font-family: var(--font-mono); font-size: 14px; text-align: right; }
 .ctrl select, .demo select, .demo input[type="number"] {
   font: inherit; font-size: 14px;
@@ -531,8 +532,9 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
 .readout .k { display: block; font-size: 12px; color: var(--text-faint); }
 .readout .v { font-family: var(--font-mono); font-size: 18px; font-weight: 600; }
 @media (max-width: 560px) {
-  .ctrl { grid-template-columns: 1fr auto; }
+  .ctrl { grid-template-columns: minmax(0, 1fr) auto; }
   .ctrl input[type="range"] { grid-column: 1 / -1; grid-row: 2; }
+  .ctrl select { grid-column: 1 / -1; grid-row: 2; }
 }
 
 /* Series navigation, filled in by /assets/series.js. */

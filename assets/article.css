@@ -1,0 +1,27 @@
+/* Inline engineering figures and worked exercises, in the article's flow. */
+.article-figure { margin: 1.6em 0; padding: 20px; border: 1px solid var(--border); border-radius: 14px; background: var(--surface); }
+.article-figure h3 { margin-top: 0; }
+.article-figure svg { display: block; max-width: 100%; height: auto; }
+.article-figure figcaption { margin-top: 12px; color: var(--text-soft); font-size: 14px; line-height: 1.6; }
+.figure-scroll { max-width: 100%; overflow-x: auto; overscroll-behavior-x: contain; }
+.article-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 16px; }
+.article-grid > * { min-width: 0; }
+.article-stat { padding: 12px 14px; border-radius: 8px; background: var(--bg-soft); font-variant-numeric: tabular-nums; }
+.article-note { color: var(--text-soft); font-size: .94em; }
+.article-exercise { margin: 1.4em 0; padding-top: 12px; border-top: 1px solid var(--border); }
+.article-exercise h3 { margin-top: 0; }
+.article-step-caption { min-height: 3.2em; color: var(--text-soft); font-size: 15px; line-height: 1.7; }
+.article-step-caption strong { color: var(--text); }
+.article-step-controls { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+.article-step-controls button { font: inherit; font-size: 14px; color: var(--text); padding: 7px 10px; background: var(--bg); border: 1px solid var(--border); border-radius: 7px; cursor: pointer; }
+.article-step-controls button:hover { border-color: var(--accent); }
+.article-step-controls button:disabled { opacity: .42; cursor: default; }
+.article-step-controls :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.article-step-controls input[type=range] { flex: 1; min-width: 90px; width: auto; accent-color: var(--accent); }
+.article-step-controls output { color: var(--text-soft); font: 12px var(--font-mono); white-space: nowrap; }
+@media(max-width: 520px) {
+  .article-figure { padding: 13px; }
+  .article-grid { grid-template-columns: 1fr; }
+  .article-step-controls input[type=range] { flex-basis: 100%; order: 1; }
+  .article-step-controls output { margin-left: auto; }
+}

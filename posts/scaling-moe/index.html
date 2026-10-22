@@ -6,7 +6,7 @@
   <title>MoE 与专家并行 · Zunzhe Zhang</title>
   <meta name="description" content="从路由器讲起：top-k、softmax 与 sigmoid 门控、容量与丢 token、负载均衡损失的推导、z-loss、细粒度与共享专家、无辅助损失均衡，再到专家并行的 all-to-all、通信量和与 DP/TP/PP 的组合。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
@@ -43,7 +43,7 @@
     .prose table td.num { font-family: var(--font-mono); font-size: 14px; }
     .formula-note { font-size: 14px; color: var(--text-faint); }
   </style>
-<link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+<link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 </head>
 <body>
@@ -482,7 +482,7 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
   <script src="/assets/series.js?v=0db6ff6b7f47"></script>
-  <script src="/assets/anim.js"></script>
+  <script src="/assets/anim.js?v=499c11838720"></script>
   <script>
   (() => {
     const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1061,8 +1061,8 @@ out      = zeros_like(U).index_add_(0, order // k, Y * w.flatten()[order, None])
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+  <script src="/assets/post-links.js?v=9057de45e84d"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

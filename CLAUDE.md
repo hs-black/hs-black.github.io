@@ -21,8 +21,8 @@ feed.xml              RSS; hand-maintained, one <item> per post
 404.html
 .nojekyll             stops GitHub Pages from running Jekyll
 assets/site.css       shared styles + color tokens (light/dark)
-assets/slides.css     slide-deck styles (load after site.css)
-assets/slides.js      slide engine (navigation, fragments, slidechange event)
+assets/article.css    shared inline figure and exercise styles
+assets/article-steps.js manual, rewindable figure controls
 assets/posts.js       list of all posts (category, tags, desc) + tags/related box on posts
 assets/post-links.js  generated cross-reference index (scripts/post-links.py)
 assets/series.js      series list + nav for multi-part posts
@@ -33,7 +33,6 @@ assets/img/           avatar and other shared images
 assets/favicon.svg
 files/resume.pdf      linked from the home page
 templates/article.html    starting point for an article / interactive post
-templates/deck.html       starting point for a slide deck
 ```
 
 All internal links and assets use root-absolute paths (`/assets/site.css`,
@@ -42,8 +41,8 @@ folder and are referenced relatively.
 
 ## Adding a post
 
-1. Pick a short lowercase slug (`kv-cache`, `rlhf-notes`) and copy the right
-   template to `posts/<slug>/index.html`.
+1. Pick a short lowercase slug (`kv-cache`, `rlhf-notes`) and copy
+   `templates/article.html` to `posts/<slug>/index.html`.
 2. Fill in `<title>` (`标题 · Zunzhe Zhang`), `<meta name="description">`, the
    `<h1>`, the kind label and the date.
 3. Add an entry at the **top** of `POSTS` in `assets/posts.js` (slug, title,
@@ -61,12 +60,12 @@ folder and are referenced relatively.
 6. Link related posts to each other in the text where a concept is
    explained elsewhere, then run `python3 scripts/post-links.py` to refresh
    the cross-reference index, the blog's content-versioned data URLs, and
-   matching player/style URLs for engineering decks.
+   matching shared script/style URLs.
 7. Preview locally (below), then commit and push.
 
 The header nav (Home / Papers / Projects / Blog) is copied into every page;
 mark the current section with `aria-current="page"`. If the nav changes,
-change it in every page and both templates.
+change it in every page and the article template.
 
 ## Adding a paper
 
@@ -82,15 +81,14 @@ Kinds, used in both the post header and the home list:
 | --- | --- | --- |
 | plain article | 文章 | `kind` |
 | article with interactive demos | 交互 | `kind interactive` |
-| slide deck | 幻灯片 | `kind deck` |
 
 ## Writing
 
 - Engineering lessons should read as continuous articles, with the question,
   reasoning, derivation, worked numbers and engineering consequence connected
   in prose. Use inline interactive figures for the steps that benefit from
-  motion. Preserve a slide version only as an optional presentation aid;
-  do not turn slide bullet points into a stack of article cards.
+  motion. All topics use the article format. Develop the explanation in
+  continuous paragraphs, with figures at the point where they clarify a step.
 - Explain variables, tensor axes and units beside each important formula.
   Repeat the needed definitions after a substantial gap or context change.
   A symbol tooltip supplements this text; it does not replace it. Avoid using
@@ -122,7 +120,7 @@ Kinds, used in both the post header and the home list:
   and let headings and the TOC carry the structure.
 - Use the English term when the Chinese one is uncommon in the ML community
   (micro-batch, all-reduce, kernel, warp, rollout, KV cache, prefill/decode…).
-  Decks read like a talk: "目录", not "这套幻灯片讲什么".
+
 - Technical accuracy matters more than flourish. When numbers in a demo are
   made up for illustration, say so on the page. Do not state specific facts
   (token ids, benchmark scores, paper results) that you have not verified.
@@ -162,45 +160,39 @@ tables scroll inside it), `.callout` / `.callout.warn`, `details`, and demo
 controls `.ctrls` > `.ctrl` (label · range · output), `.seg` toggle buttons and
 `.readout` stat tiles.
 
-## Slide decks
+## Inline figures, exercises, and engineering practice
 
-- Each `<section class="slide">` inside `.stage` is one slide, laid out on a
-  fixed 1280×720 canvas that `slides.js` scales to the window. Sizes in deck
-  CSS are canvas pixels.
-- `.rise` elements animate in whenever their slide is entered; stagger them
-  with `style="--d: 1"`, `--d: 2`, ….
-- `.fragment` elements are revealed one per key press, in document order.
-  Add `dim-after` to fade earlier fragments once a later one is shown.
-- `slidechange` (and `fragmentchange`) fire on `document` with
-  `detail = { index, step, slide }`. Give a slide an `id` and start its custom
-  animation in a listener; clear timers when another slide is entered (see
-  `posts/next-token/` for the pattern).
-- Navigation: ← → / space / PageUp/Down, click (left third goes back), swipe,
-  `F` for fullscreen, `#N` in the URL opens slide N.
-- If a slide heading contains TeX, add a plain-language `data-menu-title` to
-  the heading; native slide-selector options cannot display typeset formulas.
-- Smooth animation: build a timeline with `assets/anim.js` (`Anim.timeline()`
-  → `.to(sel, {x, y, scale, opacity, fill, draw, text, attr}, {at, dur})`,
-  `.label()` for stops) and bind it with `Anim.slide(slideEl, tl, { steps:
-  true, controls: true })`: each label is reached by one key press, the
-  scene is a pure function of time so going back and scrubbing work. Don't
-  mix anim steps with ordinary `.fragment`s on the same slide. Article figures
-  should wait for the reader to advance or play them. The header comment of
-  anim.js has the full API; see `posts/kv-cache/slides.html` for a deck example.
-- Live widgets go in `<div class="widget" data-interactive>`: clicks inside
-  don't turn the page, and focused inputs/buttons keep their keys. See
-  `posts/scaling-pipeline/` and `posts/scaling-collectives/`.
-- Engineering lessons use `/assets/course.css`, loaded after their local
-  styles, and `<section class="slide workshop">`. Derive formulas with
-  named axes and units, work through numbers, and connect implementation
-  choices to a measurable outcome. Split dense material across slides.
-- Exercises use `<details class="ws-answer">` inside an interactive widget.
-  Keep the solution closed initially and verify that the whole slide fits
-  with it open. Supply reasoning and units, not only the final number.
-  Each engineering deck links a runnable `lab.py` beside its HTML, with
-  setup, expected output, a learner experiment and correctness checks.
-  Label simulated timings as teaching inputs; GPU snippets require a
-  separate GPU run before reporting measured performance.
+- Define each visual object positively and precisely, for example “每格表示当前层
+  一个位置的一对 K/V 向量”. Keep essential assumptions beside calculations.
+  Remove boilerplate about what a picture does not represent. Explain a concrete
+  failure with its mechanism and correction when that distinction teaches something.
+- Symbol hints are part of the reading interface. Keep their resting underline
+  subtle. Do not add tooltip usage instructions or a separate symbol glossary;
+  define the needed symbols in the paragraph beside each derivation.
+- Use `/assets/article.css` and `/assets/article-steps.js` for figures that need
+  shared controls. `ArticleSteps.mount(root, {steps, render, duration})` calls
+  `render(step, index, progress)`, starts paused, and supports rewind and scrubbing.
+  A step has a title, a caption, and optional data. Render the scene from its
+  arguments so moving backward restores the exact state. Give the figure
+  meaningful coordinates, units, a stable layout and numerical values.
+- Existing continuous timelines can use `Anim.timeline()` and `Anim.controls()`.
+  Keep reader controls in the normal document flow; figures must work at phone
+  width and with reduced motion. Prefer custom topic-specific views over a row
+  of generic boxes when the computation has a useful spatial representation.
+- Keep worked exercises with full reasoning and units in closed `<details>`.
+  Engineering articles link their runnable `lab.py`, setup, expected results and
+  a concrete modification for the learner. Label example timings as model inputs;
+  report measured GPU performance only after running the corresponding GPU code.
+- When writing an engineering topic, research concrete implementation problems
+  through upstream GitHub issues/discussions, Stack Overflow and official docs or
+  source. Read the discussion and verify the mechanism against primary material.
+  Choose broadly useful or technically interesting mechanisms: algorithm/hardware
+  interactions, performance tradeoffs, numerical contracts and storage lifetimes.
+  Exclude installation/dependency/environment failures and one-off implementation
+  bugs. Issues are research leads, not a bug anthology. Integrate the symptom,
+  mechanism, diagnostic experiment and applicable design into the explanation. Record relevant version or configuration conditions and link
+  direct sources in the references. Historical issues illustrate failure modes;
+  a closed issue alone is not evidence that current versions remain affected.
 
 ## Preview
 
@@ -212,6 +204,9 @@ then open http://localhost:8000/. Root-absolute paths need a server at the
 site root; opening files directly with `file://` will not load the styles.
 For a visual check, Playwright with the preinstalled Chromium can screenshot
 pages at desktop and phone widths.
+
+Article and figure checks: `python3 scripts/check-articles.py` and
+`python3 scripts/check-article-steps.py` (Python Playwright and Chromium).
 
 After changing the shared math reader, run `python3 scripts/check-reader-math.py`
 (Python Playwright and Chromium required). The test serves its own local fixture

@@ -4,13 +4,13 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Transformer 推理的数学 · Zunzhe Zhang</title>
-  <meta name="description" content="从 KV cache 到投机解码：推导带宽与算力瓶颈、延迟下界、吞吐权衡和多卡服务账本；公式旁解释符号与单位，并提供可悬停、点击的变量释义。">
+  <meta name="description" content="从 KV cache 到投机解码：推导带宽与算力瓶颈、延迟下界、吞吐权衡和多卡服务账本，结合数值计算与服务排查。">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
-  <link rel="stylesheet" href="/assets/reader-math.css?v=8e91b4bec017">
+  <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
   <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
   <style>
     :root { --c3: #0f9d75; --hatch: rgba(0,0,0,0.06); }
@@ -24,8 +24,6 @@
     .fig foreignObject .svg-math { display: flex; align-items: center; min-height: 100%; color: var(--text); font-family: var(--font-sans); line-height: 1.25; white-space: nowrap; }
     .fig foreignObject .svg-math.center { justify-content: center; }
     .notation-note { color: var(--text-soft); font-size: 0.94em; padding-left: 12px; border-left: 2px solid var(--border); }
-    .notation-help { font-size: 14px; color: var(--text-soft); }
-    .prose .symbol-glossary { margin: 20px 0; }
     .fig figcaption { margin-top: 6px; font-size: 13.5px; color: var(--text-faint); line-height: 1.6; }
     svg text { font-family: var(--font-sans); fill: var(--text); }
     svg .soft { fill: var(--text-soft); }
@@ -84,27 +82,9 @@
     <nav class="series" data-series="scaling"></nav>
 
     <article class="prose">
-      <div class="callout"><a href="/posts/distributed-inference/">分布式推理动画幻灯片</a>：把权重、KV cache 和中间结果放进每张 GPU，看清计算与通信发生在哪里。</div>
+      <div class="callout"><a href="/posts/distributed-inference/">分布式推理图解</a>：把权重、KV cache 和中间结果放进每张 GPU，看清计算与通信发生在哪里。</div>
       <p>训练时我们只关心一件事：每秒每张卡处理多少 token。推理多了一个维度——<strong>延迟</strong>。用户在等第一个字出来，在等后面的字一个个往外冒。好在推理可以拆成能算的东西：每一步要从显存里搬多少字节、做多少 FLOPs、什么时候受带宽限制、什么时候受算力限制。KV cache 压缩、张量并行、预填充/解码分离、continuous batching、PagedAttention、前缀缓存、投机解码和量化，解决的都是这本账里的某一项。</p>
       <p>算例主要用 TPU v5e：它的规格简单、每美元算力高，数字也好算；需要时同时给出 H100 的对应数字。算术强度、硬件强度这两个概念来自 <a href="/posts/scaling-roofline/">Roofline</a>。</p>
-
-      <p class="notation-help">带点状下划线的数学符号可以悬停、键盘聚焦或轻触查看含义；各节也会在公式附近说明本节的符号与单位。</p>
-      <details class="symbol-glossary"><summary>常用符号速查</summary><div class="table-wrap"><table><thead><tr><th>符号</th><th>含义</th><th>单位</th></tr></thead><tbody>
-<tr><td>B · batch</td><td>一个模型副本本轮参与解码的活动请求数；每条请求贡献一个输入 token。</td><td>条请求</td></tr>
-<tr><td>S · 可见历史长度</td><td>一条序列当前可读取或缓存的 key/value 位置数。</td><td>token</td></tr>
-<tr><td>T · 本次 Query 长度</td><td>本次前向处理的新位置数；单 token 解码时为 1，prefill 可大于 1。</td><td>token</td></tr>
-<tr><td>D · 模型宽度</td><td>每个 token 的 hidden state 维度，也是这里线性层的输入宽度。</td><td>元素</td></tr>
-<tr><td>dh · 每头维度</td><td>每个注意力头的向量长度；此处普通 GQA 假设 key 与 value 维度相同。</td><td>元素</td></tr>
-<tr><td>Hq · Query 头数</td><td>每层 query 的头数；GQA 中多个 query 头共享一组 KV。</td><td>个头</td></tr>
-<tr><td>Hkv · KV 头数</td><td>每层实际存储的 key/value 头数，不能直接用 query 头数替代。</td><td>个头</td></tr>
-<tr><td>L · 层数</td><td>需要保存 attention KV 的模型层数。</td><td>层</td></tr>
-<tr><td>P · 参数量</td><td>稠密模型参数的个数；Pb_w 是权重总字节数。</td><td>参数</td></tr>
-<tr><td>Ndev · 单副本卡数</td><td>一起执行这个模型副本的设备数量；理想估计假设权重与 KV 均匀分片。</td><td>张卡</td></tr>
-<tr><td>𝓑 · 每卡 HBM 带宽</td><td>每张卡在 HBM 与计算单元之间每秒可搬运的字节数；不是权重矩阵 W。</td><td>B/s</td></tr>
-<tr><td>C · 每卡算力</td><td>实际计算精度对应的每秒浮点运算数；此处用峰值作理想下界估计。</td><td>FLOP/s</td></tr>
-<tr><td>kKV · 每 token 的 KV 字节数</td><td>一条序列的一个历史位置，在全部层存储的 K 和 V 字节总和。</td><td>B/token</td></tr>
-<tr><td>bw · 每参数字节数</td><td>一个模型权重存储所需的字节；BF16 为 2，INT8 为 1，理想 INT4 为 0.5。</td><td>B/参数</td></tr>
-</tbody></table><p class="notation-help">表中的 B 默认用于解码；线性层一节用 B 表示本次矩阵乘的 token 行数，符号提示会随章节变化。</p></div></details>
       <div class="toc">
         <b>目录</b>
         <ol>
@@ -195,7 +175,7 @@
 </section>
 <section data-math-scope="linear">
       <h2 id="linear">3. 线性层：解码为什么受带宽限制</h2>
-      <p class="notation-note">这里的 \(\htmlData{symbol=batch}{B}\) 是<strong>本次矩阵乘的 token 行数</strong>：解码时每条请求贡献一行，所以它等于活动请求数；prefill 时一条请求也会贡献多行。\(\htmlData{symbol=width}{D}\) 是输入宽度，\(\htmlData{symbol=ffn}{F}\) 是输出宽度；\(\htmlData{symbol=compute}{C}\) 是每卡算力（FLOP/s），\(\htmlData{symbol=bandwidth}{\mathcal{B}}\) 是每卡 HBM 带宽（B/s），与权重矩阵 \(\mathbf{W}\) 分开记。</p>
+      <p class="notation-note">这里的 \(\htmlData{symbol=batch}{B}\) 是<strong>本次矩阵乘的 token 行数</strong>：解码时每条请求贡献一行，所以它等于活动请求数；prefill 时一条请求也会贡献多行。\(\htmlData{symbol=width}{D}\) 是输入宽度，\(\htmlData{symbol=ffn}{F}\) 是输出宽度；\(\htmlData{symbol=compute}{C}\) 是每卡算力（FLOP/s），\(\htmlData{symbol=bandwidth}{\mathcal{B}}\) 是每卡 HBM 带宽（B/s），权重矩阵记为 \(\mathbf{W}\)。</p>
       <h3>回顾：roofline 与临界 batch</h3>
       <p>一次运算要花的时间至少是两样东西的较大者（假设二者能完全重叠）：算 FLOPs 的时间 \(\htmlData{symbol=math-time}{T_\text{math}}=\text{FLOPs}/\htmlData{symbol=compute}{C}\)，以及把数据从 HBM 搬进计算单元的时间 \(\htmlData{symbol=memory-time}{T_\text{mem}}=\text{Bytes}/\htmlData{symbol=bandwidth}{\mathcal{B}}\)。其中 \(\htmlData{symbol=compute}{C}\) 是芯片的峰值算力（FLOPs/s），\(\htmlData{symbol=bandwidth}{\mathcal{B}}\) 是 HBM 带宽（Bytes/s）。<strong>算术强度</strong> = FLOPs / Bytes；当它超过<strong>硬件强度</strong> \(\htmlData{symbol=compute}{C}/\htmlData{symbol=bandwidth}{\mathcal{B}}\) 时，算子受算力限制（compute-bound），否则受带宽限制（memory-bound）。</p>
       <p>看一个线性层：bf16 激活 \(X[\htmlData{symbol=batch}{B}, \htmlData{symbol=width}{D}]\) 乘 bf16 权重 \(\mathbf{W}[\htmlData{symbol=width}{D}, \htmlData{symbol=ffn}{F}]\)。\(\htmlData{symbol=batch}{B}\) 是这一步里送进来的 token 数。</p>
@@ -287,7 +267,7 @@
       </figure>
 
       <p>以 DeepSeek-V3（61 层）为例，bf16 下每 token 的缓存是 \(61\times576\times2=70{,}272\) 字节 ≈ 69 KiB，比 LLaMA-3-70B 的 320 KiB 还小得多，而它有 128 个注意力头。如果同样的头配置用 MHA（key 是 128+64=192 维，value 128 维），每层每 token 要存 \(128\times320=40{,}960\) 个元素，是 MLA 的 71 倍。DeepSeek-V2 相对 DeepSeek 67B 把 KV cache 减少了 93.3%，最大生成吞吐提高到 5.76 倍。</p>
-      <p>MLA 还有一个常被忽略的好处：吸收之后，解码时 128 个头都在读同一份 576 维的缓存，相当于 \(\htmlData{symbol=group}{G}=\htmlData{symbol=hq}{H_q}\) 的 MQA，注意力的算术强度随头数增长，而不是停在 GQA 的 \(\htmlData{symbol=group}{G}=8\)。代价是每个头的 query 要先做一次到 512 维的投影，注意力里的 FLOPs 变多。</p>
+      <p>MLA 还有一个常被忽略的好处：吸收之后，解码时 128 个头都在读同一份 576 维的缓存，相当于 \(\htmlData{symbol=group}{G}=\htmlData{symbol=hq}{H_q}\) 的 MQA，注意力的算术强度随头数增长。代价是每个头的 query 要先做一次到 512 维的投影，注意力里的 FLOPs 变多。</p>
 
       <h3>其他减小 KV 的办法</h3>
       <ul>
@@ -344,11 +324,11 @@
       $$\htmlData{symbol=step-time}{T_\text{step}}\approx\underbrace{\frac{\htmlData{symbol=batch}{B} \htmlData{symbol=history}{S} \htmlData{symbol=kv-token}{k_{KV}}}{\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=bandwidth}{\mathcal{B}}}}_{\text{KV 读取}}+\max\!\Big(\underbrace{\frac{\htmlData{symbol=params}{P} \htmlData{symbol=weight-bytes}{b_w}}{\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=bandwidth}{\mathcal{B}}}}_{\text{权重读取}},\ \underbrace{\frac{2\htmlData{symbol=batch}{B}\htmlData{symbol=params}{P}}{\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=compute}{C}}}_{\text{矩阵 FLOPs}}\Big)$$
       <p>推理性能的账，基本都在这个式子里。小 batch 时 max 取权重读取，得到<strong>理论最小步时</strong>：</p>
       $$\htmlData{symbol=min-time}{T_\text{min}}=\frac{\htmlData{symbol=batch}{B}\cdot\text{KV 大小}+\text{参数大小}}{\text{总 HBM 带宽}},\qquad \text{吞吐上界}=\frac{\htmlData{symbol=batch}{B}}{\htmlData{symbol=min-time}{T_\text{min}}}$$
-      <p>这里忽略了注意力本身的 FLOPs（它在这组常见 GQA 配置里通常不是主要耗时）、非矩阵运算、通信和"读与算不能完美重叠"等因素，所以它给出理想化的成本估计。实际用时还取决于 kernel 效率、通信、调度与工作区，不能用固定倍数替代测量。</p>
+      <p>这个估计保留权重读取、KV 读取与线性层计算三项主要成本，并假设线性层读写和计算充分重叠。测量时还需要加入 attention 计算、非矩阵算子、通信、调度与工作区的成本。</p>
       <p>举个例子：30B 稠密模型，int8 权重、bf16 计算，16 张 v5e，上下文 8192，每 token KV 100 kB。batch 4 时 \((4\times819\text{MB}+30\text{GB})/(16\times8.2\times10^{11})\approx2.5\) ms；batch 256 时 MLP 已经受算力限制，\(256\times819\text{MB}/(16\times8.2\times10^{11})+2\times256\times30\times10^9/(16\times1.97\times10^{14})\approx16+4.9\approx21\) ms。batch 扩大 64 倍，步时只涨 8 倍左右——这就是吞吐和延迟的交换。</p>
 
       <h3>什么时候解码才受算力限制</h3>
-      <p>只看线性层：\(2\htmlData{symbol=batch}{B}\htmlData{symbol=params}{P}/(\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=compute}{C})\ge \htmlData{symbol=params}{P}\htmlData{symbol=weight-bytes}{b_w}/(\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=bandwidth}{\mathcal{B}})\iff \htmlData{symbol=batch}{B}\ge \htmlData{symbol=weight-bytes}{b_w} \htmlData{symbol=compute}{C}/(2\htmlData{symbol=bandwidth}{\mathcal{B}})\)，正是第 3 节的 \(\htmlData{symbol=critical-batch}{B_\text{crit}}\)，和芯片数无关——<strong>是每个模型副本的 batch</strong>，不是每张卡的。但注意 KV 那一项永远在：即使线性层进了算力区，步时里还有一块纯带宽的时间，所以<strong>整体 MFU 达不到 100%</strong>，上下文越长、KV 那块越大，MFU 天花板越低。</p>
+      <p>只看线性层：\(2\htmlData{symbol=batch}{B}\htmlData{symbol=params}{P}/(\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=compute}{C})\ge \htmlData{symbol=params}{P}\htmlData{symbol=weight-bytes}{b_w}/(\htmlData{symbol=devices}{N_{dev}}\htmlData{symbol=bandwidth}{\mathcal{B}})\iff \htmlData{symbol=batch}{B}\ge \htmlData{symbol=weight-bytes}{b_w} \htmlData{symbol=compute}{C}/(2\htmlData{symbol=bandwidth}{\mathcal{B}})\)，正是第 3 节的 \(\htmlData{symbol=critical-batch}{B_\text{crit}}\)，这里的 <strong>batch 指一个模型副本共同处理的请求数</strong>；芯片数在两边约掉，因此临界 batch 保持不变。但注意 KV 那一项永远在：即使线性层进了算力区，步时里还有一块纯带宽的时间，所以<strong>整体 MFU 达不到 100%</strong>，上下文越长、KV 那块越大，MFU 天花板越低。</p>
 
       <figure class="fig">
         <div class="figure-scroll"><svg viewBox="0 0 720 300" role="img" aria-label="生成的 roofline 图">
@@ -478,7 +458,7 @@
       <p>长上下文时，KV 读取常占主要成本，理想情况是把缓存均匀分片。先按 KV 头切（Megatron 风格），但最多只能切 \(\htmlData{symbol=hkv}{H_{kv}}\) 路（LLaMA-3 只有 8 个 KV 头，MQA 只有 1 个）；再多的卡就沿 batch 维切：用下标 Z、Y 标记 batch 轴与头轴上的局部分片，缓存形状记为 \(\text{KV}[2, \htmlData{symbol=local-batch}{B_Z}, \htmlData{symbol=history}{S}, \htmlData{symbol=local-heads}{H_{kv,Y}}, \htmlData{symbol=head-dim}{d_h}]\)，完全分布。代价是每层注意力前后各一次 AllToAll：把按头切的 query 转成按 batch 切，算完注意力再转回来。这些通信作用在小小的激活上，换来的是不用搬巨大的、原地不动的 KV。上下文特别长、batch 又小时，还可以沿序列维切 KV：先 AllGather query，各卡算局部注意力，再像 FlashAttention 那样用 log-sum-exp 合并。</p>
       <h3>两个细节</h3>
       <ul>
-        <li><strong>延迟受限的集合通信</strong>：小 batch 时激活非常小，一次集合通信的耗时被每跳的固定开销（TPU 上约 1 μs 量级）主导，而不是带宽。例如在 v5e 上做 8 路张量并行时，缓冲区小于约 360 kB 就进入这个区，而 batch 16、\(\htmlData{symbol=width}{D}=8192\) 的 int8 激活只有 131 kB。</li>
+        <li><strong>延迟受限的集合通信</strong>：小 batch 时激活非常小，一次集合通信的耗时被每跳的固定开销（TPU 上约 1 μs 量级）主导。例如在 v5e 上做 8 路张量并行时，缓冲区小于约 360 kB 就进入这个区，而 batch 16、\(\htmlData{symbol=width}{D}=8192\) 的 int8 激活只有 131 kB。</li>
         <li><strong>2D 权重驻留分片</strong>（来自 <em>Efficiently Scaling Transformer Inference</em>）：权重同时沿 \(\htmlData{symbol=width}{D}\) 和 \(\htmlData{symbol=ffn}{F}\) 切成接近方形的块，通信量随总芯片数 \(\sqrt{\htmlData{symbol=devices}{N_{dev}}}\) 下降。在 \(\htmlData{symbol=ffn}{F}=4\htmlData{symbol=width}{D}\) 时，芯片数超过约 72 它就优于 1D 张量并行。</li>
       </ul>
       <p>MoE 顺带一提：记 \(\htmlData{symbol=experts}{E}\) 为总 expert 数、\(\htmlData{symbol=active-experts}{r}\) 为每 token 选中的 expert 数。每个 token 只激活 \(\htmlData{symbol=active-experts}{r}\) 个 expert，但要读的是被任何 token 选中的 expert 权重。以 \(\htmlData{symbol=experts}{E}=16, \htmlData{symbol=active-experts}{r}=2\) 为例，若 batch 足够大、几乎全部 expert 都会被选中，相比单 expert 层，要读的 expert 权重多了 \(\htmlData{symbol=experts}{E}\) 倍、FLOPs 多了 \(\htmlData{symbol=active-experts}{r}\) 倍，所以受算力限制所需的 batch 要乘 \(\htmlData{symbol=experts}{E}/\htmlData{symbol=active-experts}{r}\)：v5e 上约 \(240\times8=1920\) 个 token。MoE 的解码比稠密模型更难吃满算力。</p>
@@ -581,7 +561,7 @@
 </section>
 <section data-math-scope="spec">
       <h2 id="spec">10. 投机解码</h2>
-      <p class="notation-note">投机解码另有一组局部符号：\(\htmlData{symbol=draft}{k}\) 是一轮草稿长度，\(\htmlData{symbol=produced}{N}\) 是这一轮最终输出的 token 数，\(\htmlData{symbol=accepted}{\alpha}\) 是简化模型中每一步的条件接受率，\(\htmlData{symbol=cost-ratio}{c}\) 是一次草稿前向与普通目标模型解码一步的耗时比。这里的 \(\htmlData{symbol=produced}{N}\) 不表示 GPU 数量。</p>
+      <p class="notation-note">投机解码另有一组局部符号：\(\htmlData{symbol=draft}{k}\) 是一轮草稿长度，\(\htmlData{symbol=produced}{N}\) 是这一轮最终输出的 token 数，\(\htmlData{symbol=accepted}{\alpha}\) 是简化模型中每一步的条件接受率，\(\htmlData{symbol=cost-ratio}{c}\) 是一次草稿前向与普通目标模型解码一步的耗时比。</p>
       <p>解码受带宽限制，意味着在小 batch 时芯片的算力大量闲置：把 1 个 token 和把 5 个 token 送过模型，要读的权重相同；若新增计算仍藏在读权重的时间里，两者耗时就可能接近。投机解码就利用这一点：用一个便宜的<strong>草稿模型</strong>先猜 \(\htmlData{symbol=draft}{k}\) 个 token，再让大模型（目标模型）一次前向同时验证这 \(\htmlData{symbol=draft}{k}\) 个位置。</p>
       <h3>贪心版本</h3>
       <ol>
@@ -709,7 +689,7 @@
       <p>int8 下每 token \(2\cdot \htmlData{symbol=hkv}{H_{kv}}\cdot \htmlData{symbol=head-dim}{d_h}\cdot \htmlData{symbol=layers}{L}=2\cdot8\cdot128\cdot80=163{,}840\) 字节，约 164 kB。一条 32k 的序列约 5.4 GB；batch 240 就是 1.3 TB，比 70 GB 的参数大得多，光装下这些就要约 \((70\text{GB}+1.3\text{TB})/16\text{GB}\approx85\) 张 v5e。</p>
       <h3>batch 32、上下文 8k、int8 权重与 KV</h3>
       <p>KV 总量 \(164\text{kB}\times8192\times32\approx43\) GB，加上 70 GB 参数共约 113 GB。至少要 8 张卡（4×2，共 128 GB），非常紧，算上其他开销实际上得用 4×4。</p>
-      <p>步时：int8 权重 + bf16 计算，\(\htmlData{symbol=critical-batch}{B_\text{crit}}\approx120\)，batch 32 远在带宽区，步时就是把这 113 GB 读一遍。4×2 上 \(\htmlData{symbol=step-time}{T_\text{step}}\approx113\text{GB}/(8\times8.2\times10^{11})\approx17\) ms，吞吐 \(32/0.017\approx1860\) token/s，即每芯片约 230 token/s。还要检查张量并行有没有撞上通信界：用两个轴做模型并行，界约为 \(2\htmlData{symbol=ffn}{F}/2200\approx26\) 路，8 路没问题。换成 4×4：通信仍然不是瓶颈，步时减半到约 8.6 ms，每芯片吞吐不变。</p>
+      <p>步时：int8 权重 + bf16 计算，\(\htmlData{symbol=critical-batch}{B_\text{crit}}\approx120\)，batch 32 远在带宽区，步时就是把这 113 GB 读一遍。4×2 上 \(\htmlData{symbol=step-time}{T_\text{step}}\approx113\text{GB}/(8\times8.2\times10^{11})\approx17\) ms，吞吐 \(32/0.017\approx1860\) token/s，即每芯片约 230 token/s。还要检查张量并行有没有撞上通信界：用两个轴做模型并行，界约为 \(2\htmlData{symbol=ffn}{F}/2200\approx26\) 路，8 路没问题。换成 4×4：通信仍在这个带宽下界之内，步时减半到约 8.6 ms，每芯片吞吐不变。</p>
       <h3>最小拓扑与最大 batch</h3>
       <p>如果不在乎 batch，能装下参数就行。8k 上下文下：</p>
       <div class="table-wrap">
@@ -722,7 +702,7 @@
           </tbody>
         </table>
       </div>
-      <p>三行的序列数都是 43，因为参数和 KV 按同样比例缩小。70B 模型能塞进 4 张 v5e，但 batch 只有 43，算力利用率很差。用满显存时，每步就是"把一整张卡的 HBM 读一遍"：\(16\text{GB}/8.2\times10^{11}\approx19\) ms。若平均生成长度为 512，并近似认为每步均维持相同 batch，一次解码约 9.7 s，每芯片吞吐约 \(43/(0.019\times512\times \htmlData{symbol=devices}{N_{dev}})\)：bf16 / int8 / int4 分别约 0.27 / 0.55 / 1.11 QPS/芯片。把拓扑各翻一倍，参数占比减半，KV 空间多出很多，batch 从 43 涨到约 138（例如 bf16 在 4×8 上：\((512-140)\text{GB}/2.68\text{GB}\)），而步时仍是"读一整张卡"的 19 ms，吞吐变成约 0.44 / 0.89 / 1.78。<strong>结论：受 KV 容量限制时，最小的拓扑不是最划算的拓扑。</strong></p>
+      <p>三行的序列数都是 43，因为参数和 KV 按同样比例缩小。70B 模型能塞进 4 张 v5e，但 batch 只有 43，算力利用率很差。用满显存时，每步就是"把一整张卡的 HBM 读一遍"：\(16\text{GB}/8.2\times10^{11}\approx19\) ms。若平均生成长度为 512，并近似认为每步均维持相同 batch，一次解码约 9.7 s，每芯片吞吐约 \(43/(0.019\times512\times \htmlData{symbol=devices}{N_{dev}})\)：bf16 / int8 / int4 分别约 0.27 / 0.55 / 1.11 QPS/芯片。把拓扑各翻一倍，参数占比减半，KV 空间多出很多，batch 从 43 涨到约 138（例如 bf16 在 4×8 上：\((512-140)\text{GB}/2.68\text{GB}\)），而步时仍是"读一整张卡"的 19 ms，吞吐变成约 0.44 / 0.89 / 1.78。<strong>受 KV 容量限制时，增加芯片能腾出更多缓存空间，提高每芯片吞吐。</strong></p>
       <h3>分片能切多宽</h3>
       <p>bf16 在 4×8 上能不能纯张量并行？按受算力限制的界 \(\htmlData{symbol=shards}{Y}\gt \htmlData{symbol=ffn}{F}\cdot \htmlData{symbol=mesh-axes}{M_Y}/2200\)（\(\htmlData{symbol=mesh-axes}{M_Y}\) 是用于模型并行的轴数），两轴约 26 路，所以 4×4 可以、4×8 不行。但解码受带宽限制时，按第 8 节的条件可以放宽到 \(\htmlData{symbol=shards}{Y}\approx \htmlData{symbol=ffn}{F}/(8\htmlData{symbol=batch}{B})\)：batch 64 时约 56 路。具体算一下单个矩阵乘在 4×8 上的三个时间：\(\htmlData{symbol=network-time}{T_\text{ICI}}=2\cdot64\cdot8192/(9\times10^{10})\approx12\) μs，\(\htmlData{symbol=hbm-time}{T_\text{HBM}}=2\cdot8192\cdot28672/(32\cdot8.2\times10^{11})\approx18\) μs，\(\htmlData{symbol=math-time}{T_\text{math}}=2\cdot64\cdot8192\cdot28672/(32\cdot1.97\times10^{14})\approx5\) μs——仍然受 HBM 带宽限制，可以用 4×8 换更低的延迟。如果只压缩权重，HBM 读取时间缩短，通信反而可能更早显露出来；是否能继续扩大 batch，要同时检查激活通信精度与容量。</p>
       <h3>预填充与两池配比</h3>
@@ -741,7 +721,7 @@
       <ul>
         <li>推理 = 预填充（长 prompt 更容易受算力限制，关注 MFU 和 TTFT）+ 解码（小 batch 通常受带宽限制，关注每步字节数与 ITL）。</li>
         <li>解码一步的下界：\(\big(\htmlData{symbol=batch}{B}\cdot\text{KV}+\text{参数}\big)/\text{总带宽}\)；线性层要 batch 超过 \(\htmlData{symbol=critical-batch}{B_\text{crit}}=\htmlData{symbol=weight-bytes}{b_w}\htmlData{symbol=compute}{C}/(2\htmlData{symbol=bandwidth}{\mathcal{B}})\)（v5e bf16 为 240）才进入算力区，常见 GQA 解码注意力的强度仍远低于同一硬件拐点。</li>
-        <li>batch 是吞吐和延迟之间的旋钮；芯片数在带宽区买的是延迟，不是单卡效率；受 KV 容量限制时，加卡也能换来更大 batch 和更高单卡吞吐。</li>
+        <li>batch 是吞吐和延迟之间的旋钮；在固定 batch 的带宽区，增加芯片可以降低延迟，单卡吞吐近似保持不变；受 KV 容量限制时，加卡也能换来更大 batch 和更高单卡吞吐。</li>
         <li>KV cache 是推理特有的主角：GQA / MQA / MLA / 局部注意力缩小它，量化压缩它，PagedAttention 不浪费它，前缀缓存复用它，分离式部署要传输它。</li>
         <li>张量并行与 KV 分片可以降低单步成本；服务副本提高总容量，流水线并行帮助容纳大模型。不同方案要一起计算通信和排队。</li>
         <li>投机解码用闲置算力换延迟，每次验证期望前进 \((1-\htmlData{symbol=accepted}{\alpha}^{\htmlData{symbol=draft}{k}+1})/(1-\htmlData{symbol=accepted}{\alpha})\) 个 token，在小 batch 时划算。</li>
@@ -796,7 +776,7 @@
     },
     "bandwidth": {
       "label": "𝓑 · 每卡 HBM 带宽",
-      "description": "每张卡在 HBM 与计算单元之间每秒可搬运的字节数；不是权重矩阵 W。",
+      "description": "每张卡在 HBM 与计算单元之间每秒可搬运的字节数。",
       "unit": "B/s"
     },
     "net-bandwidth": {
@@ -996,7 +976,7 @@
     },
     "active-experts": {
       "label": "r · 激活 expert 数",
-      "description": "每个 token 的路由器选中的 expert 数，本例为 2；不是草稿长度。",
+      "description": "每个 token 的路由器选中的 expert 数，本例为 2。",
       "unit": "个 expert/token"
     }
   },
@@ -1310,8 +1290,8 @@
     new MutationObserver(() => { dcUpdate(); spUpdate(); }).observe(document.documentElement, { attributes: true, attributeFilter: ['data-theme'] });
   })();
   </script>
-  <script src="/assets/post-links.js?v=3173091271f1"></script>
-  <script src="/assets/posts.js?v=150c41e1230c"></script>
-<script src="/assets/curriculum.js?v=b3e0bc3a87a5"></script>
+  <script src="/assets/post-links.js?v=9057de45e84d"></script>
+  <script src="/assets/posts.js?v=d0504bda181a"></script>
+<script src="/assets/curriculum.js?v=cc75d107b740"></script>
 </body>
 </html>

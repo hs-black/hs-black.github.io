@@ -74,15 +74,18 @@ def main():
     print(f'E[output]={expected:.4f}; round={round_ms:.2f} ms; per-token={round_ms / expected:.4f} ms')
     print(f'speedup vs 10 ms/token={10 * expected / round_ms:.4f}x')
 
-    # target KV 已含原前缀和候选；新采样的纠正 token 尚未过前向。
-    target_kv = ['A', 'B', 'E', 'F', 'G', 'H']
-    prefix_len, accepted_len = 2, 2
-    target_kv = target_kv[:prefix_len + accepted_len]
-    output = target_kv + ['X']
-    assert output == ['A', 'B', 'E', 'F', 'X']
+    # 原缓存含 P 个位置，C 是已采样、待消费的 anchor。
+    prefix, anchor, draft = ['A', 'B'], 'C', ['D', 'E', 'F']
+    prefix_len, accepted_len = len(prefix), 2
+    target_kv = prefix + [anchor] + draft  # target 本轮写入 C、D、E、F。
+    # 接受 D、E，拒绝 F：保留旧缓存 + anchor + 接受的候选。
+    target_kv = target_kv[:prefix_len + 1 + accepted_len]
+    assert target_kv == ['A', 'B', 'C', 'D', 'E']
+    output = prefix + [anchor] + draft[:accepted_len] + ['X']
+    assert len(target_kv) == 5 and len(output) == 6
     assert len(output) == len(target_kv) + 1
-    target_kv.append(output[-1])  # 下一轮输入 anchor X，才能提交 X 的 KV。
-    assert target_kv == output
+    target_kv.append(output[-1])  # 下一轮消费 anchor X，才写入 X 的 KV。
+    assert target_kv == output == ['A', 'B', 'C', 'D', 'E', 'X']
     print('probability, length enumeration, and KV alignment: PASS')
 
 

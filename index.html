@@ -7,7 +7,7 @@
   <meta name="description" content="Zunzhe Zhang works on LLM pretraining at 九坤至知研究院 (Ubiquant) and on embodied AI at Tsinghua IIIS: Vision-Language-Action models, LLM agents, and robotic control.">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
-  <link rel="stylesheet" href="/assets/site.css">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
 </head>
 <body class="home-page">
   <header class="site-header wrap wide">
@@ -141,8 +141,8 @@
         <!-- The newest 3 posts from /blog/. -->
         <ul class="post-list">
           <li><a href="/posts/llm-engineering/"><span class="post-title">LLM 工程学习路径：从张量到推理服务</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">九个阶段串起模型计算、GPU 算子、缓存、推理引擎、服务压测、微调、真实架构和多模态；每阶段都有先修、验收任务与实验，最后完成最小推理引擎。</span></a></li>
-          <li><a href="/posts/mini-inference-engine/"><span class="post-title">从零写一个最小推理引擎</span><span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">用可运行的 NumPy Transformer 串起正确前向、GQA、RoPE、分页 KV、连续调度、采样和测量；含独立参考检查、三种故障注入、四道习题与实验记录模板。</span></a></li>
-          <li><a href="/posts/tensor-layouts/"><span class="post-title">张量布局、stride 与 GPU 访存</span><span class="post-meta"><span class="kind deck">幻灯片</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">从逻辑索引推导真实地址，拆解 transpose、reshape、合并访存与 shared memory bank；含逐步动画、复制成本计算、排错习题和 NumPy 实验。</span></a></li>
+          <li><a href="/posts/mini-inference-engine/"><span class="post-title">从零写一个最小推理引擎</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">用可运行 NumPy Transformer 连起 GQA、RoPE、分页 KV、逐轮调度与采样，从独立 dense 参考、容量承诺和故障注入建立推理引擎的正确性。</span></a></li>
+          <li><a href="/posts/tensor-layouts/"><span class="post-title">张量布局、stride 与 GPU 访存</span><span class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time></span><span class="post-desc">从索引与 stride 推导真实地址，解释转置、切片、复制与别名，再用 sector 和 bank 分析 GPU 访存；含交互图、工程排错、四道习题和 NumPy 实验。</span></a></li>
         </ul>
       </section>
 
