@@ -10,7 +10,7 @@ The owner asks Claude to write the posts; this file is how to do that.
 
 ```
 index.html            home: profile card + "Now" (sidebar), intro, experience timeline,
-                      selected papers, writing (series cards + newest 3 posts), awards
+                      selected papers, awards
 papers/index.html     full publication list (abstract + BibTeX toggles)
 projects/index.html   projects and tools
 blog/index.html       archive: timeline / category / series / tag views + search,
@@ -52,10 +52,11 @@ folder and are referenced relatively.
    templates already do); post pages then show their category and tags under
    the header, a 相关文章 box at the end, and preview cards on links to
    other posts.
-4. Update the post list under "Writing" on `index.html`: it shows the newest
-   **3** posts, so add the new one on top and drop the fourth. If the post
-   belongs to a series, also add it to `assets/series.js` (and bump the count
-   on the series card under "Writing").
+4. If the post belongs to a series, add it to `assets/series.js`. Blog posts,
+   series, and learning paths are presented in `/blog/`. The homepage focuses
+   on the owner's identity, experience, selected papers, and awards, with a
+   Blog navigation link. Adding a post does not add a Writing section, post
+   list, or series cards to the homepage.
 5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
 6. Link related posts to each other in the text where a concept is
    explained elsewhere, then run `python3 scripts/post-links.py` to refresh
@@ -75,7 +76,7 @@ add the short form to "Selected Papers" on `index.html` if it should be
 featured. Only use metadata the owner gives or that you have verified (arXiv
 page etc.); never guess venues, author order or years.
 
-Kinds, used in both the post header and the home list:
+Kinds, used in post headers and the blog archive:
 
 | kind | label | class |
 | --- | --- | --- |
