@@ -11,7 +11,7 @@
 @media(max-width:480px){.training-figure{padding:13px 10px}.training-grid{grid-template-columns:1fr}.training-controls{gap:8px}.training-figure table{font-size:12px}.training-cells span{padding:7px 4px}}
 @media(prefers-reduced-motion:reduce){.training-bar>span{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>LoRA / QLoRA：参数高效微调</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav><article class="prose">
 <p>一个 \(4096\times4096\) 的线性层有 1677 万个参数。让每个参数都能更新，还需要为它保存梯度、Adam 的两个状态，可能再保留一份 FP32 主权重。LoRA 把任务需要的变化写成两个小矩阵，让大模型保留原有权重，同时学习一条额外的计算分支。</p>
 <p>理解这条分支，需要一起看三个量：它能表达什么变化，反向传播怎样穿过它，以及训练时哪些张量仍然占显存。这样才能判断一次微调的瓶颈究竟在 rank、激活还是量化重建。</p>

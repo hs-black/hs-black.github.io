@@ -11,7 +11,7 @@
 @media(max-width:480px){.training-figure{padding:13px 10px}.training-grid{grid-template-columns:1fr}.training-controls{gap:8px}.training-figure table{font-size:12px}.training-cells span{padding:7px 4px}}
 @media(prefers-reduced-motion:reduce){.training-bar>span{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>VLA：从视觉 token 到机器人动作</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav><article class="prose">
 <p>视觉语言模型输出一句描述，VLA 输出一组会被控制器执行的动作。它们都从图像和指令开始，但动作还带着单位、坐标系与执行时刻。一个数值看起来合理的预测，若用了另一套归一化统计，或在过期之后才送到控制器，也会产生系统性的轨迹误差。</p>
 <p>把VLA拆成输入表征、动作生成、时间队列和闭环反馈四段，就可以分别核对计算与接口。模型推理的速度最终要转换成“每个控制周期是否有合适的新动作”。</p>

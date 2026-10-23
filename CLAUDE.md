@@ -12,11 +12,10 @@ The owner asks Claude to write the posts; this file is how to do that.
 index.html            home: profile card + "Now" (sidebar), intro, experience timeline,
                       selected papers, awards
 papers/index.html     full publication list (abstract + BibTeX toggles)
-projects/index.html   projects and tools
 blog/index.html       archive: timeline / category / series / tag views + search,
                       rendered from assets/posts.js
 posts/<slug>/index.html   one folder per post
-tools/<name>/index.html   standalone interactive tools (linked from projects)
+tools/<name>/index.html   standalone interactive tools
 feed.xml              RSS; hand-maintained, one <item> per post
 404.html
 .nojekyll             stops GitHub Pages from running Jekyll
@@ -64,7 +63,7 @@ folder and are referenced relatively.
    matching shared script/style URLs.
 7. Preview locally (below), then commit and push.
 
-The header nav (Home / Papers / Projects / Blog) is copied into every page;
+The header nav (Home / Papers / Blog) is copied into every page;
 mark the current section with `aria-current="page"`. If the nav changes,
 change it in every page and the article template.
 
@@ -105,7 +104,7 @@ Kinds, used in post headers and the blog archive:
   stable positions, a visible initial state, controls, and a nearby explanation
   of each change. Every arrow and color needs a clear meaning; motion should
   make a computation or state transition easier to follow.
-- Personal / academic pages (home, papers, projects) are in English; posts
+- Personal / academic pages (home, papers) are in English; posts
   are in Chinese unless the owner asks otherwise. Write in the owner's
   first-person voice, plainly; no filler intros or hype.
 - The point of a post is that the reader understands. Write as a narrator

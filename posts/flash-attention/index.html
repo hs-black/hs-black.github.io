@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>FlashAttention 1、2、3</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>Attention 的计算量随序列长度平方增长，但显存里最昂贵的对象往往是那张同样按平方增长的分数矩阵。FlashAttention 把计算拆成能放进片上存储的小块，一边读取 Q/K/V，一边更新输出，从而减少大中间结果在 HBM 与计算单元之间的往返。</p>
 <p>三代实现沿着同一条数学基础继续优化：第一代解决中间结果的 IO，第二代改善 GPU 工作划分，第三代进一步利用 Hopper 的异步搬运、矩阵乘和低精度硬件。理解这些层次，就能判断某个形状为什么受益，以及哪种瓶颈仍留在整层模型里。</p>

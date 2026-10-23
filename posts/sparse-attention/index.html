@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>Sparse attention：只看需要的历史</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>上下文增长到十万 token 时，一次 decode 会为每个新 query 扫描很长的 K/V 历史。许多任务只依赖其中一小部分：最近的句子、文档开头的规则，或者与当前问题相关的几个片段。Sparse attention 为每个 query 指定一个读取集合，把计算和访存集中在这些位置。</p>
 <p>真正需要设计的是三个环节：怎样确定集合，怎样保持集合内计算正确，以及怎样让 GPU 实际跳过其余数据。集合选得准确、索引组织得高效，才会同时带来质量和速度收益。</p>

@@ -11,7 +11,7 @@
 @media(max-width:480px){.training-figure{padding:13px 10px}.training-grid{grid-template-columns:1fr}.training-controls{gap:8px}.training-figure table{font-size:12px}.training-cells span{padding:7px 4px}}
 @media(prefers-reduced-motion:reduce){.training-bar>span{transition:none}}
 .patch-grid,.visual-grid{display:grid;gap:5px;margin:12px 0}.patch-grid{grid-template-columns:repeat(4,1fr)}.visual-grid{grid-template-columns:repeat(2,1fr)}.patch-grid span,.visual-grid span{padding:10px 5px;text-align:center;border:1px solid var(--border);border-radius:5px;font-size:14px}.patch-grid .on,.visual-grid .on{background:var(--accent-soft);border-color:var(--accent)}</style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>图像与视频推理：token、计算与显存账本</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav><article class="prose">
 <p>“这张图里写了什么？”只有十几个文字 token，图片却可能展开成几百到几千个视觉位置。一次带图请求要经过媒体解码、缩放、视觉编码、特征合并和语言模型；视频还增加采样与时间位置。输入文件很小，模型中的计算与缓存仍可能很大。</p>
 <p>工程上的第一份账，应从 processor 的实际输出开始：多少 patch 进入视觉模型，多少向量进入语言模型，每个阶段保存多久。把这些长度与时延分开，才能解释分辨率、帧率和 batch 改变之后的表现。</p>

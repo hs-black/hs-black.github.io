@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>一次只猜一个 token</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>给模型输入“今天的天气”，屏幕上的下一段文字怎样出现？一次前向计算会为整个词表产生一组分数，采样器从这些分数中选出一个 token。这个 token 随后成为新的输入，模型再计算下一轮。长答案就是这个循环累积的结果。</p>
 <p>要实现一个能正确生成文本的小程序，需要把三种对象接起来：tokenizer 负责文本与编号的转换，模型把编号序列变成分数，采样器把分数变成下一次选择。它们共同决定输出的内容、长度和停止时机。</p>

@@ -11,7 +11,7 @@
 @media(max-width:480px){.training-figure{padding:13px 10px}.training-grid{grid-template-columns:1fr}.training-controls{gap:8px}.training-figure table{font-size:12px}.training-cells span{padding:7px 4px}}
 @media(prefers-reduced-motion:reduce){.training-bar>span{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>多 Adapter 推理服务</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav><article class="prose">
 <p>同一轮推理里，四条请求分别使用 B、A、C、A 三个 adapter。它们共享底座模型，却要求不同的任务行为。给每个 adapter 单独启动一个模型副本会重复保存底座，也会把本来可以合并的矩阵乘法拆小。多 Adapter 服务把公共计算合起来，再按请求身份补上各自的低秩增量。</p>
 <p>服务端需要同时管理两种共享：所有请求共享底座权重，同一 adapter 的请求共享增量权重。每条请求的缓存、行位置和版本则要跟随自身生命周期。算子速度、显存准入与缓存身份因此连成了同一个问题。</p>

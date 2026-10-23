@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>Linear attention：把历史写进状态</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>普通 attention 会保存每个历史位置的 K/V，新 query 到来时再逐项读取。Linear attention 选择另一种记忆方式：把历史持续写入一个固定形状的状态，新 query 直接读取这个状态。上下文继续增长时，状态的张量形状保持不变。</p>
 <p>这种做法把问题从“保留每个位置”转成“怎样压缩和更新历史”。要理解它的速度、容量和质量，需要同时看求和的重排、归一化分母、遗忘门以及状态写入规则。</p>

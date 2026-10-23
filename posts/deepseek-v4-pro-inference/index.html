@@ -14,7 +14,7 @@
 @media(max-width:600px){.ds-flow{grid-template-columns:repeat(2,minmax(0,1fr))}.ds-stats{grid-template-columns:1fr 1fr}.ds-stats>div:last-child{grid-column:1/-1}.ds-table{font-size:13px}.ds-table td,.ds-table th{padding:7px 5px}}
 @media(prefers-reduced-motion:reduce){.ds-progress span{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>DeepSeek-V4-Pro 推理：一枚 token，8 张卡</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav>
 <article class="prose">
 <p>把 DeepSeek-V4-Pro 放到 8 张卡上，首先要确定每张卡保存什么、计算什么、何时需要等其他卡。这里沿参考推理实现的分工展开：query 与输出投影按头切分，路由专家按 ID 分配；每个 rank 保存完整 shared KV、mHC 状态与共享专家。8 路划分的路由专家权重本身就需要约 95.7 GiB/卡；使用 80 GiB 设备时，需要进一步选择满足容量与整除约束的划分。</p>

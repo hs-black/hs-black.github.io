@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>LLM 量化：字节、误差与计算</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>100 亿个 BF16 参数占约 20 GB。若每个参数能用 4 bit 保存，整数码本身只需 5 GB。这个变化会影响模型能否装进显存，也会影响 decode 每步搬运权重的时间。量化真正要解决的是：用更少的字节保存有用信息，并让实际 kernel 高效地消费这种表示。</p>
 <p>一套量化方案包含数值格式、分组与 scale、校准目标、计算精度和执行布局。沿着一个线性层 \(y=Wx\) 来推导，能看清每个选择怎样传到最终输出。</p>

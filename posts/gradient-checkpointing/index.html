@@ -11,7 +11,7 @@
 @media(max-width:480px){.training-figure{padding:13px 10px}.training-grid{grid-template-columns:1fr}.training-controls{gap:8px}.training-figure table{font-size:12px}.training-cells span{padding:7px 4px}}
 @media(prefers-reduced-motion:reduce){.training-bar>span{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>Gradient checkpointing</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-19">2026-10-19</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav><article class="prose">
 <p>训练一个 Transformer 时，参数和优化器状态常驻显存，而前向产生的中间值会逐层积累：反向还需要它们计算梯度。一个 batch 能完成前向，却在反向前后触发 OOM，往往就发生在这些保存值与临时工作区叠加的时刻。</p>
 <p>Gradient checkpointing 把“保存全部中间值”改成“保存少量入口，反向时重算”。它改变了张量的寿命和计算顺序。理解这项交换，要先写出反向究竟需要哪些值，再选择保存边界，最后验证重算是否还原了同一次前向。</p>

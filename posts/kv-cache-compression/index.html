@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>KV cache 压缩：把历史装得更小</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>一条长请求占用的显存，常常逐渐从模型权重转向 KV cache。32 层、8 个 KV 头、每头 128 维、BF16 的模型，每保存一个位置就增加 128 KiB；8192 个位置是一条请求 1 GiB，32 条这样的请求就是 32 GiB。</p>
 <p>缓存压缩可以从几个不同维度入手：让多个 query 共享 KV 头，把多头表示写入低维 latent，合并或淘汰位置，以及降低每个元素的存储位宽。先把这些维度写进同一份容量公式，再判断每种方法需要模型训练、缓存管理和 kernel 分别做哪些工作。</p>

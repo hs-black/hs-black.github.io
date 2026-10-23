@@ -42,7 +42,7 @@
 @media(max-width:420px){.article-figure{padding:13px}.state-grid{grid-template-columns:1fr}.article-figure th,.article-figure td{padding:7px 3px;font-size:12px}.figure-bar{grid-template-columns:55px 1fr 57px;font-size:12px}.matrix-grid{font-size:11px;gap:2px}}
 @media(prefers-reduced-motion:reduce){.figure-bar i{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>RoPE 与长上下文扩展</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header>
 <nav class="series" data-series="systems"></nav><article class="prose"><p>同一组词换一个顺序，意思就可能改变。Attention 的点积先比较 query 和 key 的内容，模型还需要把位置关系放进比较过程。RoPE（rotary position embedding）在每个头内旋转 Q、K 的二维通道对，让点积随两个位置的距离变化。</p>
 <p>这个旋转会贯穿推理引擎：输入如何填充、缓存追加到哪里、长上下文采用哪组频率，都决定同一对 token 是否得到一致的相位。把旋转公式和缓存生命周期一起检查，才能解释“短输入正常，长输入或分块输入开始出错”的现象。</p>

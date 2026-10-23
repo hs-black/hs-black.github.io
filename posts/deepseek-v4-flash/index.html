@@ -14,7 +14,7 @@
 @media(max-width:600px){.ds-flow{grid-template-columns:repeat(2,minmax(0,1fr))}.ds-stats{grid-template-columns:1fr 1fr}.ds-stats>div:last-child{grid-column:1/-1}.ds-table{font-size:13px}.ds-table td,.ds-table th{padding:7px 5px}}
 @media(prefers-reduced-motion:reduce){.ds-progress span{transition:none}}
 </style></head><body>
-<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>DeepSeek-V4-Flash 架构：一个 token 的旅程</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-20">2026-10-20</time><span>更新于 2026-10-22</span></div></header><nav class="series" data-series="systems"></nav>
 <article class="prose">
 <p>一个 token 走进 DeepSeek-V4-Flash 时，携带的是一个 4096 维向量。经过 43 层处理，它要完成两件事：从过去的上下文里取出相关信息，再用少量专家把当前表示向前推进。它有 284B 总参数，每个 token 激活约 13B。较小的激活规模来自稀疏专家，较小的历史读取来自局部窗口与压缩注意力。</p>
