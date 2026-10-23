@@ -63,7 +63,7 @@
       prerequisite: '残差分支需要矩阵乘法、softmax 与链式法则；真实模型推理需要阶段 3 的缓存和阶段 5 的通信。',
       check: '手算多路残差与深度加权；做删层和递归计算实验；核对记忆查询及概念压缩成本；重建真实模型的跨卡关键路径。',
       core: ['hyper-connections', 'manifold-hyper-connections', 'attention-residuals', 'effective-depth', 'recurrent-depth', 'over-encoding', 'engram', 'concept-models', 'deepseek-v4-flash', 'deepseek-v4-flash-inference', 'deepseek-v4-pro', 'deepseek-v4-pro-inference'],
-      extra: ['deepseek-v4', 'kimi-k2', 'kimi-k3'],
+      extra: ['deepseek-v4', 'kimi-k2', 'kimi-k3', 'iquest-q1'],
     },
     {
       id: 'multimodal', title: '从图像和视频走向动作',

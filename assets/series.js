@@ -325,6 +325,7 @@
     reports: {
       title: '模型技术报告精读',
       posts: [
+        ['iquest-q1', 'IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP'],
         ['deepseek-v4', 'DeepSeek-V4 技术报告精读'],
         ['qwen3-next', 'Qwen3-Next：混合线性注意力与超稀疏 MoE'],
         ['kimi-k2', 'Kimi K2：MuonClip 与万亿参数 Agent 模型'],

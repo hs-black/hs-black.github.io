@@ -70,6 +70,7 @@ window.POST_LINKS = {
  "effective-depth": [
   "attention-residuals",
   "hyper-connections",
+  "iquest-q1",
   "manifold-hyper-connections",
   "recurrent-depth",
   "speculative-decoding"
@@ -98,6 +99,19 @@ window.POST_LINKS = {
   "continuous-batching",
   "cpu-overhead",
   "prefill-decode-disaggregation"
+ ],
+ "iquest-q1": [
+  "deepseek-v4",
+  "effective-depth",
+  "model-merging",
+  "optimizers",
+  "paged-attention",
+  "pretraining-mup",
+  "qwen3-next",
+  "rmsnorm-kernel",
+  "scaling-context-parallel",
+  "scaling-moe",
+  "speculative-decoding"
  ],
  "kimi-k2": [
   "kimi-linear"
@@ -234,6 +248,7 @@ window.POST_LINKS = {
   "cuda-graph",
   "distributed-inference",
   "gemm-optimization",
+  "iquest-q1",
   "prefix-caching",
   "speculative-decoding"
  ],

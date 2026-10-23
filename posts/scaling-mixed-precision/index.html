@@ -660,7 +660,7 @@ PASS: transpose, SR moments, Adam noise, gather metadata, RHT, GEMM gradients/de
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
 <script type="application/json" id="math-definitions">{"global":{"quant-scale":{"label":"FP8 量化乘数 S","description":"此处 q = Q(Sx)，反量化为 q / S；后文 NVFP4 用 s_g、s_b 相乘恢复数值。"},"global-scale":{"label":"NVFP4 张量级反量化乘数 s_g","description":"global amax / (448×6)，用 FP32 保存；同一个 gathered 张量共用。"},"block-scale":{"label":"NVFP4 块级反量化乘数 s_b","description":"当前块 amax / (6 s_g)，再舍入为 E4M3；与 q、s_g 相乘恢复数值。"},"fprop":{"label":"前向 Y = XW","description":"X 为 T×K 激活，W 为 K×N 权重，输出 Y 为 T×N；沿输入特征 K 求和。"},"dgrad":{"label":"输入梯度 dX = GWᵀ","description":"G 为 T×N 上游梯度，结果为 T×K；沿输出特征 N 求和。"},"wgrad":{"label":"权重梯度 dW = XᵀG","description":"X 为 T×K，G 为 T×N，结果为 K×N；沿本批 token 数 T 求和。"},"qvariance":{"label":"量化噪声方差 Var(e | g)","description":"固定真实梯度 g，重复随机舍入产生的误差方差；它进入梯度平方的条件期望。"}}}</script>
-  <script src="/assets/series.js?v=414d36fec9c5"></script>
+  <script src="/assets/series.js?v=727fd7187cb2"></script>
   <script>
 (() => {
   const $ = (id) => document.getElementById(id);
@@ -1226,8 +1226,8 @@ PASS: transpose, SR moments, Adam noise, gather metadata, RHT, GEMM gradients/de
 
   </script>
   <script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/scaling-mixed-precision/training.js"></script>
-  <script src="/assets/post-links.js?v=d42382e2780f"></script>
-  <script src="/assets/posts.js?v=219546abac78"></script>
-<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
+  <script src="/assets/post-links.js?v=f57719c82076"></script>
+  <script src="/assets/posts.js?v=18762a451eee"></script>
+<script src="/assets/curriculum.js?v=3d5c0dc80f88"></script>
 </body>
 </html>

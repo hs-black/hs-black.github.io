@@ -1,0 +1,452 @@
+<!doctype html>
+<html lang="zh-CN"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP · Zunzhe Zhang</title><meta name="description" content="从残差尺度、query-aware sink 与 25 层全局注意力，推导 512K 上下文的 KV 账本、跨卡 softmax 合并和递归投机解码；含交互图、习题与 NumPy 实验。">
+<link rel="canonical" href="https://hs-black.github.io/posts/iquest-q1/">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+<link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+<script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+<link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<style>
+.iq-figure { --iq-global: var(--accent); --iq-local: var(--accent-2); }
+.iq-figure h3 { font-size: 1.05em; }
+.iq-figure .iq-note { font-size: 14px; line-height: 1.7; color: var(--text-soft); margin: 10px 0; }
+.iq-layer-map { display: grid; grid-template-columns: repeat(22,minmax(0,1fr)); gap: 4px; margin: 16px 0 10px; }
+.iq-layer { display: flex; flex-direction: column; align-items: center; justify-content: center; min-width: 0; padding: 5px 0; font: 11px/1.4 var(--font-mono); border: 1px solid var(--border); border-radius: 5px; }
+.iq-layer b { font-size: 12px; }
+.iq-layer.iq-global { background: color-mix(in srgb,var(--accent) 13%,var(--surface)); border-color: color-mix(in srgb,var(--accent) 45%,var(--border)); }
+.iq-layer.iq-local { background: color-mix(in srgb,var(--accent-2) 13%,var(--surface)); border-color: color-mix(in srgb,var(--accent-2) 45%,var(--border)); }
+.iq-legend { display: flex; gap: 8px 18px; flex-wrap: wrap; font-size: 13px; color: var(--text-soft); }
+.iq-legend i { display: inline-block; width: 10px; height: 10px; border-radius: 3px; margin-right: 5px; }
+.iq-key-global { background: var(--accent); }
+.iq-key-local { background: var(--accent-2); }
+.iq-select,.iq-slider { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 18px 0; font-size: 14px; }
+.iq-select select { max-width: 100%; padding: 7px 9px; border: 1px solid var(--border); border-radius: 6px; color: var(--text); background: var(--bg); font: inherit; }
+.iq-slider input { flex: 1; min-width: 85px; width: 100px; accent-color: var(--accent); }
+.iq-slider output { font: 13px var(--font-mono); min-width: 4.5em; text-align: right; }
+.iq-memory-chart { margin: 16px 0; }
+.iq-memory-row { display: grid; grid-template-columns: 130px minmax(0,1fr) 93px; align-items: center; gap: 8px; margin: 10px 0; font-size: 12px; }
+.iq-memory-track { height: 17px; background: var(--bg-soft); border-radius: 4px; overflow: hidden; }
+.iq-memory-track i { display: block; height: 100%; }
+.iq-memory-row output { text-align: right; font: 12px var(--font-mono); }
+.iq-reference-row .iq-memory-track i { background: var(--text-faint); }
+.iq-stat-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; margin: 16px 0; }
+.iq-stat { min-width: 0; padding: 12px; border-radius: 8px; background: var(--bg-soft); }
+.iq-stat span,.iq-stat small { display: block; color: var(--text-soft); font-size: 12px; line-height: 1.5; }
+.iq-stat strong { display: block; font: 600 22px/1.6 var(--font-mono); overflow-wrap: anywhere; }
+.iq-stat small span { display: inline; }
+.iq-probability-table { margin: 20px 0; }
+.iq-probability-row { display: grid; grid-template-columns: 55px minmax(0,1fr) 54px 100px; align-items: center; gap: 8px; margin: 13px 0; font-size: 12px; }
+.iq-probability-row b { font-size: 13px; }
+.iq-probability-row output,.iq-probability-row > span { font-family: var(--font-mono); text-align: right; }
+.iq-probability-track { height: 20px; background: var(--bg-soft); border-radius: 5px; overflow: hidden; }
+.iq-probability-track i { display: block; height: 100%; background: var(--accent); }
+.iq-sink-row .iq-probability-track i { background: var(--accent-2); }
+#iq-sink[data-stage="1"] #iq-sink-denominator,#iq-sink[data-stage="2"] #iq-sink-history,#iq-sink[data-stage="3"] #iq-sink-output { color: var(--accent); }
+.iq-equation { font: 14px/1.8 var(--font-mono); padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; overflow-wrap: anywhere; }
+.iq-halo-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 12px; margin: 18px 0 12px; }
+.iq-halo-card { padding: 14px; border: 1px solid var(--border); border-radius: 10px; background: var(--bg-soft); min-width: 0; }
+.iq-halo-card h4 { margin: 0 0 10px; font-size: 14px; }
+.iq-halo-card > p { font: 12px/1.7 var(--font-mono); margin: 12px 0 5px; }
+.iq-halo-card > strong { font-size: 15px; }
+.iq-token-pair { display: flex; flex-wrap: wrap; gap: 6px; }
+.iq-token-pair span { flex: 1; min-width: 90px; padding: 8px; border-radius: 6px; background: var(--surface); font: 12px/1.7 var(--font-mono); }
+.iq-halo-pending { opacity: .4; }
+.iq-transfer-status { font-size: 14px; color: var(--text-soft); min-height: 3em; }
+.iq-merge-stage { min-height: 130px; }
+.iq-merge-bar { display: flex; height: 35px; border-radius: 7px; overflow: hidden; font: 12px/35px var(--font-mono); text-align: center; }
+.iq-merge-bar span:first-child { flex: 2; background: color-mix(in srgb,var(--accent) 20%,var(--surface)); }
+.iq-merge-bar span:last-child { flex: 1; background: color-mix(in srgb,var(--accent-2) 20%,var(--surface)); }
+@media(max-width:600px) {
+ .iq-layer-map { grid-template-columns: repeat(11,minmax(0,1fr)); gap: 3px; }
+ .iq-memory-row { grid-template-columns: minmax(0,1fr) 93px; gap: 5px; }
+ .iq-memory-row > span { grid-column: 1 / -1; }
+ .iq-probability-row { grid-template-columns: 48px minmax(0,1fr) 50px; }
+ .iq-probability-row > span { grid-column: 2 / -1; font-size: 11px; }
+ .iq-stat-grid { gap: 6px; }
+ .iq-stat { padding: 8px; }
+ .iq-stat strong { font-size: 17px; }
+ .iq-stat span,.iq-stat small { font-size: 11px; }
+ .iq-halo-grid { grid-template-columns: 1fr; }
+ .iq-equation { font-size: 12px; }
+}
+
+.prose .katex-display { overflow-x:auto; overflow-y:hidden; padding:.25em 0; }
+.prose p,.prose td,.prose li { overflow-wrap:anywhere; }
+.prose h2 { scroll-margin-top:24px; }
+.prose pre { overflow-x:auto; }
+</style></head><body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/projects/">Projects</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-23">2026-10-23</time></div></header>
+<nav class="series" data-series="reports"></nav>
+<article class="prose"><p>一个 coding agent 会反复读取代码、运行工具、检查输出，再把新的观察接回上下文。任务越长，模型面对的历史越多；模型越深，每层更新的尺度也越难控制。IQuest-Q1 用 320B 总参数、约 15B 激活参数，把稀疏专家、混合 attention 和稳定训练放在同一套结构里。</p>
+<p>有三个数字能抓住这套模型的计算特征：<strong>88 层、512K 上下文、每个 token 选择 8 个专家</strong>。88 层需要有效地利用深度；512K 需要控制历史状态；8 个专家决定一次前向实际经过哪些权重。沿着一个 token 的计算过程看，这些设计之间的关系会清楚很多。</p>
+<nav class="toc" aria-label="目录"><b>目录</b><ul>
+<li><a href="#overview">1. 一个 token 经过哪些张量</a></li>
+<li><a href="#splitnorm">2. Stable SplitNorm：让残差更新保持可见</a></li>
+<li><a href="#hybrid">3. 3 层局部、1 层全局，为什么一共是 25 层全局</a></li>
+<li><a href="#sink">4. Query-aware sink：允许一次 attention 少取一些历史信息</a></li>
+<li><a href="#qknorm">5. QKNorm、Partial RoPE 和 FP8 要怎样接起来</a></li>
+<li><a href="#moe">6. 256 选 8：计算稀疏，权重仍要放得下</a></li>
+<li><a href="#memory">7. 512K 上下文究竟需要多少 KV cache</a></li>
+<li><a href="#halo">8. 跨卡 SWA：只传边界，还要正确合并 softmax</a></li>
+<li><a href="#mtp">9. 递归 MTP：一套小模块，连续起草多个 token</a></li>
+<li><a href="#training">10. Muon 与 μP：把小模型找到的尺度迁移过来</a></li>
+<li><a href="#agent">11. 架构怎样接到 CLI 后训练</a></li>
+<li><a href="#exercises">12. 计算与诊断练习</a></li>
+<li><a href="#lab">13. 在 CPU 上把关键等式跑一遍</a></li>
+<li><a href="#refs">参考与延伸阅读</a></li>
+</ul>
+</nav>
+<h2 id="overview">1. 一个 token 经过哪些张量</h2>
+<p>主干隐藏维度为 3,072。输入 token 经 embedding 变成一个 3,072 维向量，随后经过 88 层 attention 与 FFN，最后通过独立的 LM head 得到词表上的 logits。</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>部件</th>
+<th>发布模型的配置</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>主干</td>
+<td>88 层，隐藏维度 3,072</td>
+</tr>
+<tr>
+<td>Attention</td>
+<td>48 个 Query 头，8 个 KV 头，每头 128 维</td>
+</tr>
+<tr>
+<td>全局与局部</td>
+<td>25 层 full attention，63 层 sliding-window attention</td>
+</tr>
+<tr>
+<td>局部窗口</td>
+<td>4,096 token</td>
+</tr>
+<tr>
+<td>位置编码</td>
+<td>每头 32 维使用 RoPE，其余 96 维保留内容表示</td>
+</tr>
+<tr>
+<td>FFN</td>
+<td>第 1 层 dense SwiGLU；其余 87 层 sparse MoE</td>
+</tr>
+<tr>
+<td>MoE</td>
+<td>每层 256 个 routed expert，每个 token 选 8 个；专家中间维度 1,536</td>
+</tr>
+<tr>
+<td>Dense FFN</td>
+<td>中间维度 12,288</td>
+</tr>
+<tr>
+<td>词表与上下文</td>
+<td>160,000 词表；发布配置最大上下文 524,288</td>
+</tr>
+</tbody>
+</table></div>
+<p>这里有一个容易影响实现的张量形状：Query 投影的输出宽度是 \(48\times128=6,144\)，KV 投影各为 \(8\times128=1,024\)。Attention 汇总出 6,144 维结果后，输出投影再将它压回 3,072 维。隐藏维度和所有 attention head 拼起来的宽度，各自承担不同的接口。</p>
+<p>8 个 KV 头由 48 个 Query 头共享，每组 6 个 Query 头。这是 GQA 在头维度上的共享。SWA 则限制某一层能读取哪些历史位置：每个 Query 只访问当前位置及窗口内的历史。两种节省可以同时使用。</p>
+<h2 id="splitnorm">2. Stable SplitNorm：让残差更新保持可见</h2>
+<p>先看普通 Pre-Norm 的一个 attention 子层。设 \(x\) 是输入隐藏向量，\(N\) 是 RMSNorm，\(A\) 是 attention：</p>
+<p>$$
+h=x+A(N(x)).
+$$</p>
+<p>左边那条残差路径把 \(x\) 原样向后传。随着层数增加，残差流不断累加更新。若将各层更新近似看成尺度相当、相关性较弱的向量，残差范数可能随深度增长，而后面一层加入的更新保持在相近尺度。更新相对于当前状态的比例于是变小。这会表现为后面一些层对输出的改变越来越弱；具体模型可以用删层实验、残差更新比和隐藏表示相似度来测量。</p>
+<p>SplitNorm 在 attention 入口处先归一化整条流，再从归一化后的状态建立残差：</p>
+<p>$$
+z=N_{\rm in}(x),\qquad h=z+A(z),\qquad
+y=h+F(N_{\rm ffn}(h)).
+$$</p>
+<p>这里 \(F\) 是 FFN。Attention 周围的残差起点是 \(z\)，FFN 周围的残差起点是 \(h\)。把这两个起点标出来，就能看清它怎样处理深度：每个普通 block 开始时重新控制主流尺度，同时让 FFN 的更新通过加法进入下一状态。</p>
+<p>Stable SplitNorm 再对 attention 的输出做 RMSNorm。将发布实现中的分支尺度也写出来，一个普通 block 是</p>
+<p>$$
+\begin{aligned}
+z&amp;=N_{\rm in}(x),\\
+h&amp;=z+s_A N_{\rm attn}(A(z)),\\
+y&amp;=h+\htmlData{symbol=ffn-scale}{s_F} F(N_{\rm ffn}(h)).
+\end{aligned}
+$$</p>
+<p>\(s_A,s_F\) 分别是 attention 与 FFN 的输出尺度，\(N_{\rm attn}\) 的 gain 也是模型参数。发布配置里，普通层的 <code>attn_out_scale</code> 为 1，<code>ffn_out_scale</code> 约为 0.5388。部署时按 checkpoint 的 Norm 参数与这些 scale 执行。</p>
+<p>RMSNorm 自身的运算是</p>
+<p>$$
+N(x)=\gamma\odot\frac{x}{\sqrt{d^{-1}\sum_{i=1}^{d}x_i^2+\epsilon}},
+$$</p>
+<p>其中 \(d\) 是向量宽度，\(\gamma\) 是逐维可学习 gain，\(\epsilon\) 用于稳定分母。Attention 输出的 RMSNorm 控制的是这一整次更新的尺度；FFN 的输出尺度则直接作用于分支结果。</p>
+<p>第 1 层承担从 embedding 进入深层主干的过渡，使用单独的 SandwichNorm：保留原输入残差，并对 attention 和 dense FFN 的输出都归一化。后面 87 层使用上述 Stable SplitNorm。实现 block fusion 时应分别检查首层与普通层的残差起点、Norm 位置和缩放顺序。[1–3]</p>
+<p>理解深度贡献可以继续看<a href="/posts/effective-depth/">有效深度</a>；RMSNorm 的归约与数值实现见 <a href="/posts/rmsnorm-kernel/">RMSNorm 算子</a>。</p>
+<h2 id="hybrid">3. 3 层局部、1 层全局，为什么一共是 25 层全局</h2>
+<p>模型的前两层和最后两层使用 full attention。中间的 84 层重复 21 组“3 层 SWA + 1 层 full attention”，所以</p>
+<p>$$
+L_{\rm full}=2+21+2=25,\qquad L_{\rm local}=21\times3=63.
+$$</p>
+<p>局部层让大部分 token 混合集中在最近 4,096 个位置；周期性的全局层负责从完整历史提取信息。经过全局层汇总的信息，可以继续进入后面的局部计算。首尾的额外全局层也参与模型的完整信息流。</p>
+
+<figure class="article-figure iq-figure" id="iq-cache">
+  <h3>88 层各自保留多少历史？</h3>
+  <p class="iq-note">每格是一层，数字从 1 开始。紫色 G 为全局注意力，橙色 S 为滑动窗口注意力；第 1 层接 dense FFN，其余层接 MoE。</p>
+  <div class="iq-layer-map" id="iq-layer-map" aria-label="88层注意力分布"></div>
+  <div class="iq-legend"><span><i class="iq-key-global"></i>25 层 G · 全部历史</span><span><i class="iq-key-local"></i>63 层 S · 最近 4,096 个位置</span></div>
+  <label class="iq-select">上下文长度 <select id="iq-cache-length"><option value="0">4,096 tokens</option><option value="1">32,768 tokens</option><option value="2">131,072 tokens</option><option value="3">524,288 tokens</option></select></label>
+  <div class="iq-memory-chart" aria-label="KV缓存大小比较">
+    <div class="iq-memory-row"><span>25 层全局 KV</span><div class="iq-memory-track"><i id="iq-global-bar" class="iq-key-global"></i></div><output id="iq-global-size">0.391 GiB</output></div>
+    <div class="iq-memory-row"><span>63 层窗口 KV</span><div class="iq-memory-track"><i id="iq-local-bar" class="iq-key-local"></i></div><output id="iq-local-size">0.984 GiB</output></div>
+    <div class="iq-memory-row iq-reference-row"><span>88 层全局，对照</span><div class="iq-memory-track"><i id="iq-reference-bar"></i></div><output id="iq-reference-size">1.375 GiB</output></div>
+  </div>
+  <p class="iq-note">三条柱共用 176 GiB 的横轴。全局层随上下文增长；窗口层在窗口填满后保持相同容量。</p>
+  <div class="iq-stat-grid"><div class="iq-stat"><span>当前上下文</span><strong id="iq-context-tokens">4,096</strong><small>tokens</small></div><div class="iq-stat"><span>混合架构 KV 合计</span><strong id="iq-total-size">1.375</strong><small>GiB / 请求</small></div><div class="iq-stat"><span>相对全局对照</span><strong id="iq-cache-ratio">100.0%</strong><small>保留的 KV 容量</small></div></div>
+  <figcaption>单请求、8 个 KV 头、每头 128 维、K 与 V 均为 BF16。每层每个位置占 4,096 bytes。账本按窗口层及时回收旧 KV 计算；MTP、分页对齐和服务工作区另计。</figcaption>
+</figure>
+
+
+<p>长上下文 decode 时，局部层保存最近一个窗口的 K/V，全局层保存完整历史。于是缓存增长速度由 25 层全局 attention 主导。只在 attention mask 上屏蔽旧 token，显存占用仍取决于后端是否真的回收对应的缓存块。</p>
+<h2 id="sink">4. Query-aware sink：允许一次 attention 少取一些历史信息</h2>
+<p>普通 softmax 的权重和为 1，即使当前 Query 与所有历史内容都不太相关，它也会将全部权重分给这些位置。给 attention 增加一个可学习的 sink key，并把它的 Value 设为零，就给了这次查询一个可调节的出口。</p>
+<p>固定一个 Query 头，设历史位置 \(j\) 的 attention logit 为 \(a_j=q^\top k_j/\sqrt{d_h}\)，其中 \(d_h=128\)。对应 Value 为 \(v_j\)。Sink 的 logit 是 \(a_\star=q^\top k_\star/\sqrt{d_h}\)，其 Value 为零。输出变成</p>
+<p>$$
+o=\frac{\sum_j e^{a_j}v_j}{e^{a_\star}+\sum_j e^{a_j}}.
+$$</p>
+<p>Sink 进入了 softmax 的分母。它获得越多权重，历史 Value 的总贡献就越小。因为 \(a_\star\) 随 Query 改变，不同 token、不同 Query 头可以选择不同强度的历史更新。</p>
+
+<figure class="article-figure iq-figure" id="iq-sink">
+  <h3>给 softmax 一个可以分走概率的零值位置</h3>
+  <p class="iq-note">教学数值：三个历史位置的 logits 是 ln 2、0、0，对应 V 是 1、3、−1。每条横柱表示该位置的 softmax 概率；sink 的 V 固定为 0。</p>
+  <label class="iq-slider">sink logit <input id="iq-sink-score" type="range" min="-4" max="4" step="any" value="1.3862943611198906"><output id="iq-sink-score-value">1.386</output></label>
+  <p class="iq-note">滑块只改变教学算例中 sink 的分数；模型中的分数由当前 query 与可学习的 sink key 计算。</p>
+  <div class="iq-probability-table" id="iq-sink-probabilities">
+    <div class="iq-probability-row"><b>历史 A</b><div class="iq-probability-track"><i data-sink-bar="0"></i></div><output data-sink-prob="0">50.0%</output><span data-sink-term="0">0.500 × 1</span></div>
+    <div class="iq-probability-row"><b>历史 B</b><div class="iq-probability-track"><i data-sink-bar="1"></i></div><output data-sink-prob="1">25.0%</output><span data-sink-term="1">0.250 × 3</span></div>
+    <div class="iq-probability-row"><b>历史 C</b><div class="iq-probability-track"><i data-sink-bar="2"></i></div><output data-sink-prob="2">25.0%</output><span data-sink-term="2">0.250 × −1</span></div>
+    <div class="iq-probability-row iq-sink-row"><b>sink</b><div class="iq-probability-track"><i data-sink-bar="3"></i></div><output data-sink-prob="3">0.0%</output><span data-sink-term="3">0.000 × 0</span></div>
+  </div>
+  <div class="iq-stat-grid"><div class="iq-stat"><span>softmax 分母</span><strong id="iq-sink-denominator">4.000</strong><small>历史 4 + <span id="iq-sink-weight">0.000</span></small></div><div class="iq-stat"><span>历史保留的概率</span><strong id="iq-sink-history">100.0%</strong><small>所有历史位置相加</small></div><div class="iq-stat"><span>加权输出</span><strong id="iq-sink-output">1.000</strong><small>Σ 概率 × V</small></div></div>
+  <p class="iq-equation" id="iq-sink-equation">(2 × 1 + 1 × 3 + 1 × −1) / 4 = 1.000</p>
+  <figcaption>三个历史位置的相对比例始终为 2:1:1。sink 接走一部分总概率后，整个历史输出一起缩小；当 sink 的 exp(logit) 为 4 时，输出从 1 变成 0.5。</figcaption>
+</figure>
+
+
+<p>这个设计还能与普通 attention kernel 组合。令真实历史上的 log-sum-exp 为 \(\ell=\log\sum_j e^{a_j}\)，普通 attention 输出为 \(o_0\)，则</p>
+<p>$$
+o=\frac{e^\ell}{e^\ell+e^{a_\star}}o_0
+=\sigma(\ell-a_\star)o_0.
+$$</p>
+<p>\(\sigma\) 是 sigmoid。也就是说，kernel 返回普通 attention 的输出和 LSE 后，可以计算一个标量门来得到带 sink 的结果。公开实现正是利用这种关系：保留稳定的 softmax 归约，再补上 sink 对归一化分母的贡献。[3][4]</p>
+<p>发布实现为每个 KV 头保存一个 128 维 sink key，同组的 6 个 Query 头共享它，各自计算自己的点积。计算使用经过 QKNorm 和 partial RoPE 的 Query。Sink key 属于模型权重，其存储大小随层数和头数确定。</p>
+<p>这里的门作用于单个头的 Value 聚合。各头随后拼接、经过输出投影，再进入 Stable SplitNorm 的输出 RMSNorm。不同头的门会改变合成向量的方向；若所有头恰好同时乘上同一个正数，忽略 \(\epsilon\) 时，后续 RMSNorm 会消去这次共同的幅度变化。因此观察完整 block 时，要同时看各头的相对贡献和归一化后的分支方向。</p>
+<p>一个实用的核对方法是：先把 sink key 与零 Value 显式拼进小型 attention，作为参考结果；再检查 LSE 缩放版本是否一致。后面的 CPU 实验会完成这项比较，包括极大 logits 与被 mask 的位置。</p>
+<h2 id="qknorm">5. QKNorm、Partial RoPE 和 FP8 要怎样接起来</h2>
+<p>Query 和 Key 的范数都会影响点积的大小。点积尺度过大时，softmax 很容易集中到极少数位置。QKNorm 在每个头内部归一化 Q/K，再进行位置变换和打分，使注意力尺度更容易控制。</p>
+<p>训练中的 QKNorm Clip 进一步约束 Norm 的 affine 参数，上限设为 10。这个约束作用在可学习的归一化参数上。检查训练稳定性时，可以同时记录 gain 的分布、Q/K 范数、attention logit 的范围和梯度峰值，判断放大来自哪一环。</p>
+<p>每个头的 128 个维度里，前 32 维应用 RoPE。将向量分成位置部分 \(q_p,k_p\) 与内容部分 \(q_c,k_c\)，第 \(t\) 个 Query 对第 \(j\) 个 Key 的点积可写成</p>
+<p>$$
+(R_tq_p)^\top(R_jk_p)+q_c^\top k_c.
+$$</p>
+<p>\(R_t,R_j\) 是对应位置的旋转。前一项携带相对位置信息，后一项保留内容匹配。SWA 使用 10,000 的 RoPE base，全局层在最终长上下文配置中使用 1,000,000；两类层分别适配窗口内关系和长距离关系。[1][2]</p>
+<p>低精度 kernel 又增加了一层数值约定。例如按 \(q\approx s_q\hat q\) 量化 Query，其中 \(\hat q\) 是 FP8 表示，\(s_q\) 是反量化尺度。Attention kernel 可能已经正确处理了这个 scale，但旁路计算 sink logit 时仍需要使用恢复尺度后的 Query：</p>
+<p>$$
+a_\star=\frac{(s_q\hat q)^\top k_\star}{\sqrt{d_h}}.
+$$</p>
+<p>若省去 \(s_q\)，sink 获得的概率会变化，最终输出门也随之变化。GQA 下还要核对 scale 究竟按 Query 头还是 KV 组存放。公开 vLLM 插件的测试覆盖了 FP8 scale、GQA 共享和非连续张量布局；这些都是移植自定义 attention 时值得保留的数值实验。[3]</p>
+<h2 id="moe">6. 256 选 8：计算稀疏，权重仍要放得下</h2>
+<p>第 1 层使用 dense FFN，使初始 token 表示先经过一套公共变换。后面的每层含 256 个专家，router 为当前 token 选择 8 个。每个专家都是 SwiGLU：两条输入投影产生 gate 与内容，逐元素相乘后，再通过输出投影回到隐藏维度。</p>
+<p>设隐藏宽度为 \(d\)，专家中间宽度为 \(m\)，忽略 bias 时，一个专家有约 \(3dm\) 个参数。代入 \(d=3,072,m=1,536\)，87 层的 routed expert 权重总量为</p>
+<p>$$
+87\times256\times3\times3,072\times1,536\approx315.28\text{B}.
+$$</p>
+<p>专家权重占据了模型的绝大部分。每个 token 只经过少量专家，降低了当前前向的计算量；保存与部署时，整个专家集合仍占用存储。320B 参数按 BF16 粗算为 <strong>640 GB 权重</strong>。正式的设备容量账本还要加入 KV cache、临时张量、通信 buffer 与递归 drafter。</p>
+<p>MoE 的另一个瓶颈是每个专家分到多少 token。假设一批有 \(M\) 个 token，每个路由到 8 个专家，并且负载均匀，则每个专家平均收到</p>
+<p>$$
+n_{\rm expert}=\frac{8M}{256}=\frac{M}{32}\text{ 个 token}.
+$$</p>
+<p>当 \(M=32\) 时，平均只有 1 个；当 \(M=512\) 时，平均为 16 个。小批量容易落到小矩阵乘法和通信启动开销主导的区域。扩大批量可能改善 GEMM 利用率，也会增加排队和缓存占用。实际调优应一起观察专家 token 分布、grouped GEMM 时间、all-to-all 时间和请求延迟。进一步的跨卡账本见 <a href="/posts/scaling-moe/">MoE 与专家并行</a>。</p>
+<h2 id="memory">7. 512K 上下文究竟需要多少 KV cache</h2>
+<p>现在把层数、窗口和 GQA 放到同一个式子里。令 \(B\) 为请求数，\(T\) 为每个请求的历史长度，\(h_{kv}=8\) 为 KV 头数，\(d_h=128\) 为头维度，\(b=2\) 为每个 BF16 元素的字节数，\(W=4,096\) 为窗口大小。逻辑 KV 存储量为</p>
+<p>$$
+M_{\rm KV}=2\htmlData{symbol=batch}{B} \htmlData{symbol=kv-heads}{h_{kv}}\htmlData{symbol=head-dim}{d_h} \htmlData{symbol=bytes}{b}
+\left[25\htmlData{symbol=context}{T}+63\min(\htmlData{symbol=context}{T},\htmlData{symbol=window}{W})\right].
+$$</p>
+<p>最前面的 2 对应 K 和 V。每层每个历史 token 占 \(2\times8\times128\times2=4,096\) 字节。令 \(B=1\)，得到下面的稳态容量：</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>历史长度</th>
+<th style="text-align: right;">25 层全局 KV</th>
+<th style="text-align: right;">63 层局部 KV</th>
+<th style="text-align: right;">合计</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>32K = 32,768</td>
+<td style="text-align: right;">3.125 GiB</td>
+<td style="text-align: right;">0.984 GiB</td>
+<td style="text-align: right;">4.109 GiB</td>
+</tr>
+<tr>
+<td>128K = 131,072</td>
+<td style="text-align: right;">12.500 GiB</td>
+<td style="text-align: right;">0.984 GiB</td>
+<td style="text-align: right;">13.484 GiB</td>
+</tr>
+<tr>
+<td>512K = 524,288</td>
+<td style="text-align: right;">50.000 GiB</td>
+<td style="text-align: right;">0.984 GiB</td>
+<td style="text-align: right;"><strong>50.984 GiB</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>若全部 88 层都保存完整历史，512K 会达到 176 GiB。混合 attention 将这个算例缩减约 3.45 倍。全局层贡献了 50 GiB，因此长上下文下继续压缩局部窗口，对总缓存的影响已经较小。</p>
+<p>这些数字采用单请求、局部窗口正常回收、无 padding 的逻辑 K/V；部署另列页块碎片、缓存池分组、prefill workspace 和 MTP 状态。TP=8 且 8 个 KV 头均匀分到各卡时，逻辑主干 KV 约为每卡 6.373 GiB。进一步增加 TP 时，还要查看后端是否复制 KV 头。</p>
+<p>一个具体的配置差异是：vLLM 0.30.0 的缓存规格实现保留了“关闭 hybrid allocator、SWA 按全历史分配”的路径，窗口 mask 仍然有效。要获得上表的容量收益，需要让 allocator 按层类型管理并回收旧块。[5]</p>
+<p>检验缓存实现，可以固定请求数逐步增长 \(T\)，分别记录 full 与 SWA 的有效缓存块：前者应继续增长，后者达到窗口容量后进入稳定区间。预分配的总显存可能一直不变，因此还要看已使用块数和剩余容量。再比较一次完整 prefill 与分块 prefill 的末端 logits，覆盖窗口边界和 chunk 边界。分页管理细节见 <a href="/posts/paged-attention/">PagedAttention</a>。</p>
+<h2 id="halo">8. 跨卡 SWA：只传边界，还要正确合并 softmax</h2>
+<p>长序列训练可以把连续的 token 分片放在不同 GPU 上。一张卡的内部 Query 能在本地找到整个窗口；靠近分片起点的 Query，还需要前一张卡尾部的 K/V，这一段称为 halo。</p>
+<p>设每卡有 \(S\) 个 token，一个 Query 最多访问前面的 \(H\) 个位置。当 \(0&lt;H&lt;S\) 时，一张卡只需要前一分片的 \(H\) 个尾部位置。在发送和接收 halo 的同时，本地 attention 可以先运行：内部 Query 得到完整结果，边界 Query 得到本地部分的结果。</p>
+<p>边界 Query 的本地输出与远端输出，各自在自己的 Key 集合上做过 softmax。要把它们合起来，必须同时保留各自的归一化分母。</p>
+<p>令 \(o_l,o_h\) 分别为本地和 halo 的已归一化输出，\(\ell_l,\ell_h\) 为各自 logits 的 LSE。全局结果是</p>
+<p>$$
+\ell=\operatorname{logaddexp}(\ell_l,\ell_h),\qquad
+o=e^{\ell_l-\ell}o_l+e^{\ell_h-\ell}o_h.
+$$</p>
+<p>这两个系数表示各分片在完整 softmax 分母中占多少比例。指数权重大的分片，对最终输出贡献更大。</p>
+
+<figure class="article-figure iq-figure" id="iq-halo">
+  <h3>边界 query 怎样拼回跨卡窗口？</h3>
+  <p class="iq-note">教学算例：一个 query 看见本卡两个位置和邻卡一个位置。卡片中的 Z 是各分区 exp(logit) 的和，LSE = ln Z。左侧先计算，右侧的 halo 随通信到达。</p>
+  <div class="iq-halo-grid">
+    <section class="iq-halo-card" id="iq-halo-local"><h4>本卡 · 两个位置</h4><div class="iq-token-pair"><span>exp(logit) = 1<br>V = 0</span><span>exp(logit) = 3<br>V = 4</span></div><p>Z = 4 · LSE = ln 4</p><strong>局部输出 = 3</strong></section>
+    <section class="iq-halo-card iq-halo-pending" id="iq-halo-remote"><h4>邻卡 halo · 一个位置</h4><div class="iq-token-pair"><span>exp(logit) = 2<br>V = 1</span></div><p>Z = 2 · LSE = ln 2</p><strong>局部输出 = 1</strong></section>
+  </div>
+  <p class="iq-transfer-status" id="iq-halo-status">halo 正在传输；本卡可以先算自己的部分。</p>
+  <div class="iq-merge-stage" id="iq-halo-merge">
+    <div class="iq-merge-bar"><span id="iq-halo-local-mass">本卡 2/3</span><span id="iq-halo-remote-mass">邻卡 1/3</span></div>
+    <p class="iq-equation">最终输出 = (4/6) × 3 + (2/6) × 1 = <strong id="iq-halo-output">2.333</strong></p>
+    <p class="iq-note">两个局部输出各自在自己的分区内归一化。合并时，用该分区占全局分母的比例重新加权。</p>
+  </div>
+  <figcaption>真实实现用 log-sum-exp 合并统计量。局部计算与 halo 通信可以重叠；这张图展示依赖关系，实际加速取决于计算量与网络时间。</figcaption>
+</figure>
+
+
+<p>如果还包含一个零 Value sink，令 \(a_\star\) 为当前 Query 对 sink key 的 logit，可以在合并真实历史时只计入一次它的指数权重：</p>
+<p>$$
+\ell=\log\left(e^{\ell_l}+e^{\ell_h}+e^{a_\star}\right),\qquad
+o=e^{\ell_l-\ell}o_l+e^{\ell_h-\ell}o_h.
+$$</p>
+<p>若每张卡的部分分母都已经包含同一个 sink，再直接累加分母，就会重复计算它。Sink 与 context parallel 的组合，适合用同一个小张量同时跑“完整 attention”和“分片后合并”，比较每头输出及 LSE。</p>
+<p>训练系统采用了这种通信与局部计算重叠的设计。实际收益由通信耗时、可重叠的本地计算和边界 Query 占比共同决定。部署时还需对应具体后端能力：所核对的公开 vLLM 插件版本关闭了 context parallel 和 cascade attention，使用该版本服务时应按其已经实现的执行路径规划并行。[1][3]</p>
+<h2 id="mtp">9. 递归 MTP：一套小模块，连续起草多个 token</h2>
+<p>主干生成一个 token 后，通常要再次穿过 88 层才能生成下一个。MTP 让一个较小模块先连续起草几个候选，再由主干批量验证，争取用一次大模型前向推进多个位置。</p>
+<p>训练时使用两个独立的 MTP 层，为更远的未来 token 提供监督。后续将第一层适配为递归 drafter，使用同一套参数连续生成候选；递归阶段的 attention 窗口缩为 512。</p>
+<p>设主干已经处理到位置 \(t\)，最后一层状态为 \(h_t\)，并刚刚采样出下一个 token \(y_{t+1}\)。词嵌入记为 \(E\)。第一次起草将 \(h_t\) 与这个新 token 的 embedding 分别归一化、拼接，再投影到 MTP block 的输入：</p>
+<p>$$
+u= W_{\rm merge}[N_h(h_t);N_e(E(y_{t+1}))],\qquad
+\hat h_{t+1}=\operatorname{MTP}(u).
+$$</p>
+<p>随后从 \(\hat h_{t+1}\) 预测候选 \(\hat y_{t+2}\)。下一次起草把 \(\hat h_{t+1}\) 和 \(E(\hat y_{t+2})\) 送回同一个模块，继续预测 \(\hat y_{t+3}\)。固定的一套权重因此可以产生更长候选链。[1][6]</p>
+<p>发布 drafter 配置包含 7 个 draft slot。候选链对应的验证前向，还会产生末端的下一个 token 分布，因此要分别记录“起草几个候选”和“验证前向覆盖多少位置”。实际服务中的候选长度是可配置参数，最终能提交多少 token 由接受结果决定。</p>
+<p>假设起草 \(K\) 个候选，每一步在此前全部接受的条件下，接受概率近似为 \(a\)。考虑遇到拒绝时的修正 token，或全部接受后的额外 token，一轮平均推进量为</p>
+<p>$$
+\mathbb E[n]=1+a+a^2+\cdots+a^K.
+$$</p>
+<p>例如 \(K=7,a=0.8\)，平均约为 4.16 个 token。吞吐还取决于起草与验证时间。若单 token 主干耗时为 \(t_b\)，整个候选链耗时为 \(t_d\)，批量验证与调度合计为 \(t_v\)，理想化加速比为</p>
+<p>$$
+\operatorname{speedup}\approx\frac{\mathbb E[n]t_b}{t_d+t_v}.
+$$</p>
+<p>这几个时间都应在目标 batch 和上下文长度下测量。候选越长，接受前缀可能增加，起草和验证也会更贵。</p>
+<p>缓存提交必须跟随接受前缀。Full attention 的新增 K/V、SWA 的窗口槽位、drafter 的状态各自记录已确认边界；验证失败时撤销未接受的位置。</p>
+<p>例如，一个容量为 4 的环形窗口保存 \([a,b,c,d]\)，暂时写入草稿 \([e,f]\) 时覆盖了 \(a,b\)。如果第一个候选 \(e\) 就被拒绝，仍然有效的历史应恢复为 \([a,b,c,d]\)。仅缩短长度，无法恢复已覆盖的字节。额外保留 lookahead 空间、把草稿写进临时页，或保存被覆盖内容，都能建立可回滚的状态。滑动缓存与投机 iterator 的接口讨论中，有过这类覆盖后无法 trim 的实际案例。[7]</p>
+<p>可以让 prompt 长度跨过窗口边界，强制接受 0 个、1 个和全部候选，再与逐 token 解码比较回滚后的条件分布。这项测试先确认状态正确，然后才比较性能。概率接受规则见<a href="/posts/speculative-decoding/">投机解码</a>。</p>
+<h2 id="training">10. Muon 与 μP：把小模型找到的尺度迁移过来</h2>
+<p>残差结构负责控制前向状态，优化器和参数化负责控制每次权重更新。IQuest-Q1 对主要矩阵使用 Muon；embedding、LM head、Norm 和 router 使用 Adam。Muon 对动量矩阵做近似正交化，再按矩阵形状校准更新尺度。</p>
+<p>设矩阵尺寸为 \(m\times n\)，正交化后的更新为 \(U\)，其采用的尺度为</p>
+<p>$$
+\Delta W\propto0.2\sqrt{\max(m,n)}\,U.
+$$</p>
+<p>形状因子让不同尺寸矩阵的更新 RMS 更容易对齐。μP 则规定宽度和深度变化时，各模块的初始化与学习率怎样跟着改变。将隐藏宽度记为 \(d\)、深度记为 \(L\)，这一训练配方的线性层学习率随 \(d^{-1/2}L^{-1/4}\) 缩放，LM head 随 \(d^{-1}\) 缩放；两条残差分支还使用随 \(L^{-1/2}\) 变化的输出尺度，attention 的尺度并入输出 RMSNorm。[1]</p>
+<p>这些是跨模型尺寸的缩放关系。落到一个已发布 checkpoint，具体常数由它的参数和配置给出。要复现实验，应同时保存 base shape、各参数组学习率、初始化方式与分支 scale，才能重建一次更新的大小。更完整的推导见 <a href="/posts/pretraining-mup/">μP 与超参数迁移</a>和<a href="/posts/optimizers/">从 SGD 到 Muon</a>。</p>
+<p>训练稳定性还可以用两个学习率来观察：固定预算下效果最好的 \(\eta_{\rm opt}\)，以及搜索中仍能稳定训练的最大 \(\eta_{\rm safe}\)。两者的对数比</p>
+<p>$$
+H=\log\frac{\eta_{\rm safe}}{\eta_{\rm opt}}
+$$</p>
+<p>描述有效学习率附近还剩多少稳定空间。若 \(H\) 较大，调参和扩大模型时拥有更多余量；“能够跑完”之外，还要观察是否在高效的学习率附近训练。</p>
+<p>在相同数据、达到相同训练 loss 的对照中，这套架构与训练配方相对 Qwen3-MoE-style 基线取得约 1.93 倍的计算效率，对应约 52% 的训练 FLOPs。这个数字描述整套配方的联合结果；分配给 Norm、优化器或其他组件的贡献，需要进一步的单项消融。[1]</p>
+<h2 id="agent">11. 架构怎样接到 CLI 后训练</h2>
+<p>预训练与中训练合计使用 29T token，上下文训练经过 32K、128K、512K 的阶段扩展。代码与工具轨迹带来一种特别的监督结构：模型写出的动作、工具返回的观察、用户指令，虽然都进入上下文，却可以使用不同的 loss mask。</p>
+<p>后训练先建立基本的 CLI 交互能力，再在不同任务、harness 和版本上学习。一个可重复评测单元包括任务、工具协议、环境、harness 版本与 verifier。模型在某个工具格式上表现变差时，应先固定这些条件，定位是能力变化、序列化变化，还是执行环境变化。</p>
+<p>多教师 on-policy distillation 使用学生自己生成的轨迹，再让领域教师评价学生选择的 token。设学生在采样时给该 token 的概率为 \(p_k\)，对应教师概率为 \(q\)，蒸馏信号可以写成</p>
+<p>$$
+\tilde a=\operatorname{clip}(\log q-\log p_k,-c,c),
+$$</p>
+<p>其中 \(c&gt;0\) 控制信号幅度。若教师给某 token 的概率为 0.3，学生为 0.1，未裁剪信号为 \(\log3&gt;0\)，会提高学生对这一选择的倾向。采样概率、轨迹和 advantage 在这次更新中保持固定，梯度作用于当前学生的 log-probability。</p>
+<p>这里的四个领域教师是完整模型，分别提供不同任务能力；主干 MoE 中的 256 个专家则是单层 FFN 模块。教师信号整合之后，还可以在共同参考 checkpoint 上组合参数增量，并校准全局范数。两种能力整合方式分别沿着“学习分布”和“合并参数”进行，评测都要回到固定任务与工具环境。[1]</p>
+<h2 id="exercises">12. 计算与诊断练习</h2>
+<details>
+<summary>练习一：512K 的混合 KV，以及窗口再缩一半</summary>
+<p>单请求、BF16、8 个 KV 头、头维度 128。先求 25 层 full 与 63 层 SWA 的总缓存，再把 SWA 窗口从 4,096 改为 2,048。</p>
+<p>每层每 token 为 4,096 B。全局部分为 50 GiB；局部部分为 \(63\times4,096\times4,096/2^{30}=0.984375\) GiB，合计 50.984375 GiB。窗口减半后局部为 0.4921875 GiB，总量为 50.4921875 GiB，只降低约 0.97%。在这个长度上，全局层决定容量的大头。</p>
+</details>
+
+<details>
+<summary>练习二：零 Value 的 sink 为什么能把输出减半</summary>
+<p>真实历史的指数权重为 \([2,1,1]\)，Value 为 \([1,3,-1]\)，sink 的指数权重为 4。</p>
+<p>真实历史的加权分子为 \(2\times1+1\times3-1=4\)，原分母为 4，原输出为 1。加入 sink 后分母为 8，输出为 0.5。Sink 获得 50% 概率；其余三个位置总共获得 50%。也可用 \(\sigma(\log4-\log4)=0.5\) 验证。</p>
+</details>
+
+<details>
+<summary>练习三：两个 GPU 的 attention 输出应该怎样合并</summary>
+<p>本地两个 Key 的指数权重为 \([1,3]\)、Value 为 \([0,4]\)；远端一个 Key 的指数权重为 2、Value 为 1。</p>
+<p>本地分母为 4，归一化输出为 3；远端分母为 2，输出为 1。完整输出是 \((4\times3+2\times1)/(4+2)=7/3\)。若加入指数权重为 2 的零 Value sink，输出为 \(14/(6+2)=1.75\)。每个分片都重复加入 sink 会把总分母变成 10，得到错误的 1.4。</p>
+</details>
+
+<details>
+<summary>练习四：更长的草稿链能带来多少推进</summary>
+<p>起草 7 个 token，每一步条件接受率均为 0.8。求平均推进量；再把接受率改为 0.3。</p>
+<p>使用有限等比数列：\(\mathbb E[n]=(1-a^8)/(1-a)\)。当 \(a=0.8\) 时约为 4.161；当 \(a=0.3\) 时约为 1.428。起草与验证耗时也要计入，低接受率下应比较更短候选链的实际吞吐。</p>
+</details>
+
+<details>
+<summary>练习五：模型结果变了，先检查哪个缩放</summary>
+<p>普通 attention 的 FP8 输出通过了参考检查，增加 sink 后误差明显。应检查哪些张量？</p>
+<p>保留同一组 Query、Key 和 mask，分别比较真实历史 LSE、sink logit 与最终 sigmoid gate。核对 Query 的反量化 scale、GQA 的头到组映射、sink key 的 dtype，以及 LSE 的对数约定。若普通输出和 LSE 一致而 sink logit 不一致，优先定位旁路点积；再用显式追加零 Value 的 dense attention 验证修复。</p>
+</details>
+
+<details>
+<summary>练习六：Stable SplitNorm 的残差接错了会怎样</summary>
+<p>将一个普通 block 的 attention 残差从 \(z=N(x)\) 改成原输入 \(x\)。设输入在同一方向放大 10 倍，其他权重固定，会观察到什么？</p>
+<p>忽略 \(\epsilon\) 时，\(N(10x)=N(x)\)，因此正确普通 block 的归一化入口与 attention 分支基本保持不变。若残差直接使用 \(10x\)，输出会多出随输入尺度变化的分量。这个实验检查前向语义；深层训练的收敛结果需要训练实验另行测量。</p>
+</details>
+
+<h2 id="lab">13. 在 CPU 上把关键等式跑一遍</h2>
+<p>下载 <a href="./lab.py">lab.py</a>，安装 NumPy 后运行：</p>
+<pre><code class="language-bash">python3 -m pip install numpy
+python3 lab.py
+</code></pre>
+<p>实验用小型确定性张量验证四件事：显式追加 sink 与 LSE 缩放相等；分片合并与完整 attention 相等；25/63 层布局得到正确 KV 字节数；普通 block 的残差确实从归一化后的状态出发。它还展示重复计入 sink 和直接相加部分输出造成的误差。</p>
+<p>修改窗口大小、sink 分数或输入幅度，先写出预期变化，再运行验证。将这些断言迁移到真实 kernel 时，继续加入不同 mask、序列边界、低精度 scale 和非连续 layout。这样从架构公式到部署实现，每一步都有可比较的中间结果。</p>
+<h2 id="refs">参考与延伸阅读</h2>
+<ol>
+<li><a href="https://arxiv.org/abs/2610.30949v1">IQuest-Q1 技术报告，arXiv:2610.30949v1</a>，2026-10-22。§2、§3.2 与附录 A 给出架构、训练尺度、halo 合并及递归 MTP；§4 给出后训练流程。训练计算效率来自图 4 的受控对照。</li>
+<li><a href="https://huggingface.co/IQuestLab/IQuest-Q1/blob/5c21b0630586ef77d38cff1094b8cf37a417fcd8/config.json">官方模型配置，固定 revision</a>与<a href="https://github.com/IQuestLab/IQuest-Q1">发布仓库</a>。本文层数、维度与窗口按发布配置展开，核对日期 2026-10-23。</li>
+<li><a href="https://github.com/IQuestLab/vllm-iquest-q1/tree/cf13cab2406112afc5638c4c2352cb9fe96cf14b">官方 vLLM 插件，固定源码版本</a>：<a href="https://github.com/IQuestLab/vllm-iquest-q1/blob/cf13cab2406112afc5638c4c2352cb9fe96cf14b/src/vllm_iquest_q1/model.py">block 与模型实现</a>，包含首层、普通层与分支缩放；<a href="https://github.com/IQuestLab/vllm-iquest-q1/blob/cf13cab2406112afc5638c4c2352cb9fe96cf14b/src/vllm_iquest_q1/attention.py">attention 实现</a>及<a href="https://github.com/IQuestLab/vllm-iquest-q1/blob/cf13cab2406112afc5638c4c2352cb9fe96cf14b/tests/test_sink_attention.py">数值测试</a>包含 sink、FP8 scale 与并行支持条件。</li>
+<li><a href="https://github.com/sgl-project/sglang/pull/41590">SGLang 的 IQuest-Q1 支持 PR</a>。关注 query-aware sink 与 LSE 输出的结合方式，以及分离的 draft model。</li>
+<li><a href="https://docs.vllm.ai/en/stable/design/hybrid_kv_cache_manager/">vLLM Hybrid KV Cache Manager</a>及 <a href="https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/kv_cache_interface.py">v0.30.0 缓存规格源码</a>。混合 attention 的缓存分组、窗口回收与物理缓存池约束。</li>
+<li><a href="https://huggingface.co/IQuestLab/IQuest-Q1/blob/5c21b0630586ef77d38cff1094b8cf37a417fcd8/mtp/config.json">官方递归 drafter 配置</a>及<a href="https://github.com/IQuestLab/vllm-iquest-q1/blob/cf13cab2406112afc5638c4c2352cb9fe96cf14b/src/vllm_iquest_q1/mtp_recursive.py">模块实现</a>。部署的 draft slot、窗口与精度配置；实际起草长度由服务参数确定。</li>
+<li><a href="https://github.com/ml-explore/mlx-swift-lm/issues/424">mlx-swift-lm #424：滑动缓存与 speculative trim 的接口问题</a>，2026-07。用于解释环形覆盖与回滚的通用机制；IQuest-Q1 的运行路径应通过自身回滚测试验证。<a href="https://github.com/vllm-project/vllm/blob/v0.30.0/vllm/v1/core/single_type_kv_cache_manager.py">vLLM 缓存管理源码</a>提供已分配草稿块与前缀状态管理的实现参考。</li>
+</ol>
+<p>相关站内文章：<a href="/posts/qwen3-next/">Qwen3-Next</a>、<a href="/posts/deepseek-v4/">DeepSeek-V4</a>、<a href="/posts/scaling-context-parallel/">上下文并行</a>、<a href="/posts/model-merging/">模型合并</a>。</p></article>
+<nav class="series-pager" data-series="reports"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"batch": {"label": "B · 请求数", "description": "这里假定各请求有相同的历史长度；容量式按这些请求合计。"}, "kv-heads": {"label": "h_kv · KV 头数", "description": "IQuest-Q1 有 8 个 KV 头，48 个 Query 头按每组 6 个共享。"}, "head-dim": {"label": "d_h · 每头维度", "description": "每个 K 或 V 向量有 128 个元素；其中 32 维 Key 使用 RoPE。"}, "bytes": {"label": "b · 元素字节数", "description": "本例 K、V 使用 BF16，每个元素占 2 bytes。"}, "context": {"label": "T · 每个请求的历史长度", "description": "单位 token。25 个全局层保留完整历史，63 个局部层最多保留一个窗口。"}, "window": {"label": "W · 滑动窗口长度", "description": "主干局部 attention 的窗口为 4,096 token；递归 drafter 的窗口单独为 512。"}, "ffn-scale": {"label": "s_F · FFN 输出尺度", "description": "普通层发布配置中的 ffn_out_scale 约为 0.5388；首层按独立 SandwichNorm 配置执行。"}}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script>
+<script src="/posts/iquest-q1/figures.js?v=1b25679846f5"></script>
+<script src="/assets/series.js?v=727fd7187cb2"></script>
+<script src="/assets/post-links.js?v=f57719c82076"></script>
+<script src="/assets/posts.js?v=18762a451eee"></script>
+<script src="/assets/curriculum.js?v=3d5c0dc80f88"></script>
+</body></html>

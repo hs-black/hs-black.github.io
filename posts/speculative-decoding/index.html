@@ -66,4 +66,4 @@ ArticleSteps.mount('#mass-demo',{steps:massSteps,render(s){let q=[.5,.3,.2],a=[.
 function speedUpdate(){let a=+$('alpha-input').value,k=+$('draft-input').value,values=Array.from({length:k},(_,i)=>a**(i+1)),E=1+values.reduce((x,y)=>x+y,0),cost=12+.5*k;$('alpha-value').value=fmt(a);$('draft-value').value=k;$('survival-bars').innerHTML=bars(values.map((x,i)=>['位置 '+(i+1),x]));$('speed-result').textContent=`每轮期望 ${fmt(E,4)} token；轮时 ${fmt(cost,1)} ms；每输出 ${fmt(cost/E,4)} ms；加速比 ${fmt(10*E/cost,4)}×。`;}
 $('alpha-input').addEventListener('input',speedUpdate);$('draft-input').addEventListener('input',speedUpdate);speedUpdate();
 })();</script>
-<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=d42382e2780f"></script><script src="/assets/posts.js?v=219546abac78"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script></body></html>
+<script src="/assets/series.js?v=727fd7187cb2"></script><script src="/assets/post-links.js?v=f57719c82076"></script><script src="/assets/posts.js?v=18762a451eee"></script><script src="/assets/curriculum.js?v=3d5c0dc80f88"></script></body></html>

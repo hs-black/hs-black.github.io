@@ -60,4 +60,4 @@ $('change-position').addEventListener('input',hashUpdate);hashUpdate();
 function savingUpdate(){let N=4096,H=+$('hit-input').value,total=N*(N+1)/2,remaining=total-H*(H+1)/2,cold=55+.05*N,hot=55+.05*(N-H);$('hit-value').value=H;$('saving-bars').innerHTML=bars([['输入行数',(N-H)/N],['Attention',remaining/total,'alt'],['TTFT',hot/cold]]);$('saving-result').textContent=`剩余 ${N-H} 个输入位置；${remaining.toLocaleString()} 对 query-key。TTFT：${fmt(cold,1)} → ${fmt(hot,1)} ms，加速 ${fmt(cold/hot)}×。`;}
 $('hit-input').addEventListener('input',savingUpdate);savingUpdate();
 })();</script>
-<script src="/assets/series.js?v=414d36fec9c5"></script><script src="/assets/post-links.js?v=d42382e2780f"></script><script src="/assets/posts.js?v=219546abac78"></script><script src="/assets/curriculum.js?v=cbae97d9f5e4"></script></body></html>
+<script src="/assets/series.js?v=727fd7187cb2"></script><script src="/assets/post-links.js?v=f57719c82076"></script><script src="/assets/posts.js?v=18762a451eee"></script><script src="/assets/curriculum.js?v=3d5c0dc80f88"></script></body></html>

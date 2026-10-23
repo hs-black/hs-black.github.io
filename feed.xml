@@ -7,6 +7,13 @@
     <description>Zunzhe Zhang 的博客：大模型、具身智能、实验与想法。</description>
     <language>zh-CN</language>
     <item>
+      <title>IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP</title>
+      <link>https://hs-black.github.io/posts/iquest-q1/</link>
+      <guid>https://hs-black.github.io/posts/iquest-q1/</guid>
+      <pubDate>Fri, 23 Oct 2026 08:00:00 +0800</pubDate>
+      <description>从残差尺度、query-aware sink 与 25 层全局注意力，推导 512K 上下文的 KV 账本、跨卡 softmax 合并和递归投机解码；含交互图、习题与 NumPy 实验。</description>
+    </item>
+    <item>
       <title>已有模型怎样长成 MoE：从权重复用到专家分化</title>
       <link>https://hs-black.github.io/posts/moe-upcycling/</link>
       <guid>https://hs-black.github.io/posts/moe-upcycling/</guid>

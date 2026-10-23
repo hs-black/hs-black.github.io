@@ -110,6 +110,7 @@
     <article class="prose">
       <p>总参数约 80B，每个 token 只激活约 3B。在官方与 Qwen3-32B 的对照中，它使用不到十分之一的训练 GPU 时，并在 32K 以上上下文取得超过 10 倍的推理吞吐。这是 Qwen 团队 2025 年 9 月发布的 Qwen3-Next-80B-A3B。它在架构上一口气改了好几处：混合注意力（Gated DeltaNet 加 Gated Attention，比例 3:1）、512 个 expert 的高稀疏 MoE、零中心且带权重衰减的 LayerNorm、归一化的 router 初始化、多 token 预测（MTP）。每一项背后都有一两篇论文，单看名字很难知道它们解决什么问题。</p>
       <p>这套架构后来没有停在 Qwen3-Next：Qwen3-Coder-Next、Qwen3.5、Qwen3.6、Qwen3.8 都沿用了它（<a href="#later">对照表</a>）。</p>
+      <p><a href="/posts/iquest-q1/">IQuest-Q1</a> 提供了另一个适合并排分析的实例：局部层使用滑动窗口 softmax attention，Stable SplitNorm 调整跨层残差尺度，再用递归 MTP 生成草稿。把两者的状态大小、全局层比例和验证流程放在一起，可以看清不同混合架构的计算取舍。</p>
 
       <nav class="toc" aria-label="目录">
         <b>目录</b>
@@ -963,7 +964,7 @@ All checks passed: chunk algebra, streaming state, prefix forks, rollback, memor
 
   <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 
-  <script src="/assets/series.js?v=414d36fec9c5"></script>
+  <script src="/assets/series.js?v=727fd7187cb2"></script>
   <script>
   (() => {
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
@@ -1602,8 +1603,8 @@ All checks passed: chunk algebra, streaming state, prefix forks, rollback, memor
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=d42382e2780f"></script>
-  <script src="/assets/posts.js?v=219546abac78"></script>
-<script src="/assets/curriculum.js?v=cbae97d9f5e4"></script>
+  <script src="/assets/post-links.js?v=f57719c82076"></script>
+  <script src="/assets/posts.js?v=18762a451eee"></script>
+<script src="/assets/curriculum.js?v=3d5c0dc80f88"></script>
 </body>
 </html>
