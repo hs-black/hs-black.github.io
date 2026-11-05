@@ -175,6 +175,10 @@ window.POST_LINKS = {
  ],
  "multi-adapter-serving": [],
  "multimodal-inference": [],
+ "neural-network-initialization": [
+  "pretraining-mup",
+  "pretraining-stability"
+ ],
  "next-token": [
   "kv-cache",
   "sampling-structured-decoding"
@@ -213,6 +217,7 @@ window.POST_LINKS = {
   "pretraining-scaling"
  ],
  "pretraining-mup": [
+  "neural-network-initialization",
   "optimizers",
   "pretraining-stability",
   "scaling-mixed-precision"
@@ -237,6 +242,7 @@ window.POST_LINKS = {
   "effective-depth",
   "hyper-connections",
   "manifold-hyper-connections",
+  "neural-network-initialization",
   "optimizers",
   "pretraining-mup",
   "recurrent-depth",

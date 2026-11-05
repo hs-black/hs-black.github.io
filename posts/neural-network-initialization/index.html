@@ -1,0 +1,485 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>神经网络初始化：从信号传播到训练动力学 · Zunzhe Zhang</title><meta name="description" content="从 Xavier、He 与均值场相关性递推，讲到 Jacobian 谱、动力学等距性、深线性学习、NTK、Fixup 与 μP；配交互图、计算题、工程案例和统一的 NumPy 对照实验。">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+<script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+<link rel="stylesheet" href="/posts/neural-network-initialization/figures.css"><style>.init-toc-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px 24px;margin-top:12px}.init-toc-groups>div{min-width:0}.init-toc-groups strong{font-size:14px}.init-toc-groups ul{margin:8px 0 0;padding-left:1.2em}.init-toc-groups li{margin:4px 0}.prose h2,.prose section[id]{scroll-margin-top:24px}.prose pre{overflow-x:auto}@media(max-width:560px){.init-toc-groups{grid-template-columns:1fr;gap:14px}}</style></head>
+<body><header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>神经网络初始化：从信号传播到训练动力学</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-11-05">2026-11-05</time></div></header><nav class="series" data-series="pretraining"></nav>
+<article class="prose"><p>两个同样深的网络，初始激活大小接近，训练速度却可能差很多。原因藏在几个不同的地方：不同输入的表示可能越来越相似，梯度可能集中在少数方向，或者优化器的一步更新已经改变了原先稳定的尺度。初始化把这些问题放在训练的同一个起点上。</p>
+<p>一个完整的初始化方案需要同时说明<strong>权重分布、网络结构、参数的存储与前向倍率，以及优化器的学习率</strong>。研究它，可以沿着四个可测量的问题前进。</p>
+<div class="table-wrap"><table><thead><tr><th>问题</th><th>测量对象</th><th>能解释的现象</th></tr></thead><tbody>
+<tr><td>信号能传多深？</td><td>逐层均值、二阶矩、激活比例</td><td>幅值消失、爆炸、进入饱和区</td></tr>
+<tr><td>不同输入还分得开吗？</td><td>样本间归一化内积、特征协方差及其谱</td><td>幅值正常，表示却挤到相近方向</td></tr>
+<tr><td>哪些方向能收到梯度？</td><td>输入—输出 Jacobian 的完整奇异值分布</td><td>少数方向放大、大量方向被压缩</td></tr>
+<tr><td>更新一次究竟改变了什么？</td><td>参数位移、固定样本上的特征和输出变化</td><td>步幅过大、特征几乎不学习、宽度迁移失效</td></tr>
+</tbody></table></div>
+<p>线性层的方差计算给出 Xavier，ReLU 的二阶矩给出 He；把两个输入一起传播，会得到相关性递推；把所有局部导数相乘，会得到 Jacobian 谱；最后把梯度代入优化器，才能讨论真正发生的学习。每一步都在前一步的基础上增加一个新的观测对象。</p>
+<nav class="toc init-toc" aria-label="文章目录"><b>目录</b><div class="init-toc-groups"><div><strong>信号的尺度与输入的区别</strong><ul><li><a href="#init-symmetry">随机初值与对称性</a></li><li><a href="#init-scale">Xavier 与 fan-in / fan-out</a></li><li><a href="#init-he">He、ReLU 与二阶矩</a></li><li><a href="#init-meanfield">均值场与尺度不动点</a></li><li><a href="#init-correlation">相关性与混沌边缘</a></li></ul></div><div><strong>梯度传播与学习动力学</strong><ul><li><a href="#init-jacobian">完整 Jacobian 谱</a></li><li><a href="#init-orthogonal">正交初始化与非线性</a></li><li><a href="#init-linear-dynamics">深线性网络怎样开始学习</a></li><li><a href="#init-ntk">参数 Jacobian 与 NTK</a></li><li><a href="#init-update">实际参数、特征与输出更新</a></li></ul></div><div><strong>结构与真实实现</strong><ul><li><a href="#init-residual">残差深度缩放与 Fixup</a></li><li><a href="#init-transformer">Transformer、DeepNorm 与 attention</a></li><li><a href="#init-convolution">卷积算子的几何与分组连接</a></li><li><a href="#init-practice">默认分布、转置与 QKV 打包</a></li></ul></div><div><strong>从研究假设到实验结果</strong><ul><li><a href="#init-research">指标、对照与研究设计</a></li><li><a href="#init-lab">统一 NumPy 实验与实测结果</a></li><li><a href="#init-references">论文与工程来源</a></li></ul></div></div></nav><h2 id="init-symmetry">随机初值打破了什么对称性</h2>
+<p>一个隐藏层里，神经元的编号可以互换。只要同时交换对应的输入权重、偏置和输出连接，网络计算的函数就保持不变。如果把所有隐藏单元放在完全相同的参数位置，它们会输出相同的特征，也会在同一批数据上收到相同的梯度。普通梯度下降会一直保留这种对称性，宽层因此只能重复同一种计算。</p>
+<p>随机权重让不同单元从不同的投影方向出发。偏置可以统一设为零，因为权重已经区分了这些单元。随机分布还需要一个合适的尺度：太大时，求和会放大信号或把激活推入饱和区；太小时，深层乘法和训练更新可能很难启动。初始化公式控制的就是这些方向与尺度。</p>
+<p>结构化的零初始化还有另一种用途：在一个已有恒等通路的残差块里，将最后一层权重设为零，可以让整个块从恒等函数开始，而其他随机权重仍保留不同的特征方向。它怎样开始收到梯度，会在残差部分用链式法则具体算出。</p>
+<section data-math-scope="init-signal">
+<h2 id="init-scale">一层加起来很正常，叠一百层以后呢？</h2>
+<p>一个神经元把许多输入乘上权重，再加起来。假设有 1024 个输入，每个输入的均方幅值为 1，权重独立、均值为零、标准差为 0.1，那么输出的二阶矩约为 10.24。线性网络再叠一层，同样的倍数会再次出现。初始化的第一件事，就是让这种反复乘上的尺度处在可控范围。</p>
+<p>把第 \(\ell\) 层写成</p>
+\[h^\ell=W^\ell x^{\ell-1}+b^\ell,\qquad x^\ell=\phi(h^\ell).\]
+<p>这里 \(h^\ell\) 是激活函数之前的向量，\(x^\ell\) 是激活函数之后的向量；\(W^\ell\) 的形状为 \(n_\ell\times n_{\ell-1}\)。当前层每个输出连接 \(n_{\ell-1}\) 个输入，这个数叫 fan-in；每个输入连接 \(n_\ell\) 个输出，这个数叫 fan-out。先把偏置设为零，记权重元素的方差为 \(v_\ell\)。</p>
+<p>固定上一层的输入，对当前层随机权重取期望。由于不同权重独立且均值为零，展开平方时的交叉项消失：</p>
+\[\mathbb E_{W^\ell}\!\left[(h_i^\ell)^2\mid x^{\ell-1}\right]
+=v_\ell\sum_{j=1}^{n_{\ell-1}}(x_j^{\ell-1})^2.\]
+<p>因此，只要输入各坐标有相同二阶矩 \(r_{\ell-1}=\mathbb E[(x_j^{\ell-1})^2]\)，就得到 \(\mathbb E[(h_i^\ell)^2]=n_{\ell-1}v_\ell r_{\ell-1}\)。这个推导允许输入坐标彼此相关：本层随机权重的独立性已经消去了交叉项。若激活函数在当前尺度上近似线性，保持每个坐标的尺度需要 \(n_{\ell-1}v_\ell\approx1\)，即 \(v_\ell\approx1/n_{\ell-1}\)。</p>
+<p>反向传播把同一张矩阵转置。对线性层，输出梯度 \(g_y\) 变成输入梯度 \(g_x=W^\top g_y\)。采用初始化时的独立、同尺度近似，单个输入坐标收到 fan-out 个梯度贡献，因此</p>
+\[\mathbb E[(g_{x,j})^2]\approx n_{\mathrm{out}}v\,\mathbb E[(g_{y,i})^2].\]
+<p>前向希望 \(v=1/n_{\mathrm{in}}\)，反向希望 \(v=1/n_{\mathrm{out}}\)。两层宽度不同，就需要选择侧重或者折中。Xavier 初始化让这两个尺度因子的算术平均为 1：</p>
+\[\frac{n_{\mathrm{in}}v+n_{\mathrm{out}}v}{2}=1
+\quad\Longrightarrow\quad
+\boxed{v=\frac{2}{n_{\mathrm{in}}+n_{\mathrm{out}}}}.\]
+<p>正态版本按这个方差采样；均匀版本使用 \(W_{ij}\sim\mathcal U[-a,a]\)。均匀分布方差为 \(a^2/3\)，所以边界 \(a=\sqrt{6/(n_{\mathrm{in}}+n_{\mathrm{out}})}\)。二者匹配的是二阶尺度，矩阵的完整谱仍取决于采样方式。</p>
+<p>例如把 512 维扩展到 2048 维，Xavier 方差是 \(1/1280\)。线性近似下，前向每坐标二阶矩乘 0.4，反向每坐标梯度二阶矩乘 1.6。输出坐标数增加了四倍，每坐标统计量与整个向量范数需要分别记录。工程监控里，RMS 适合跨宽度比较；L2 范数则直接描述整个向量的长度。</p>
+</section>
+
+<section data-math-scope="init-signal">
+<h2 id="init-he">ReLU 留下一半平方能量，He 初始化把它补回来</h2>
+<p>ReLU 把负数变成零。设它的输入 \(H\sim\mathcal N(0,q)\)，其中 \(q\) 是激活前的二阶矩。对称分布在正负半轴各贡献一半平方能量，所以</p>
+\[\mathbb E[\operatorname{ReLU}(H)^2]=\frac q2.
+\]
+<p>ReLU 输出具有正均值。将半个高斯分布积分，还能得到</p>
+\[\mathbb E[\operatorname{ReLU}(H)]=\sqrt{\frac{q}{2\pi}},\qquad
+\operatorname{Var}[\operatorname{ReLU}(H)]
+=q\left(\frac12-\frac{1}{2\pi}\right).\]
+<p>取 \(q=1\)，输出均值约 0.399，二阶矩为 0.5，方差约 0.341。下一层零均值随机权重接收的是这些输出的平方和，因此进入传播公式的是 <strong>0.5 这个二阶矩</strong>。均值、方差、二阶矩对应三个观测量；关系始终是 \(\mathbb E[X^2]=\operatorname{Var}(X)+\mathbb E[X]^2\)。</p>
+<p>把“线性层求和”和“ReLU 留下一半”连起来。仍记 \(r_{\ell-1}\) 为输入激活的二阶矩，当前层有 \(n_{\mathrm{in}}\) 个输入，权重方差为 \(v\)，则输出激活的二阶矩满足</p>
+\[r_\ell\approx\frac12n_{\mathrm{in}}v\,r_{\ell-1}.
+\]
+<p>令每层倍率等于 1，得到 He 的 fan-in 版本：</p>
+\[\boxed{\operatorname{Var}(W_{ij})=\frac{2}{n_{\mathrm{in}}}},\qquad
+\operatorname{Std}(W_{ij})=\sqrt{\frac{2}{n_{\mathrm{in}}}}.\]
+<p>例如 fan-in 为 512，标准差是 0.0625。一个等宽 ReLU 网络若仍取方差 \(1/n\)，每经过一层，激活二阶矩在这个近似下缩小一半；20 层后只剩 \(2^{-20}\approx9.54\times10^{-7}\)。He 用两倍的权重方差补偿这次截断。</p>
+<figure class="article-figure init-figure" id="init-scale-figure">
+  <h3>同一个信号，经过 24 次 ReLU 与线性变换</h3>
+  <p class="init-lead">从高斯预激活的二阶矩 q₀ = 1 出发，等宽、零偏置网络每层把它乘以 σw² / 2。紫线使用当前权重尺度；橙线使用 Xavier 的 σw² = 1。</p>
+  <div class="init-options">
+    <label><span>权重方差的分子 σw² <output data-value="variance">2.00</output></span><input data-control="variance" aria-label="权重方差的分子 sigma w 平方" type="range" min="0.8" max="2.4" step="0.05" value="2"></label>
+    <div class="init-presets"><button type="button" data-preset="1">Xavier · 1</button><button type="button" data-preset="2">He · 2</button></div>
+  </div>
+  <div class="init-plot" data-chart="scale" role="img" aria-label="预激活二阶矩随层数变化，纵轴使用对数刻度"></div>
+  <div class="init-legend"><span><i></i>当前 σw²</span><span><i class="alt"></i>Xavier</span><span><i class="reference"></i>q = 1</span></div>
+  <div class="init-stats"><div class="init-stat">预激活二阶矩 qℓ<output data-stat="q">1.0000</output></div><div class="init-stat">ReLU 二阶矩 rℓ<output data-stat="r">0.5000</output></div><div class="init-stat">ReLU 的方差<output data-stat="var">0.3408</output></div><div class="init-stat">ReLU 的均值<output data-stat="mean">0.3989</output></div></div>
+  <figcaption>纵轴每隔三个数量级画一条网格。灰色细线显示完整的理论轨迹，推进进度会逐层显示当前数值。ReLU 的均值为 \(\sqrt{q_\ell/(2\pi)}\)，二阶矩为 \(q_\ell/2\)，方差为 \(q_\ell(1/2-1/(2\pi))\)。</figcaption>
+</figure>
+<p>对 Leaky ReLU，负半轴斜率设为 \(a\)，正半轴斜率为 1。负半轴的平方能量会乘 \(a^2\)，于是</p>
+\[\mathbb E[\phi(H)^2]=\frac{1+a^2}{2}q,
+\qquad
+\operatorname{Var}(W_{ij})=\frac{2}{(1+a^2)n_{\mathrm{in}}}.\]
+<p>PReLU 把 \(a\) 也变成可学习参数，初始化时将它的初值代入这条式子即可。训练后斜率会变化，传播尺度也跟着变化，因此监控里要保留斜率分布和激活统计。对于 GELU、SiLU 这类不齐次激活，可以数值积分 \(\mathbb E[\phi(\sqrt q Z)^2]\)，为目标输入尺度 \(q\) 选择增益；这个增益与输入分布和所选尺度一起定义。</p>
+<p>前向与反向的 fan 选择同样适用于 ReLU。fan-out 版本使用 \(2/n_{\mathrm{out}}\)，使该层反传时每个坐标的梯度二阶矩更稳定。等宽网络的两种选择一致；有扩维、瓶颈或者分组结构时，需要根据实际连接数核对。</p>
+<div class="article-exercise"><h3>练习：方差、标准差与增益分别是多少？</h3><p>一个 256 → 1024 的线性层，后接负斜率 \(a=0.2\) 的 Leaky ReLU。按 fan-in 保持激活二阶矩，求权重方差、标准差；再求初始化近似下每坐标反向梯度二阶矩的倍率。</p><details><summary>展开推导与答案</summary><p>激活的平方增益是 \((1+0.2^2)/2=0.52\)。方差为 \(1/(256\times0.52)\approx0.007512\)，标准差约 0.08667。反向倍率为 \(1024\times0.007512\times0.52=4\)，等于 fan-out/fan-in。若改用 fan-out 版本，反向倍率为 1，前向倍率为 1/4。填写初始化 API 时要确认它接收的是标准差、方差，还是相对基础分布的 gain。</p></details></div>
+</section>
+
+<section data-math-scope="init-signal">
+<h2 id="init-meanfield">把整张网络压缩成一个二阶矩递推</h2>
+<p>研究更一般的激活函数时，可以把每层的输出分布一起跟踪。考虑各层独立的随机 MLP，令权重和偏置分别满足</p>
+\[W^\ell_{ij}\sim\mathcal N\!\left(0,\frac{\sigma_w^2}{n_{\ell-1}}\right),\qquad
+b_i^\ell\sim\mathcal N(0,\sigma_b^2).\]
+<p>这里 \(\sigma_w^2\) 是除去 fan-in 之后剩下的权重方差因子；\(\sigma_b^2\) 是偏置方差。固定输入，对随机初始化取期望，预激活 \(h_i^\ell\) 均值为零。把它的二阶矩记为 \(q_\ell\)，激活后的二阶矩记为 \(r_\ell\)。在固定深度、宽度足够大且各层独立的条件下，上一层经验统计逐渐集中，预激活可以用相应高斯分布描述：</p>
+\[q_\ell=\sigma_w^2r_{\ell-1}+\sigma_b^2,
+\qquad
+r_\ell\approx\mathbb E_{Z\sim\mathcal N(0,1)}
+\left[\phi(\sqrt{q_\ell}Z)^2\right].\]
+<p>消去中间的 \(r\)，从第二个隐藏层开始，就得到只追踪预激活尺度的递推：</p>
+\[\boxed{\htmlData{symbol=init-q}{q_\ell}=\mathcal V(q_{\ell-1})
+\approx\sigma_w^2\mathbb E_Z[\phi(\sqrt{q_{\ell-1}}Z)^2]+\sigma_b^2}.
+\]
+<p>第一层直接从数据进入：若输入平均二阶矩为 \(r_0\)，则 \(q_1=\sigma_w^2r_0+\sigma_b^2\)。这也说明输入标准化参与了初始化设计。数据整体乘 10，会让第一层的输入贡献乘 100；同一份权重初始化由此工作在另一个激活区间。</p>
+<p>一个不动点 \(q_*\) 满足 \(q_*=\mathcal V(q_*)\)。如果尺度略偏离它，令 \(q_\ell=q_*+\varepsilon_\ell\)，一阶展开给出</p>
+\[\varepsilon_{\ell+1}\approx\mathcal V'(q_*)\varepsilon_\ell.\]
+<p>当 \(|\mathcal V'(q_*)|&lt;1\) 时，附近的尺度逐层回到不动点；大于 1 时，小偏差被放大。等于 1 时，需要继续研究更高阶项。对光滑激活，在满足积分与求导交换条件时，高斯积分分部还给出</p>
+\[\mathcal V'(q)=\sigma_w^2\mathbb E_Z\!\left[
+\phi'(\sqrt q Z)^2+\phi(\sqrt q Z)\phi''(\sqrt q Z)
+\right].\]
+<p>这条导数控制的是<strong>幅值扰动</strong>。后面两输入之间的相似性，会由另一条映射的导数控制。将两个问题分开，才能解释一个网络为什么能维持稳定 RMS，却逐渐失去区分输入的能力。</p>
+<p>ReLU 的递推尤其清楚：\(q_{\ell+1}=(\sigma_w^2/2)q_\ell+\sigma_b^2\)。零偏置时，\(\sigma_w^2&lt;2\) 让尺度衰减，\(\sigma_w^2&gt;2\) 让尺度增长；取 He 对应的 \(\sigma_w^2=2\)，每个正的初始尺度都保持原值。这是一条中性的固定点线：它保留输入幅值，也保留幅值偏差。若此时给偏置加入正方差，递推变成 \(q_{\ell+1}=q_\ell+\sigma_b^2\)，尺度随深度线性增加。</p>
+<p>tanh 的行为不同。它把大幅值压到接近 ±1，\(r_\ell\le1\)，因此预激活尺度有上界 \(\sigma_w^2+\sigma_b^2\)。这样的有限幅值可能伴随大量饱和神经元：tanh 的导数是 \(1-\tanh^2(h)\)，进入饱和区后会很小。除了测 RMS，还可以记录导数绝对值小于 0.05 的坐标比例，把“幅值稳定”继续拆成可检验的传播条件。</p>
+<p>也可以反过来设计：先选希望工作的预激活尺度 \(q_{\mathrm{target}}\)，数值计算激活的二阶矩，再令</p>
+\[\sigma_w^2=
+\frac{q_{\mathrm{target}}-\sigma_b^2}
+{\mathbb E_Z[\phi(\sqrt{q_{\mathrm{target}}}Z)^2]}.
+\]
+<p>只要分子为正，这会使目标尺度成为一个候选不动点。随后计算 \(\mathcal V'(q_{\mathrm{target}})\) 检查它是否吸引附近尺度，并迭代若干层查看实际数据的初值是否进入这个区间。对 tanh、零偏置、\(q_{\mathrm{target}}=1\)，高斯积分给出 \(\mathbb E[\tanh^2(Z)]\approx0.39429\)，因此 \(\sigma_w^2\approx2.53618\)。此时 \(\mathcal V'(1)\approx0.46107\)，附近的幅值偏差会很快缩小。这个具体配置也适合继续检查输入方向和梯度的行为。</p>
+<p>有限宽度实验中，可以在固定输入上按神经元平均 \((h_i^\ell)^2\) 来估计 \(q_\ell\)，再换多个独立初始化检查波动。网络越深，沿途的随机偏差越可能累积；同时扫描深度与宽度，可以看出这条确定性递推在哪些规模上能准确预测实际网络。</p>
+<div class="article-exercise"><h3>练习：有限幅值怎样形成？</h3><p>一个 ReLU 随机网络满足 \(\sigma_w^2=1.8\)、\(\sigma_b^2=0.02\)，第一层预激活二阶矩为 \(q_1=1\)。求它的不动点、\(q_{21}\)，以及初始尺度偏差衰减到 \(1/e\) 所需的大约层数。</p><details><summary>展开推导与答案</summary><p>递推为 \(q_{\ell+1}=0.9q_\ell+0.02\)，所以 \(q_*=0.02/(1-0.9)=0.2\)。闭式解为 \(q_\ell=0.2+0.8\times0.9^{\ell-1}\)，得到 \(q_{21}\approx0.2973\)。尺度偏差的衰减深度为 \(-1/\log0.9\approx9.49\) 层。网络最终保留了有限幅值，但不同初始幅值的差异正在被压缩；输入方向的差异还要用下面的两输入递推单独检查。</p></details></div>
+</section>
+
+<section data-math-scope="init-signal">
+<h2 id="init-correlation">两段输入还能分开吗：相关性与混沌边缘</h2>
+<p>分类器需要区分不同样本。如果两段输入穿过网络后得到几乎相同的方向，即使每个向量的 RMS 都是 1，最后的读出层也只能利用很小的差异。于是，初始化分析需要同时把两段输入送进<strong>同一组随机权重</strong>。</p>
+<p>将输入标为 A、B，定义第 \(\ell\) 层的预激活交叉二阶矩 \(q_\ell^{AB}=\mathbb E[h_i^\ell(A)h_i^\ell(B)]\)。各自的二阶矩分别是 \(q_\ell^{AA}\)、\(q_\ell^{BB}\)，归一化得到</p>
+\[\htmlData{symbol=init-c}{c_\ell}=\frac{q_\ell^{AB}}{\sqrt{q_\ell^{AA}q_\ell^{BB}}}.\]
+<p>这里的期望遍历随机初始化，预激活的集合均值为零，因此 \(c_\ell\) 也是这个随机变量对的相关系数。在一个足够宽的具体网络上，可以用两个预激活向量的归一化内积作经验估计；将经验均值另外减去，得到的是另一种有限宽度估计，需要在实验中写清定义。</p>
+<p>假设上一层两个输入的预激活二阶矩都为 \(q\)，相关性为 \(c\)。取两个独立标准高斯变量 \(Z_1,Z_2\)，就能构造具有相应统计量的一对输入：</p>
+\[U=\sqrt q Z_1,\qquad
+V=\sqrt q\left(cZ_1+\sqrt{1-c^2}Z_2\right).\]
+<p>两个输入使用同一层偏置，因此偏置方差也进入交叉项。下一层的二阶矩与相关性分别为</p>
+\[q'=\sigma_w^2\mathbb E[\phi(U)^2]+\sigma_b^2,
+\qquad
+c'=\frac{\sigma_w^2\mathbb E[\phi(U)\phi(V)]+\sigma_b^2}{q'}.
+\]
+<p>这条式子可以用二维高斯积分计算，也可以直接采样 \(Z_1,Z_2\) 做 Monte Carlo 检查。若两输入的尺度不同，就分别使用 \(\sqrt{q^{AA}}\)、\(\sqrt{q^{BB}}\) 构造高斯对，并把分母改成下一层两个二阶矩的几何平均。</p>
+<p>对于零偏置 ReLU，积分有一个直观的闭式结果。在每层采用 He 初始化、预激活尺度保持为 \(q\) 时，相关性按下面的映射演化：</p>
+\[\boxed{c_{\ell+1}=\mathcal C(c_\ell)
+=\frac{\sqrt{1-c_\ell^2}+(\pi-\arccos c_\ell)c_\ell}{\pi}}.
+\]
+<p>公式中的角度来自二维高斯的旋转对称性。写 \(c=\cos\theta\)，并将两个独立标准高斯变量表示成极坐标 \(Z_1=R\cos\alpha\)、\(Z_2=R\sin\alpha\)。方向 \(\alpha\) 均匀分布在一个圆周上，半径满足 \(\mathbb E[R^2]=2\)。于是 \(U=\sqrt qR\cos\alpha\)、\(V=\sqrt qR\cos(\alpha-\theta)\)。两次 ReLU 都为正的方向组成一个长度为 \(\pi-\theta\) 的交集，在这个区间积分：</p>
+\[\begin{aligned}
+\mathbb E[\operatorname{ReLU}(U)\operatorname{ReLU}(V)]
+&=\frac q\pi\int_{\theta-\pi/2}^{\pi/2}
+\cos\alpha\cos(\alpha-\theta)\,d\alpha\\
+&=\frac{q}{2\pi}\big[\sin\theta+(\pi-\theta)\cos\theta\big].
+\end{aligned}\]
+<p>再乘 He 的权重方差因子 2、除以下一层预激活二阶矩 \(q\)，就得到上面的相关性映射。ReLU 在两个方向上的共同正半空间，把原本不相关的一对输入变成了具有正交叉二阶矩的一对激活。</p>
+<p>从 \(c_0=0\) 开始迭代这条映射，一次得到约 0.318，十次得到约 0.872，五十次得到约 0.988。两向量的尺度保持着，它们的方向却越来越接近。等尺度时，每坐标的平均平方距离满足</p>
+\[\frac1n\mathbb E\|h^\ell(A)-h^\ell(B)\|_2^2
+=2q(1-c_\ell).
+\]
+<p>例如 \(q=1\)，初始 RMS 距离是 \(\sqrt2\)，五十次映射后约为 0.156。这组数字揭示了一个仅看激活范数看不到的现象：网络保持了信号的大小，同时将两段输入推向相近方向。多样本实验可以进一步观察 Gram 矩阵或特征协方差的谱，看这种收缩覆盖了多少独立方向。</p>
+<figure class="article-figure init-figure" id="init-correlation-figure">
+  <h3>长度保持稳定，两个输入的方向仍在靠近</h3>
+  <p class="init-lead">使用 He 初始化的无限宽、零偏置 ReLU 网络，令每层两个预激活的二阶矩都为 1。改变初始相关系数 c₀，观察相关性和均方距离怎样一起变化。</p>
+  <div class="init-options"><label><span>初始相关系数 c₀ <output data-value="correlation">0.00</output></span><input data-control="correlation" aria-label="两个输入的初始相关系数" type="range" min="-0.95" max="0.95" step="0.05" value="0"></label></div>
+  <div class="init-split"><div><p class="init-panel-title">相关性 cℓ</p><div class="init-plot" data-chart="correlation" role="img" aria-label="两个输入的预激活相关系数随深度变化"></div></div><div><p class="init-panel-title">均方根距离 √(2 − 2cℓ)</p><div class="init-plot" data-chart="distance" role="img" aria-label="两个单位二阶矩预激活的均方根距离随深度变化"></div></div></div>
+  <div class="init-stats"><div class="init-stat">当前相关系数<output data-stat="correlation">0.0000</output></div><div class="init-stat">当前均方根距离<output data-stat="distance">1.4142</output></div></div>
+  <figcaption>每一步按 ReLU 的解析相关性递推计算 cℓ₊₁。距离是 √E[(hᵃ − hᵇ)²]；这里 E[(hᵃ)²] = E[(hᵇ)²] = 1，因此距离等于 √(2 − 2cℓ)。所有曲线都来自该理论模型。</figcaption>
+</figure>
+<h3>同一个斜率，连接输入扰动与平均梯度</h3>
+<p>现在令两输入的尺度已经到达正的不动点 \(q_*\)，在 \(c=1\) 附近考察相关性映射。其斜率是</p>
+\[\htmlData{symbol=init-chi}{\chi}=\mathcal C'(1)
+=\sigma_w^2\mathbb E_{Z\sim\mathcal N(0,1)}
+\left[\phi'(\sqrt{q_*}Z)^2\right].\]
+<p>这里 \(\chi\) 衡量两个几乎相同的输入经过一层后，微小差异的平方尺度如何变化。若令 \(\epsilon_\ell=1-c_\ell\)，局部关系就是 \(\epsilon_{\ell+1}\approx\chi\epsilon_\ell\)。\(\chi&lt;1\) 使附近输入继续靠拢；\(\chi&gt;1\) 使它们的微小差异最初被放大。在具有稳定幅值不动点的常见 tanh 均值场模型中，这分别对应有序区与混沌区，\(\chi=1\) 给出它们之间的临界边界。</p>
+<p>前面构造的 tanh 配置满足 \(q_*=1\)、\(\sigma_w^2\approx2.53618\)、零偏置。数值积分给出 \(\chi\approx1.17781\)，而幅值映射斜率只有约 0.46107。两个相近输入的长度偏差会缩小，方向差异却可以先被放大。这两个结果来自不同的导数，恰好提供了一组可以在同一网络上检查的预测。</p>
+<p>当 \(0&lt;\chi&lt;1\) 且进入线性近似区后，差异按指数衰减。把衰减到 \(1/e\) 的层数记为 \(\xi_c\)，便有 \(\xi_c=-1/\log\chi\)。\(\chi=0.9\) 对应约 9.49 层，\(\chi=0.99\) 对应约 99.5 层。更一般地，在相关性不动点 \(c_*\) 附近，应使用 \(\mathcal C'(c_*)\) 计算偏差的衰减速度。这个深度尺度衡量初始化时信息变化的速度，可以用来挑选实验范围。</p>
+<p>反向传播中也会出现同一个因子。把第 \(\ell\) 层预激活的梯度记为 \(\delta_i^\ell=\partial\mathcal L/\partial h_i^\ell\)，并令 \(\nu_\ell=\mathbb E[(\delta_i^\ell)^2]\)。链式法则给出 \(\delta^\ell=\phi'(h^\ell)\odot(W^{\ell+1})^\top\delta^{\ell+1}\)。采用宽网络中权重、门控和反传信号的独立性近似，在幅值不动点附近得到</p>
+\[\nu_\ell\approx
+\frac{n_{\ell+1}}{n_\ell}\chi\,\nu_{\ell+1}.
+\]
+<p>等宽时，\(\chi\) 就是每个坐标梯度二阶矩的层间倍率；变宽时，还要乘上下一层宽度与本层宽度之比。这把“输入扰动传播”和“梯度传播”放进了同一套局部尺度分析。实际反向中的变量会有关联，因此可以用随机顶层梯度和真实损失梯度分别做实验，观察这个近似解释了哪些统计量。</p>
+<p>He 初始化的零偏置 ReLU 恰好满足 \(\chi=2\times\tfrac12=1\)。其相关性映射在 1 处的斜率为 1，但对每个 \(-1&lt;c&lt;1\)，都有 \(\mathcal C(c)&gt;c\)。输入仍会逐渐靠拢，只是临界附近的收缩需要由高阶项描述，速度慢于通常的指数衰减。这个 ReLU 特例中，幅值存在整条固定点线；分析 tanh 的有序—混沌相图时，则需要同时求解其幅值不动点和相关性映射。</p>
+<p>到这里，研究对象已经从一个平均尺度扩展成了几何问题：给定同样的 \(\chi\)，不同方向究竟分别被放大或压缩多少？这需要保留 Jacobian 的完整奇异值分布。</p>
+<div class="article-exercise"><h3>练习：尺度保持了多少，输入差异又保持了多少？</h3><p>两段输入在某层的预激活二阶矩都为 1，相关性为 0。经过十次零偏置 He-ReLU 的相关性映射后，\(c\approx0.87154\)。求每坐标平均平方距离保留的比例。再考虑另一个局部模型 \(\chi=0.98\)：经过 100 层，微小平方距离与 RMS 距离分别保留多少？</p><details><summary>展开推导与答案</summary><p>第一组的初始平均平方距离为 2，之后为 \(2(1-0.87154)\approx0.25692\)，保留约 12.85%；预激活二阶矩仍为 1。第二组的微小平方距离保留 \(0.98^{100}\approx0.13262\)，RMS 距离保留它的平方根，约 0.36417。图中的纵轴若画平方量、RMS 或 L2 范数，衰减指数会相应不同。</p></details></div>
+</section>
+<section data-math-scope="init-spectrum">
+<h2 id="init-jacobian">梯度平均大小稳定以后，还要看哪些方向能通过</h2>
+<p>两个初始化都让每层激活的二阶矩保持稳定，训练速度仍然可能相差很大。一个网络可能保留了大部分方向，另一个则把少数方向放大，把其余方向压到几乎不可见。总范数把这些方向加在一起，正好掩盖了差异。</p>
+<p>固定输入与初始化权重，考虑一个各层宽度均为 \(n\) 的网络。第 \(\ell\) 层的预激活为 \(h^\ell\)，激活为 \(x^\ell=\phi(h^\ell)\)。把每个神经元的局部斜率放到对角矩阵 \(D^\ell=\operatorname{diag}(\phi'(h^\ell_i))\) 中，输入扰动到最后一层的传播就是</p>
+\[
+\htmlData{symbol=init-input-jac}{J_x}=\frac{\partial x^L}{\partial x^0}
+=D^LW^L\cdots D^1W^1,\qquad
+\Delta x^L\approx J_x\Delta x^0.
+\]
+<p>这里 \(L\) 是带权重的层数，\(J_x\) 是 \(n\times n\) 的输入 Jacobian；下标 \(x\) 提醒我们求导对象是输入。反向传播则把顶层梯度乘以 \(J_x^\top\)。同一个矩阵控制了前向的小扰动与反向的误差信号。</p>
+<p>做奇异值分解 \(J_x=U\operatorname{diag}(s_1,\ldots,s_n)V^\top\)。\(V\) 的第 \(i\) 个列向量给出一个输入方向；沿它移动一小步，输出就沿 \(U\) 的对应方向移动，长度乘以 \(\htmlData{symbol=init-singular}{s_i}\)。把所有单位方向组成一个球，经过 \(J_x\) 后得到椭球，奇异值就是各条半轴的长度。</p>
+<p>若探针向量 \(v\) 在单位球面均匀取样，则 \(\mathbb E[vv^\top]=I/n\)，从而</p>
+\[
+\mathbb E_v\|J_xv\|_2^2
+=\frac{1}{n}\operatorname{tr}(J_x^\top J_x)
+=\frac{1}{n}\sum_{i=1}^{n}s_i^2.
+\]
+<p>所以平均平方奇异值等于 1，只约束随机方向的平均平方增益。取两个二维矩阵 \(J_A=I\) 与 \(J_B=\operatorname{diag}(\sqrt{1.99},0.1)\)，二者的平均平方奇异值都为 1。前者保留所有方向，后者把第二个方向缩小到十分之一，第一方向放大约 1.411 倍。\(J_B\) 的条件数约为 14.11；继续沿相同方向串联，差异还会累积。</p>
+<p><strong>动力学等距性要求相关方向上的奇异值集中在 1 附近。</strong>对于当前的方形全空间映射，这等价于让 \(J_x^\top J_x\) 接近单位矩阵，小扰动的长度与夹角都得到近似保留。实际诊断时可以同时画奇异值直方图、最大值、中位数和较低分位数，再报告数值零值的比例。若存在零奇异值，全空间条件数为无穷；只在非零谱上计算的条件数要明确标为“非零子空间条件数”，并同时给出秩与判零阈值。</p>
+<figure class="article-figure init-figure" id="init-spectrum-figure">
+  <h3>平均放大倍数相同，不同方向的处境可以相差很远</h3>
+  <p class="init-lead">左边是长度为 1 的输入扰动，右边是经过 \(J=\operatorname{diag}(\sqrt{2-\varepsilon^2},\varepsilon)\) 后的扰动。两个奇异值的平方平均始终为 1。播放会转动输入方向，观察输出长度。</p>
+  <div class="init-options"><label><span>较小奇异值 ε <output data-value="minor">0.10</output></span><input data-control="minor" aria-label="Jacobian 的较小奇异值" type="range" min="0.05" max="1" step="0.05" value="0.1"></label><div class="init-presets"><button type="button" data-preset="0.1">方向失衡 · 0.1</button><button type="button" data-preset="1">等距 · 1</button></div></div>
+  <div class="init-split"><div><p class="init-panel-title">输入扰动 · 单位圆</p><div class="init-plot" data-chart="input-circle" role="img" aria-label="二维单位输入扰动的方向"></div></div><div><p class="init-panel-title">输出扰动 · 椭圆</p><div class="init-plot" data-chart="output-ellipse" role="img" aria-label="Jacobian 将单位圆变换成的椭圆与当前输出扰动"></div></div></div>
+  <div class="init-legend"><span><i></i>输入扰动</span><span><i class="alt"></i>输出扰动</span><span><i class="reference"></i>长度为 1 的圆</span></div>
+  <div class="init-stats"><div class="init-stat">两个奇异值 s₁，s₂<output data-stat="singular">1.4107，0.1000</output></div><div class="init-stat">平均平方奇异值<output data-stat="average">1.0000</output></div><div class="init-stat">当前方向的放大倍数<output data-stat="gain">1.4107</output></div><div class="init-stat">条件数 s₁ / s₂<output data-stat="condition">14.11</output></div></div>
+  <figcaption>两张图使用相同的坐标尺度。虚线圆提供长度为 1 的参照；椭圆长、短半轴分别等于两个奇异值。这里 J 为对角矩阵，反向传播中的 Jᵀ 具有相同的方向缩放。</figcaption>
+</figure>
+<p>各层的奇异值还不能直接逐项相乘来得到完整谱。层与层之间，前一层的输出奇异方向会相对于后一层的输入奇异方向发生旋转：被一层放大的分量，可能进入下一层的压缩方向。逐层 SVD 能定位异常，完整 Jacobian 的 SVD 则衡量整条路径的最终结果。两种测量回答不同尺度上的问题。</p>
+<p>在小网络上可以显式构造 \(J_x\) 并做 SVD。规模较大时，自动微分提供的 Jacobian-vector product 可以计算 \(J_xv\)，反向传播可以计算 \(J_x^\top u\)。多次采样各向同性探针，能估计平均平方增益；交替使用这两个乘法的 power iteration 可以估计最大奇异值。接近零的方向与完整谱分布需要额外的谱估计，所以小规模的显式矩阵实验仍然有价值。</p>
+<div class="article-exercise"><h3>计算：平均增益相同，方向差多少？</h3><p>把 \(J_B=\operatorname{diag}(\sqrt{1.99},0.1)\) 连用三次，求两个坐标方向的增益，以及新矩阵的平均平方奇异值。</p><details><summary>展开推导与答案</summary><p>乘积仍为对角矩阵，两个增益是 \(1.99^{3/2}\approx2.8072\) 与 \(0.1^3=0.001\)。平均平方奇异值为 \((1.99^3+10^{-6})/2=3.940300\)。单层的平均保持没有延续为三层的平均保持，因为这里每层放大的方向完全对齐。这也说明分析随机独立层得到的期望时，必须保留层间独立与方向混合的条件。</p></details></div>
+</section>
+
+<section data-math-scope="init-spectrum">
+<h2 id="init-orthogonal">正交初始化改变了谱，非线性又改变了什么</h2>
+<p>在线性方形网络中，一个直接的构造是让每层权重 \(W^\ell=Q^\ell\) 满足 \((Q^\ell)^\top Q^\ell=I\)。正交矩阵只旋转或反射向量，多个这样的矩阵相乘仍然正交，因此整个网络的奇异值恰好全为 1。随机高斯权重采用元素方差 \(1/n\) 时，只在期望上满足 \(\mathbb E[W^\top W]=I\)；一次实际采样得到的奇异值已经有宽度，多层乘积会进一步改变这个分布。</p>
+<p>随机正交初始化可以从高斯矩阵的 QR 分解得到：将 Q 的各列乘以 R 对角元的符号，就得到符号约定一致的随机正交矩阵。再乘一个 gain，就能设置整体尺度。对方形矩阵，gain 为 1 时每个元素的二阶矩为 \(1/n\)，gain 为 \(\sqrt2\) 时则为 \(2/n\)。后者和 He 高斯初始化有相同的元素尺度，两者的谱结构不同。</p>
+<p>ReLU 每层还会插入门控矩阵 D。对某个固定输入，若一半神经元激活，D 就有一半对角元为 1，另一半为 0。取 \(W=\sqrt2 Q\)，局部 Jacobian 为 \(\sqrt2 DQ\)，于是</p>
+\[
+(\sqrt2 DQ)(\sqrt2 DQ)^\top=2D.
+\]
+<p>它的奇异值一半为 \(\sqrt2\)，一半为 0，平均平方仍为 1。正交权重让线性部分的伸缩非常整齐，ReLU 门控仍然关闭了部分局部方向。对于这种等宽、无旁路的网络，关闭的方向已经使全空间等距性失效；多层之后，保留下来的非零谱还取决于门控与旋转怎样组合。研究时应把零值质量和非零谱展宽分别测量。</p>
+<p>tanh 的局部导数为 \(1-\tanh^2(h)\)。预激活集中在零附近时，大多数导数接近 1；配合正交权重和合适的 gain，局部 Jacobian 更接近长度保持的变换。随着深度增加，需要进一步控制这些导数的离散程度与层间乘积。动力学等距性的设计因此同时涉及<strong>权重谱、预激活分布、激活函数与深度</strong>。单独指定“orthogonal”只完成了其中一项。</p>
+<p>宽度发生变化时，要先写清楚保留哪一个空间。若 \(W\in\mathbb R^{m\times n}\) 且 \(m\ge n\)，列正交 \(W^\top W=I_n\) 可以保持所有输入方向的长度；若 \(m\lt n\)，降维必然留下输入零空间，行正交 \(WW^\top=I_m\) 保持的是对应的 \(m\) 维子空间。卷积和残差结构还会改变完整算子的形状，初始化检查应直接针对实际前向映射。</p>
+<div class="article-exercise"><h3>计算：正交 ReLU 层的谱</h3><p>一个 8 维 ReLU 层在当前输入上有 5 个激活神经元，权重为 \(\sqrt2 Q\)，Q 正交。求局部 Jacobian 的秩、奇异值和平均平方奇异值。</p><details><summary>展开推导与答案</summary><p>由 \(JJ^\top=2D\)，5 个奇异值为 \(\sqrt2\)，3 个为 0，秩为 5。平均平方为 \(5\times2/8=1.25\)。只有在激活比例恰好为一半时，该次采样的平均值才等于 1；对称随机初始化对应的是激活比例的期望。完整谱同时显示了样本波动和方向丢失。</p></details></div>
+</section>
+
+<section data-math-scope="init-dynamics">
+<h2 id="init-linear-dynamics">从初始谱到学习速度：深线性网络的一个可解模式</h2>
+<p>线性网络 \(f(x)=W^L\cdots W^1x\) 对输入是线性的，训练却要分别改变每个因子。一个层的梯度会乘上其余层的权重，因此初始因子的大小会改变之后的学习速度。这正好提供了一个能把“初始化”和“训练过程”连起来的最小模型。</p>
+<p>设输入已经白化，\(\mathbb E[xx^\top]=I\)，目标是线性映射 \(y=Tx\)，采用损失 \(\mathcal L=\tfrac12\mathbb E\|f(x)-y\|_2^2\)。将目标做奇异值分解，并选取相邻层方向彼此对齐的初始化，各个模式可以独立演化。对一个目标奇异值为 \(\rho\gt0\) 的模式，用 \(w_1,\ldots,w_L\) 表示各层在这个模式上的标量系数，它的端到端强度为</p>
+\[
+a=\prod_{\ell=1}^{L}w_\ell,\qquad
+\mathcal L_{\mathrm{mode}}=\tfrac12(a-\rho)^2.
+\]
+<p>这里 \(a\) 是当前网络已经学到的强度，\(\rho\) 是目标强度，L 是权重矩阵数量。采用单位速率的欧氏梯度流，时间 t 吸收了学习率尺度，每个因子满足</p>
+\[
+\frac{dw_\ell}{dt}
+=(\rho-a)\prod_{k\ne\ell}w_k.
+\]
+<p>进一步取平衡的正初始化 \(w_1=\cdots=w_L=w\gt0\)，各因子的导数相同，所以这种平衡会延续。利用 \(a=w^L\)，链式法则给出</p>
+\[
+\frac{da}{dt}
+=Lw^{L-1}\frac{dw}{dt}
+=\boxed{L a^{\,2-2/L}(\rho-a)}.
+\]
+<p>靠近零时，前面的 \(a^{2-2/L}\) 控制了学习启动的速度。若目标 \(\rho=1\)，当前端到端强度同为 \(a=10^{-4}\)，两层网络的初始速度约为 \(2.00\times10^{-4}\)，八层网络约为 \(8.00\times10^{-7}\)，相差 250 倍。八层网络每个因子约为 0.316，而两层网络每个因子为 0.01；比较的对象是相同端到端强度。这个算例把深层乘法参数化的影响单独分离出来。</p>
+<p>两层时可以直接解出整个轨迹：</p>
+\[
+a(t)=\frac{\rho}{1+(\rho/a_0-1)e^{-2\rho t}},
+\qquad a_0=a(0)\gt0.
+\]
+<p>初期若 \(a_0\) 很小，loss 会经历一段变化缓慢的区间；强度增长后，学习明显加速，最后接近目标。这条曲线说明，初始输出接近零和容易启动学习是两个需要分别检查的性质。对于一般随机方向、非线性激活和离散大步长，继续用同一组观测量测量模式、梯度与损失，就能研究偏离这条可解轨迹的原因。</p>
+<figure class="article-figure init-figure" id="init-dynamics-figure">
+  <h3>初始输出相同，深度怎样改变学习曲线</h3>
+  <p class="init-lead">教师模态强度 ρ = 1，所有层的正权重保持平衡。紫线按 \(da/dt=L a^{2-2/L}(1-a)\) 演化；橙线固定为两层。a 是各层权重的乘积，也是当前输出模态强度。</p>
+  <div class="init-options"><label><span>初始乘积 a₀ <output data-value="product">0.0010</output></span><input data-control="product" aria-label="初始输出模态强度的十进制对数" type="range" min="-4" max="-0.3" step="0.1" value="-3"></label><label><span>深度 L</span><select data-control="depth" aria-label="深线性网络的层数"><option value="2">2 层</option><option value="4">4 层</option><option value="8" selected>8 层</option><option value="16">16 层</option></select></label></div>
+  <div class="init-plot" data-chart="dynamics" role="img" aria-label="平衡深线性网络模态强度随梯度流时间变化"></div>
+  <div class="init-legend"><span><i></i>当前深度 L</span><span><i class="alt"></i>两层基准</span><span><i class="reference"></i>教师强度 ρ = 1</span></div>
+  <div class="init-stats"><div class="init-stat">当前时间 t<output data-stat="time">0</output></div><div class="init-stat">当前模态强度 a(t)<output data-stat="mode">0.0010</output></div><div class="init-stat">各层初始权重 \(a_0^{1/L}\)<output data-stat="weight">0.4217</output></div><div class="init-stat">当前变化率 da/dt<output data-stat="rate">0.000045</output></div></div>
+  <figcaption>时间吸收了统一的学习率尺度。深线性网络采用白化输入、对齐的单一模态和连续梯度流；两条曲线共用相同 a₀。数值轨迹由四阶 Runge–Kutta 法计算，步长 0.02。固定初始乘积时，各层初始权重随深度变化，数值显示在图下。</figcaption>
+</figure>
+<p>平衡条件也可以直接检查。每个因子的平方都满足 \(d(w_\ell^2)/dt=2a(\rho-a)\)，因此任意两层的平方差保持不变。一般的随机初始化会沿着它自己的初始不平衡程度演化。两层时，端到端强度的精确导数是 \(da/dt=(w_1^2+w_2^2)(\rho-a)\)。同样的乘积 a，可以由不同的因子组合得到，也会拥有不同的更新速度。</p>
+<p>例如 \((w_1,w_2)=(0.1,0.1)\) 和 \((1,0.01)\) 都给出 \(a=0.01\)，初始预测完全相同；目标 \(\rho=1\) 时，两个初始速度分别是 0.0198 和 0.990099。第二组局部变化更快，也改变了各参数方向的曲率和合适步长。比较初始化时，记录端到端输出之外，还应保留每层的尺度，并给不同设置相同的学习率搜索预算。</p>
+<div class="article-exercise"><h3>计算：初始化改变了多长的启动时间</h3><p>两层平衡线性网络的目标强度为 \(\rho=1\)。分别从 \(a_0=0.01\) 和 \(a_0=0.0001\) 出发，达到 \(a(t)=0.5\) 需要多长梯度流时间？</p><details><summary>展开推导与答案</summary><p>令 \(a(t)=1/2\)，得到 \(t=\tfrac12\log(1/a_0-1)\)。两个时间分别约为 2.298 和 4.605。初始强度缩小 100 倍，使到达同一目标的时间增加约 2.308。这些时间使用单位速率梯度流；步长为 η 的小步长梯度下降对应 \(t\approx k\eta\)，k 是更新次数。</p></details></div>
+</section>
+
+<section data-math-scope="init-kernel">
+<h2 id="init-ntk">参数变动怎样改变预测：从 Jacobian 到 NTK</h2>
+<p>输入 Jacobian 描述输入移动时输出怎样变；训练中移动的是参数。取 N 个固定样本，把标量预测组成向量 \(f(\theta)\in\mathbb R^N\)，将全部 P 个参数展开为 \(\theta\in\mathbb R^P\)。定义参数 Jacobian</p>
+\[
+\htmlData{symbol=init-param-jac}{G}_{ip}
+=\frac{\partial f_i}{\partial\theta_p},
+\qquad G\in\mathbb R^{N\times P}.
+\]
+<p>G 的第 i 行给出“改变哪些参数可以调整第 i 个样本的预测”。两行越对齐，沿着一个样本的梯度更新时，对另一个样本的影响就越强。把这些内积放进矩阵，就得到在这 N 个样本上的经验 Neural Tangent Kernel：</p>
+\[
+\htmlData{symbol=init-ntk}{K}=GG^\top,\qquad
+K_{ij}=\nabla_\theta f_i^\top\nabla_\theta f_j.
+\]
+<p>对平均平方损失 \(\mathcal L=\tfrac{1}{2N}\|f-y\|_2^2\)，欧氏梯度流的参数与预测更新分别为</p>
+\[
+\frac{d\theta}{dt}=-\frac1N G^\top(f-y),\qquad
+\frac{df}{dt}=-\frac1N K(t)(f-y).
+\]
+<p>这条瞬时关系适用于有限网络：参数变化时，G 和 K 也可能变化。固定核近似进一步采用 \(K(t)\approx K(0)\)。一个经典的理论实现是固定深度与数据集，采用显式 \(1/\sqrt{\text{fan-in}}\) 前向倍率、在未缩放权重坐标上训练，再在相应激活正则性条件与有限时间区间内让隐藏宽度趋向无穷。参数化、优化器和极限方式共同决定核是否保持不变。</p>
+<p>假设 K 在考察期间固定，记它的一个单位特征向量为 u、特征值为 \(\lambda\ge0\)。残差 \(e=f-y\) 在这个方向上的分量 \(e_u=u^\top e\) 满足</p>
+\[
+e_u(t)=e_u(0)e^{-\lambda t/N}.
+\]
+<p>大的特征值让相应误差模式更快被修正；零特征值对应固定核无法改变的模式。离散梯度下降还要求步长与最快方向匹配：在正特征值子空间上，\(0\lt\eta\lt2N/\lambda_{\max}\) 保证线性残差迭代收敛。若最小正特征值很小，允许的步长由快方向限制，慢方向就需要更多步数。</p>
+<p>这里出现了两个互补的谱：\(J_x\) 的奇异值描述输入方向的传播，K 的特征值描述固定训练样本上参数更新可以修正哪些误差。预测训练速度时，还应检查标签残差投影在哪些核特征方向上。即使谱完全相同，残差落在快方向和慢方向上，也会得到不同的损失曲线。</p>
+<p>优化器也会进入这个关系。若某个预条件梯度流写成 \(d\theta/dt=-M(t)\nabla_\theta\mathcal L\)，其中 M 是给参数方向重新分配步幅的矩阵，那么对应的预测变化使用 \(GMG^\top\)。因此同一份初始化，换了参数坐标或优化器之后，仍然需要重新检查更新速度。学习率、初始化和优化器的组合共同决定训练开始时看到的几何。</p>
+<p>在小模型上，可以同时保存初始化和训练后的 K，测量 \(\|K_t-K_0\|_F/\|K_0\|_F\)，并在固定 probe 样本上记录隐藏特征的变化。核几乎不动时，固定核预测有机会解释早期训练；核和特征明显改变时，需要把特征学习纳入模型。<a href="/posts/pretraining-mup/">μP 与超参数迁移</a>进一步讨论了如何联合缩放初始化、前向倍率和学习率，让宽度增长时仍保留有效的特征更新。</p>
+<div class="article-exercise"><h3>计算：相同学习率，两个误差方向</h3><p>N = 100，固定核的两个正特征值是 100 和 1，学习率 η = 1。每次更新后，两种残差分量分别乘多少？慢方向衰减到原来的十分之一，大约需要多少步？</p><details><summary>展开推导与答案</summary><p>离散更新为 \(e_{u,k+1}=(1-\eta\lambda/N)e_{u,k}\)。两个乘数分别是 0 和 0.99，快方向一步被消除。慢方向需要 \(k\ge\log(0.1)/\log(0.99)\approx229.1\)，取整数 230 步。步长稳定上界为 2；若只为了加快慢方向而把 η 增大到 3，快方向乘数就变成 −2，产生振荡并发散。</p></details></div>
+</section>
+<section id="init-update" data-math-scope="init-update">
+<h2>初始化还决定了第一步会走多远</h2>
+<p>训练开始后，权重的作用有两层：它们决定当前函数，也决定参数移动时函数怎样变化。对固定的一组 probe 输入，记参数为 \(\theta\)、预测向量为 \(f_\theta\)，一次小更新满足</p>
+\[\Delta f\approx \htmlData{symbol=init-param-jac}{G}\Delta\theta,\qquad G=\frac{\partial f_\theta}{\partial\theta}.\]
+<p>这里的 \(G\) 对参数求导，刻画每个参数方向改变输出的能力。初始化同时选择了 \(f_{\theta_0}\) 和 \(G_{\theta_0}\)。因此，一个相同大小的参数步长，放在不同的初始化处，可以造成不同的输出变化。</p>
+<p>这种差别甚至会出现在初始函数完全相同的网络里。取两层无偏置 ReLU 网络 \(f(x)=W_2\phi(W_1x)\)，令 \(\gamma\gt0\)，把权重换成 \(W'_1=\gamma W_1\)、\(W'_2=W_2/\gamma\)。ReLU 的正齐次性保证输出保持相同。对同一批数据和同一个损失，梯度却变成 \(g'_1=g_1/\gamma\)、\(g'_2=\gamma g_2\)。使用相同学习率的 SGD，第一层的相对更新量缩小 \(\gamma^2\) 倍，第二层则放大 \(\gamma^2\) 倍。这两套坐标会沿不同的训练轨迹离开同一个初始函数。</p>
+<p>优化器还会再次改变这种关系。SGD 的更新是 \(\Delta\theta=-\eta g\)；Adam 首步从零动量状态出发，做完偏差修正、暂时忽略权重衰减后，每个坐标满足</p>
+\[\Delta\theta_i=-\eta\frac{g_i}{|g_i|+\varepsilon}.\]
+<p>\(\eta\) 是学习率，\(g_i\) 是当前坐标的梯度，\(\varepsilon\) 是分母中的稳定常数。梯度远大于 \(\varepsilon\) 时，步长接近 \(\eta\)；接近 \(\varepsilon\) 时，梯度幅值开始明显影响实际步幅。初始化改变了梯度、参数本身的尺度，以及参数 Jacobian，这三项要一起观察。</p>
+<p>对第 \(\ell\) 层，在固定 probe 样本上记录下面三个量。\(t\) 表示训练步，\(\theta_\ell\) 是该层参数，\(x^\ell\) 是该层特征；RMS 指张量所有坐标的均方根：</p>
+\[\htmlData{symbol=init-update}{u_\ell(t)}=\frac{\|\theta_\ell^{(t+1)}-\theta_\ell^{(t)}\|_2}{\|\theta_\ell^{(t)}\|_2+\epsilon_u},\qquad v_\ell(t)=\operatorname{RMS}(x^\ell_t-x^\ell_0),\qquad d_f(t)=\operatorname{RMS}(f_{\theta_t}-f_{\theta_0}).\]
+<p>第一项测一次参数位移，后两项测特征和输出从初始化累计改变了多少。接近零初始化的参数同时报告绝对更新量；比较宽度时使用每个坐标的 RMS，可以避免把坐标数量增加算成学习增强。<a href="/posts/pretraining-mup/">μP 与超参数迁移</a>进一步把这些量写成随宽度变化的缩放规则：初始化、前向倍率和各参数组学习率共同决定模型怎样学习。</p>
+<h3>宽度增加以后，初始化和学习率怎样一起变化</h3>
+<p>保持前向幅值所用的随机抵消，在训练更新里会遇到输入与梯度的对齐。对一行线性计算 \(z_i=\sum_{j=1}^{n}W_{ij}x_j\)，单样本反向梯度是 \(g_{ij}=\delta_i x_j\)，其中 \(\delta_i=\partial\mathcal L/\partial z_i\)。Adam 首步在 epsilon 可忽略时给出</p>
+\[\Delta z_i\approx-\eta\operatorname{sign}(\delta_i)\sum_{j=1}^{n}|x_j|.\]
+<p>若每个输入坐标的平均绝对值保持常数，右边就按 \(\eta n\) 增长。隐藏矩阵的学习率按 \(1/n\) 缩小，可以控制这项变化。初始化时的随机求和与训练时的对齐求和，由此需要不同的宽度规则。</p>
+<p>μP 将这种考虑扩展到整张网络。以两隐藏层 MLP 为例，固定深度、输入输出维度，只把隐藏宽度从 \(n_0\) 改为 \(n\)，令倍率 \(r=n/n_0\)。直接存储前向使用的有效权重，以 \(\eta\) 为基准学习率，一组可执行的缩放关系是：</p>
+<div class="table-wrap"><table><thead><tr><th>参数</th><th>初始化方差</th><th>SGD 学习率</th><th>Adam 学习率</th></tr></thead><tbody>
+<tr><td>输入矩阵 \(W_1\)</td><td>\(1/d_{\mathrm{in}}\)</td><td>\(\eta r\)</td><td>\(\eta\)</td></tr>
+<tr><td>隐藏矩阵 \(W_2\)</td><td>\(1/n\)</td><td>\(\eta\)</td><td>\(\eta/r\)</td></tr>
+<tr><td>读出矩阵 \(W_3\)</td><td>\(1/(nr)\)</td><td>\(\eta/r\)</td><td>\(\eta/r\)</td></tr>
+</tbody></table></div>
+<p>这里 \(d_{\mathrm{in}}\) 是固定输入维度；表中保留了宽度依赖关系，各层的常数增益可以根据激活函数和基准模型选择。Adam 一列采用 epsilon 相对梯度足够小的尺度分析。读出权重随宽度缩小会影响回传梯度，SGD 和 Adam 处理这次缩小的方式不同，因此它们的学习率列也不同。</p>
+<p>例如基准宽度 256、目标宽度 2048，倍率为 8。基准学习率为 0.001 时，隐藏矩阵的 Adam 学习率取 0.000125。先在几个宽度上测每坐标激活和固定 probe 的特征变化，再用相同数据与步数搜索基准学习率，就能检查缩放是否保留了相近的学习行为。这个比较将初始化的幅值分析延伸到宽度变化后的实际训练。</p>
+<p>真实实现可能保存 \(V=rW\)，前向再除以 \(r\)。此时梯度变成 \(g_V=g_W/r\)，学习率和 Adam 的 epsilon 也要按参数坐标一起换算。完整的坐标推导、Transformer 轴语义和恢复 checkpoint 的实践可见<a href="/posts/pretraining-mup/">μP 与超参数迁移</a>。</p>
+<div class="article-exercise"><h3>练习：同一个函数，两种 SGD 更新</h3><p>两层 ReLU 网络的两组权重范数均为 2，梯度范数均为 0.4，SGD 学习率为 0.1。按 \(W'_1=4W_1\)、\(W'_2=W_2/4\) 重参数化后，两层的相对更新量分别是多少？忽略分母稳定常数。</p><details><summary>展开推导与答案</summary><p>原来的相对更新量都是 \(0.1\times0.4/2=0.02\)。新权重范数为 8 和 0.5，新梯度范数为 0.1 和 1.6，因此相对更新量变成 0.00125 和 0.32，分别是原来的 \(1/16\) 倍和 16 倍。初始预测相同，参数敏感度和更新几何已经发生变化。</p></details></div>
+</section>
+
+<section id="init-residual" data-math-scope="init-residual">
+<h2>残差网络：把每个分支放进整个深度里计算</h2>
+<p>对一个残差子层，写成 \(x_{\ell+1}=x_\ell+a_\ell F_\ell(x_\ell)\)。\(a_\ell\) 是分支系数，当前状态和分支输出都是 \(d\) 维向量。记 \(r(x)^2=\|x\|_2^2/d\)，一次相加有精确关系</p>
+\[r(x+aF)^2=r(x)^2+a^2r(F)^2+\frac{2a\,x^\top F}{d},\qquad J_\ell=I+\htmlData{symbol=init-residual-scale}{a_\ell}J_{F_\ell}.\]
+<p>前一个式子记录前向幅值，后一个式子记录局部梯度传播。若各层分支贡献近似不相关，且每层分支的均方幅值保持常数量级，\(L\) 次累加带来的增量按 \(La^2\) 增长。取 \(a\) 为 \(L^{-1/2}\) 的量级，就能在这个近似下控制累积幅值。训练会改变分支之间的对齐程度，所以实验中还要记录内积项。对同向的标量分支 \(F(x)=kx\)，梯度增益直接是 \((1+ak)^L\)：恒等通路与分支共同决定最终结果。</p>
+<p>Fixup 把深度缩放进一步落实到分支内部的参数。设网络有 \(L\) 条残差分支，每条包含 \(m\ge2\) 个线性或卷积权重层。采用常规随机初始化后，将分支内前 \(m-1\) 层权重再乘</p>
+\[L^{-1/(2m-2)},\]
+<p>并将每条分支最后一层及分类头初始化为零。每个分支增加初值为 1 的可学习标量乘子，在卷积、线性与逐元素激活之前增加初值为零的标量偏置。这个配方将网络从零分支贡献开始，再让各分支以受深度控制的速度学习。</p>
+<p>可以用一个标量分支看见指数的来源。令 \(F(x)=w_m\cdots w_1x\)，最后的 \(w_m=0\)，前面的 \(m-1\) 个系数都具有尺度 \(s\)。在输入 \(x\) 与上游导数保持常数量级时，\(\partial\mathcal L/\partial w_m\) 的尺度为 \(s^{m-1}\)。SGD 更新后，分支输出变化的尺度再乘一次 \(s^{m-1}\)，成为 \(\eta s^{2m-2}\)。让每条分支承担约 \(\eta/L\) 的变化，就得到 \(s=L^{-1/(2m-2)}\)。这里是在固定输入和上游导数下的局部尺度计算，完整网络还要计入分支的组合与相关性。</p>
+<p>零初始化也给出了明确的学习顺序。对分支 \(F(x)=W_2\phi(W_1x)\)，当 \(W_2=0\) 时，分支输出和输入 Jacobian 都为零；一旦有非零上游梯度，\(W_2\) 就能收到梯度，而传向 \(W_1\) 的梯度含有 \(W_2^\top\)，此时为零。如果同时按 Fixup 将线性分类头置零，第一步由分类头接收数据梯度，骨干中的数据梯度暂时为零；分类头更新后，梯度路径再逐步打开。检查最初几步的各组梯度，可以直接看到这个过程。</p>
+<p>局部零初始化之所以能启动学习，还依赖其他位置保留了不同的随机特征。分类头收到的是每个样本已经不同的表示，各输出类别收到的损失导数也不同；更新以后便能打破零分类头的初始对称性。把多层普通 MLP 的所有权重都置零，则会让中间特征和相应梯度同时退化。实现一个新配方时，可以先列出每组参数的首步梯度表达式，再对照实际的 <code>grad</code>：哪些应当为零，哪些应当由随机特征驱动，都有明确的预期。</p>
+<div class="article-exercise"><h3>练习：零分支怎样开始学习</h3><p>一个两层标量残差分支为 \(F(x)=w_2\operatorname{ReLU}(w_1x)\)，网络共有 100 个这样的分支。取缩放前的 \(w_1=1\)，Fixup 初始化后 \(w_1=0.1,w_2=0\)。给定 \(x=2\)、分支输出处的上游导数为 1、SGD 学习率为 0.01，求第一步参数与分支输出的变化。</p><details><summary>展开推导与答案</summary><p>当前隐藏激活为 0.2，故 \(g_{w_2}=0.2\)，\(g_{w_1}=w_2x=0\)。更新后 \(w_2=-0.002\)、\(w_1=0.1\)，分支输出变为 −0.0004。这个输出变化等于 \(-\eta L^{-1}x^2\)。题目给定了非零上游导数；完整零分类头网络需要先让分类头更新，才会出现这一步分支学习。</p></details></div>
+</section>
+
+<section id="init-transformer" data-math-scope="init-transformer">
+<h2>Transformer：初始化、归一化位置与学习率共同设计</h2>
+<p>归一化会把前向幅值拉回某个范围，同时改变导数。记 \(N\) 为归一化，\(F\) 为 attention 或 FFN 子层，Pre-LN 和 Post-LN 的局部计算分别为</p>
+\[\begin{aligned}
+\text{Pre-LN:}\quad y&=x+F(N(x)),&J&=I+J_FJ_N,\\
+\text{Post-LN:}\quad y&=N(x+F(x)),&J&=J_N(I+J_F).
+\end{aligned}\]
+<p>每个 Jacobian 都在对应的前向输入处求值。Pre-LN 的恒等通路直接通过子层；Post-LN 的全部梯度路径经过相加后的归一化。常用 Pre-LN 模型还在整叠网络顶部添加 final norm，它会继续影响最终输出和输入梯度。</p>
+<p>用不带可学习增益的 RMSNorm 看导数会更直观。对 \(x\in\mathbb R^d\)，令 \(r=\sqrt{\|x\|_2^2/d+\varepsilon}\)，则</p>
+\[N(x)=x/r,\qquad J_N=I/r-xx^\top/(dr^3).\]
+<p>与输入 \(x\) 正交的方向被乘以 \(1/r\)，沿 \(x\) 的方向被乘以 \(\varepsilon/r^3\)。输出 RMS 接近 1 时，梯度仍然可以对不同方向有很不一样的响应。LayerNorm 还会移除整体平移方向。初始化研究因此需要保留归一化前的残差统计和实际 Jacobian，而仅看归一化后的激活会丢掉这些信息。</p>
+<p>在初始化梯度分析中，Post-LN 靠近输出的参数可能具有较大的梯度，较小的起始学习率能够约束早期更新；Pre-LN 的梯度尺度通常更容易控制。Warmup 的长度可以作为受控实验变量：固定初始化、数据顺序和总训练预算，比较前几十步的参数位移与输出变化，再观察完整训练的验证损失。</p>
+<p>DeepNorm 将残差系数与初始化配成一组。对含 \(L\) 个 block、每个 block 具有 self-attention 和 FFN 两个子层的 encoder-only 或 decoder-only Transformer，采用</p>
+\[x_{\ell+1}=\operatorname{LN}(\alpha x_\ell+F_\ell(x_\ell)),\qquad \htmlData{symbol=init-deepnorm-alpha}{\alpha}=(2L)^{1/4},\qquad \htmlData{symbol=init-deepnorm-beta}{\beta}=(8L)^{-1/4}.\]
+<p>\(\alpha\) 放大残差路径；\(\beta\) 乘在 FFN、attention 的 V 与输出投影的基础初始化标准差上；Q、K 保留基础尺度。64 个 block 对应 \(\alpha\approx3.364\)、\(\beta\approx0.210\)。Encoder–decoder 中的 cross-attention 增加了计算路径，配套系数也随之改变。实现时应让 block 数、子层数、投影矩阵和初始化规则一一对应。相关梯度推导、注意力熵诊断与数值实验见<a href="/posts/pretraining-stability/">深层 Transformer 怎样稳定训练</a>。</p>
+<h3>把 attention 分数与分支输出分开测量</h3>
+<p>对一个 attention head，令 \(q,k\in\mathbb R^{d_h}\)，分数为 \(z=q^\top k/\sqrt{d_h}\)。若各坐标独立、均值为零，Q 与 K 也相互独立，每个 Q 坐标的方差为 \(v_Q\)、每个 K 坐标的方差为 \(v_K\)，则 \(\operatorname{Var}(z)=v_Qv_K\)。这个近似把点积中的维度因子与两个投影的尺度分开了。</p>
+<p>如果把 Q、K 投影权重同时乘 \(b\)，单个分数就乘 \(b^2\)，分数方差乘 \(b^4\)。例如两边都放大 2 倍，会让分数的标准差放大 4 倍，使 softmax 更容易集中在少数位置。Value 和输出投影则直接决定写回残差流的幅值。因此，检查 attention 初始化时，可以在同一批输入上同时记录 Q/K 的 RMS、分数标准差、概率熵和分支输出 RMS，逐项定位当前配方控制的是哪一种量。</p>
+<p>门控 FFN 也有独立的尺度问题。设一个中间坐标为 \(u\operatorname{SiLU}(v)\)，其中 \(u,v\) 来自两个投影。在两支独立的近似下，它的二阶矩为 \(\mathbb E[u^2]\mathbb E[\operatorname{SiLU}(v)^2]\)。后者随门控输入的尺度变化，需要用相应分布的积分或样本估计。工程上可先固定真实的归一化输入，测量两路投影、门控乘积和降维输出，再调节各投影的增益；这样能把激活函数、门控乘法和残差输出的影响逐层分清楚。</p>
+</section>
+
+<section id="init-convolution" data-math-scope="init-convolution">
+<h2>卷积网络：要保持的是整个算子的几何</h2>
+<p>卷积核沿空间重复使用，局部权重之间的关系会变成整张特征图上的结构。一个最简单的例子是周期边界上的一维卷积：\(y_t=(x_t+x_{t-1})/\sqrt2\)。核 \([1/\sqrt2,1/\sqrt2]\) 的平方和为 1，但它对常量信号的增益是 \(\sqrt2\)，对正负交替信号的增益是 0。相邻位置的重叠，使卷积在不同空间频率上有不同响应。</p>
+<p>因此，卷积的正交初始化需要分析把整张输入映射到整张输出的算子。在线性、步长为 1、周期边界的卷积中，可用傅里叶变换将空间方向分解：每个频率 \(\omega\) 对应一个通道矩阵 \(\widehat K(\omega)=\sum_\delta K_\delta e^{-i\omega\delta}\)。若要保持所有输入方向的长度，就要让每个频率上的通道变换具有对应的等距性质。对普通卷积核做一次展平矩阵的 QR 分解，只约束了展平后的通道与核坐标关系；空间位移产生的重叠仍需单独处理。</p>
+<p>Delta-orthogonal 给出一个很直观的起点。取相同的输入输出通道数 \(C\)、奇数尺寸的卷积核、步长 1 与保持空间尺寸的居中 padding，只在核的中心放一个 \(C\times C\) 正交矩阵 \(U\)，其他位置设为零。每个像素都独立执行 \(y_p=Ux_p\)，所以</p>
+\[\sum_p\|y_p\|_2^2=\sum_p\|Ux_p\|_2^2=\sum_p\|x_p\|_2^2.\]
+<p>它在初始化时保持整张特征图的线性几何。非中心位置的权重也参与后续训练，可以逐步学出空间交互。加入 tanh 等激活后，完整 Jacobian 还要乘上激活导数；非线性工作区间、权重增益和偏置尺度需要一起选择。减少通道或采用下采样时，输入输出维度也随之改变，应在相应维度上重新检查谱。</p>
+<p>这个区别可以用一个很小的实验看清楚。取 \(4\times4\) 的图像、两个输入和输出通道，整个输入共有 32 个坐标。依次输入 32 个标准基向量，将展平的卷积输出作为列，便能显式构造 \(32\times32\) 的线性算子矩阵，再计算它的奇异值。对中心正交核，所有奇异值都是 1；对具有相邻位置重叠的核，比较它的算子谱与展平核的谱，就能观察空间结构带来的差异。</p>
+<p>随后固定一张输入图像，加入激活函数，使用自动微分计算同一位置的输入 Jacobian。再把输入幅值扩大，记录激活导数与完整奇异值的变化。这个实验依次改变卷积空间结构、非线性和输入尺度，把三种因素各自的作用分开测量。进入真实图像训练后，再检查下采样层、通道变化和首个卷积层，通常比直接汇总整网的梯度范数更容易定位问题。</p>
+<h3>一个常见工程细节：groups 改变了真实的连接数</h3>
+<p>对步长为 1 的二维分组卷积，输入通道数为 \(C_{\rm in}\)、输出通道数为 \(C_{\rm out}\)、分组数为 \(G\)，核尺寸为 \(k\times k\)。在内部位置，单个输出连接 \((C_{\rm in}/G)k^2\) 个输入；单个输入连接 \((C_{\rm out}/G)k^2\) 个输出。这两个实际连接数分别用于相应的前向与反向尺度分析。</p>
+<p>PyTorch 2.9.0 将这类权重存成 \([C_{\rm out},C_{\rm in}/G,k,k]\)。初始化工具根据张量形状计算 fan：fan-in 是第二个轴乘核面积，fan-out 是第一个轴乘核面积。后者没有获取模块的 groups 参数。因此，对 depthwise 卷积直接使用 <code>mode="fan_out"</code> 时，要核对它计算的尺度是否符合当前设计。按前向 He 规则初始化可以使用 <code>mode="fan_in", nonlinearity="relu"</code>；若目标是保持分组反向尺度，则应根据实际连接数指定标准差，并用逐层梯度统计验证。</p>
+<div class="article-exercise"><h3>练习：一个 depthwise 卷积的两个 fan-out</h3><p>设 \(C_{\rm in}=C_{\rm out}=G=64\)、\(k=3\)，忽略边界影响。求真实 fan-in、真实 fan-out，以及上述形状计算得到的 fan-out。采用 ReLU 增益时，两种 fan-out 对应的初始化标准差相差多少？</p><details><summary>展开推导与答案</summary><p>每组只有一个输入和一个输出通道，真实的两个 fan 都是 9。存储形状为 \([64,1,3,3]\)，形状工具得到的 fan-out 为 \(64\times9=576\)。两种标准差为 \(\sqrt{2/9}\approx0.4714\) 与 \(\sqrt{2/576}\approx0.05893\)，相差 8 倍。若输入二阶矩为 1，使用后一个尺度，再经过 ReLU，在独立权重与对称预激活近似下，输出二阶矩为 \(9\times(2/576)/2=1/64\)。把统计量按层画出来，就能找到这个额外缩放来自哪里。</p></details></div>
+</section>
+<section id="init-practice">
+<h2>把初始化公式落实到真实张量</h2>
+<p>一份初始化配方最终要变成对张量的写入。此时最容易改变数学含义的地方，是激活增益、矩阵存储方向，以及多个投影是否合并存储。它们都会影响同一个量：每个输出坐标究竟加了多少项，每项最初有多大。下面以 PyTorch 2.9.0 的接口和实现为例，把这三处对应关系算清楚。</p>
+
+<h3>默认 Linear 的方差是多少？</h3>
+<p>搭一个没有归一化的深 ReLU MLP，直接使用 <code>nn.Linear</code> 的默认初始化，可能看到激活逐层变小。排查时，先计算初始化实际产生的分布。该版本的 <code>Linear.reset_parameters()</code> 调用了 <code>kaiming_uniform_(weight, a=√5)</code>。函数默认使用 Leaky ReLU 的增益，因此这里的增益为</p>
+\[g=\sqrt{\frac{2}{1+a^2}}=\frac1{\sqrt3},\qquad
+W_{ij}\sim\mathcal U\!\left(-\frac1{\sqrt{n_{\mathrm{in}}}},\frac1{\sqrt{n_{\mathrm{in}}}}\right),\qquad
+\operatorname{Var}(W_{ij})=\frac1{3n_{\mathrm{in}}}.\]
+<p>这里 \(n_{\mathrm{in}}\) 是这一层的输入维度。这种调用用 Kaiming 的接口表达了已有的默认均匀分布。若把 bias 设为零，在对称预激活的尺度近似下，ReLU 再保留一半二阶矩，激活二阶矩每过一层约乘 \(1/6\)。实验中可以先关闭 bias 和归一化，输入固定的标准高斯 batch，逐层记录 <code>activation.square().mean()</code>；再显式使用 ReLU 的 He 初始化，比较这条曲线：</p>
+<pre><code>import torch
+from torch import nn
+
+layer = nn.Linear(256, 256, bias=False)
+nn.init.kaiming_normal_(layer.weight, mode="fan_in", nonlinearity="relu")
+
+# 预期权重方差为 2 / 256；有限样本会围绕它波动。
+print(layer.weight.var(unbiased=False).item())</code></pre>
+<p>这个检查把“调用了哪个函数”落实为“获得了哪一个分布”。原来的默认 bias 也带有随机尺度；若要验证纯粹的乘法递推，实验需要像上面一样使用零 bias。</p>
+
+<h3>矩阵转置以后，fan-in 也要跟着转</h3>
+<p>标准 <code>Linear</code> 把权重存成 <code>[n_out, n_in]</code>，计算 <code>x @ weight.T</code>。自定义 kernel 常把它存成 <code>[n_in, n_out]</code>，直接计算 <code>x @ weight</code>。PyTorch 的 Kaiming 初始化按前一种布局识别 fan-in。若把后一种布局的原张量传进去，它就会把输出维度当成求和长度。</p>
+<p>例如输入宽度 64、输出宽度 256，ReLU 的目标方差是 \(2/64=1/32\)。对形状 \(64\times256\) 的原张量使用默认 fan-in，得到的却是 \(2/256=1/128\)：权重标准差少了一半，前向激活二阶矩也缩小为目标的四分之一。初始化转置视图便能让函数看到正确的轴：</p>
+<pre><code>weight = torch.empty(64, 256)  # 前向使用 x @ weight
+nn.init.kaiming_normal_(weight.T, mode="fan_in", nonlinearity="relu")
+x = torch.randn(4096, 64)
+y = torch.relu(x @ weight)
+print(x.square().mean().item(), y.square().mean().item())</code></pre>
+<p>两项二阶矩应在抽样误差内处于相近尺度。交换输入、输出宽度再测一次，能让布局错误从“缩小信号”变成“放大信号”，更容易定位。检查对象应包括权重形状、前向乘法和实际分布，三者共同决定初始化语义。</p>
+<p>诊断用的矩阵形状也有讲究：方形矩阵的两个 fan 相同，转置后仍会得到同一尺度；Xavier 的分母是 fan-in 与 fan-out 之和，交换两者也保留结果。因此，矩形层加上明确选择 <code>fan_in</code> 的 Kaiming 配方，是更敏感的布局探针。模型里既有扩宽 FFN，也有缩窄投影时，可以各抽一层，用这一方法核对初始化函数看到的求和轴。</p>
+
+<h3>把 Q、K、V 打包，为什么初始 attention 会变平？</h3>
+<p>为了用一次矩阵乘法得到 Q、K、V，常把三个 \(d\times d\) 投影沿输出轴拼成 \(3d\times d\) 的权重。在 PyTorch 2.9.0 的 <code>MultiheadAttention</code> 中，Q、K、V 的输入维度都等于 embedding 维度时，就使用这种 packed 权重，并对整个张量调用 Xavier uniform。</p>
+<p>取 Xavier 增益为 1。单个方形投影的方差为 \(2/(d+d)=1/d\)，打包后则是</p>
+\[\operatorname{Var}(W_{\mathrm{packed},ij})=
+\frac{2}{d+3d}=\frac1{2d}.\]
+<p>三个切片的每个元素都获得了后一种方差。以相同随机方向作比较，Q 和 K 的幅值各缩小为原来的 \(1/\sqrt2\)，所以 attention 的点积 logit \(q^\top k/\sqrt{d_h}\) 缩小为原来的一半；这里 \(d_h\) 是每头维度。固定其他计算且不加 QK 归一化时，这会让初始 softmax 更平。V 的幅值也变小，进一步改变 attention 分支的输出尺度。</p>
+<p>如果实验目标是让打包实现保留“每个投影单独做 Xavier”的配方，可以对三个视图分别初始化：</p>
+<pre><code>d = 256
+packed = torch.empty(3 * d, d)
+for projection in packed.chunk(3, dim=0):
+    nn.init.xavier_uniform_(projection)</code></pre>
+<p>验证打包前后的计算时，先初始化三个独立矩阵，再把同一组数值复制到 packed 权重；用固定输入比较 Q、K、V 和 attention logits。这样可以直接核对计算等价性。随后分别按两套初始化配方采样，比较各切片方差、QK RMS、attention 熵及第一次参数更新，就能测出初始化差异带来的影响。对于已有 checkpoint 的实现转换，复制训练好的权重便保留了原来的尺度。</p>
+<p>Grouped-query attention 还会使三个切片拥有不同的高度。设 Q 的输出宽度为 \(d\)，K、V 各为 \(d_k\)，共同输入宽度为 \(d\)。单独初始化时，Q 的目标方差是 \(1/d\)，K、V 则是 \(2/(d+d_k)\)。整体打包的 Xavier 方差为 \(1/(d+d_k)\)，同一个增益会同时缩放全部切片。只要 \(d_k\ne d\)，这一个增益便无法同时恢复两个目标方差。逐块初始化把每个逻辑投影的输入、输出语义直接保留了下来，也更适合检查融合 kernel 与独立实现是否采用了同一训练配方。</p>
+
+<div class="article-exercise"><h3>练习：合并存储后，怎样保留投影的初始化？</h3>
+<p>三个 \(512\times512\) 矩阵分别使用增益为 1 的 Xavier 初始化。将它们改成一个 \(1536\times512\) 参数后，希望一次初始化就获得相同的逐元素方差。应给 Xavier 使用多大的增益？两种情况下的目标标准差各是多少？</p>
+<details><summary>展开推导与答案</summary><p>独立矩阵的方差为 \(1/512\)，标准差为 \(1/\sqrt{512}\approx0.04419\)。打包矩阵在增益为 1 时的方差为 \(2/(1536+512)=1/1024\)，标准差为 \(0.03125\)。Xavier 的增益乘在标准差上，因此使用 \(g=\sqrt2\) 可恢复标准差 \(\sqrt2/32\approx0.04419\)。这适用于题目中三个同尺寸方形投影；若各投影尺寸不同，可按它们各自的输入、输出维度逐块初始化。</p></details></div>
+</section>
+<h2 id="init-research">把初始化研究变成一次可解释的实验</h2>
+<p>一个有价值的实验要让两种解释产生不同预测。比如，两种初始化的激活二阶矩接近，但训练速度不同：如果差异主要来自输入 Jacobian 的谱，初始化时就应看见不同的方向增益；如果差异主要来自学习率与参数化，改变学习率后，初始谱保持原样，早期输出变化和训练速度却会改变。</p>
+<p>先固定数据、损失、网络结构、输出头、batch 和训练步数，只改变隐藏权重初始化。每种配置保存相同的测量时刻：更新前、第一步、前几步和短程训练结束。固定一批 probe 输入，逐层记录它们的表示；这样可以把数据变化与参数变化分开。</p>
+<h3>先决定“稳定”具体指哪一个量</h3>
+<p>对某一层的特征矩阵 \(H\in\mathbb R^{N\times d}\)，\(N\) 是样本数，\(d\) 是特征维度。逐元素均方值 \(\|H\|_F^2/(Nd)\) 测量整体幅值。研究样本区别时，可以先对每个样本做长度归一化，再比较归一化 Gram 矩阵；研究数据的变化方向时，则先减去样本均值，计算特征协方差：</p>
+\[\bar h=\frac1N\sum_{a=1}^{N}h_a,\qquad C=\frac1N\sum_{a=1}^{N}(h_a-\bar h)(h_a-\bar h)^\top.\]
+<p>这里 \(h_a\in\mathbb R^d\) 是第 \(a\) 个样本的特征。若 \(C\) 的特征值是 \(\lambda_i\ge0\)，用 \(p_i=\lambda_i/\sum_j\lambda_j\) 将方差归一化，可以定义熵有效秩：</p>
+\[r_{\mathrm{eff}}=\exp\!\left(-\sum_{i:p_i>0}p_i\log p_i\right).\]
+<p>所有非零方向贡献相等时，有效秩等于这些方向的数量；一个方向占据绝大多数方差时，它接近 1。例如两个特征值为 \((1,1)\)，有效秩为 2；改成 \((1.99,0.01)\)，总方差仍为 2，有效秩却约为 1.032。协方差为零时，直接记录“所有样本特征相同”，并把有效秩约定为 0。有限样本下，中心化协方差的秩至多为 \(\min(d,N-1)\)，比较宽度时要一起报告这个上限。</p>
+<p>这一统计描述一组样本的表示几何。前面的输入 Jacobian 描述某个输入附近的局部扰动传播，参数 Jacobian 描述改变权重怎样改变预测。三者一起记录，能把“样本变得难区分”“局部方向被压缩”和“参数难以推动输出”定位到不同环节。</p>
+<h3>用相同的学习率预算比较初始化</h3>
+<p>先固定同一个学习率，观察不同初始化对现有训练配方的兼容性；再给每种方法相同的学习率候选、训练步数和随机种子，比较各自调参后的表现。保留整条 loss—学习率曲线，以及发散或非有限值的运行。最佳点落在搜索边界时，继续扩展便宜配置的搜索范围，再安排更大的实验。</p>
+<p>每个候选同时报告验证损失的均值、波动和失败次数。训练停止规则也保持一致：若某个配置在第 6 步产生非有限值，这个失败属于该配置的结果。扩大网络时，还应明确固定的是训练步数、token 数、FLOPs 还是墙钟时间；这些预算回答不同的工程问题。</p>
+<h3>用干预验证机制</h3>
+<p>保持网络和随机权重方向不变，只改变初始化增益，检验幅值的预测；保持每层矩阵的 Frobenius 范数相近，改变奇异值分布，检验方向失衡；保持初始化不变，只改变学习率或优化器，检验更新尺度；加入残差或归一化后，重新测同一组量，观察结构在哪一步改变了预测。</p>
+<p>如果要从 ReLU 扩展到 GELU 或 SwiGLU，可以先数值计算给定输入分布下的二阶矩与导数平方期望。门控层含两条相关分支及其乘积，输入分布、分支相关性和输出投影共同决定尺度。将这些量代入传播分析，再用有限宽网络核对，是研究自定义结构的直接起点。</p>
+<div class="article-exercise"><h3>研究题：同样的平均幅值，哪些解释仍然成立？</h3><p>初始化 A、B 的逐层激活 RMS 接近。A 的训练明显更快，但 B 在把学习率调高四倍后追平。请设计下一组测量，判断差异来自输入方向压缩、参数更新尺度，还是二者共同作用。</p><details><summary>展开一种实验设计</summary><p>在更新前比较同一组 probe 的输入 Jacobian 谱、特征 Gram 与协方差谱；对原学习率和四倍学习率，记录第一步参数位移、逐层特征变化和输出变化。固定初始化的 B，两种学习率具有相同的初始几何；它们早期变化的差异能直接检验步幅解释。若 A、B 的谱仍明显不同，进一步构造保持矩阵范数、改变奇异值分布的对照。最后用相同搜索预算和多个种子比较损失曲线。学习率调高后追平说明更新尺度是重要变量，谱与干预结果决定还需要保留哪些几何解释。</p></details></div>
+<h2 id="init-lab">统一实验：从初始化诊断走到前 40 步训练</h2>
+<p>用一个可以在 CPU 上运行的 ReLU MLP，把前面的观测放在同一份记录中。下载 <a href="/posts/neural-network-initialization/lab.py" download>实验脚本 lab.py</a>；完整扫描的<a href="/posts/neural-network-initialization/lab-results.json" download>实测结果 JSON</a>保存了每层统计、全部奇异值、每次运行的训练轨迹与汇总。实验使用 NumPy 和 float64。</p>
+<pre><code>python3 -m pip install numpy
+OPENBLAS_NUM_THREADS=1 python3 lab.py
+OPENBLAS_NUM_THREADS=1 python3 lab.py --sweep --output my-results.json</code></pre>
+<p>默认运行宽度 16、深度 4 与 12、两个种子、20 步训练，用于检查实现和读懂记录。<code>--sweep</code> 扫描宽度 16/32、深度 4/12、三种初始化、三个种子和三个学习率，每次 40 步，共 108 次训练。所有方法得到相同的学习率搜索预算。</p>
+<h3>把任务固定下来，再改变网络宽度</h3>
+<p>输入 \(u\in\mathbb R^8\) 来自标准高斯分布，回归目标为 \(y=\sin(u_0)+0.3u_1u_2\)。训练、验证和 probe 各有 64 个固定样本。网络宽度为 \(n\) 时，用固定矩阵 \(P\in\mathbb R^{n\times8}\) 将输入映射为 \(x^0=Pu\)，并令</p>
+\[P^\top P=\frac n8I,\qquad \frac{(Pu)^\top(Pv)}n=\frac{u^\top v}8.\]
+<p>因此，不同宽度看到的是同一个八维任务，输入的每坐标平均能量和归一化 Gram 保持一致。\(P\) 固定不训练。随后是 \(L\) 个 \(n\times n\) 隐藏层，每层接 ReLU，最后由一个线性头输出标量。隐藏层采用以下三种方案：</p>
+<div class="table-wrap"><table><thead><tr><th>方案</th><th>隐藏权重</th><th>主要控制的性质</th></tr></thead><tbody>
+<tr><td>Xavier</td><td>独立高斯，方差 \(1/n\)</td><td>线性求和的每坐标尺度</td></tr>
+<tr><td>He</td><td>独立高斯，方差 \(2/n\)</td><td>ReLU 后的平均二阶矩</td></tr>
+<tr><td>√2 正交</td><td>\(\sqrt2 Q\)，\(Q^\top Q=I\)</td><td>相同元素二阶尺度下，更集中的线性权重谱</td></tr>
+</tbody></table></div>
+<p>同一种子下，Xavier 和 He 共用基础高斯矩阵，He 的每层权重恰好是 Xavier 的 \(\sqrt2\) 倍。三种方法共用相同的输出头初值。所有 bias 从零开始，随后参与训练。优化器是全批量 SGD，损失为 \(\frac1{2N}\sum_i(f_i-y_i)^2\)，学习率候选为 0.003、0.01、0.03；动量、权重衰减和裁剪均为零，学习率保持恒定。</p>
+<h3>初始化时，逐层测四组量</h3>
+<p>首先，脚本在固定的 192 个样本上记录预激活和激活的均值、二阶矩、中心方差。这里中心方差减去的是全部样本与坐标组成的池子的一个经验均值；特征协方差则按每个神经元分别减去样本均值，两种统计各有明确定义。</p>
+<p>其次，取固定的两个输入，记录跨神经元坐标的未中心化余弦，并给出宽网络高斯递推的参考曲线。激活后的余弦对应归一化交叉二阶矩。有限网络的一对向量只是一次经验探针，多种子与更宽网络可以检验它怎样接近前面的集合期望。</p>
+<p>第三，给顶层隐藏表示一个固定的单位范数梯度方向，逐层回传，记录坐标梯度 RMS 和向量范数。这个测量将梯度传播与具体读出头、损失残差分开。换一个顶层方向再运行，可以看见同一 Jacobian 对方向的选择性。</p>
+<p>第四，在第一个 probe 输入处计算完整的隐藏映射 \(J_x=\partial x^L/\partial x^0\)。它是 \(n\times n\) 矩阵，保留全部奇异值。数值秩的阈值为 \(n\varepsilon_{\mathrm{mach}}s_{\max}\)，其中 \(\varepsilon_{\mathrm{mach}}\) 是 float64 的机器精度，\(s_{\max}\) 是最大奇异值。下面是脚本实际运行得到的宽度 32、深度 12、种子 0 的结果：</p>
+<div class="table-wrap"><table><thead><tr><th>初始化</th><th>末层激活二阶矩</th><th>输入对的激活余弦</th><th>Jₓ 数值秩</th><th>平均 s²</th><th>最大奇异值</th></tr></thead><tbody><tr><td>Xavier</td><td>0.000206038</td><td>0.932925</td><td>9 / 32</td><td>7.95277e-05</td><td>0.047015</td></tr><tr><td>He</td><td>0.843932</td><td>0.932925</td><td>9 / 32</td><td>0.325745</td><td>3.009</td></tr><tr><td>√2 正交</td><td>0.638391</td><td>0.951821</td><td>11 / 32</td><td>0.241004</td><td>2.1599</td></tr></tbody></table></div>
+<p>He 将激活恢复到了常数量级，而这两个 Gaussian 网络的输入对余弦完全相同。原因可以精确算出：零 bias 和 ReLU 的正齐次性给出 \(x^\ell_{\mathrm{He}}=2^{\ell/2}x^\ell_{\mathrm{Xavier}}\)，所以末层二阶矩相差 \(2^{12}=4096\) 倍，归一化内积保持原值。它们的激活门控也相同，因此 Jacobian 的秩相同。调整整体幅值解决了幅值问题，方向几何继续由权重方向和门控决定。</p>
+<p>√2 正交方案在这个输入处仍然只有 11 个数值非零奇异值。线性权重的正交结构经过 ReLU 门控后，完整映射出现了方向损失。这正是同时保存全部谱与秩的价值。</p>
+<h3>训练以后，检查真实的变化和损失</h3>
+<p>脚本在第 1、5、10、20 和 40 步保存每层此次权重的相对位移、bias 的绝对位移，以及固定 probe 上相对初始化的特征与输出变化。先固定学习率为 0.01，宽度 32、深度 12，三个种子的 40 步验证损失如下。波动列采用样本标准差：</p>
+<div class="table-wrap"><table><thead><tr><th>初始化</th><th>验证损失均值</th><th>种子间标准差</th><th>数值失败</th></tr></thead><tbody><tr><td>Xavier</td><td>0.251632</td><td>0.000417</td><td>0 / 3</td></tr><tr><td>He</td><td>0.241318</td><td>0.002900</td><td>0 / 3</td></tr><tr><td>√2 正交</td><td>0.230804</td><td>0.023478</td><td>0 / 3</td></tr></tbody></table></div>
+<p>这组短程实验中，正交方案的平均验证损失较低，种子间波动也更大。下一步应增加种子和训练长度，并观察各学习率曲线，判断差异能否持续。完整扫描的 12 组“宽度 × 深度 × 初始化”配置中，最佳学习率候选都落在搜索边界；这给出了明确的后续实验：向相应边界外扩展候选范围，再比较各方法调参后的表现。</p>
+<p>学习率由验证集选择，probe 集用于追踪特征与输出。结果文件保留每个种子的损失、数值失败的原因与步数；任一随机种子数值失败的候选不会被选为最佳。当前 108 次运行全部完成数值计算。扩大深度或学习率后，失败频率本身也应成为比较的一部分。</p>
+<p>脚本还用有限差分核对参数梯度与输入 Jacobian，用正交线性网络核对全部奇异值，并用高斯采样核对 ReLU 的二阶矩、中心方差与相关性映射。实验数据、网络实现和诊断公式由这些检查连接起来。</p>
+<div class="article-exercise"><h3>实验题：任务实际能进入哪些方向？</h3><p>上面测的是 \(n\times n\) 的完整隐藏映射，但真实输入经 \(P\) 落在八维子空间。应如何测量原始输入 \(u\) 到末层隐藏表示的方向增益？</p><details><summary>展开推导与操作</summary><p>链式法则给出 \(\partial x^L/\partial u=J_xP\)，形状为 \(n\times8\)。在脚本中计算 <code>hidden_jacobian(model, probe[0]) @ embedding(n)</code>，再做 SVD。若比较每坐标归一化长度，用 \(\sqrt{8/n}\,J_xP\)：当隐藏映射是单位矩阵时，这个矩阵的八个奇异值恰好为 1。比较完整隐藏谱和这个任务子空间的谱，能判断被压缩的方向是否位于数据实际可达的空间内。</p></details></div>
+<div class="article-exercise"><h3>实验题：怎样继续检验初始化的作用？</h3><p>保持每种方法的实验预算相同，扩大随机种子和学习率范围，随后一次只增加残差、归一化或改变激活函数。每次修改之前，先写下对幅值、相关性、Jacobian 谱和第一步更新的预测。</p><details><summary>展开建议的记录方式</summary><p>在 <code>main()</code> 中扩展 <code>rates</code> 与 <code>seeds</code>，保留当前所有候选，再按最优点所在边界补充更大或更小的学习率。报告固定学习率与等预算搜索两份结果，保留失败和波动。若加入残差，预期恒等通路改变输入 Jacobian；若加入归一化，先测归一化前后及其方向导数；若改成平滑激活，则重新计算其二阶矩与导数平方期望。将这些预测与实测逐项对照，再决定下一次实验。</p></details></div>
+<h2 id="init-references">参考与延伸阅读</h2>
+<p>这些论文分别增加了一个研究对象：从单层尺度，到多个输入的相关性，再到完整谱和训练轨迹。结合相应推导与实验，阅读时可以把每篇论文的假设、预测量和验证方法对应起来。</p>
+<div class="table-wrap"><table><thead><tr><th>论文</th><th>连接起来的问题</th></tr></thead><tbody>
+<tr><td><a href="https://proceedings.mlr.press/v9/glorot10a.html">Glorot &amp; Bengio · Understanding the difficulty of training deep feedforward neural networks</a>（2010）</td><td>前向与反向的 fan 如何同时进入初始化尺度。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/1502.01852">He et al. · Delving Deep into Rectifiers</a>（2015）</td><td>ReLU/PReLU 二阶矩怎样改变初始化与梯度传播。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/1312.6120">Saxe et al. · Exact solutions to the nonlinear dynamics of learning in deep linear neural networks</a>（2014）</td><td>因子尺度、对齐与平衡如何决定模式的学习速度。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/1606.05340">Poole et al. · Exponential expressivity in deep neural networks through transient chaos</a>（2016）；<a href="https://arxiv.org/abs/1611.01232">Schoenholz et al. · Deep Information Propagation</a>（2017）</td><td>均值场的幅值、相关性递推与可传播深度。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/1711.04735">Pennington et al. · Resurrecting the sigmoid in deep learning through dynamical isometry</a>（2017）</td><td>从平均梯度尺度推进到完整 Jacobian 奇异值分布。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/1806.07572">Jacot et al. · Neural Tangent Kernel: Convergence and Generalization in Neural Networks</a>（2018）</td><td>参数 Jacobian 的 Gram 矩阵如何描述预测的更新。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/1901.09321">Zhang et al. · Fixup Initialization: Residual Learning Without Normalization</a>（2019）</td><td>深度如何进入残差分支初始化与首轮更新尺度。</td></tr>
+<tr><td><a href="https://proceedings.mlr.press/v119/xiong20b.html">Xiong et al. · On Layer Normalization in the Transformer Architecture</a>（2020）；<a href="https://arxiv.org/abs/2203.00555">Wang et al. · DeepNet: Scaling Transformers to 1,000 Layers</a></td><td>归一化位置、残差系数与初始化的联合设计。</td></tr>
+<tr><td><a href="https://arxiv.org/abs/2011.14522">Yang &amp; Hu · Tensor Programs IV</a>；<a href="https://arxiv.org/abs/2203.03466">Yang et al. · Tensor Programs V</a></td><td>宽度极限中的特征学习，以及初始化与学习率的迁移。</td></tr>
+<tr><td><a href="https://proceedings.mlr.press/v80/xiao18a.html">Xiao et al. · Dynamical Isometry and a Mean Field Theory of CNNs</a>（2018）</td><td>空间频率、正交卷积算子与 delta-orthogonal 初始化。</td></tr>
+</tbody></table></div>
+<p>工程案例对应的实现与讨论：</p>
+<ul>
+<li><a href="https://github.com/pytorch/pytorch/blob/v2.9.0/torch/nn/modules/linear.py#L120-L128">PyTorch 2.9.0 Linear 初始化</a>、<a href="https://docs.pytorch.org/docs/2.9/nn.init.html">nn.init 文档</a>与历史讨论 <a href="https://github.com/pytorch/pytorch/issues/15314">#15314</a>、<a href="https://github.com/pytorch/pytorch/issues/57109">#57109</a>：默认分布、激活 gain 和转置布局。</li>
+<li><a href="https://github.com/pytorch/pytorch/blob/v2.9.0/torch/nn/modules/activation.py#L1229-L1235">PyTorch 2.9.0 MultiheadAttention 初始化</a>与讨论 <a href="https://github.com/pytorch/pytorch/issues/166378">#166378</a>：packed QKV 的 fan-out 变化。</li>
+<li><a href="https://github.com/pytorch/pytorch/blob/v2.9.0/torch/nn/init.py#L385-L402">PyTorch 2.9.0 fan 计算</a>与 <a href="https://github.com/pytorch/pytorch/blob/v2.9.0/torch/nn/modules/conv.py#L155-L176">Conv2d 权重布局</a>：groups 与形状推断出的连接数。</li>
+<li><a href="https://github.com/hongyi-zhang/Fixup/blob/master/cifar/models/fixup_resnet_cifar.py">Fixup 作者实现</a>：分支缩放、零初始化、标量偏置与乘子的位置。</li>
+</ul>
+</article><nav class="series-pager" data-series="pretraining"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer><script type="application/json" id="math-definitions">{"global": {"init-q": {"label": "qℓ · 预激活二阶矩", "description": "第 ℓ 层激活函数之前单个坐标的平方期望。随机初始化集合中其均值为零；激活之后的二阶矩另记为 rℓ。"}, "init-c": {"label": "cℓ · 两输入的预激活相关性", "description": "同一随机网络中，两输入预激活的交叉二阶矩除以各自二阶矩的几何平均；期望遍历随机初始化。"}, "init-chi": {"label": "χ · 相关性映射在 c=1 的斜率", "description": "在正的幅值不动点 q* 处，χ=σw² E[φ′(√q* Z)²]。等宽均值场近似下也控制每坐标梯度二阶矩的层间倍率。"}, "init-input-jac": {"label": "Jₓ · 输入 Jacobian", "description": "最后隐藏层激活对输入向量的导数，描述局部输入扰动的传播。此处是宽度 n 的方形隐藏映射。"}, "init-singular": {"label": "sᵢ · Jacobian 奇异值", "description": "第 i 个输入奇异方向经过 Jacobian 后的长度缩放倍数；为零表示该局部方向被消除。"}, "init-param-jac": {"label": "G · 参数 Jacobian", "description": "固定 N 个样本的标量预测对 P 个模型参数的导数，形状 N×P；一次小参数位移产生的预测变化约为 GΔθ。"}, "init-ntk": {"label": "K · 经验 NTK", "description": "固定样本上参数梯度的 Gram 矩阵 GGᵀ，形状 N×N，刻画欧氏梯度更新对各样本预测的共同作用。"}, "init-update": {"label": "uℓ(t) · 相对参数更新量", "description": "第 ℓ 层一次实际参数位移的范数，除以更新前参数范数加稳定常数；t 表示训练步。"}, "init-residual-scale": {"label": "aℓ · 残差分支系数", "description": "在 xℓ₊₁=xℓ+aℓFℓ(xℓ) 中，乘在第 ℓ 个残差分支输出上的系数。"}, "init-deepnorm-alpha": {"label": "α · DeepNorm 残差系数", "description": "相加前乘在残差路径上的固定系数。此处针对每个 block 有 self-attention 和 FFN 的 encoder-only 或 decoder-only 架构。"}, "init-deepnorm-beta": {"label": "β · DeepNorm 初始化增益", "description": "乘在 FFN、attention V 与输出投影的基础初始化标准差上；Q/K 保留基础尺度。"}}, "scopes": {}}</script><script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/neural-network-initialization/figures.js"></script><script src="/assets/series.js?v=d4ef109c0990"></script><script src="/assets/post-links.js?v=2b229c172beb"></script><script src="/assets/posts.js?v=1b19c69323eb"></script><script src="/assets/curriculum.js?v=c0c169fcf37a"></script></body></html>

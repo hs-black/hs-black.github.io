@@ -19,7 +19,7 @@
 <p>记第 \(\ell\) 层的输入为 \(x_\ell\in\mathbb R^d\)，输出为 \(x_{\ell+1}=F_\ell(x_\ell)\)。对固定的一次前向，局部 Jacobian \(J_\ell=\partial x_{\ell+1}/\partial x_\ell\) 是一个 \(d\times d\) 矩阵。这是单向量推导；处理整段 attention 时，把 \(T\) 个 token 的特征一起展平为 \(Td\) 维，Jacobian 也包含跨 token 的导数块，链式法则保持相同形式。若 \(g_L=\nabla_{x_L}\mathcal L\) 是顶层传回的梯度，便有：</p>
 <div class="math-block">\[g_0=\htmlData{symbol=jac}{J_0}^{\!\top}J_1^\top\cdots J_{L-1}^\top g_L,\qquad \|g_0\|_2\le\Big(\prod_{\ell=0}^{L-1}\|J_\ell\|_2\Big)\|g_L\|_2.\]</div>
 <p>矩阵的 \(\|J_\ell\|_2\) 是最大奇异值，表示它对某个方向最多能放大多少。这个上界把每层最坏方向连在一起；实际梯度还取决于各层方向如何旋转。一个标量例子已足够说明深度的敏感性：每层导数只有 1.02，连乘 100 次就是 7.24；每层为 0.98，则剩下约 0.133。</p>
-<p>残差层把 \(F_\ell\) 写成 \(x_\ell+f_\ell(x_\ell)\)，于是局部 Jacobian 是 \(I+J_{f_\ell}\)。恒等项为梯度提供直接通路，而分支的大小、方向和层数继续决定整个乘积。因此，初始化让残差分支处在合适尺度，以及训练中保持可控的更新，都是结构设计的一部分。</p>
+<p>残差层把 \(F_\ell\) 写成 \(x_\ell+f_\ell(x_\ell)\)，于是局部 Jacobian 是 \(I+J_{f_\ell}\)。恒等项为梯度提供直接通路，而分支的大小、方向和层数继续决定整个乘积。因此，<a href="/posts/neural-network-initialization/#init-residual">初始化让残差分支处在合适尺度</a>，以及训练中保持可控的更新，都是结构设计的一部分。</p>
 
 <h2 id="normalization">Pre-LN 与 Post-LN：归一化放在了哪条路径上？</h2>
 <p>用 \(N\) 表示归一化，\(f\) 表示 attention 或 FFN 子层。Post-LN 在相加后归一化，Pre-LN 在进入分支前归一化：</p>
@@ -124,5 +124,5 @@ PASS: RMSNorm/stack finite differences, entropy derivative, spectral scaling, cl
 </ul>
 </article><nav class="series-pager" data-series="pretraining"></nav></main><footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 <script type="application/json" id="math-definitions">{"global":{"jac":{"label":"局部 Jacobian Jℓ","description":"本层输出对本层输入的导数矩阵，反向传播使用它的转置。"},"alpha":{"label":"残差系数 α","description":"DeepNorm 中相加前乘在残差路径上的固定系数，依赖架构与深度。"},"beta":{"label":"初始化因子 β","description":"DeepNorm 对 FFN、attention value 与 output 权重施加的初始化缩放。"},"entropy":{"label":"注意力熵 H(a)","description":"固定基础分数 z 后，尺度 a 对应的注意力概率熵，−Σ pᵢ log pᵢ。","unit":"nats"},"gamma":{"label":"谱尺度 γ","description":"σReparam 中可学习的标量；使用精确谱范数时，有效矩阵的谱范数为 |γ|。"},"update":{"label":"参数更新比例 uℓ","description":"一组参数更新前后的差值范数，除以旧参数范数加数值稳定常数。"}}}</script>
-<script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/pretraining-stability/figures.js"></script><script src="/assets/series.js?v=727fd7187cb2"></script><script src="/assets/post-links.js?v=f57719c82076"></script><script src="/assets/posts.js?v=18762a451eee"></script><script src="/assets/curriculum.js?v=3d5c0dc80f88"></script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/pretraining-stability/figures.js"></script><script src="/assets/series.js?v=d4ef109c0990"></script><script src="/assets/post-links.js?v=2b229c172beb"></script><script src="/assets/posts.js?v=1b19c69323eb"></script><script src="/assets/curriculum.js?v=c0c169fcf37a"></script>
 </body></html>

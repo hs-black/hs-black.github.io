@@ -33,6 +33,7 @@
         ["pretraining-scaling", "训练预算怎样分配：Scaling Laws 与模型、数据的取舍"],
         ["pretraining-data-curation", "预训练数据怎样筛选：去重、质量与多样性"],
         ["pretraining-data-mixture", "数据配比怎样学出来：DoReMi、DoGE 与 RegMix"],
+        ["neural-network-initialization", "神经网络初始化：从信号传播到训练动力学"],
         ["pretraining-mup", "从小模型调参到大模型：μP 与超参数迁移"],
         ["pretraining-objectives", "一段文本提供什么监督：从去噪、FIM 到多 token 预测"],
         ["pretraining-stability", "深层 Transformer 怎样稳定训练"],

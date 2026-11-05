@@ -45,8 +45,8 @@
       id: 'pretraining', title: '设计预训练算法与实验',
       goal: '把预算、数据、学习目标与更新尺度连起来，再比较低精度、稀疏连接和 dense 转 MoE 的训练选择。',
       prerequisite: '阶段 1 的概率与矩阵计算；链式法则和 SGD / Adam（可先读《优化器：从 SGD 到 Muon》）。',
-      check: '分配预算、筛选与混合数据；迁移宽度超参；跟踪三个 GEMM 的数值误差；检查双向 2:4 掩码与 upcycling 输出尺度。',
-      core: ['pretraining-scaling', 'pretraining-data-curation', 'pretraining-data-mixture', 'pretraining-mup', 'pretraining-objectives', 'pretraining-stability', 'scaling-mixed-precision', 'sparse-pretraining', 'moe-upcycling'],
+      check: '分配预算、筛选与混合数据；测量初始化的信号、相关性、Jacobian 谱和实际更新；迁移宽度超参；跟踪三个 GEMM 的数值误差；检查双向 2:4 掩码与 upcycling 输出尺度。',
+      core: ['pretraining-scaling', 'pretraining-data-curation', 'pretraining-data-mixture', 'neural-network-initialization', 'pretraining-mup', 'pretraining-objectives', 'pretraining-stability', 'scaling-mixed-precision', 'sparse-pretraining', 'moe-upcycling'],
       extra: ['scaling-moe', 'smol-decisions', 'smol-optim-data', 'smol-marathon'],
     },
     {

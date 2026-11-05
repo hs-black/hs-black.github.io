@@ -16,7 +16,7 @@
 <section id="features" data-math-scope="features"><h2>1. 初始化稳定以后，特征怎样学习</h2>
 <p>先看一个输出坐标：\(z_i=\sum_{j=1}^{n}W_{ij}h_j\)。这里 \(n\) 是输入宽度，\(h_j\) 是输入特征，\(W_{ij}\) 是权重。若初始化权重独立、均值为零，并与输入独立，记输入的平均二阶矩为 \(q=\mathbb E[h_j^2]\)，就有</p>
 $$\operatorname{Var}(z_i)=\htmlData{symbol=width}{n}\operatorname{Var}(W_{ij})q.$$
-<p>取权重方差 \(1/n\)，便能让输出方差保持常数量级。这解决了前向信号的尺度。训练时，还要检查 \(\Delta z_i=\sum_j\Delta W_{ij}h_j\)：更新 \(\Delta W\) 本身来自输入 \(h\)，两者带有相关性。</p>
+<p>取权重方差 \(1/n\)，便能让输出方差保持常数量级。这解决了<a href="/posts/neural-network-initialization/#init-scale">前向信号的尺度</a>。训练时，还要检查 \(\Delta z_i=\sum_j\Delta W_{ij}h_j\)：更新 \(\Delta W\) 本身来自输入 \(h\)，两者带有相关性。</p>
 <p>用一个样本做反向传播，记损失对 \(z_i\) 的导数为 \(\delta_i\)，那么梯度是 \(g_{ij}=\delta_i h_j\)。Adam 首步经过偏差修正，在梯度绝对值远大于 ε 时，更新近似为 \(\Delta W_{ij}=-\eta\operatorname{sign}(\delta_i h_j)\)。代回前向计算：</p>
 $$\Delta z_i\approx-\htmlData{symbol=lr}{\eta}\operatorname{sign}(\delta_i)\sum_{j=1}^{n}|h_j|.$$
 <p>若每个输入坐标平均绝对值保持常数，求和就随宽度 \(n\) 线性增长。隐藏矩阵的 Adam 学习率按 \(1/n\) 缩放，可以抵消这个增长。真实 mini-batch、动量和不同层会带来更复杂的相关性；这个单样本计算把最关键的原因露了出来：梯度与特征对齐后，求和具有不同的尺度。</p>
@@ -125,4 +125,4 @@ $('epsilon-svg').innerHTML=svg;$('eps-gradient-value').textContent=gl.toFixed(1)
 ['eps-gradient','eps-value'].forEach(id=>$(id).addEventListener('input',epsilon));$('eps-reset').addEventListener('click',()=>{$('eps-gradient').value=-9;$('eps-value').value=-8;epsilon();});epsilon();
 window.addEventListener('resize',()=>{player.render();epsilon();});
 })();
-</script><script src="/assets/series.js?v=727fd7187cb2"></script><script src="/assets/post-links.js?v=f57719c82076"></script><script src="/assets/posts.js?v=18762a451eee"></script><script src="/assets/curriculum.js?v=3d5c0dc80f88"></script></body></html>
+</script><script src="/assets/series.js?v=d4ef109c0990"></script><script src="/assets/post-links.js?v=2b229c172beb"></script><script src="/assets/posts.js?v=1b19c69323eb"></script><script src="/assets/curriculum.js?v=c0c169fcf37a"></script></body></html>

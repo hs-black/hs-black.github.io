@@ -1,0 +1,46 @@
+.init-figure { --init-line: var(--accent); --init-alt: var(--accent-2); }
+.init-figure h3 { font-size: 1.12em; line-height: 1.5; margin-bottom: .55em; }
+.init-figure .init-lead { margin: .5em 0 1em; font-size: .91em; color: var(--text-soft); }
+.init-options { display: flex; flex-wrap: wrap; align-items: end; gap: 12px 18px; padding: 13px; margin: 12px 0 16px; border-radius: 9px; background: var(--bg-soft); }
+.init-options label { display: flex; flex: 1 1 190px; min-width: 0; flex-direction: column; gap: 5px; font-size: 13px; color: var(--text-soft); }
+.init-options label > span { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.init-options input[type=range] { width: 100%; min-width: 0; accent-color: var(--accent); }
+.init-options output { color: var(--text); font-variant-numeric: tabular-nums; }
+.init-options select, .init-options button { max-width: 100%; font: inherit; font-size: 13px; color: var(--text); border: 1px solid var(--border); border-radius: 7px; background: var(--surface); padding: 7px 10px; }
+.init-options button { cursor: pointer; }
+.init-options button:hover { border-color: var(--accent); }
+.init-options :focus-visible { outline: 2px solid var(--accent); outline-offset: 3px; }
+.init-presets { display: flex; gap: 7px; }
+.init-plot { width: 100%; min-width: 0; height: 260px; }
+.init-plot svg { width: 100%; height: 100%; overflow: visible; }
+.init-plot text { fill: var(--text-soft); font: 12px var(--font-sans); }
+.init-plot .init-grid { stroke: var(--border); stroke-width: 1; }
+.init-plot .init-axis { stroke: var(--text-faint); stroke-width: 1; }
+.init-plot .init-reference { stroke: var(--text-faint); stroke-width: 1.4; stroke-dasharray: 5 5; fill: none; }
+.init-plot .init-future { stroke: var(--text-faint); stroke-width: 1.6; fill: none; opacity: .28; }
+.init-plot .init-path { stroke: var(--accent); stroke-width: 2.7; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.init-plot .init-alt { stroke: var(--accent-2); stroke-width: 2; fill: none; stroke-linecap: round; stroke-linejoin: round; }
+.init-plot .init-cursor { stroke: var(--text-faint); stroke-width: 1; stroke-dasharray: 3 4; }
+.init-plot .init-dot { fill: var(--accent); stroke: var(--surface); stroke-width: 2; }
+.init-legend { display: flex; flex-wrap: wrap; gap: 5px 17px; margin: 8px 0; color: var(--text-soft); font-size: 12px; }
+.init-legend span { display: inline-flex; gap: 6px; align-items: center; }
+.init-legend i { display: inline-block; width: 19px; height: 0; border-top: 3px solid var(--accent); }
+.init-legend i.alt { border-color: var(--accent-2); }
+.init-legend i.reference { border-color: var(--text-faint); border-top-style: dashed; }
+.init-stats { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 8px; margin: 13px 0 5px; }
+.init-stat { padding: 9px 11px; border: 1px solid var(--border); border-radius: 8px; font-size: 12px; color: var(--text-soft); min-width: 0; }
+.init-stat output { display: block; color: var(--text); font: 600 17px var(--font-mono); margin-top: 4px; overflow-wrap: anywhere; }
+.init-split { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 14px; }
+.init-split > div { min-width: 0; }
+.init-panel-title { margin: 2px 0 5px; color: var(--text-soft); font-size: 13px; font-weight: 600; }
+.init-split .init-plot { height: 215px; }
+.init-figure .article-step-caption { min-height: 3.1em; margin: 14px 0 6px; font-size: 14px; }
+.init-figure .init-description { min-height: 3.1em; font-size: 14px; color: var(--text-soft); margin: 10px 0; }
+@media (max-width: 520px) {
+  .init-split { grid-template-columns: 1fr; }
+  .init-options { padding: 10px; gap: 10px; }
+  .init-options label { flex-basis: 100%; }
+  .init-legend { gap: 5px 11px; }
+  .init-figure h3 { font-size: 1.04em; }
+  .init-stat output { font-size: 15px; }
+}

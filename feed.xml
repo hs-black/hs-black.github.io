@@ -7,6 +7,13 @@
     <description>Zunzhe Zhang 的博客：大模型、具身智能、实验与想法。</description>
     <language>zh-CN</language>
     <item>
+      <title>神经网络初始化：从信号传播到训练动力学</title>
+      <link>https://hs-black.github.io/posts/neural-network-initialization/</link>
+      <guid>https://hs-black.github.io/posts/neural-network-initialization/</guid>
+      <pubDate>Thu, 05 Nov 2026 08:00:00 +0800</pubDate>
+      <description>从 Xavier、He 与均值场相关性递推，讲到 Jacobian 谱、动力学等距性、深线性学习、NTK、Fixup 与 μP；配交互图、计算题、工程案例和统一的 NumPy 对照实验。</description>
+    </item>
+    <item>
       <title>IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP</title>
       <link>https://hs-black.github.io/posts/iquest-q1/</link>
       <guid>https://hs-black.github.io/posts/iquest-q1/</guid>
