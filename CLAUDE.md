@@ -114,6 +114,13 @@ Validate the reader and publisher with `python3 scripts/check-encrypted-post.py`
   Repeat the needed definitions after a substantial gap or context change.
   A symbol tooltip supplements this text; it does not replace it. Avoid using
   one letter for unrelated quantities in the same derivation.
+- For GPU and parallelism explanations, show what each GPU stores and can
+  compute locally before introducing communication costs. Explain collective
+  operations with a small concrete example before using their names in a
+  derivation. Keep card numbering and example values consistent between prose
+  and figures. Label whole-model, single-GPU and per-GPU quantities where they
+  appear, and explain specialized implementation terms at first use. Put
+  optional implementation detail after the main data flow is understandable.
 - Math uses the local pinned KaTeX runtime in
   `/assets/vendor/katex/0.16.11/` and `reader-math.js` / `reader-math.css`.
   Explicit `data-symbol` annotations and the page's `#math-definitions` JSON
