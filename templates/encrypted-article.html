@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{TITLE}} · Zunzhe Zhang</title>
+  <meta name="description" content="这是一篇加密文章，输入密码后阅读。">
+  <meta name="robots" content="noindex, nofollow">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="{{SITE_CSS}}">
+  <link rel="stylesheet" href="{{ENCRYPTED_CSS}}">
+</head>
+<body class="encrypted-post-page">
+  <header class="site-header wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav">
+      <a href="/">Home</a>
+      <a href="/papers/">Papers</a>
+      <a href="/blog/" aria-current="page">Blog</a>
+    </nav>
+  </header>
+  <main class="wrap">
+    <header class="post-header">
+      <h1>{{TITLE}}</h1>
+      <div class="post-meta"><span class="kind encrypted">加密</span><time datetime="{{DATE}}">{{DATE}}</time></div>
+    </header>
+    <section id="encrypted-post-gate" class="encrypted-post-gate" aria-label="解锁文章">
+      <p>这是一篇加密文章，输入密码后阅读。</p>
+      <form id="encrypted-post-form">
+        <label for="encrypted-post-password">请输入密码</label>
+        <div class="encrypted-post-fields">
+          <input id="encrypted-post-password" type="password" required autocomplete="off" spellcheck="false" autocapitalize="off" aria-describedby="encrypted-post-status">
+          <button id="encrypted-post-submit" type="submit">解锁文章</button>
+        </div>
+      </form>
+      <noscript><p>请启用 JavaScript 后输入密码阅读。</p></noscript>
+    </section>
+    <p id="encrypted-post-status" role="status" aria-live="polite"></p>
+    <section id="encrypted-post-open" class="encrypted-post-open" hidden aria-label="文章正文">
+      <div class="encrypted-post-toolbar"><button id="encrypted-post-lock" type="button">重新锁定</button></div>
+      <div id="encrypted-post-content"></div>
+    </section>
+  </main>
+  <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+  <script type="application/json" id="encrypted-post-payload">{{PAYLOAD}}</script>
+  <script src="{{ENCRYPTED_JS}}"></script>
+</body>
+</html>

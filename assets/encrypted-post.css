@@ -1,0 +1,55 @@
+/* Encrypted article gate and in-memory reading frame. */
+.encrypted-post-page .post-header h1 { overflow-wrap: anywhere; }
+#encrypted-post-gate {
+  margin: 32px 0 12px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+}
+#encrypted-post-gate h2 { margin: 0 0 8px; font-size: 21px; line-height: 1.5; }
+#encrypted-post-gate p { margin: 0 0 20px; color: var(--text-soft); }
+#encrypted-post-form label { display: block; margin-bottom: 7px; font-size: 14px; font-weight: 600; }
+#encrypted-post-form .encrypted-post-fields { display: flex; align-items: stretch; gap: 10px; }
+#encrypted-post-password {
+  min-width: 0;
+  width: 100%;
+  padding: 10px 12px;
+  color: var(--text);
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font: inherit;
+  line-height: 1.5;
+}
+#encrypted-post-submit, #encrypted-post-lock {
+  flex-shrink: 0;
+  padding: 10px 15px;
+  font: inherit;
+  font-size: 15px;
+  line-height: 1.5;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+#encrypted-post-submit { color: var(--surface); border-color: var(--accent); background: var(--accent); }
+#encrypted-post-lock { color: var(--text-soft); background: var(--surface); }
+#encrypted-post-submit:hover:not(:disabled) { filter: brightness(1.07); }
+#encrypted-post-lock:hover { border-color: var(--accent); color: var(--text); }
+#encrypted-post-submit:disabled, #encrypted-post-password:disabled { opacity: .6; cursor: wait; }
+#encrypted-post-form :focus-visible, #encrypted-post-lock:focus-visible, .encrypted-post-frame:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 3px;
+}
+#encrypted-post-status { min-height: 1.7em; margin: 12px 0 20px; color: var(--text-soft); font-size: 14px; }
+#encrypted-post-status[data-state="error"] { color: var(--accent-2); }
+#encrypted-post-open { margin-top: 24px; }
+.encrypted-post-toolbar { display: flex; justify-content: flex-end; margin: 0 0 18px; }
+#encrypted-post-content { min-width: 0; }
+.encrypted-post-frame { display: block; width: 100%; min-height: 160px; border: 0; background: transparent; }
+#encrypted-post-gate[hidden], #encrypted-post-open[hidden] { display: none; }
+@media (max-width: 520px) {
+  #encrypted-post-gate { padding: 18px; }
+  #encrypted-post-form .encrypted-post-fields { flex-direction: column; }
+  #encrypted-post-submit { width: 100%; }
+}

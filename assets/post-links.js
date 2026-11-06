@@ -249,6 +249,7 @@ window.POST_LINKS = {
   "rmsnorm-kernel",
   "smol-marathon"
  ],
+ "private-research-2026-11": [],
  "qwen3-next": [
   "continuous-batching",
   "cuda-graph",

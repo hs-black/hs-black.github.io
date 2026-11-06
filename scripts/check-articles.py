@@ -4,6 +4,9 @@
 Requires Python Playwright and Chromium. Run `python3 scripts/check-articles.py`.
 Optional positional slugs restrict the check, e.g. `kv-cache paged-attention`.
 CHROMIUM_PATH selects a browser. All HTTP resources must come from this checkout.
+Encrypted posts are checked as locked public shells, without a password.
+Run scripts/check-encrypted-post.py for encryption/decryption behavior using
+synthetic content and a test password; never supply a real article password.
 """
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -30,6 +33,7 @@ AUDIT = r"""() => {
   if (!document.querySelector('article.prose')) issues.push('missing article');
   if (document.querySelector('.deck-page,.deck,.stage,.slide,.deck-ui')) issues.push('obsolete presentation markup');
   if (document.querySelector('.symbol-glossary')) issues.push('obsolete symbol glossary');
+  for (const el of document.querySelectorAll('.katex-error')) issues.push('invalid rendered math: ' + (el.getAttribute('title') || el.textContent));
   if (document.body.scrollWidth > innerWidth + 1) issues.push('page overflows viewport');
   const ids = [...document.querySelectorAll('[id]')].map(e => e.id);
   if (ids.length !== new Set(ids).size) issues.push('duplicate element ids');
@@ -61,6 +65,50 @@ AUDIT = r"""() => {
 }"""
 
 
+ENCRYPTED_AUDIT = r"""() => {
+  const issues = [];
+  const require = (condition, message) => { if (!condition) issues.push(message); };
+  const gate = document.getElementById('encrypted-post-gate');
+  const form = document.getElementById('encrypted-post-form');
+  const password = document.getElementById('encrypted-post-password');
+  const open = document.getElementById('encrypted-post-open');
+  const content = document.getElementById('encrypted-post-content');
+  const status = document.getElementById('encrypted-post-status');
+  require(!!document.querySelector('.post-header h1'), 'missing public title');
+  require(!!gate && !gate.hidden, 'missing visible password gate');
+  require(!!form && !!password && password.type === 'password' && !password.value, 'invalid or prefilled password form');
+  require(!!document.getElementById('encrypted-post-submit'), 'missing unlock control');
+  require(!!document.getElementById('encrypted-post-lock'), 'missing relock control');
+  require(!!status && status.getAttribute('role') === 'status', 'missing accessible status');
+  require(!!open && open.hidden, 'encrypted page did not start locked');
+  require(!!content && !content.childNodes.length, 'plaintext container is not empty');
+  require(!document.querySelector('article.prose,iframe'), 'decrypted article exposed before unlock');
+  require(!!document.querySelector('script[src^="/assets/encrypted-post.js"]'), 'missing encrypted reader script');
+  require(!!document.querySelector('link[rel="stylesheet"][href^="/assets/encrypted-post.css"]'), 'missing encrypted reader style');
+  require((document.querySelector('meta[name="robots"]')?.content || '').includes('noindex'), 'missing noindex metadata');
+  require(document.body.scrollWidth <= innerWidth + 1, 'encrypted shell overflows viewport');
+  const ids = [...document.querySelectorAll('[id]')].map(el => el.id);
+  require(ids.length === new Set(ids).size, 'duplicate element ids');
+  try {
+    const element = document.getElementById('encrypted-post-payload');
+    require(element?.type === 'application/json', 'missing encrypted payload');
+    const payload = JSON.parse(element?.textContent || '');
+    require(payload.version === 1 && payload.cipher === 'AES-GCM' && payload.kdf === 'PBKDF2-SHA256' && payload.iterations === 600000, 'unsupported encryption envelope');
+    const length = value => {
+      if (typeof value !== 'string' || value.length > 22369624 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new Error();
+      return atob(value).length;
+    };
+    require(length(payload.salt) === 16, 'invalid encryption salt');
+    require(length(payload.iv) === 12, 'invalid encryption IV');
+    const size = length(payload.ciphertext);
+    require(size > 16 && size <= 16777216, 'invalid encrypted document size');
+  } catch (_) {
+    issues.push('invalid encrypted payload encoding');
+  }
+  return {issues:[...new Set(issues)], math:0, figures:0, exercises:0};
+}"""
+
+
 def check(browser, base, slugs):
     failures = []
     page = browser.new_page(viewport={'width': 1280, 'height': 900}, reduced_motion='reduce')
@@ -76,14 +124,16 @@ def check(browser, base, slugs):
             route.abort()
 
     page.route('**/*', local_only)
-    totals = {'articles': 0, 'math': 0, 'figures': 0}
+    totals = {'articles': 0, 'encrypted_shells': 0, 'math': 0, 'figures': 0}
     for slug in slugs:
         events.clear()
         page.set_viewport_size({'width': 1280, 'height': 900})
         page.emulate_media(color_scheme='light')
         page.goto(base + '/posts/' + slug + '/', wait_until='networkidle')
         page.wait_for_load_state('load')
-        result = page.evaluate(AUDIT)
+        encrypted = bool(page.locator('#encrypted-post-payload, #encrypted-post-form').count())
+        audit = ENCRYPTED_AUDIT if encrypted else AUDIT
+        result = page.evaluate(audit)
         issues = result['issues']
         for controls in page.locator('.article-step-controls').all():
             play = controls.locator('[data-action=play]')
@@ -92,25 +142,27 @@ def check(browser, base, slugs):
                 issues.append('figure did not start paused at initial position')
             for value in (slider.get_attribute('max'), '0'):
                 slider.fill(value)
-                issues.extend(page.evaluate(AUDIT)['issues'])
+                issues.extend(page.evaluate(audit)['issues'])
         # Wide tables and equations may scroll inside their own containers.
         page.locator('details').evaluate_all('(items) => items.forEach(item => { item.open = true; })')
-        issues.extend(page.evaluate(AUDIT)['issues'])
+        issues.extend(page.evaluate(audit)['issues'])
         for width in (390, 320):
             page.set_viewport_size({'width': width, 'height': 844})
             page.emulate_media(color_scheme='dark')
-            issues.extend(page.evaluate(AUDIT)['issues'])
+            issues.extend(page.evaluate(audit)['issues'])
         issues = sorted(set(issues + events))
-        totals['articles'] += 1
+        totals['encrypted_shells' if encrypted else 'articles'] += 1
         totals['math'] += result['math']
         totals['figures'] += result['figures']
         if issues:
             failures.append({'slug': slug, 'issues': issues})
             print('FAIL', slug, json.dumps(issues, ensure_ascii=False), flush=True)
         else:
-            print('PASS', slug, flush=True)
+            print('PASS encrypted shell' if encrypted else 'PASS', slug, flush=True)
     page.close()
     print(json.dumps({'totals': totals, 'failures': failures}, ensure_ascii=False, indent=2))
+    if totals['encrypted_shells']:
+        print('Encrypted pages: locked shell checks only. Run scripts/check-encrypted-post.py for synthetic encryption/decryption tests.')
     assert not failures, 'Article checks failed'
 
 

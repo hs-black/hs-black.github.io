@@ -42,7 +42,7 @@ def version_assets(page, names):
 
 shared = ('site.css', 'posts.js', 'series.js', 'post-links.js', 'curriculum.js',
           'curriculum.css', 'reader-math.js', 'reader-math.css', 'article.css',
-          'article-steps.js', 'anim.js')
+          'article-steps.js', 'anim.js', 'encrypted-post.css', 'encrypted-post.js')
 for page in sorted(root.rglob('*.html')):
-    if '.git' not in page.parts and 'vendor' not in page.parts:
+    if not {'.git', 'vendor', 'drafts'}.intersection(page.relative_to(root).parts):
         version_assets(page, shared)

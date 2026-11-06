@@ -7,3 +7,5 @@ Plain hand-written HTML served by GitHub Pages, no build step. See [CLAUDE.md](C
 The homepage presents the owner's profile, experience, selected papers, and awards. Blog articles and series are listed in [`/blog/`](https://hs-black.github.io/blog/), accessible through the Blog navigation link.
 
 Preview locally with `python3 -m http.server 8000`.
+
+Password-protected posts use browser-side decryption. Keep their plaintext sources outside this repository and publish only the generated ciphertext page. See [the encrypted-post workflow](docs/encrypted-posts.md).

@@ -3,7 +3,7 @@
 // list, and post pages use it to show their tags and related posts.
 //
 // To add a post: add an entry at the TOP (newest first). kind is
-// article | interactive; cat is a key of CATEGORIES; reuse existing
+// article | interactive | encrypted; cat is a key of CATEGORIES; reuse existing
 // tags where possible. Then run `python3 scripts/post-links.py` to refresh
 // the cross-reference index in assets/post-links.js.
 (() => {
@@ -16,9 +16,10 @@
     recipes: '训练方法',
     basics: '入门与随笔',
   };
-  const KINDS = { article: ['文章', 'kind'], interactive: ['交互', 'kind interactive'] };
+  const KINDS = { article: ['文章', 'kind'], interactive: ['交互', 'kind interactive'], encrypted: ['加密', 'kind'] };
 
   const POSTS = [
+    {"slug": "private-research-2026-11", "title": "加密研究笔记", "date": "2026-11-06", "kind": "encrypted", "cat": "basics", "tags": [], "desc": "这是一篇加密文章，输入密码后阅读。"},
     {"slug": "neural-network-initialization", "title": "神经网络初始化：从信号传播到训练动力学", "date": "2026-11-05", "kind": "interactive", "cat": "pretraining", "tags": ["初始化", "预训练", "优化", "稳定性", "实验"], "desc": "从 Xavier、He 与均值场相关性递推，讲到 Jacobian 谱、动力学等距性、深线性学习、NTK、Fixup 与 μP；配交互图、计算题、工程案例和统一的 NumPy 对照实验。"},
     {"slug": "iquest-q1", "title": "IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP", "date": "2026-10-23", "kind": "interactive", "cat": "models", "tags": ["模型架构", "MoE", "长上下文", "训练稳定性", "投机解码"], "desc": "从残差尺度、query-aware sink 与 25 层全局注意力，推导 512K 上下文的 KV 账本、跨卡 softmax 合并和递归投机解码；含交互图、习题与 NumPy 实验。"},
     {"slug": "moe-upcycling", "title": "已有模型怎样长成 MoE：从权重复用到专家分化", "date": "2026-10-22", "kind": "interactive", "cat": "pretraining", "tags": ["预训练", "MoE", "Upcycling", "实验"], "desc": "从复制 dense FFN 的函数保持条件，推导 router 梯度、SwiGLU 细粒度切分与专家分化，再核算 upcycling 的训练预算、GEMM 和通信。含交互图、四道习题和 NumPy 实验。"},

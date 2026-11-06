@@ -7,6 +7,13 @@
     <description>Zunzhe Zhang 的博客：大模型、具身智能、实验与想法。</description>
     <language>zh-CN</language>
     <item>
+      <title>加密研究笔记</title>
+      <link>https://hs-black.github.io/posts/private-research-2026-11/</link>
+      <guid>https://hs-black.github.io/posts/private-research-2026-11/</guid>
+      <pubDate>Fri, 06 Nov 2026 08:00:00 +0800</pubDate>
+      <description>这是一篇加密文章，输入密码后阅读。</description>
+    </item>
+    <item>
       <title>神经网络初始化：从信号传播到训练动力学</title>
       <link>https://hs-black.github.io/posts/neural-network-initialization/</link>
       <guid>https://hs-black.github.io/posts/neural-network-initialization/</guid>

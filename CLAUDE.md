@@ -32,6 +32,8 @@ assets/img/           avatar and other shared images
 assets/favicon.svg
 files/resume.pdf      linked from the home page
 templates/article.html    starting point for an article / interactive post
+templates/encrypted-article.html    public shell for an encrypted post
+scripts/encrypt-post.mjs   encrypt an external private source before publishing
 ```
 
 All internal links and assets use root-absolute paths (`/assets/site.css`,
@@ -81,6 +83,25 @@ Kinds, used in post headers and the blog archive:
 | --- | --- | --- |
 | plain article | 文章 | `kind` |
 | article with interactive demos | 交互 | `kind interactive` |
+| password-encrypted article | 加密 | `kind` |
+
+## Encrypted posts
+
+Follow [docs/encrypted-posts.md](docs/encrypted-posts.md). Keep the plaintext
+source outside this repository, including before the first commit. Publish only
+the generated encrypted `posts/<slug>/index.html`. The title, date, URL and
+catalog metadata are public; use a neutral description in `assets/posts.js` and
+RSS, with `kind: "encrypted"`. Do not extract private text, links or symbol
+definitions into public indexes. Private images must be embedded in the encrypted
+source, and private attachments must not be published as separate cleartext files.
+
+The password is entered locally through the encryption command's hidden prompt.
+Never place passwords in source, command arguments, git, analytics or browser
+storage. Existing published text remains in git history when a later version is
+encrypted; confirm the intended protection when converting an existing article.
+Do not rewrite history or delete old publications without the owner's instruction.
+
+Validate the reader and publisher with `python3 scripts/check-encrypted-post.py`.
 
 ## Writing
 
