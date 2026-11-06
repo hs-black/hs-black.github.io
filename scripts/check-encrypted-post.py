@@ -136,7 +136,8 @@ def prepare_fixtures(folder, reference_url):
     malformed = read_payload(page)
     malformed['iterations'] = 1
     long_source = folder / 'long-source.html'
-    long_source.write_text(fragment + '<div id="long-fixture">'
+    long_source.write_text('<p><a id="long-jump" href="#long-end">Jump to document end</a></p>'
+                           + fragment + '<div id="long-fixture">'
                            + '<p>Long synthetic paragraph.</p>' * 1000
                            + '</div><p id="long-end">Synthetic document end.</p>')
     long_output = folder / 'long-output'
@@ -277,6 +278,11 @@ def check_browser(base):
         long_frame = unlock()
         page.wait_for_function('document.querySelector("iframe").clientHeight>40000')
         page.set_viewport_size({'width': 375, 'height': 900})
+        long_frame.locator('#long-jump').click()
+        page.wait_for_function('scrollY>35000')
+        assert long_frame.locator('body').evaluate('()=>location.href') == 'about:srcdoc'
+        assert long_frame.locator('iframe').count() == 0
+        assert long_frame.get_by_text(SENTINEL, exact=True).count() == 1
         long_frame.locator('#long-end').scroll_into_view_if_needed()
         long_frame.locator('#long-end').screenshot()
         page.evaluate('scrollTo(0, 0)')

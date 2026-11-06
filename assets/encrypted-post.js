@@ -85,7 +85,7 @@
     if (!/<head\b[^>]*>/i.test(source) || !/<\/body\s*>/i.test(source)) {
       throw new Error('Invalid encrypted document');
     }
-    // This runs in an opaque-origin iframe. Only the article height crosses back.
+    // This runs in an opaque-origin iframe. Only numeric layout and scroll coordinates cross back.
     const relay = `(() => {
       const channel = ${JSON.stringify(token)};
       let queued = false, previous = -1;
@@ -104,7 +104,24 @@
         anchor.referrerPolicy = 'no-referrer';
       }
       document.querySelectorAll('a[href]').forEach(prepareReference);
-      const prepareClickedReference = event => prepareReference(event.target.closest?.('a[href]'));
+      function prepareClickedReference(event) {
+        const anchor = event.target.closest?.('a[href]');
+        if (!anchor) return;
+        const href = anchor.getAttribute('href') || '';
+        if (href.startsWith('#')) {
+          // srcdoc inherits the embedding URL as its base: native fragment
+          // navigation would load the locked page inside the reading frame.
+          event.preventDefault();
+          let id;
+          try { id = decodeURIComponent(href.slice(1)); } catch (_) { return; }
+          const target = id ? document.getElementById(id) : document.body;
+          if (!target) return;
+          const top = Math.max(0, target.getBoundingClientRect().top + scrollY);
+          parent.postMessage({type:'encrypted-post-scroll', channel, top}, '*');
+          return;
+        }
+        prepareReference(anchor);
+      }
       document.addEventListener('click', prepareClickedReference, true);
       document.addEventListener('auxclick', prepareClickedReference, true);
       function measure() {
@@ -156,9 +173,15 @@
   addEventListener('message', event => {
     if (!frame || event.source !== frame.contentWindow) return;
     const data = event.data;
-    if (!data || data.type !== 'encrypted-post-height' || data.channel !== channel ||
-        typeof data.height !== 'number' || !Number.isFinite(data.height) || data.height < 0) return;
-    frame.style.height = Math.max(160, Math.min(1000000, Math.ceil(data.height))) + 'px';
+    if (!data || data.channel !== channel) return;
+    if (data.type === 'encrypted-post-height') {
+      if (typeof data.height !== 'number' || !Number.isFinite(data.height) || data.height < 0) return;
+      frame.style.height = Math.max(160, Math.min(1000000, Math.ceil(data.height))) + 'px';
+    } else if (data.type === 'encrypted-post-scroll') {
+      if (typeof data.top !== 'number' || !Number.isFinite(data.top) || data.top < 0 || data.top > 1000000) return;
+      const top = scrollY + frame.getBoundingClientRect().top + Math.min(data.top, frame.clientHeight) - 16;
+      scrollTo({top:Math.max(0, top), behavior:'auto'});
+    }
   });
   form.addEventListener('submit', async event => {
     event.preventDefault();
