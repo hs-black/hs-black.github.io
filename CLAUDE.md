@@ -114,6 +114,10 @@ Validate the reader and publisher with `python3 scripts/check-encrypted-post.py`
   Repeat the needed definitions after a substantial gap or context change.
   A symbol tooltip supplements this text; it does not replace it. Avoid using
   one letter for unrelated quantities in the same derivation.
+- Define an operator's purpose and what its dimensions represent before
+  analyzing its performance or showing a figure that assumes those definitions.
+  End a substantial technical comparison with the main conclusions, their
+  assumptions and practical tradeoffs, so the reader can judge the alternatives.
 - For GPU and parallelism explanations, show what each GPU stores and can
   compute locally before introducing communication costs. Explain collective
   operations with a small concrete example before using their names in a
