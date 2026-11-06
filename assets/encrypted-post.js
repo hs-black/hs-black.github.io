@@ -157,7 +157,9 @@
     frame = document.createElement('iframe');
     frame.className = 'encrypted-post-frame';
     frame.title = (document.querySelector('.post-header h1')?.textContent || '博文') + ' · 正文';
-    frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox');
+    // Trusted article controls can save an inline Blob after a reader clicks
+    // download; the frame remains opaque and cannot access the outer document.
+    frame.setAttribute('sandbox', 'allow-scripts allow-popups allow-popups-to-escape-sandbox allow-downloads');
     frame.referrerPolicy = 'no-referrer';
     frame.tabIndex = 0;
     frame.srcdoc = documentSource;

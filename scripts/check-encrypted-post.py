@@ -28,6 +28,7 @@ CLI = ROOT / 'scripts' / 'encrypt-post.mjs'
 PASSWORD = '  synthetic fixture 密码  '
 SENTINEL = 'ENCRYPTED_FIXTURE_7c23f5'
 TITLE = 'Synthetic <svg onload="window.titleInjection=true"> & "title"'
+DOWNLOAD_BYTES = 'Synthetic inline download.\n第二行。\n'.encode('utf-8')
 FRAGMENT = r'''
 <h2>ENCRYPTED_FIXTURE_7c23f5</h2>
 <p>Only the synthetic reader fixture contains this sentence.</p>
@@ -42,6 +43,7 @@ FRAGMENT = r'''
 <p id="step-value"></p><figcaption>A synthetic interactive figure.</figcaption></figure>
 <button id="grow" type="button">Expand fixture</button><div id="extra"></div>
 <p><a id="synthetic-reference" href="REFERENCE_URL">Open synthetic reference</a></p>
+<button id="synthetic-download" type="button">Download synthetic file</button>
 <script>
 ArticleSteps.mount('#synthetic-step', {
   steps: [{title:'Initial',caption:'Zero'}, {title:'Changed',caption:'One'}],
@@ -49,6 +51,17 @@ ArticleSteps.mount('#synthetic-step', {
 });
 document.getElementById('grow').onclick = () => {
   document.getElementById('extra').innerHTML='<p>Additional synthetic paragraph.</p>'.repeat(40);
+};
+document.getElementById('synthetic-download').onclick = () => {
+  const blob = new Blob(['Synthetic inline download.\n第二行。\n'], {type:'text/plain;charset=utf-8'});
+  const url = URL['createObjectURL'](blob);
+  const anchor = document.createElement('a');
+  anchor.href=url;
+  anchor.download='synthetic-fixture.txt';
+  document.body.append(anchor);
+  anchor.click();
+  anchor.remove();
+  setTimeout(()=>URL['revokeObjectURL'](url),1000);
 };
 window.parentReadable=false;
 try { parent.document.body; window.parentReadable=true; } catch (_) {}
@@ -153,11 +166,13 @@ def check_browser(base):
         executable = (shutil.which(os.environ.get('CHROMIUM_PATH', 'chromium'))
                       or shutil.which('chromium-browser') or playwright.chromium.executable_path)
         browser = playwright.chromium.launch(executable_path=executable)
-        context = browser.new_context(viewport={'width': 1280, 'height': 900}, reduced_motion='reduce')
+        context = browser.new_context(viewport={'width': 1280, 'height': 900},
+                                      reduced_motion='reduce', accept_downloads=True)
         page = context.new_page()
-        errors, requests = [], []
+        errors, requests, downloads = [], [], []
         page.on('pageerror', lambda error: errors.append(str(error)))
         page.on('request', lambda request: requests.append((request.url, request.post_data or '')))
+        page.on('download', lambda download: downloads.append(download))
         page.add_init_script('''window.__storageWrites=0;
           const original=Storage.prototype.setItem;
           Storage.prototype.setItem=function(...args){window.__storageWrites++;return original.apply(this,args);};''')
@@ -193,7 +208,7 @@ def check_browser(base):
         frame = unlock()
         assert page.locator('#encrypted-post-password').input_value() == ''
         permissions = page.locator('iframe').get_attribute('sandbox').split()
-        assert set(permissions) == {'allow-scripts', 'allow-popups', 'allow-popups-to-escape-sandbox'}
+        assert set(permissions) == {'allow-scripts', 'allow-popups', 'allow-popups-to-escape-sandbox', 'allow-downloads'}
         assert frame.locator('body').evaluate('()=>window.parentReadable') is False
         frame.locator('#scoped-formula .katex').wait_for()
         assert not frame.locator('.katex-error').count()
@@ -214,6 +229,17 @@ def check_browser(base):
         assert frame.locator('#step-value').inner_text() == '1'
         frame.locator('[data-action="reset"]').click()
         assert frame.locator('#step-value').inner_text() == '0'
+
+        assert not downloads, 'Unlocking an article must not start a download'
+        with page.expect_download() as download_event:
+            frame.locator('#synthetic-download').click()
+        download = download_event.value
+        assert download.suggested_filename == 'synthetic-fixture.txt'
+        assert download.failure() is None
+        assert Path(download.path()).read_bytes() == DOWNLOAD_BYTES
+        assert len(downloads) == 1 and len(context.pages) == 1
+        assert page.url == base + '/fixture/'
+        assert frame.locator('body').evaluate('()=>location.href') == 'about:srcdoc'
 
         with context.expect_page() as popup_event:
             frame.locator('#synthetic-reference').click()
@@ -245,7 +271,7 @@ def check_browser(base):
         unlock()
         page.reload(wait_until='networkidle')
         locked()
-        print('PASS exact password, title escaping/wrapping, opaque reading, scoped math/fonts, steps, safe reference popup and mobile layout')
+        print('PASS exact password, title escaping/wrapping, opaque reading, math/fonts, steps, inline download, safe reference popup and mobile layout')
 
         # Pause key derivation deterministically, lock while it is pending, then
         # release it. A stale success must not recreate the plaintext frame.
@@ -309,6 +335,7 @@ def check_browser(base):
             assert not parsed.query or re.fullmatch(r'v=[a-f0-9]{12}', parsed.query), url
             assert PASSWORD not in url + body and SENTINEL not in url + body
         assert page.evaluate('localStorage.length===0 && sessionStorage.length===0 && __storageWrites===0')
+        assert len(downloads) == 1, 'Subsequent unlocks must not start extra downloads'
         print('PASS tamper rejection, malformed envelope, pending-unlock cancellation, no persisted secrets or outbound requests')
         context.close()
         browser.close()
