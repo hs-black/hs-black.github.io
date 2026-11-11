@@ -95,7 +95,8 @@ ENCRYPTED_AUDIT = r"""() => {
     const payload = JSON.parse(element?.textContent || '');
     require(payload.version === 1 && payload.cipher === 'AES-GCM' && payload.kdf === 'PBKDF2-SHA256' && payload.iterations === 600000, 'unsupported encryption envelope');
     const length = value => {
-      if (typeof value !== 'string' || value.length > 22369624 || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(value)) throw new Error();
+      if (typeof value !== 'string' || !value.length || value.length % 4 !== 0 ||
+          value.length > 22369624 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) throw new Error();
       return atob(value).length;
     };
     require(length(payload.salt) === 16, 'invalid encryption salt');
