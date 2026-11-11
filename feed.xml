@@ -7,6 +7,13 @@
     <description>Zunzhe Zhang 的博客：大模型、具身智能、实验与想法。</description>
     <language>zh-CN</language>
     <item>
+      <title>SimpleHC：把多路残差的读写合并起来</title>
+      <link>https://hs-black.github.io/posts/simple-hyper-connections/</link>
+      <guid>https://hs-black.github.io/posts/simple-hyper-connections/</guid>
+      <pubDate>Wed, 11 Nov 2026 08:00:00 +0800</pubDate>
+      <description>从动态读写门控与恒等残差出发，推导共享入口、标量修正、18C 到 9C 的访问账本和反向融合，解释稳定性与真实实验范围；含交互图、计算题和 NumPy 实验。</description>
+    </item>
+    <item>
       <title>加密研究笔记</title>
       <link>https://hs-black.github.io/posts/private-research-2026-11/</link>
       <guid>https://hs-black.github.io/posts/private-research-2026-11/</guid>

@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SimpleHC：把多路残差的读写合并起来 · Zunzhe Zhang</title>
+  <meta name="description" content="从动态读写门控与恒等残差出发，推导共享入口、标量修正、18C 到 9C 的访问账本和反向融合，解释稳定性与真实实验范围；含交互图、计算题和 NumPy 实验。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
+  <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
+  <script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
+  <style>
+
+.shc-figure{--shc-update:var(--accent-2);margin:2rem 0}.shc-kicker{font-size:13px;color:var(--text-soft);margin:.4rem 0 1rem}.shc-entry{padding:12px 16px;border:1px solid var(--border);border-radius:10px;background:var(--bg-soft);display:flex;justify-content:space-between;gap:12px;flex-wrap:wrap;font-size:14px}.shc-entry strong{color:var(--accent);font-family:var(--font-mono)}.shc-equation-card{margin:14px 0;padding:16px;border:1px solid var(--accent);border-radius:10px;background:var(--accent-soft);min-height:160px}.shc-equation-card h4{margin:0 0 8px;font-size:16px}.shc-equation-card p{margin:6px 0;font-size:14px;line-height:1.75}.shc-equation-line{font-family:var(--font-mono);overflow-wrap:anywhere}.shc-output-row{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:8px;margin:14px 0}.shc-output{padding:10px 8px;border:1px solid var(--border);border-radius:8px;font-size:12px;background:var(--bg);min-width:0}.shc-output strong{display:block;font:16px var(--font-mono);margin-top:7px;overflow-wrap:anywhere}.shc-output.is-done{border-color:var(--accent)}.shc-output.is-active{background:var(--accent-soft);box-shadow:inset 0 3px var(--accent)}.shc-comparison{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin:14px 0}.shc-state-card{padding:12px;border:1px solid var(--border);border-radius:10px;min-width:0}.shc-state-card h4{font-size:14px;margin:0 0 8px}.shc-state-card p{font-size:13px;line-height:1.6;margin:8px 0 0;color:var(--text-soft)}.shc-state-values{display:grid;grid-template-columns:1fr 1fr;gap:8px}.shc-state-values span{font-size:12px;color:var(--text-soft)}.shc-state-values strong{display:block;color:var(--text);font:15px var(--font-mono);margin-top:5px;overflow-wrap:anywhere}.shc-matrix{display:grid;grid-template-columns:48px repeat(4,minmax(0,1fr));gap:4px;max-width:440px;margin:12px auto;font:13px var(--font-mono);text-align:center}.shc-matrix>span{padding:7px 2px;border-radius:5px;min-width:0}.shc-matrix .shc-coeff{border:1px solid var(--border);background:var(--bg-soft)}.shc-matrix .shc-inactive{color:var(--text-faint)}.shc-matrix .is-active{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}.shc-matrix-label{font-size:13px;color:var(--text-soft);text-align:center;margin:10px 0}.shc-figure details{font-size:13px}.shc-figure table{font-size:13px}.shc-figure th,.shc-figure td{padding:8px 9px}.shc-control{display:flex;align-items:center;gap:12px;flex-wrap:wrap;font-size:14px;margin:14px 0}.shc-control input{flex:1;min-width:100px;max-width:100%;accent-color:var(--accent)}.shc-control output{font:18px var(--font-mono);color:var(--accent)}.shc-breakdown{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:16px 0}.shc-breakdown>div{border-left:3px solid var(--border);padding:4px 10px;min-width:0;font-size:12px;color:var(--text-soft)}.shc-breakdown strong{display:block;color:var(--text);font:23px var(--font-mono);margin-top:7px}.shc-breakdown .shc-wide{border-color:var(--accent)}.shc-breakdown .shc-base{border-color:var(--text-soft)}.shc-breakdown .shc-correction{border-color:var(--accent-2)}.shc-bar-axis{display:flex;justify-content:space-between;font-size:12px;color:var(--text-soft);margin:8px 0 4px}.shc-traffic-track{height:29px;border-radius:6px;background:var(--bg-soft);display:flex;overflow:hidden;border:1px solid var(--border)}.shc-traffic-track span{height:100%;display:block;transition:width .15s}.shc-traffic-track .shc-wide{background:var(--accent)}.shc-traffic-track .shc-base{background:var(--text-soft)}.shc-traffic-track .shc-correction{background:var(--accent-2)}.shc-traffic-total{margin:14px 0;font-size:15px;line-height:1.8}.shc-traffic-total strong{font:24px var(--font-mono);color:var(--accent);margin-right:6px}.shc-note{font-size:13px;color:var(--text-soft);line-height:1.7}.shc-figure .shc-traffic-table{min-width:0;width:100%;font-size:12px}.shc-traffic-table tr.is-active{background:var(--accent-soft)}.shc-traffic-table tr.is-active td:first-child{font-weight:700;color:var(--accent)}
+@media(max-width:560px){.shc-comparison{grid-template-columns:1fr}.shc-output-row{grid-template-columns:repeat(2,minmax(0,1fr))}.shc-breakdown{grid-template-columns:1fr}.shc-breakdown>div{display:flex;align-items:center;justify-content:space-between;gap:8px}.shc-breakdown strong{margin:0;font-size:19px}.shc-equation-card{min-height:200px;padding:12px}.shc-matrix{font-size:11px;grid-template-columns:36px repeat(4,minmax(0,1fr));gap:3px}.shc-figure th,.shc-figure td{padding:7px 5px}.shc-traffic-total strong{font-size:22px}}
+@media(prefers-reduced-motion:reduce){.shc-traffic-track span{transition:none}}
+
+.shc-pack{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:5px;max-width:420px;margin:18px auto;text-align:center;font:14px var(--font-mono)}.shc-pack>*{padding:10px 2px;min-width:0}.shc-pack>span{border:1px solid var(--border);border-radius:6px;color:var(--text-faint)}.shc-pack>.keep{background:var(--accent-soft);border-color:var(--accent);color:var(--accent)}.shc-pack>b{color:var(--text-soft);font-weight:400}@media(max-width:420px){.shc-pack{gap:3px;font-size:13px}.shc-pack>*{padding:10px 1px}}
+
+  </style>
+</head>
+<body>
+<header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
+<main class="wrap"><header class="post-header"><h1>SimpleHC：把多路残差的读写合并起来</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-11-11">2026-11-11</time></div></header>
+<nav class="series" data-series="hyperconnections"></nav>
+<article class="prose">
+<p>把一个 Transformer 的单路残差扩展为四条，额外 FLOPs 可以很少，训练时间却明显增加。原因藏在每个 attention 和 FFN 之间：读出几条宽向量，计算门控，把它们合成子层输入，再把新输出写回。计算单元很快做完了乘加，下一步却要等数据搬过来。</p>
+<p>SimpleHC 把这个问题拆成两件事：<strong>保留对模型有用的读写选择，再把相邻子层对同一份宽状态的访问合并起来。</strong>它采用恒等残差通路，保留动态、逐层独立的读写门控；连续四个子层从共同的入口状态生成门控，子层之间用标量系数传递新输出，最后统一写回四条残差流。这里最值得理解的是：哪些信息需要马上交给下一层，哪些大张量可以晚一点再落回显存。</p>
+<nav class="toc" aria-label="文章目录"><b>目录</b><ol>
+<li><a href="#operations">先分清读取、计算、混合与写入</a></li>
+<li><a href="#simplify">保留什么：两种有效的交互机制</a></li>
+<li><a href="#group">四个子层怎样只写回一次</a></li>
+<li><a href="#gates">共享入口，为什么仍要逐层独立的门控</a></li>
+<li><a href="#traffic">18C 到 9C：逐项计算显存访问</a></li>
+<li><a href="#kernels">把公式变成快的前向与反向</a></li>
+<li><a href="#storage">激活显存究竟省在哪里</a></li>
+<li><a href="#stability">稳定性：恒等路径保住了什么</a></li>
+<li><a href="#evidence">质量、速度与规模的证据</a></li>
+<li><a href="#practice">计算题与可运行实验</a></li>
+<li><a href="#references">参考与延伸阅读</a></li></ol></nav>
+
+<section id="operations"><h2>1. 先分清读取、计算、混合与写入</h2>
+<p>普通残差子层计算 \(x_{l+1}=x_l+F_l(x_l)\)。这里 \(l\) 每增加 1，经过一个 attention 或 FFN；一个完整 Transformer block 包含两个这样的子层。\(F_l\) 包含子层需要的归一化及 attention/FFN 运算。</p>
+<p>Hyper-Connections 同时保存多条状态。对一个 token，令 \(\htmlData{symbol=state}{X_l}\in\mathbb R^{n\times C}\)：\(n\) 行分别是残差流，每行有 \(C\) 个通道。默认 \(n=4\)。完整 batch 的张量还带有 batch、序列位置两个前导维度；以下公式描述一个位置，attention 在计算 \(F_l\) 时仍会访问序列中的其他位置。</p>
+<p>读取门控 \(p_l\in\mathbb R^n\) 决定当前子层从每条流读取多少；写入门控 \(q_l\in\mathbb R^n\) 决定把计算结果向每条流写入多少。残差混合矩阵 \(M_l\in\mathbb R^{n\times n}\) 的第 \(i\) 行、第 \(j\) 列表示旧流 \(j\) 对新流 \(i\) 的贡献。三个步骤是：</p>
+\[
+ u_l=X_l^\top\htmlData{symbol=read}{p_l},\qquad
+ o_l=F_l(u_l),\qquad
+ X_{l+1}=\htmlData{symbol=mixing}{M_l}X_l+\htmlData{symbol=write}{q_l}o_l^\top.
+\]
+<p>\(u_l,o_l\) 都是 \(C\) 维列向量。\(X_l^\top p_l\) 把 \(n\) 条流汇总成一个子层输入；\(q_lo_l^\top\) 是一个 \(n\times C\) 外积，把同一个输出按不同比例分配回各流。例如 \(q_l=(1,0.5,0.2,0.8)^\top\)，四条流分别加上 \(o_l,0.5o_l,0.2o_l,0.8o_l\)。</p>
+<p>HC 允许学习自由的混合矩阵；<a href="/posts/manifold-hyper-connections/">mHC</a> 用 Sinkhorn 归一化，使混合矩阵近似满足非负、每行每列和为 1。SimpleHC 取 \(M_l=I\)，于是每条旧流直接留下，再加上本层写入：</p>
+\[ X_{l+1}=X_l+q_lo_l^\top. \]
+<p>这个改动保留了跨流的信息交流：子层从多条流读取，经过 \(F_l\) 计算，再把结果写入多条流。它把交流集中在“读入子层—计算—写回”的通路上，旧状态本身沿恒等路径向前传播。</p>
+</section>
+
+<section id="simplify"><h2>2. 保留什么：两种有效的交互机制</h2>
+<p>先看质量，再决定哪些操作值得保留。在 15B 总参数、每个 token 激活约 1B 参数的 MoE 对照中，把门控和混合逐一拆开，会看到两个有效组合：一组是<strong>共同学习的读取与写入</strong>；另一组是<strong>不受双随机约束的混合</strong>。下表摘取相同实验中的关键配置；平均分由 MMLU、HellaSwag、MATH、MBPP、C3 五项组成，分数越高越好，验证 loss 越低越好。</p>
+<div class="table-wrap"><table><thead><tr><th>残差设计</th><th>读取 / 写入</th><th>混合</th><th>Loss</th><th>五项平均分</th></tr></thead><tbody>
+<tr><td>Vanilla</td><td>单路残差</td><td>恒等</td><td>1.678</td><td>52.4</td></tr>
+<tr><td>mHC</td><td>共同学习</td><td>Sinkhorn</td><td>1.659</td><td>55.0</td></tr>
+<tr><td>identityHC</td><td>共同学习</td><td>恒等</td><td>1.660</td><td>55.4</td></tr>
+<tr><td>固定读取</td><td>读取固定，写入学习</td><td>恒等</td><td>1.676</td><td>53.6</td></tr>
+<tr><td>固定写入</td><td>读取学习，写入固定</td><td>恒等</td><td>1.678</td><td>52.8</td></tr>
+<tr><td>固定读写</td><td>均固定</td><td>无约束</td><td>1.660</td><td>56.0</td></tr>
+<tr><td>学习读写 + 自由混合</td><td>共同学习</td><td>无约束</td><td>1.657</td><td>56.2</td></tr>
+</tbody></table></div>
+<p>固定读取使用 \(p=\mathbf1/n\)，即平均读取各流；固定写入使用 \(q=\mathbf1\)，即向各流写入同样的输出。只固定其中一侧，就会削弱恒等残差版本的收益。一个自然的理解是：不同子层需要选择合适的信息，也需要把新信息放到合适的流中；读取与写入共同建立这种分工。</p>
+<p>SimpleHC 选择了共同学习的读写门控和恒等残差。这个配置在上述对照中保留了接近 mHC 的质量，同时为后续的加法展开提供了简单结构。自由混合的额外收益和跨深度的传播行为，留到<a href="#stability">稳定性部分</a>一起看。</p>
+<h3>动态门控怎样生成</h3>
+<p>将 \(n\times C\) 状态按行展平成 \(nC\) 维向量，进行无仿射参数的 RMSNorm，得到 \(z_l\)。对于读取和写入，各有一套独立参数：</p>
+\[
+ z_l=\operatorname{RMSNorm}(\operatorname{vec}X_l),\qquad
+ \ell_l^s=\alpha_l^s(W_l^s)^\top z_l+b_l^s,
+ \quad s\in\{\mathrm{pre},\mathrm{post}\},
+\]
+\[ p_l=\sigma(\ell_l^{\mathrm{pre}}),\qquad q_l=2\sigma(\ell_l^{\mathrm{post}}). \]
+<p>这里 \(W_l^s\in\mathbb R^{nC\times n}\)，\(b_l^s\in\mathbb R^n\)，\(\alpha_l^s\) 是可学习标量。\(\sigma\) 为 sigmoid，因此每个读取系数位于 \((0,1)\)，写入系数位于 \((0,2)\)。这些系数随 token 状态变化，读取系数的总和也可以变化。下一步要减少的，是生成它们时反复访问宽状态的次数。</p>
+</section>
+
+<section id="group"><h2>3. 四个子层怎样只写回一次</h2>
+<p>设一组从子层 \(L\) 开始，共有 \(\htmlData{symbol=group}{K}\) 个子层。默认 \(K=4\)，顺序是 attention、FFN、attention、FFN，正好两个 Transformer block。组入口 \(X_L\) 保存四条宽残差流。</p>
+<p>恒等残差使中间状态成为逐项相加：</p>
+\[
+ X_j=X_L+\sum_{k=L}^{j-1}q_ko_k^\top.
+\]
+<p>\(o_k\) 是前面第 \(k\) 个子层的 \(C\) 维输出，\(q_k\) 是当时向各流写入的 \(n\) 维系数。当前子层 \(j\) 用 \(p_j\) 读取状态，把上式代入 \(u_j=X_j^\top p_j\)：</p>
+\[
+ u_j=\underbrace{X_L^\top p_j}_{\text{入口基础读取}}
+ +\sum_{k=L}^{j-1}\underbrace{(p_j^\top q_k)}_{\text{一个标量}}o_k.
+\]
+<p>一次“写入各流，再从各流读取”，合起来就是一个内积。假设之前的输出向两条流分别写入 \(1\) 倍与 \(0.5\) 倍，后面读取两条流的权重是 \(0.25\) 与 \(0.75\)，那么这个输出对后面输入的总贡献就是 \(0.25\times1+0.75\times0.5=0.625\) 倍。</p>
+<h3>先把门控准备好</h3>
+<p>上面的展开需要当前的 \(p_j,q_j\) 已经可用。逐子层门控原本依赖更新后的 \(X_j\)。SimpleHC 改为让组内各子层从入口 \(X_L\) 生成自己的门控：</p>
+\[
+ \bar p_j=g_j^{\mathrm{pre}}(X_L),\qquad
+ \bar q_j=g_j^{\mathrm{post}}(X_L),\qquad L\le j&lt;L+K.
+\]
+<p>横线表示“根据组入口计算”。每个 \(g_j\) 仍有自己的投影、缩放和偏置。因此四个子层看到同一份输入状态，也可以作出四种不同的读写选择。</p>
+<p><strong>共享入口改变了门控的条件输入；给定这组门控以后，后面的计算重排是代数等价的。</strong>两件事分别由消融实验和数值等价检查来验证。训练时，梯度会通过每个门控函数回到组入口。</p>
+<h3>把跨子层的贡献写成一个小矩阵</h3>
+<p>把组内的门控按子层顺序排成列，得到 \(P=[\bar p_L,\ldots,\bar p_{L+K-1}]\) 和 \(Q=[\bar q_L,\ldots,\bar q_{L+K-1}]\)，二者均为 \(n\times K\)。预先计算：</p>
+\[
+ V=X_L^\top P\in\mathbb R^{C\times K},\qquad
+ \htmlData{symbol=correction}{D}=\operatorname{tril}(P^\top Q,-1)\in\mathbb R^{K\times K}.
+\]
+<p>\(V\) 的第 \(a\) 列是第 \(a\) 个子层从入口取得的基础输入。\(D\) 的<strong>行对应后面读取的子层，列对应前面写入的子层</strong>；\(D_{ab}=\bar p_{L+a}^\top\bar q_{L+b}\)。只保留严格下三角，因为第 \(a\) 个子层能接收的输出来自 \(b&lt;a\)。当 \(K=4\) 时，\(D\) 有六个这样的系数。</p>
+\[
+ u_{L+a}=V_{:,a}+\sum_{b&lt;a}D_{ab}o_{L+b},\qquad o_{L+a}=F_{L+a}(u_{L+a}).
+\]
+<p>四个子层仍按顺序计算。后一个子层用到了前一个子层刚产生的输出，只是这份信息通过 \(C\) 维向量直接传递。组末再把全部输出排成 \(O=[o_L,\ldots,o_{L+K-1}]\in\mathbb R^{C\times K}\)，统一写回：</p>
+\[ X_{L+K}=X_L+QO^\top. \]
+<figure class="article-figure shc-figure" id="shc-flow">
+<h3>一组之内，旧输出怎样进入新输入</h3>
+<p class="shc-kicker">教学数值：两条流，每条流只有一个数；四个子层都执行 F(u) = u / 2。读门 p、写门 q 已由组入口生成，各子层使用各自的一组。</p>
+<div class="shc-entry"><span>始终保留的组入口</span><strong>X₀ = [2, 6]</strong></div>
+<div class="shc-equation-card" aria-live="polite"><h4 id="shc-current-title">先生成四组门</h4><p id="shc-current-base"></p><p class="shc-equation-line" id="shc-current-formula"></p><p id="shc-current-reason"></p></div>
+<div class="shc-output-row" id="shc-outputs"></div>
+<div class="shc-comparison">
+<div class="shc-state-card"><h4>逐子层写回：参考状态</h4><div class="shc-state-values"><span>流 1<strong id="shc-reference-0">2</strong></span><span>流 2<strong id="shc-reference-1">6</strong></span></div><p id="shc-reference-note">每个子层结束后，把 q × o 加到两条流。</p></div>
+<div class="shc-state-card"><h4>延迟写回：实际保存的宽状态</h4><div class="shc-state-values"><span>流 1<strong id="shc-deferred-0">2</strong></span><span>流 2<strong id="shc-deferred-1">6</strong></span></div><p id="shc-deferred-note">组内保留入口；新输出通过标量修正进入后续输入。</p></div>
+</div>
+<p class="shc-matrix-label">修正系数 D：行 = 当前读取子层，列 = 先前写入子层</p>
+<div class="shc-matrix" id="shc-coefficients" role="table" aria-label="四个子层之间的标量贡献系数"></div>
+<details><summary>查看四组读门、写门与算式</summary><div class="table-wrap"><table><thead><tr><th>子层</th><th>读门 p</th><th>写门 q</th><th>入口读取 pᵀX₀</th></tr></thead><tbody><tr><td>0</td><td>[0.75, 0.25]</td><td>[1, 0.5]</td><td>3</td></tr><tr><td>1</td><td>[0.25, 0.75]</td><td>[0.5, 1]</td><td>5</td></tr><tr><td>2</td><td>[0.5, 0.5]</td><td>[1, 1]</td><td>4</td></tr><tr><td>3</td><td>[0.8, 0.2]</td><td>[0.25, 0.75]</td><td>2.8</td></tr></tbody></table></div><p>D 的第 a 行、第 b 列取 pₐᵀqᵦ；只有 b &lt; a 的历史输出进入当前输入。第 0 个子层先得到 u₀ = 3、o₀ = 1.5；第 1 个子层接着得到 u₁ = 5 + 0.625 × 1.5 = 5.9375。</p></details>
+<figcaption>紫色突出当前计算与使用的系数。两种执行方式使用相同的门与子层函数，组末得到相同状态。界面中的长小数保留六位。</figcaption>
+</figure>
+<p>可以把执行顺序记成：<strong>入口读一次以生成各层门控，入口再读一次以生成各层基础输入；依次计算子层并补入历史输出；组末统一写回。</strong>中途保留的是每个子层的窄输出，宽残差状态只在组边界更新。</p>
+<details><summary>对应的伪代码</summary><pre><code># X: [tokens, n, C]；每个 token 独立生成门控
+# P, Q: [tokens, n, K]；各子层参数独立
+P, Q = grouped_gates(X)
+V = einsum("tnc,tnk-&gt;tck", X, P)
+D = tril(einsum("tna,tnb-&gt;tab", P, Q), diagonal=-1)
+outputs = []
+for a in range(K):
+    u = V[:, :, a]
+    for b in range(a):
+        u = u + D[:, a, b, None] * outputs[b]
+    outputs.append(sublayers[a](u))
+X_next = X + einsum("tnk,tck-&gt;tnc", Q, stack(outputs, dim=-1))</code></pre><p>这段写法直接表达计算关系。高效实现会把内层乘加、输出读取和最终写回融合，减少临时张量。</p></details>
+</section>
+
+<section id="gates"><h2>4. 共享入口，为什么仍要逐层独立的门控</h2>
+<p>共享输入是否损失质量，取决于入口包含多少后续门控所需的信息，以及组内新输出能否及时进入后续子层。15B-A1B 对照把这两个问题分开验证：</p>
+<div class="table-wrap"><table><thead><tr><th>配置</th><th>组内门控</th><th>新输出的标量修正</th><th>Loss</th><th>五项平均分</th></tr></thead><tbody>
+<tr><td>identityHC，逐子层入口</td><td>各层独立</td><td>通过完整状态传递</td><td>1.660</td><td>55.4</td></tr>
+<tr><td>共享 2 个子层</td><td>各层独立</td><td>保留</td><td>1.660</td><td>54.8</td></tr>
+<tr><td>SimpleHC，共享 4 个子层</td><td>各层独立</td><td>保留</td><td>1.660</td><td>55.0</td></tr>
+<tr><td>共享 8 个子层</td><td>各层独立</td><td>保留</td><td>1.662</td><td>54.3</td></tr>
+<tr><td>共享 4 个子层，复用一对门控</td><td>各层共用同一对</td><td>保留</td><td>1.667</td><td>53.5</td></tr>
+<tr><td>共享 4 个子层，省去修正</td><td>各层独立</td><td>省去，组末仍写回</td><td>1.705</td><td>47.9</td></tr>
+</tbody></table></div>
+<p>最明显的下降发生在省去修正时。虽然组末仍把四个输出写回了残差流，后面的子层在计算当下却只拿到入口信息。这切断了组内的顺序加工。相比之下，四层门控共同看入口，同时保留各自参数和输出修正，维持了接近参考模型的质量。</p>
+<p>门控预测实验进一步检查了入口的信息量：冻结训练好的 identityHC，让独立的小预测器从组入口预测后面子层的门控。误差在冻结教师模型的轨迹上评估，写入门控先除以 2，使读写两种门控都按 \(0\) 到 \(1\) 的尺度统计。测试集上，直接使用对应教师门控参数时，写入门控的平均绝对误差为 0.05044；只训练预测器后，降到 0.01034。读取门控也从 0.05817 降到 0.01653。这解释了为什么“相同输入、不同映射”有机会保留逐层的路由选择。</p>
+<p>这个比较给出的设计结论很具体：<strong>可以尝试减少决定门控时的状态刷新频率，同时保留逐层决策和最新子层输出。</strong>把组继续扩大，需要同时考察门控预测误差、最终质量和修正成本。</p>
+</section>
+
+<section id="traffic"><h2>5. 18C 到 9C：逐项计算显存访问</h2>
+<p>GPU 的 HBM 保存大张量，线程在寄存器和片上存储中计算。一次 kernel 可以把数据读进来，完成多步运算再写回；跨 kernel 留下的大型中间张量通常增加显存流量。SimpleHC 的收益主要来自减少对 \(nC\) 个元素的宽残差状态的重复访问。</p>
+<p>先固定计数范围：<strong>每个 token、每个子层的残差连接前向激活读写</strong>，以元素数计。读取参数、小型门控系数和 attention/FFN 内部访问分别核算。一次读或写一条完整的宽残差状态，计 \(nC\) 个元素；一条子层输入或输出只有 \(C\) 个元素。</p>
+<h3>融合后的 mHC 与 identityHC</h3>
+<div class="table-wrap"><table><thead><tr><th>操作</th><th>读写内容</th><th>每 token、每子层</th></tr></thead><tbody>
+<tr><td>投影与 RMS 统计</td><td>读取宽状态</td><td>\(nC\)</td></tr>
+<tr><td>汇总子层输入</td><td>读取宽状态，写出窄输入</td><td>\(nC+C\)</td></tr>
+<tr><td>写回残差</td><td>读取旧宽状态和窄输出，写出新宽状态</td><td>\(2nC+C\)</td></tr>
+<tr><td>合计</td><td></td><td>\(4nC+2C\)</td></tr>
+</tbody></table></div>
+<p>取 \(n=4\)，结果为 \(18C\)。融合后的 mHC 在同一 kernel 中完成混合、输出分配与残差写回，所以 identityHC 去掉混合后，仍需要这三次操作中的相同大张量访问。减少算术和减少数据搬运，是两笔可以分别检查的账。</p>
+<h3>SimpleHC 的组边界访问与组内修正</h3>
+<p>一组 \(K\) 个子层只做一次门控状态读取、一次基础输入状态读取，以及一次宽状态读出与写回，共 \(4nC\) 个元素。摊到每子层为 \(4nC/K\)。各层的基础输入写出、最终写回时的窄输出读取，平均还需要 \(2C\)。</p>
+<p>组内第 \(a\) 个子层从 0 开始编号。对于 \(a&gt;0\)，修正 kernel 读取一个基础输入和 \(a\) 个之前的输出，再写出一个修正后的输入，共 \((a+2)C\) 个元素。第 0 个子层直接使用基础输入。平均修正流量为：</p>
+\[
+ Q_{\mathrm{corr}}(K)=\frac{C}{K}\sum_{a=1}^{K-1}(a+2)
+ =\frac{C(K-1)(K+4)}{2K}.
+\]
+<p>因此，SimpleHC 每个 token、每个子层的逻辑前向访问量为</p>
+\[
+ \htmlData{symbol=traffic}{Q_{\mathrm{act}}}(K)
+ =\underbrace{\frac{4nC}{K}}_{\text{宽状态访问}}
+ +\underbrace{2C}_{\text{基础输入写出与输出读取}}
+ +\underbrace{\frac{C(K-1)(K+4)}{2K}}_{\text{组内修正}}.
+\]
+<p>当 \(n=K=4\) 时，三项分别为 \(4C,2C,3C\)，合计 \(9C\)。取 \(C=6144\)、8192 个 token、BF16 每元素 2 字节，这部分前向读写从每子层 \(1728\) MiB 降到 \(864\) MiB。这里统计的是所有 token 累计搬运的字节数；设备实际 HBM 事务还受缓存复用和 kernel 布局影响。</p>
+<figure class="article-figure shc-figure" id="shc-traffic">
+<h3>分组更长，宽状态访问更少，历史修正更多</h3>
+<p class="shc-kicker">固定 n = 4 条流。计量单位为 C 个元素 / token / 子层；C 是每条流的通道数。采用正文的逻辑前向访存模型。</p>
+<label class="shc-control" for="shc-group-size">每组子层数 K<input id="shc-group-size" type="range" min="1" max="16" step="1" value="4"><output id="shc-group-value" for="shc-group-size">4</output></label>
+<div class="shc-breakdown"><div class="shc-wide">宽状态的读取与写回<strong id="shc-q-wide">4 C</strong></div><div class="shc-base">基础输入写出、最终输出读入<strong id="shc-q-base">2 C</strong></div><div class="shc-correction">历史输出的标量修正<strong id="shc-q-correction">3 C</strong></div></div>
+<div class="shc-bar-axis"><span>0</span><span>18 C：逐子层执行的基线</span></div><div class="shc-traffic-track" role="img" aria-label="逻辑访问量的三部分" id="shc-traffic-bar"><span class="shc-wide" id="shc-bar-wide"></span><span class="shc-base" id="shc-bar-base"></span><span class="shc-correction" id="shc-bar-correction"></span></div>
+<p class="shc-traffic-total"><strong id="shc-q-total">9 C</strong>总访问量 · 相比 18 C 减少 <span id="shc-q-saved">50.0%</span></p>
+<p class="shc-note" id="shc-k-explanation">K = 4 覆盖两个 Transformer block；在 K = 2、4、8、16 这组候选中，9 C 最低。</p>
+<div class="table-wrap"><table class="shc-traffic-table"><thead><tr><th>K</th><th>宽状态</th><th>修正</th><th>合计</th></tr></thead><tbody id="shc-traffic-rows"></tbody></table></div>
+<p class="shc-note">仅就“为反向传播保存入口残差状态”这一项，容量减少 <strong id="shc-state-saved">75.0%</strong>。其他留存激活的大小还取决于子层输入、输出和实现方式。</p>
+<figcaption>三段颜色与上方三项对应。模型包含残差相关前向激活访问；完整训练时间还受反向、kernel 调度及 attention / FFN 计算影响。</figcaption>
+</figure>
+<p>组越大，第一项越小，但每个输出需要送往更多后续子层，第三项随之增长。对 \(n=4\)，上式可整理为</p>
+\[ \frac{Q_{\mathrm{act}}(K)}C=\frac K2+\frac72+\frac{14}{K}. \]
+<p>连续近似的最低点在 \(K=\sqrt{28}\approx5.29\)，整数 \(K=5\) 给出 \(8.8C\)。\(K=4\) 的 \(9C\) 是所比较的 \(2,4,8,16\) 四种组长中最低的，而且恰好覆盖两个完整 block。实际选组长还要加入质量、尾组、流水线边界和 kernel 效率。<strong>四个子层是有实验支撑、结构对齐的折中点。</strong></p>
+<h3>FLOPs 怎么变</h3>
+<p>采用一次乘加计 2 FLOPs 的近似，mHC 每子层的门控投影将 \(nC\) 维输入映射到 \(n^2+2n\) 个系数，成本约 \(2nC(n^2+2n)\)。去掉混合投影后，读写门控只需 \(2n\) 个系数，成本约 \(4n^2C\)。在 \(n=4\) 时，两者为 \(192C\) 与 \(64C\)。</p>
+<p>分组仍保留各子层的独立门控，投影的乘加总量保持对应的规模，但可以更充分地复用同一次载入的输入。标量修正每组包含 \(K(K-1)/2\) 个“向量乘系数再相加”，平均增加约 \(C(K-1)\) FLOPs/子层；若只计算所需的严格下三角系数，还约需 \(n(K-1)\) FLOPs/子层；伪代码和 CPU 实验为表达简洁，先计算完整 \(P^\top Q\) 再取下三角，这一步约为 \(2nK\) FLOPs/子层。它用少量窄向量算术换取宽状态访问的减少。attention、FFN、归一化和反向传播的成本需要接着加入整步账本。</p>
+</section>
+
+<section id="kernels"><h2>6. 把公式变成快的前向与反向</h2>
+<p>代数重排提供的是优化空间，kernel 决定这个空间能用掉多少。在宽度 \(C=6144\) 的效率配置下，SimpleHC 的 PyTorch 实现额外训练时间为 22.5%，专用实现降到 2.4%。这里有三个可迁移的工程方法。</p>
+<h3>先复用加载，再融合小算子</h3>
+<p>组入口展平为 \(x\in\mathbb R^{nC}\)。将 \(K\) 个子层的读写投影拼成 \(W\in\mathbb R^{nC\times2Kn}\)，可以一次得到所有未归一化投影。同时累积平方和：</p>
+\[
+ t=W^\top x,\quad s=x^\top x,\quad
+ r=\left(\frac{s}{nC}+\epsilon\right)^{-1/2}.
+\]
+<p>\(r\) 是 RMS 的倒数。由于门控采用无仿射 RMSNorm，线性投影满足 \(W^\top(rx)=r(W^\top x)\)。因此 kernel 可以一起计算 \(t,s\)，随后在小张量上完成 \(\alpha rt+b\) 和 sigmoid，省下一个 \(nC\) 大小的归一化中间缓冲。</p>
+<p>在 \(n=K=4\) 时，合并投影的形状是 \(4C\times32\)：32 列对应四层、读写两种操作、每种四个系数。接着，基础读取 kernel 从宽状态的一个 tile 生成四个不同的基础输入。修正 kernel 直接接收之前输出的指针，融合乘系数、相加与写出；组末 kernel 一次性完成四份输出分配及残差相加。</p>
+<h3>反向传播也可以一起处理宽梯度</h3>
+<p>重新记住这三个形状：\(P,Q\) 为 \(n\times K\) 门控矩阵，\(V,O\) 为 \(C\times K\) 基础输入与子层输出，\(X_L\) 为 \(n\times C\) 入口。令 \(E=\partial\mathcal L/\partial X_{L+K}\) 为组出口的宽梯度，\(G=\partial\mathcal L/\partial V\) 为各基础输入的梯度。基础读取与最终写回贡献：</p>
+\[
+ \nabla_{X_L}\mathcal L\mathrel{+}=E+PG^\top,\qquad
+ \nabla_O\mathcal L\mathrel{+}=E^\top Q.
+\]
+<p>符号 \(\mathrel{+}=\) 表示把这条计算路径的梯度累加进去。前式把四层输入返回的梯度和恒等路径的 \(E\) 合在一次宽写出中；后式读取同一份 \(E\)，给四个子层输出生成各自梯度。组内修正和动态门控投影还会贡献梯度，它们沿各自路径继续累加。</p>
+<details><summary>标量修正的反向传播</summary>
+<p>在组内把子层 \(L+a\) 简写为 \(a\)：\(v_a=V_{:,a}\)，\(p_a=\bar p_{L+a}\)，\(q_a=\bar q_{L+a}\)，\(u_a,o_a\) 分别表示该子层的输入、输出。对于 \(u_a=v_a+\sum_{b&lt;a}D_{ab}o_b\)，令 \(g_a=\partial\mathcal L/\partial u_a\in\mathbb R^C\)。一对 \((a,b)\) 给出</p>
+\[
+ \nabla_{o_b}\mathcal L\mathrel{+}=D_{ab}g_a,\qquad
+ \nabla_{D_{ab}}\mathcal L=g_a^\top o_b.
+\]
+<p>再由 \(D_{ab}=p_a^\top q_b\) 得到 \(\nabla_{p_a}\mathcal L\mathrel{+}=q_b\nabla_{D_{ab}}\mathcal L\)、\(\nabla_{q_b}\mathcal L\mathrel{+}=p_a\nabla_{D_{ab}}\mathcal L\)。因此反向按子层逆序处理，每个早期输出接收来自后面多个子层的梯度。</p></details>
+<h3>小门控梯度怎样利用 Tensor Core</h3>
+<p>一个常见的 GPU 工程问题是：输出矩阵很小，归约维度却很长。读写门控的两条梯度贡献为</p>
+\[ \nabla_P\mathcal L\mathrel{+}=X_LG,\qquad \nabla_Q\mathcal L\mathrel{+}=EO. \]
+<p>取 \(n=K=4\)，\(X_LG\) 是 \((4\times C)(C\times4)\)，每个 token 只产出 16 个数。把通道分块后，各块的局部结果还需要归约；如果写出许多局部结果再启动一个 kernel 求和，临时缓冲与启动开销会侵蚀收益。</p>
+<p>一种办法是一起处理四个 token。将各 token 的 \(X\) 沿行拼成 \(16\times C\) 矩阵，将各自的 \(G\) 沿列拼成 \(C\times16\) 矩阵，得到适合成块矩阵乘法的 \(16\times16\) 输出：</p>
+\[
+ \begin{bmatrix}X^{(0)}\\X^{(1)}\\X^{(2)}\\X^{(3)}\end{bmatrix}
+ \begin{bmatrix}G^{(0)}&G^{(1)}&G^{(2)}&G^{(3)}\end{bmatrix}.
+\]
+<p>结果的块 \((i,j)\) 是 \(X^{(i)}G^{(j)}\)。需要保存的是四个对角块 \(X^{(i)}G^{(i)}\)，各自对应同一个 token 的门控梯度。通道归约在片上累积，最后只写出这四块。</p>
+<figure class="article-figure"><h3>四个 token 拼成一次矩阵乘法</h3><p class="article-note">行标表示状态来自哪个 token，列标表示梯度来自哪个 token。每格是 4×4 个标量；有色对角块被保存。</p><div class="shc-pack" role="img" aria-label="四乘四的分块矩阵，仅 token 编号相同的四个对角块保存"><span></span><b>G⁽⁰⁾</b><b>G⁽¹⁾</b><b>G⁽²⁾</b><b>G⁽³⁾</b><b>X⁽⁰⁾</b><span class="keep">保存</span><span>·</span><span>·</span><span>·</span><b>X⁽¹⁾</b><span>·</span><span class="keep">保存</span><span>·</span><span>·</span><b>X⁽²⁾</b><span>·</span><span>·</span><span class="keep">保存</span><span>·</span><b>X⁽³⁾</b><span>·</span><span>·</span><span>·</span><span class="keep">保存</span></div><figcaption>同一次小矩阵乘法的容量利用率、额外计算和中间存储要一起衡量。这里计算了交叉 token 的块，换取规整的 Tensor Core 运算及更少的归约中间结果。</figcaption></figure>
+<p>这个设计体现了一条实用原则：<strong>先找出反复读取、零碎归约和中间缓冲，再考虑用适合硬件的矩阵块来承载它们。</strong>判断优化是否有效，可以同时测 kernel 时长、显存事务、临时缓冲大小与整步训练时间；Tensor Core 指令形状和精度选择则随目标 GPU 调整。</p>
+</section>
+
+<section id="storage"><h2>7. 激活显存究竟省在哪里</h2>
+<p>显存流量是运行中累计搬运了多少数据；激活存储是反向传播开始时，还需要留下哪些数据。一个张量可以只存一份、被读取多次，所以这两笔账需要分开。</p>
+<p>先看最简单的残差入口存储。若没有重算，逐子层执行要保存 \(K\) 份 \(n\times C\) 入口，分组执行主要保存一份组入口。仅对这部分状态，理想减少比例为 \(1-1/K\)，\(K=4\) 时为 75%。完整实现还要保存子层输入、输出、基础读取、门控和一些拷贝。</p>
+<p>取八个 Transformer block，即 16 个子层，宽度 \(C=2048\)，一个 8192-token 序列，BF16。令 \(T=8192\) 为本地 microbatch 的 token 数，</p>
+\[ U=2TC\ \text{bytes}=32\ \text{MiB}. \]
+<p>\(U\) 表示一份形状为 \(T\times C\) 的窄激活。按源码级存储分配估算，留下的边界与 HC 激活如下：</p>
+<div class="table-wrap"><table><thead><tr><th>为反向保留的张量</th><th>mHC</th><th>SimpleHC</th></tr></thead><tbody>
+<tr><td>归一化前子层输入</td><td>\(16U=512\) MiB</td><td>\(16U=512\) MiB</td></tr>
+<tr><td>残差状态及输入拷贝</td><td>\(61U=1952\) MiB</td><td>\(20U=640\) MiB</td></tr>
+<tr><td>子层分支输出</td><td>\(16U=512\) MiB</td><td>\(16U=512\) MiB</td></tr>
+<tr><td>额外基础读取存储</td><td>0</td><td>\(12U=384\) MiB</td></tr>
+<tr><td>最终归一化前 decoder 输出</td><td>\(U=32\) MiB</td><td>\(U=32\) MiB</td></tr>
+<tr><td>FP32 的 HC 辅助张量</td><td>36.5 MiB</td><td>12.875 MiB</td></tr>
+<tr><td><strong>这组张量合计</strong></td><td><strong>3044.5 MiB</strong></td><td><strong>2092.875 MiB</strong></td></tr>
+</tbody></table></div>
+<p>差值为 951.625 MiB，占这组存储的 31.26%。attention/FFN 内部激活、模型与优化器状态、临时 workspace、CUDA Graph 预留空间在整机显存账本中另行加入。启用<a href="/posts/gradient-checkpointing/">激活重算</a>后，还需要按实际保存边界重新计算。</p>
+<h3>一个容易漏算的实践细节：切片让整块存储继续存活</h3>
+<p>四个基础输入一起分配为一个包含 \(4U\) 数据的缓冲，第一个子层取其中一片作为输入。只要这个输入 view 还被 autograd 保存，整块底层存储就仍然存活。因此输入这一行已经计入了 \(U\) 后，每组还需计入剩余 \(3U\)，四组就是表中的 \(12U\)。这能解释“张量看起来只剩一小片，显存却没有释放”的常见现象。</p>
+<p>排查时，先看张量是否共享底层 storage，再看 autograd 保存了哪些引用。显存统计应对每块存储计数一次，同时覆盖仍被 view 保留的完整分配。主动复制小切片可以缩短大缓冲的生命周期，但会增加复制成本；是否值得，取决于大缓冲何时能释放、其他切片是否还被需要。</p>
+<p><strong>主要收益是减少逐层保留的宽状态；新增的基础读取和辅助张量会抵消一部分节省。</strong>用完整生命周期计算，才能从“理论上少存几份状态”走到真实训练显存。</p>
+</section>
+
+<section id="stability">
+<h2>8. 稳定性：恒等路径保住了什么</h2>
+<p>一个早期 FFN 算出的特征，可能要到很多层之后才派上用场。多路残差提供了两种调节办法：写入时决定把它存到哪些 stream，读取时决定从哪些 stream 取回；还可以让中间的混合矩阵不断重新分配它。</p>
+<p>固定一个 token，设第 \(k\) 个子层的输出是 \(o_k\)，第 \(j\) 个子层读取的输入是 \(u_j\)，且 \(j&gt;k\)。用 \(p_j\in\mathbb R^n\) 表示后层的读门、\(q_k\in\mathbb R^n\) 表示前层的写门，\(M_t\in\mathbb R^{n\times n}\) 表示中间第 \(t\) 层的 stream 混合。这里 \(p,q\) 统一表示实际使用的门值；SimpleHC 中就是前文带横线、从各自组入口生成的门控，前后两层可以跨组。沿残差支路展开，\(o_k\) 在 \(u_j\) 中的系数是：</p>
+\[
+ c_{j,k}=p_j^\top
+ \underbrace{M_{j-1}M_{j-2}\cdots M_{k+1}}_{\text{写入之后、读取之前的重新分配}}
+ q_k.
+\]
+<p>相邻两个子层之间没有中间混合，括号中的乘积取单位矩阵。这个式子把三件事串起来了：\(q_k\) 分配输出，中间矩阵改变分配，\(p_j\) 收集结果。</p>
+
+<h3>读写门可以直接学历史权重</h3>
+<p>identityHC 和 SimpleHC 都令中间混合为单位矩阵，于是上式缩成 \(c_{j,k}=p_j^\top q_k\)。例如，前层把输出按 \((1,0.5)\) 写到两条 stream，后层按 \((0.6,0.4)\) 读取，就得到 \(0.6\times1+0.4\times0.5=0.8\) 倍的历史输出。写门与读门合作，便能为不同的前后层组合形成不同权重。</p>
+<p>信息仍会经过计算分支在 stream 之间交流：读门先把多条 stream 汇成一个 \(C\) 维输入，attention 或 FFN 加工它，写门再把结果送回多条 stream。恒等映射保留了旧状态的直通路径，跨 stream 的新信息由这个非线性分支产生。</p>
+<p>SimpleHC 的读门用 sigmoid，写门用两倍 sigmoid。对 \(n\) 条 stream，每个读系数在 \((0,1)\)，写系数在 \((0,2)\)，因此每一对前后层满足：</p>
+\[
+ 0&lt;c_{j,k}=\sum_{s=1}^{n}p_{j,s}q_{k,s}&lt;2n.
+\]
+<p>四条 stream 对应上界 8。这个上界控制单个历史输出的<strong>直接残差路径系数</strong>；整个网络的尺度与梯度还取决于许多历史项的累加、计算分支以及门对输入的敏感程度。</p>
+
+<h3>混合矩阵提供的自由度在哪里？</h3>
+<p>换一种设计：读门固定为 \(p_j=\mathbf1/n\)，即平均读取；写门固定为 \(q_k=\mathbf1\)，即把输出同样写入所有 stream。此时可学习的历史权重来自中间混合：</p>
+\[
+ c_{j,k}=\frac1n\mathbf1^\top
+ \bigl(M_{j-1}\cdots M_{k+1}\bigr)\mathbf1.
+\]
+<p>无约束矩阵可以产生带正负号、幅度各异的系数，也会沿深度反复放大某些方向。例如，每次把同一方向放大 1.01 倍，连续 100 次就成为 \(1.01^{100}\approx2.70\) 倍。</p>
+<p>完全双随机的矩阵元素非负，行和、列和都是 1。它保持全一向量，也保持对 stream 求和，因此上面固定读写门的系数恰好是 \(c_{j,k}=1\)。这解释了两类交互的分工：可学习读写门直接选择历史权重；无约束混合通过途中变换学习权重。双随机约束收紧途中变换的自由度，同时保留可学习读写门提供的选择能力。</p>
+
+<h3>稳定性要同时检查数值和导数</h3>
+<p>对完全双随机矩阵 \(M\)，有 \(\|M\|_2\leq1\)：把矩阵固定以后，这条线性路径的欧氏范数受到控制。训练中的混合矩阵还会随输入 \(X\) 改变。若 \(Y=M(X)X\)，输入发生一个小扰动 \(\mathrm dX\)，输出的变化为：</p>
+\[
+ \mathrm dY=
+ \underbrace{M\,\mathrm dX}_{\text{沿当前矩阵传播}}
+ +\underbrace{(\mathrm dM)X}_{\text{输入改变了混合方式}}.
+\]
+<p>工程诊断因此有两个层面。前向记录 FFN 输出尺度、混合前后 RMS，以及有限轮 Sinkhorn 的实际行列和，能定位异常值从哪里进入、在哪一步继续增大。反向分别记录固定矩阵路径和动态门路径的梯度，能检查混合方式对输入的敏感性。完整网络的稳定性需要把这两类观测连接起来。</p>
+<h3>压力实验里，异常从哪里开始</h3>
+<p>在230B-A6B、10倍参考学习率的压力实验中，峰值学习率为 \(6.2\times10^{-3}\)，warmup为4000步，三种配置都运行28,000步。mHC出现约 \(1.9\times10^6\) 的梯度峰值，SimpleHC和identityHC保持有界。一次捕获的早层MoE事件中，输入RMS为0.294，写入门控之前的FFN输出RMS已达到 \(2.31\times10^4\)。这一步把异常的起点定位到了计算分支。</p>
+<p>另一次记录中，20轮Sinkhorn后的行和仍为 \((2,1,0.5,0.5)\)，混合把同一token的RMS从 \(5.42\times10^4\) 进一步放大到 \(7.50\times10^4\)。一次反向尖峰的动态混合门输入梯度约为固定矩阵路径的9.4倍。它提示诊断时既要检查分支输出，也要检查归一化误差与动态导数；动态路径的异常究竟来自数学敏感性还是反向数值效应，还需要进一步定位。</p>
+<p><strong>这项简化的取舍很清楚：</strong>保留动态读写门来选择历史信息，以单位矩阵传递旧 stream，消除反复混合及其额外的动态梯度路径。它提供了更简单的传播结构；最终训练质量和稳定范围，则由相应规模、学习率与数值实现下的实验来确定。</p>
+</section>
+
+
+<section id="evidence"><h2>9. 质量、速度与规模的证据</h2>
+<p>三个实验分别回答质量能否保持、实现能否加速，以及压力下能否训练。把设置和结论放在一起，才方便决定自己的下一次实验。</p>
+<div class="table-wrap"><table><thead><tr><th>问题</th><th>实验配置</th><th>主要观察</th></tr></thead><tbody>
+<tr><td>组件与共享方式</td><td>15B-A1B，24 层，宽1792</td><td>读写门控 + 恒等残差有效；共享4子层保留接近参考的质量</td></tr>
+<tr><td>更大模型的质量</td><td>30B-A2B，32 层，宽2048</td><td>SimpleHC、mHC、identityHC 的验证 loss 均为1.561</td></tr>
+<tr><td>效率随宽度变化</td><td>固定8层，宽1024–6144；BF16、序列8192、CUDA Graph，无激活重算</td><td>最高宽度时，专用 SimpleHC 实现额外训练时间2.4%</td></tr>
+<tr><td>稳定性压力</td><td>230B-A6B，64层，宽2816，10倍参考学习率，28,000步</td><td>SimpleHC、identityHC 保持有界梯度；mHC 出现大幅梯度与 loss spike</td></tr>
+</tbody></table></div>
+<p>30B-A2B 的十四项平均分为：Vanilla 59.3、mHC 62.9、identityHC 62.8、SimpleHC 63.1。具体任务有升有降：SimpleHC 的 MATH 为 41.5，mHC 为 38.4；HumanEval 则分别为 45.1 和 47.6。整体支持“简化后质量相近”的判断。公开配置中的训练 token 总量尚缺，训练预算匹配需要在复现时补齐。</p>
+<h3>额外开销下降，换算成整步速度是多少</h3>
+<p>在宽度 6144 的八层效率测试里，把 Vanilla 的单步时间记为 \(t_0\)。高效 mHC 约为 \(1.070t_0\)，SimpleHC 为 \(1.024t_0\)。所以相对 mHC，整步用时减少</p>
+\[
+ 1-\frac{1.024}{1.070}\approx4.30\%,
+ \qquad
+ \frac{1.070}{1.024}\approx1.045.
+\]
+<p>右边是相同工作量下的吞吐倍率，约提升 4.5%。若某个匹配配置的 mHC 训练要 1000 GPU 小时，按这个比值估算，SimpleHC 约需 957 GPU 小时。这是由报告比例换算的预算示例，实际部署应在目标深度、并行方式和重算配置上测量。</p>
+<p>宽度 1024 时，mHC、identityHC、SimpleHC 的额外开销分别为 26.8%、10.1%、6.3%。随着宽度增加，主要专家矩阵乘法的成本上升，多流连接的相对占比下降。仅删混合与进一步共享访问，分别改善了不同部分的成本。</p>
+<p>截至 2026-11-11，官方项目公开了报告和图表，训练代码与高效 kernel 尚待发布；报告也未列出效率测试的 GPU 型号、卡数和具体并行配置。当前可复现的起点是验证计算等价性，再在自己的 GPU 上实现读写融合、测整步收益。下方 CPU 实验覆盖第一步。</p>
+<p><strong>SimpleHC 的核心价值，是让残差结构与执行计划一起变简单。</strong>读写门控保留选择信息的能力，恒等路径使历史贡献可以直接展开，共享入口把多次宽状态访问合并。最终效果来自这三者的配合，以及把公式落实为低中间存储的 kernel。</p>
+</section>
+
+<section id="practice"><h2>10. 计算题与可运行实验</h2>
+<div class="article-exercise"><h3>练习一：一次写入经过两条流，后面读到多少</h3><p>入口 \(X=(2,6)^\top\)，第0个子层读取 \(p_0=(0.75,0.25)^\top\)，计算 \(F_0(u)=u/2\)，写入 \(q_0=(1,0.5)^\top\)。第1个子层读取 \(p_1=(0.25,0.75)^\top\)。分别通过完整状态和标量修正计算第1个子层的输入。</p><details><summary>展开解答</summary><p>先有 \(u_0=3,o_0=1.5\)。完整状态更新为 \((3.5,6.75)^\top\)，随后读取 \(0.25\times3.5+0.75\times6.75=5.9375\)。分组方法的基础输入为5，修正系数为 \(p_1^\top q_0=0.625\)，因此 \(5+0.625\times1.5=5.9375\)。两种执行对同一组门控得到相同结果。</p></details></div>
+<div class="article-exercise"><h3>练习二：增加组长，为什么流量会回升</h3><p>四条流下，计算 \(K=4,8,16\) 时每 token、每子层的前向连接流量。若只保存组入口，三种配置的残差入口存储分别减少多少？</p><details><summary>展开解答</summary><p>代入 \(Q_{\mathrm{act}}(K)/C=K/2+3.5+14/K\)，得到 \(9,9.25,12.375\)。对应残差入口状态的理想减少比例为 \(1-1/K\)，即75%、87.5%、93.75%。组长增大持续减少入口存储，修正产生的流量却逐渐增加。选择组长要分别查看流量、存储、质量三项。</p></details></div>
+<div class="article-exercise"><h3>练习三：去掉修正还剩多少顺序依赖</h3><p>保持组入口门控和最终写回，但令组内所有 \(D_{ab}=0\)。四个子层的输入如何变化？哪一项训练机制被改变？</p><details><summary>展开解答</summary><p>各层输入变成 \(u_{L+a}=V_{:,a}=X_L^\top\bar p_{L+a}\)。它们都仅由入口生成，后一个子层的输入失去了前一个子层的新输出。组末依然汇总了所有输出，但组内四步顺序的非线性加工被改成对入口分别加工。这与消融中 loss 从1.660升至1.705对应。</p></details></div>
+<div class="article-exercise"><h3>练习四：把额外开销换算成训练预算</h3><p>同一工作量下，mHC 用时为基线的1.07倍，SimpleHC为1.024倍。mHC任务需要400张卡运行10天，其他条件保持一致，按这个比例估计节省多少 GPU 天？</p><details><summary>展开解答</summary><p>原预算4000 GPU天。新预算为 \(4000\times1.024/1.07\approx3828.04\) GPU天，节省约171.96 GPU天。保持400张卡时约节省0.430天，即10.32小时。预算预测成立的前提是目标配置获得相同的整步时间比例；应先用真实 batch、并行与重算做短程测量。</p></details></div>
+<h3 id="lab">运行一个小实验</h3><p><a href="/posts/simple-hyper-connections/lab.py" download>下载 lab.py</a>，准备 Python 与 NumPy 后运行：</p><pre><code>python lab.py</code></pre>
+<p>实验用小型非线性 tanh 子层和输入相关门控，对比同一组门控下的逐层完整状态更新与分组展开；float64 下最大误差约为 \(5.6\times10^{-16}\)。随后检查完整反向传播，包括修正矩阵、sigmoid 和 RMSNorm，用中心差分核对入口及六类参数的方向导数。</p>
+<p>它还会显示去掉修正、复用一对门控、改成逐层当前状态门控时的输出差异，并打印不同组长的流量账本。最后出现 <code>all checks passed</code>。可以修改组长和子层权重尺度，分别观察访问量与函数变化；质量上的取舍再通过固定训练预算的消融比较。</p>
+</section>
+
+<section id="references"><h2>参考与延伸阅读</h2><ol>
+<li><a href="https://arxiv.org/abs/2611.05984v1">Zhang et al. · On the Design of Hyper-Connections: Simplification, Stability, and Scalability</a>，2026-11-04，v1。架构与精确展开见§2–3、附录B；前后向优化与流量见§4；消融与规模实验见表2–4；测试配置、存储和压力诊断见附录A、E。</li>
+<li><a href="https://github.com/aHapBean/SimpleHC">SimpleHC 官方项目</a>。2026-11-11访问时公开报告与图表，训练代码和高效kernel列为后续发布计划。</li>
+<li><a href="https://arxiv.org/abs/2409.19606">Hyper-Connections</a>；<a href="https://arxiv.org/abs/2512.24880">mHC: Manifold-Constrained Hyper-Connections</a>。站内可接着读<a href="/posts/hyper-connections/">多路信息交换</a>、<a href="/posts/manifold-hyper-connections/">双随机约束与有限精度</a>和<a href="/posts/attention-residuals/">沿深度选择信息</a>。</li>
+<li><a href="https://docs.pytorch.org/docs/2.15/tensor_view.html">PyTorch 2.15 · Tensor Views</a>：view共享底层数据的语义。结合SimpleHC附录A.2，可以核算被切片保活的基础读取缓冲。</li>
+<li><a href="https://docs.nvidia.com/cuda/archive/12.6.3/cuda-c-programming-guide/index.html#element-types-and-matrix-sizes">NVIDIA CUDA 12.6.3 · Element Types and Matrix Sizes</a>：矩阵指令支持的形状、数据类型与累积方式；具体kernel设计需要匹配目标架构。</li>
+</ol></section>
+
+</article><nav class="series-pager" data-series="hyperconnections"></nav></main>
+<footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
+<script type="application/json" id="math-definitions">{"global": {"state": {"label": "Xₗ · 子层入口残差状态", "description": "每个 token 的 n×C 矩阵；每行是一条残差流，每行有 C 个通道。"}, "read": {"label": "pₗ · 读取门控", "description": "n 维列向量。Xₗᵀpₗ 汇成 C 维子层输入；每项由 sigmoid 产生。"}, "write": {"label": "qₗ · 写入门控", "description": "n 维列向量。第 i 条残差流加上 qₗ,i 倍的子层输出；每项由两倍 sigmoid 产生。"}, "mixing": {"label": "Mₗ · 残差混合矩阵", "description": "n×n；第 i 行第 j 列表示旧流 j 对新流 i 的系数。SimpleHC 取单位矩阵。"}, "group": {"label": "K · 每组子层数", "description": "attention 与 FFN 各算一个子层。默认 K=4，覆盖两个 Transformer block。"}, "correction": {"label": "D · 组内标量修正矩阵", "description": "K×K 严格下三角矩阵。行 a 是读取的后层，列 b 是写入的前层；Dab=paᵀqb。"}, "traffic": {"label": "Qact(K) · 逻辑前向激活访问量", "description": "每 token、每子层的残差连接激活读写元素数，包含组内修正。n 是流数，C 是每流宽度，K 是组长。", "unit": "元素 / token / 子层"}}, "scopes": {}}</script>
+<script src="/assets/article-steps.js?v=1c7283b439be"></script>
+<script>
+(() => {
+'use strict';
+const shcGet=id=>document.getElementById(id),dot=(a,b)=>a.reduce((s,x,i)=>s+x*b[i],0),fmt=x=>Number(x.toFixed(6)).toString();
+const entry=[2,6],reads=[[.75,.25],[.25,.75],[.5,.5],[.8,.2]],writes=[[1,.5],[.5,1],[1,1],[.25,.75]],bases=reads.map(p=>dot(p,entry));
+const D=reads.map((p,a)=>writes.map((q,b)=>b<a?dot(p,q):0));
+const outputs=[],inputs=[],states=[entry.slice()];
+for(let a=0;a<4;a++){const u=bases[a]+outputs.reduce((s,o,b)=>s+D[a][b]*o,0);inputs.push(u);outputs.push(u/2);states.push(states[a].map((x,i)=>x+writes[a][i]*outputs[a]));}
+const steps=[
+{title:'入口：生成门与基础输入',caption:'四组读门和写门全部使用同一个入口状态。四个基础输入分别为 3、5、4、2.8。'},
+{title:'子层 0：直接使用基础输入',caption:'此前尚无输出，输入是 3。子层得到 o₀ = 1.5，把这个窄输出留给后续子层。'},
+{title:'子层 1：补回 o₀ 的贡献',caption:'第 0 层的写门与第 1 层的读门内积为 0.625，因此当前输入要加上 0.625 × o₀。'},
+{title:'子层 2：补回两个历史输出',caption:'输入由入口读取 4，加上 0.75 × o₀ 与 0.75 × o₁。两个输出都保留各自的贡献。'},
+{title:'子层 3：补回三个历史输出',caption:'输入由入口读取 2.8，加上 0.9 × o₀、0.6 × o₁ 和 1 × o₂。宽状态仍保存入口值。'},
+{title:'组出口：合并四次写入',caption:'把四个输出按各自的写门分配到两条流，一次写回。结果与逐子层写回一致。'}
+];
+const flow=ArticleSteps.mount('#shc-flow',{steps,duration:2400,render(step,index){
+ const done=Math.min(index,4),active=index>0&&index<5?index-1:-1;
+ shcGet('shc-current-title').textContent=step.title;
+ if(index===0){shcGet('shc-current-base').textContent='入口读取：p₀ᵀX₀ = 3；p₁ᵀX₀ = 5；p₂ᵀX₀ = 4；p₃ᵀX₀ = 2.8。';shcGet('shc-current-formula').textContent='Dₐ,ᵦ = pₐᵀqᵦ，b < a';shcGet('shc-current-reason').textContent='下面的下三角矩阵提前记录：哪个历史输出，以多大的系数进入哪个后续子层。';}
+ else if(index<5){const a=index-1;shcGet('shc-current-base').textContent='当前入口读取 = '+fmt(bases[a])+'；子层 '+a+' 的读门为 ['+reads[a].map(fmt).join(', ')+']。';shcGet('shc-current-formula').textContent='u'+['₀','₁','₂','₃'][a]+' = '+fmt(bases[a])+outputs.slice(0,a).map((o,b)=>' + '+fmt(D[a][b])+' × '+fmt(o)).join('')+' ≈ '+fmt(inputs[a]);shcGet('shc-current-reason').textContent='当前输出 o'+['₀','₁','₂','₃'][a]+' = u'+['₀','₁','₂','₃'][a]+' / 2 ≈ '+fmt(outputs[a])+'。'+(a?'式中每个乘积都把一个已产生的输出加回当前输入。':'这是本组产生的第一个输出。');}
+ else{shcGet('shc-current-base').textContent='两条流分别累加四个 q × o，读取一次入口，写出一次出口。';shcGet('shc-current-formula').textContent='X₄ = X₀ + q₀o₀ + q₁o₁ + q₂o₂ + q₃o₃';shcGet('shc-current-reason').textContent='最终状态 ≈ ['+states[4].map(fmt).join(', ')+']。现在两侧数值相同。';}
+ shcGet('shc-outputs').innerHTML=outputs.map((o,a)=>'<div class="shc-output'+(a<done?' is-done':'')+(a===active?' is-active':'')+'"><span>子层 '+a+' · 输出 o'+['₀','₁','₂','₃'][a]+'</span><strong>'+(a<done?fmt(o):'等待计算')+'</strong></div>').join('');
+ [0,1].forEach(i=>{shcGet('shc-reference-'+i).textContent=fmt(states[done][i]);shcGet('shc-deferred-'+i).textContent=fmt(index===5?states[4][i]:entry[i]);});
+ shcGet('shc-reference-note').textContent=done?'已按顺序累加 '+done+' 个子层的输出。':'每个子层结束后，把 q × o 加到两条流。';
+ shcGet('shc-deferred-note').textContent=index===5?'四个窄输出已经在组出口合并写回。':'宽状态保持入口值；已保留 '+done+' 个窄输出。';
+ let matrix='<span role="columnheader">D</span>'+[0,1,2,3].map(b=>'<span role="columnheader">写 '+b+'</span>').join('');
+ for(let a=0;a<4;a++){matrix+='<span role="rowheader">读 '+a+'</span>';for(let b=0;b<4;b++)matrix+='<span role="cell" aria-label="读子层 '+a+' 接收写子层 '+b+' 的系数 '+fmt(D[a][b])+'" class="shc-coeff'+(b>=a?' shc-inactive':'')+(a===active&&b<a?' is-active':'')+'">'+fmt(D[a][b])+'</span>';}
+ shcGet('shc-coefficients').innerHTML=matrix;
+}});
+const flowRoot=shcGet('shc-flow');flowRoot.insertBefore(flowRoot.querySelector('.article-step-controls'),flowRoot.querySelector('.shc-entry'));
+const trafficParts=k=>({wide:16/k,base:2,corr:(k-1)*(k+4)/(2*k)}),trafficTotal=k=>{const x=trafficParts(k);return x.wide+x.base+x.corr;};
+function drawTraffic(){const k=Number(shcGet('shc-group-size').value),q=trafficParts(k),total=trafficTotal(k);shcGet('shc-group-value').value=String(k);shcGet('shc-group-size').setAttribute('aria-valuetext',k+' 个子层');for(const key of ['wide','base','correction']){const value=key==='correction'?q.corr:q[key];shcGet('shc-q-'+key).textContent=fmt(value)+' C';shcGet('shc-bar-'+key).style.width=(value/18*100)+'%';}shcGet('shc-q-total').textContent=fmt(total)+' C';shcGet('shc-q-saved').textContent=((1-total/18)*100).toFixed(1)+'%';shcGet('shc-state-saved').textContent=((1-1/k)*100).toFixed(1)+'%';shcGet('shc-traffic-bar').setAttribute('aria-label','K 为 '+k+' 时，宽状态 '+fmt(q.wide)+' C，基础输入和输出 '+fmt(q.base)+' C，修正 '+fmt(q.corr)+' C，合计 '+fmt(total)+' C。');shcGet('shc-k-explanation').textContent=k===4?'K = 4 覆盖两个 Transformer block；在 K = 2、4、8、16 这组候选中，9 C 最低。':k===5?'这个逻辑模型的整数最小值出现在 K = 5：8.8 C。每组四个子层恰好覆盖两个完整 Transformer block。':k===1?'K = 1 回到逐子层执行，宽状态每步读写，历史修正为零。':k>5?'每组子层数继续增加时，越来越多的历史输出需要重新读取，修正访问量开始抵消宽状态复用的收益。':'每组包含较少子层时，历史修正较少，但宽状态的读写还需要更频繁地发生。';shcGet('shc-traffic-rows').innerHTML=[1,2,4,5,8,16].map(value=>{const p=trafficParts(value);return '<tr'+(k===value?' class="is-active"':'')+'><td>'+value+'</td><td>'+fmt(p.wide)+' C</td><td>'+fmt(p.corr)+' C</td><td>'+fmt(trafficTotal(value))+' C</td></tr>';}).join('');}
+shcGet('shc-group-size').addEventListener('input',drawTraffic);drawTraffic();
+window.simpleHCDemos={flow,inputs,outputs,states,drawTraffic};
+})();
+</script>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
+</body></html>

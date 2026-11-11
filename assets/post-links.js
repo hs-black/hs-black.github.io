@@ -158,7 +158,8 @@ window.POST_LINKS = {
   "deepseek-v4-flash",
   "deepseek-v4-flash-inference",
   "gradient-checkpointing",
-  "hyper-connections"
+  "hyper-connections",
+  "simple-hyper-connections"
  ],
  "mini-inference-engine": [
   "continuous-batching",
@@ -335,6 +336,12 @@ window.POST_LINKS = {
  "scaling-tensor-parallel": [
   "scaling-collectives",
   "scaling-context-parallel"
+ ],
+ "simple-hyper-connections": [
+  "attention-residuals",
+  "gradient-checkpointing",
+  "hyper-connections",
+  "manifold-hyper-connections"
  ],
  "smol-architecture": [
   "pretraining-stability",

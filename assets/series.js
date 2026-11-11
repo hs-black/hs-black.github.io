@@ -45,6 +45,7 @@
       posts: [
         ["hyper-connections", "Hyper-Connections：从一条残差流到多路信息交换"],
         ["manifold-hyper-connections", "mHC：用双随机约束稳定多路残差"],
+        ["simple-hyper-connections", "SimpleHC：把多路残差的读写合并起来"],
         ["attention-residuals", "Attention Residuals：沿深度选择信息"],
         ["effective-depth", "一个模型到底用了多少深度：测量、剪层与提前退出"],
       ],

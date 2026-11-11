@@ -19,6 +19,7 @@
   const KINDS = { article: ['文章', 'kind'], interactive: ['交互', 'kind interactive'], encrypted: ['加密', 'kind'] };
 
   const POSTS = [
+    {"slug": "simple-hyper-connections", "title": "SimpleHC：把多路残差的读写合并起来", "date": "2026-11-11", "kind": "interactive", "cat": "models", "tags": ["Hyper-Connections", "架构", "训练稳定性", "访存", "实验"], "desc": "从动态读写门控与恒等残差出发，推导共享入口、标量修正、18C 到 9C 的访问账本和反向融合，解释稳定性与真实实验范围；含交互图、计算题和 NumPy 实验。"},
     {"slug": "private-research-2026-11", "title": "加密研究笔记", "date": "2026-11-06", "kind": "encrypted", "cat": "basics", "tags": [], "desc": "这是一篇加密文章，输入密码后阅读。"},
     {"slug": "neural-network-initialization", "title": "神经网络初始化：从信号传播到训练动力学", "date": "2026-11-05", "kind": "interactive", "cat": "pretraining", "tags": ["初始化", "预训练", "优化", "稳定性", "实验"], "desc": "从 Xavier、He 与均值场相关性递推，讲到 Jacobian 谱、动力学等距性、深线性学习、NTK、Fixup 与 μP；配交互图、计算题、工程案例和统一的 NumPy 对照实验。"},
     {"slug": "iquest-q1", "title": "IQuest-Q1：Stable SplitNorm、混合注意力与递归 MTP", "date": "2026-10-23", "kind": "interactive", "cat": "models", "tags": ["模型架构", "MoE", "长上下文", "训练稳定性", "投机解码"], "desc": "从残差尺度、query-aware sink 与 25 层全局注意力，推导 512K 上下文的 KV 账本、跨卡 softmax 合并和递归投机解码；含交互图、习题与 NumPy 实验。"},
