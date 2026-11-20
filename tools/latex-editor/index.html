@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LaTeX 编辑器 · Zunzhe Zhang</title>
+  <meta name="description" content="打开本地 .tex 文件，在浏览器中编辑正文、预览公式、编译 PDF 并下载源码。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="editor.css">
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="preview.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="site-header wrap tool-wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav" aria-label="站点导航"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/">Blog</a><a href="/tools/">Tools</a></nav>
+  </header>
+  <main class="wrap tool-wrap">
+    <a class="back" href="/tools/">← 小工具</a>
+    <div class="workhead">
+      <div><h1>LaTeX 编辑器</h1><p>打开本地 .tex 文件，边写边看排版。源码在浏览器中处理。</p></div>
+      <div class="actions">
+        <button id="open" class="primary" type="button">打开 .tex</button>
+        <input type="file" id="file" accept=".tex,text/x-tex,text/plain" hidden>
+        <button id="download" type="button">下载源码</button>
+      </div>
+    </div>
+    <noscript><p>请启用 JavaScript 以打开文件和预览排版。</p></noscript>
+    <div class="workbar">
+      <span id="filename" dir="auto">geometric-series.tex</span>
+      <div class="views" role="group" aria-label="工作区布局">
+        <button type="button" data-view="split" aria-pressed="true">分栏</button><button type="button" data-view="source" aria-pressed="false">源码</button><button type="button" data-view="preview" aria-pressed="false">预览</button>
+      </div>
+    </div>
+    <div class="workspace" id="workspace" data-view="split">
+      <section class="pane source-pane" aria-labelledby="source-title">
+        <div class="pane-head"><h2 id="source-title"><label for="source">LaTeX 源码</label></h2><span id="position" class="readout">行 1 · 列 1</span></div>
+        <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft" aria-label="LaTeX 源码"></textarea>
+      </section>
+      <section class="pane preview-pane" aria-labelledby="preview-title">
+        <div class="pane-head"><h2 id="preview-title">即时预览</h2><span id="preview-status" class="readout" role="status"></span></div>
+        <div class="preview-scroll" tabindex="0" aria-label="排版预览"><article id="preview" class="paper"></article></div>
+      </section>
+    </div>
+    <details id="diagnostics" hidden><summary id="diagnostics-title">预览提示</summary><ul id="warning-list"></ul></details>
+    <div class="file-status"><span id="draft-status">示例文档</span><span id="file-status" role="status"></span></div>
+    <section class="pdf-panel" aria-labelledby="pdf-title">
+      <div class="pdf-head"><div><h2 id="pdf-title">PDF 排版</h2><p>在浏览器中运行 pdfLaTeX，首次编译约需加载 9 MB 资源。使用 ctex 或 fontspec 的文档可在上方查看中文正文和公式。</p></div>
+        <div class="actions"><button id="compile" type="button">编译 PDF</button><button id="cancel" type="button" hidden>取消</button><a id="pdf-download" class="button" hidden>下载 PDF</a></div>
+      </div>
+      <label class="attachments">添加同目录附件（子文档、图片或宏包）<input id="attachments" type="file" multiple></label>
+      <p id="pdf-status" role="status" hidden></p>
+      <details id="pdf-log" hidden><summary>编译日志</summary><pre id="log-content"></pre></details>
+      <iframe id="pdf-viewer" title="编译后的 PDF" hidden></iframe>
+    </section>
+  </main>
+  <footer class="tool-credits wrap tool-wrap"><a href="https://github.com/hs-black/hs-black.github.io/tree/main/tools/latex-editor">编辑器源码</a><span aria-hidden="true"> · </span><a href="https://github.com/hs-black/hs-black.github.io/blob/main/tools/latex-editor/vendor/pdftex/NOTICE.md">排版引擎与许可</a></footer>
+</body>
+</html>
