@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Markdown 在线编辑器 · Zunzhe Zhang</title>
+  <meta name="description" content="在浏览器中编辑本地 Markdown，实时预览表格、代码、任务列表和数学公式，保存并下载 .md 文件。">
+  <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="../editor-workspace.css">
+  <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="stylesheet" href="editor.css">
+  <script defer src="vendor/markdown-it-15.0.3/markdown-it.min.js"></script>
+  <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
+  <script defer src="preview.js"></script>
+  <script type="module" src="app.js"></script>
+</head>
+<body>
+  <header class="site-header wrap tool-wrap">
+    <a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a>
+    <nav class="site-nav" aria-label="站点导航"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/">Blog</a><a href="/tools/">Tools</a></nav>
+  </header>
+  <main class="wrap tool-wrap">
+    <a class="back" href="/tools/">← 小工具</a>
+    <div class="workhead">
+      <div><h1>Markdown 编辑器</h1><p>打开本地笔记，边写边看排版。草稿保存在当前浏览器。</p></div>
+      <div class="actions">
+        <button id="open" class="primary" type="button">打开 .md</button>
+        <input id="file" type="file" accept=".md,.markdown,.mdown,text/markdown" hidden>
+        <button id="new" type="button">新建</button><button id="download" type="button" title="下载 Markdown 源码（Ctrl / ⌘ + S）">下载 .md</button>
+      </div>
+    </div>
+    <noscript><p>请启用 JavaScript 以打开文件和预览排版。</p></noscript>
+    <div class="workbar"><span id="filename" dir="auto">推理延迟笔记.md</span>
+      <div class="views" role="group" aria-label="工作区布局"><button type="button" data-view="split" aria-pressed="true">分栏</button><button type="button" data-view="source" aria-pressed="false">源码</button><button type="button" data-view="preview" aria-pressed="false">预览</button></div>
+    </div>
+    <div class="workspace" id="workspace" data-view="split">
+      <section class="pane source-pane" aria-labelledby="source-title">
+        <div class="pane-head"><h2 id="source-title"><label for="source">Markdown 源码</label></h2>
+          <div class="format-tools" role="group" aria-label="插入 Markdown 格式">
+            <button type="button" data-format="bold" aria-label="加粗" title="加粗（Ctrl / ⌘ + B）"><b>B</b></button><button type="button" data-format="italic" aria-label="斜体" title="斜体（Ctrl / ⌘ + I）"><i>I</i></button><button type="button" data-format="code" aria-label="行内代码" title="行内代码">&lt;/&gt;</button>
+          </div>
+        </div>
+        <textarea id="source" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off" wrap="soft" aria-label="Markdown 源码" placeholder="从一个标题开始，例如 # 我的笔记"></textarea>
+      </section>
+      <section class="pane preview-pane" aria-labelledby="preview-title">
+        <div class="pane-head"><h2 id="preview-title">即时预览</h2><span id="preview-status" class="readout" role="status"></span></div>
+        <div class="preview-scroll" tabindex="0" aria-label="Markdown 排版预览"><article id="preview" class="paper"></article></div>
+      </section>
+    </div>
+    <details id="diagnostics" hidden><summary id="diagnostics-title">预览提示</summary><ul id="warning-list"></ul></details>
+    <div class="file-status"><span id="draft-status">示例文档</span><span id="position">行 1 · 列 1</span><span id="file-status" role="status"></span></div>
+    <details class="image-settings"><summary>文档配图</summary>
+      <p>选择文档引用的图片。例如 <code>![结果](images/result.png)</code> 对应 <code>result.png</code>。图片供本次预览使用。</p>
+      <input id="images" type="file" accept="image/*" multiple aria-label="选择本地配图"><span id="image-status" role="status"></span>
+      <label class="remote-images"><input id="remote-images" type="checkbox"> 加载本文引用的 HTTPS 网络图片</label>
+    </details>
+  </main>
+</body>
+</html>

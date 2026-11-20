@@ -1,0 +1,41 @@
+.tool-wrap { max-width: 1440px; padding-inline: clamp(16px, 4vw, 64px); }
+.tool-credits { padding-bottom: 22px; font-size: 12px; color: var(--text-soft); } .tool-credits a { color: inherit; }
+main.tool-wrap { padding-bottom: 48px; }
+button, .button { display: inline-flex; align-items: center; justify-content: center; min-height: 38px; padding: 6px 15px; border: 1px solid var(--border); border-radius: 7px; background: var(--surface); color: var(--text); font: 550 14px/1.4 var(--font-sans); cursor: pointer; }
+button:hover, .button:hover { border-color: var(--accent); text-decoration: none; }
+button:disabled { opacity: .6; cursor: wait; }
+button:focus-visible, a:focus-visible, summary:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--text); color: var(--bg); border-color: var(--text); }
+[hidden] { display: none !important; }
+.back { font-size: 13px; color: var(--text-soft); }
+.workhead, .workbar, .pane-head, .file-status, .pdf-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.workhead { align-items: flex-end; flex-wrap: wrap; margin: 8px 0 24px; }
+h1 { margin: 0; font-size: clamp(29px, 4vw, 40px); line-height: 1.25; letter-spacing: -.045em; }
+.workhead p, .pdf-head p { margin: 6px 0 0; color: var(--text-soft); font-size: 14px; }
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.workbar { padding: 0 0 12px; min-width: 0; }
+#filename { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font: 13px/1.6 var(--font-mono); }
+.views { display: flex; flex-shrink: 0; border: 1px solid var(--border); border-radius: 7px; padding: 2px; background: var(--bg-soft); }
+.views button { border: 0; padding: 4px 11px; min-height: 28px; font-size: 12px; color: var(--text-soft); background: transparent; }
+.views button[aria-pressed="true"] { color: var(--text); background: var(--surface); box-shadow: 0 1px 3px #0002; }
+.workspace { display: grid; grid-template-columns: minmax(0, 0.95fr) minmax(0, 1.05fr); gap: 12px; }
+.workspace[data-view="preview"] .source-pane, .workspace[data-view="source"] .preview-pane { display: none; }
+.workspace:not([data-view="split"]) { grid-template-columns: minmax(0, 1fr); }
+.pane { overflow: hidden; min-width: 0; display: flex; flex-direction: column; border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.pane-head { padding: 10px 16px; min-height: 42px; border-bottom: 1px solid var(--border); }
+.pane-head h2, .pdf-panel h2 { font: 650 15px/1.5 var(--font-sans); margin: 0; }
+.readout, .file-status, .attachments { color: var(--text-soft); font-size: 12px; }
+.readout { font-variant-numeric: tabular-nums; }
+#source, .preview-scroll { height: clamp(400px, 62vh, 780px); }
+#source { resize: none; width: 100%; border: 0; background: var(--surface); color: var(--text); font: 14px/1.75 var(--font-mono); tab-size: 2; padding: 18px; }
+#source:focus-visible { outline-offset: -2px; }
+.preview-scroll { background: var(--bg-soft); padding: 16px; overflow: auto; }
+.paper { min-height: 100%; max-width: 54rem; margin: auto; padding: clamp(20px, 3vw, 48px); background: var(--surface); box-shadow: 0 1px 4px #0001; color: var(--text); font: 16px/1.8 var(--font-serif); overflow-wrap: anywhere; }
+.paper p { margin: .65em 0; } .paper ol, .paper ul { padding-left: 1.5em; }
+.paper pre, .paper .katex-display { max-width: 100%; overflow-x: auto; overflow-y: hidden; }
+.paper .katex { font-size: 1.08em; }
+.paper table { border-collapse: collapse; margin: .75em auto; } .paper td, .paper th { border-bottom: 1px solid var(--border); padding: .18em .8em; }
+.file-status { flex-wrap: wrap; padding: 9px 2px; }
+#diagnostics, #pdf-log { font-size: 13px; color: var(--text-soft); padding: 8px 0; }
+summary { cursor: pointer; font-weight: 600; } #warning-list { max-height: 11em; overflow-y: auto; overflow-wrap: anywhere; }
+@media(max-width: 760px) { .workspace { grid-template-columns: minmax(0, 1fr); } .workspace[data-view="split"] #source { height: clamp(190px, 30vh, 320px); } .workspace[data-view="split"] .preview-scroll { height: 56vh; } .workhead { margin-bottom: 16px; } .preview-scroll { padding: 10px; } .tool-wrap.site-header { gap: 6px; padding-block: 16px; } .site-nav { gap: 10px; font-size: 13px; } }

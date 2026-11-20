@@ -1,0 +1,33 @@
+.workspace .pane-head { min-height: 48px; }
+.workspace .readout { display: inline; margin: 0; }
+.format-tools { display: flex; gap: 3px; }
+.format-tools button { padding: 3px 6px; min-width: 28px; min-height: 27px; border-color: transparent; background: transparent; color: var(--text-soft); font: 14px/1.2 var(--font-mono); }
+.format-tools button:hover { background: var(--bg-soft); color: var(--text); }
+.paper { font: 15px/1.8 var(--font-sans); }
+.paper > :first-child { margin-top: 0; }
+.paper h1, .paper h2, .paper h3, .paper h4 { line-height: 1.35; margin: 1.2em 0 .4em; }
+.paper h1 { font-size: 1.65em; letter-spacing: -.035em; }
+.paper h2 { font-size: 1.28em; border-bottom: 1px solid var(--border); padding-bottom: .22em; }
+.paper h3 { font-size: 1.1em; }
+.paper pre { margin: .7em 0; padding: .7em 1em; border: 1px solid var(--border); border-radius: 7px; background: var(--bg-soft); }
+.paper code { font: .92em/1.55 var(--font-mono); background: var(--code-bg); border-radius: 4px; padding: .1em .25em; }
+.paper pre code { padding: 0; background: none; }
+.paper table { display: block; max-width: 100%; overflow-x: auto; margin-inline: 0; font-size: .94em; }
+.paper th, .paper td { padding: .28em .8em; border: 1px solid var(--border); }
+.paper th { background: var(--bg-soft); }
+.paper blockquote { margin-inline: 0; border-inline-start: 3px solid var(--accent); padding-inline-start: 1em; color: var(--text-soft); }
+.paper hr { border: 0; border-top: 1px solid var(--border); }
+.paper img { max-width: 100%; height: auto; }
+.paper input[type="checkbox"] { accent-color: var(--accent); }
+.paper .md-task { list-style: none; }
+.file-status { justify-content: start; }
+#position { margin-left: auto; }
+#file-status:empty { display: none; }
+.image-settings { font-size: 13px; color: var(--text-soft); padding: 10px 0; border-top: 1px solid var(--border); }
+.image-settings summary { width: fit-content; }
+.image-settings p { margin: 8px 0; }
+.image-settings input { max-width: 100%; }
+.remote-images { display: block; margin-top: 10px; }
+.md-image-placeholder { color: var(--text-soft); font-size: .92em; }
+.md-math-error { color: var(--accent-2); }
+.md-table-scroll { overflow-x: auto; }
