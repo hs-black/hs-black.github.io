@@ -26,46 +26,48 @@
 <main class="wrap"><header class="post-header"><h1>Attention Residuals：沿深度选择信息</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header>
 <nav class="series" data-series="hyperconnections"></nav>
 <article class="prose">
-<p>读到一个代词时，浅层可能已经提取出候选实体，中层在组织句法关系，深层要决定它指向谁。标准 Transformer 把每个子层的新结果累加到同一条残差流里；到了深层，早期的信息仍在累加结果中，但读取它需要从混合表示里重新提取。Attention Residuals（AttnRes）保留沿途的表示，让当前子层按内容选择：这次需要多少 embedding、多少早期结果、多少刚算出的特征？</p>
-<p>这条路线与 <a href="/posts/hyper-connections/">Hyper-Connections</a>、<a href="/posts/manifold-hyper-connections/">mHC</a> 关注同一个问题——信息怎样穿过深度。HC 扩展同时运行的残差流，mHC 约束流之间的混合，AttnRes 选择历史深度上的来源。它们给出不同的状态组织方式，也带来不同的显存与通信需求。</p>
+<p>读到一个代词时，浅层可能已经抓出了候选实体，中层在搭句法骨架，深层才拍板它指代谁。标准 Transformer 把每个子层的输出一股脑加进同一条残差流里，等传到深层，早期信息虽然还在，却早和后面几十层的输出搅成了一团，深层只能自己再费劲扒出来。Attention Residuals（AttnRes）换了个思路：把沿途的表示留下来，让当前子层按内容自己挑——这一步要多少 embedding、多少浅层特征、多少刚算出来的结果，由深度方向的 attention 说了算。</p>
+<p>它和 <a href="/posts/hyper-connections/">Hyper-Connections</a>（HC）、<a href="/posts/manifold-hyper-connections/">mHC</a> 盯着的是同一个问题：信息怎么穿过几十上百层网络。区别在于做法不同——HC 把残差流加宽成多条并行通道，mHC 给通道混合套上流形约束，AttnRes 则直接把注意力拉到深度轴上，去翻历史层的账。下面我们从公式一路算到显存和跨卡通信，看看这笔账到底怎么算。</p>
 <nav class="toc"><strong>目录</strong><ol><li><a href="#depth">把残差展开，看到深度轴</a></li><li><a href="#weights">一次深度 attention 怎样算</a></li><li><a href="#blocks">Block AttnRes 怎样管理历史</a></li><li><a href="#hardware">让历史只读一次</a></li><li><a href="#training">梯度、重算与跨卡状态</a></li><li><a href="#practice">实验与练习</a></li></ol></nav>
 
 <h2 id="depth">把残差展开，看到深度轴</h2>
-<p>以一个 token 的表示为观察对象，宽度为 \(d\)。用 \(l\) 编号 attention 或 MLP 子层，一个常见 decoder block 包含两个这样的子层。把子层内部的 normalization 也包含在函数 \(F_l\) 里，标准 PreNorm 残差写成：</p>
+<p>先盯住单个 token，隐藏维度记作 \(d\)。用 \(l\) 给 attention 和 MLP 子层统一编号（一个常见 decoder block 算两个子层），把子层里的 normalization 一并包进 \(F_l\)，标准 PreNorm 残差就是：</p>
 $$x_{l+1}=x_l+F_l(x_l),\qquad x_1=e.$$
-<p>这里 \(e\in\mathbb R^d\) 是 embedding。设子层 \(i\) 的新输出为 \(v_i=F_i(x_i)\)，再令 \(v_0=e\)，反复展开便得到 \(x_l=\sum_{i=0}^{l-1}v_i\)。每个来源到当前残差流的直接系数都是 1。网络当然可以在 \(F_i\) 中学会缩放或抵消；从这条直达路径看，聚合规则始终是加法。</p>
-<p>当来源近似不相关、方差相近时，累加的方差随来源数增长，RMS 约按来源数的平方根增长。后续 RMSNorm 再把整个向量缩回固定尺度，一个新子层的增量在总和中的相对份额就会变小。真实模型的相关性和尺度会改变这个增长规律；诊断时可以逐层记录残差 RMS、分支输出 RMS，以及两者的比值。深层分支相对份额持续下降，是值得检查的信号。</p>
-<p>Full AttnRes 把输入改成历史输出的加权和。对子层 \(l\)，共有 \(l\) 个来源：embedding 和前面 \(l-1\) 个子层的输出。</p>
+<p>这里 \(e\in\mathbb R^d\) 是 embedding。把子层 \(i\) 的分支输出记作 \(v_i=F_i(x_i)\)，再令 \(v_0=e\)，反复展开就能看到残差流的真面目：\(x_l=\sum_{i=0}^{l-1}v_i\)。不管哪一层算出来的东西，送进残差流的系数全都是 1。网络当然可以靠 \(F_i\) 自己去缩放甚至抵消旧特征，但残差连接本身只会一路做加法。</p>
+<p>一路无脑加法有个很现实的麻烦：粗略估算，只要各层输出之间不算强相关、量级也相近，累加和的方差就会随深度线性增长，RMS 大约按 \(\sqrt{l}\) 往上飘。等进入下一个子层，PreNorm 一把把它缩回固定尺度，刚算出来的新增量在总和里占的份额就越来越小——到了深层，新分支很容易被前面几十层的历史「淹掉」。真实模型里各层存在相关性，增长不会严格贴着 \(\sqrt{l}\) 走，但逐层看残差 RMS 和分支输出 RMS 的比值，深层分支相对变弱是很常见的现象。</p>
+<p>Full AttnRes 做的改动非常直接：不再把历史硬加在一起，而是把第 \(l\) 个子层的输入换成历史输出的加权和。算上 embedding 和前面 \(l-1\) 个子层的输出，此时共有 \(l\) 个可选来源：</p>
 $$\htmlData{symbol=h}{h_l}=\sum_{i=0}^{l-1}\htmlData{symbol=alpha}{\alpha_{i\to l}}\,\htmlData{symbol=v}{v_i},\qquad v_l=F_l(h_l),\qquad \sum_{i=0}^{l-1}\alpha_{i\to l}=1.$$
-<p>各来源保存独立表示；当前子层先选择，再计算自己的新输出。最后的输出聚合也可以用一个查询读取全部来源。沿深度重读同一 token 的表示保持了已有的因果关系：只要每个 \(F_l\) 的序列 attention 遵守 causal mask，聚合已有表示就继续遵守它。</p>
+<p>每个历史来源各自存着，当前子层先按权重聚合成 \(h_l\)，再算自己的输出 \(v_l\)；跑完所有层后，最终输出层也可以用同样的方式再聚合一次。至于因果性不用担心：这里重读的始终是<strong>同一个 token</strong> 在前面几层的表示，并不跨时间步，只要每个 \(F_l\) 里的序列注意力遵守 causal mask，沿深度聚合就不会泄露未来信息。</p>
 
 <h2 id="weights">一次深度 attention 怎样算</h2>
-<p>选取一个 batch、一个 token，历史来源排成 \(V_l\in\mathbb R^{l\times d}\)。子层 \(l\) 有自己的可学习查询 \(q_l\in\mathbb R^d\)，同一子层的所有 token 共享这个参数。对每个来源做 RMSNorm 得到 key，点积形成分数，softmax 的归一化轴是<strong>来源深度</strong>：</p>
+<p>还是看单个 token，把它的 \(l\) 个历史来源摞成矩阵 \(V_l\in\mathbb R^{l\times d}\)。每个子层 \(l\) 配一个可学习的查询向量 \(q_l\in\mathbb R^d\)，同一层的全部 token 共用这个参数。把每个来源过一遍 RMSNorm 当 key，和 \(q_l\) 做点积打分，再沿<strong>来源深度</strong>做 softmax：</p>
 $$\begin{aligned}
 \htmlData{symbol=k}{k_{i,l}}&=\gamma_l\odot\frac{v_i}{\sqrt{\frac1d\sum_{r=1}^{d}v_{i,r}^{\,2}+\varepsilon}},\\
 s_{i,l}&=\htmlData{symbol=q}{q_l}^{\mathsf T}k_{i,l},\\
 \alpha_{i\to l}&=\frac{\exp(s_{i,l}-m_l)}{\sum_{j=0}^{l-1}\exp(s_{j,l}-m_l)},\qquad m_l=\max_j s_{j,l},\\
 h_l&=\sum_i\alpha_{i\to l}v_i.
 \end{aligned}$$
-<p>\(\gamma_l\in\mathbb R^d\) 是这一聚合器的 RMSNorm 增益，\(\varepsilon\) 是小正数；\(m_l\) 是数值稳定用的最大分数。这里采用原始 AttnRes 的打分形式 \(q_l^{\mathsf T}k_{i,l}\)，查询自身学习合适尺度。keys 经过归一化，values 使用原来的 \(v_i\)：前者决定选谁，后者决定取回什么。放大一个来源时，它的归一化方向近似保持，而被取回的数值仍随之放大。</p>
-<p>扩展到批量计算，来源张量是 \([S,B,T,d]\)，其中 \(S\) 是当前来源数，\(B\) 是 batch 大小，\(T\) 是本次处理的 token 数。点积产生 \([S,B,T]\) 分数，对轴 0 做 softmax，最后沿轴 0 加权求和得到 \([B,T,d]\)。因此，同一个 \(q_l\) 遇到不同 token 的 keys，会产生不同权重。可以把查询理解为这一子层长期学习的“需求方向”，把每个 token 的 key 理解为本次输入携带的内容。</p>
+<p>其中 \(\gamma_l\in\mathbb R^d\) 是这层 RMSNorm 的缩放参数，\(\varepsilon\) 防除零，\(m_l\) 用于 softmax 的数值平移。注意打分直接写 \(q_l^{\mathsf T}k_{i,l}\)，没有额外的 \(1/\sqrt{d}\)——\(q_l\) 自己会学出合适的模长。这里有个刻意的不对称设计：<strong>只对 key 做 RMSNorm，value 用原始的 \(v_i\)</strong>。前者管「挑谁」，后者管「取回什么」。这样一来，就算某个来源的幅值很大，也不会单靠音量把打分压过去；可一旦被选中，它原本的幅值依然完整保留下来。</p>
+<p>放回批量计算里，来源张量的形状是 \([S,B,T,d]\)（\(S\) 是当前来源数，\(B\) 是 batch 大小，\(T\) 是 token 数）。跟 \(q_l\) 点积得到 \([S,B,T]\) 的分数，沿着第 0 维做 softmax，再沿第 0 维加权求和，正好回到 \([B,T,d]\)。虽然整层共用一个参数向量 \(q_l\)，但不同 token 的历史表示不一样，算出来的 key 也各不相同，所以每个 token 分到的深度权重依然是动态、因输入而异的——\(q_l\) 决定这层想找什么，各 token 的 key 决定手里有什么。</p>
 
 <figure class="article-figure" id="depth-figure"><h3>同一个查询，选择不同来源</h3>
-<p class="attn-note">二维算例：embedding = (1, 0)，浅层输出 = (0, 2)，近层输出 = (−1, 0)。图中归一化取增益 1、ε = 0；三个向量均非零。</p>
+<p class="attn-note">二维算例：embedding = (1, 0)，浅层输出 = (0, 2)，近层输出 = (−1, 0)；归一化取增益 1、ε = 0。</p>
 <div class="attn-controls"><label for="query-angle">查询方向<input id="query-angle" type="range" min="0" max="180" value="0" step="15"><output id="angle-value"></output></label><label for="query-scale">查询长度<input id="query-scale" type="range" min="0" max="3" value="1" step=".25"><output id="scale-value"></output></label></div>
 <div class="source-cards" id="source-cards"></div><div class="attn-output" id="depth-output"></div>
-<figcaption>按步骤观察 raw value → 归一化 key → 分数 → 权重和输出。方向决定偏好，长度控制权重集中程度；查询长度为 0 时得到三个来源的平均值。</figcaption></figure>
+<figcaption>逐步看 raw value → 归一化 key → 分数 → 权重与输出。查询方向决定偏向谁，长度控制权重有多尖锐；长度为 0 时退化成三者的简单平均。</figcaption></figure>
 
-<p>把全部查询初始化为 0，会得到均匀权重 \(1/S\)，模型从来源的平均值开始训练。这改变了初始聚合尺度：三个来源得到的是三分之一的和。若把已有残差模型直接换成 AttnRes，需要把这种函数变化纳入转换与继续训练的评估。</p>
-<p>零初始化仍然能学习。暂时把来源当作固定输入，对查询求导：</p>
+<p>如果把所有查询初始化为 0，起步时每个来源分到的权重都是 \(1/S\)，也就是直接取平均。注意这跟标准残差直接相加差了一个 \(1/S\) 的系数——从零训练没问题，但要是把训好的标准 Transformer 直接改成 AttnRes 继续训，起步输出会突然缩水，接不住原权重，得额外做过渡。</p>
+<p>顺带一提，把 \(q_l\) 设成全 0 并不会让梯度卡死在 0。先把历史来源看成常数，对 \(q_l\) 求雅可比矩阵：</p>
 $$\frac{\partial h_l}{\partial q_l}=\sum_i\alpha_{i\to l}(v_i-h_l)k_{i,l}^{\mathsf T}\in\mathbb R^{d\times d}.$$
-<p>右侧是 value 偏差与 key 的加权关联。只要不同来源提供不同内容，查询就可能得到非零梯度。对标量损失 \(\mathcal L\)，设上游梯度 \(g=\partial\mathcal L/\partial h_l\)，则 \(\partial\mathcal L/\partial q_l=\sum_i\alpha_{i\to l}[g^{\mathsf T}(v_i-h_l)]k_{i,l}\)。这给出了一个可直接做有限差分检查的公式。</p>
+<p>接上标量损失 \(\mathcal L\)，把上游梯度记作 \(g=\partial\mathcal L/\partial h_l\)，\(q_l\) 的梯度就是：</p>
+$$\frac{\partial\mathcal L}{\partial q_l}=\sum_i\alpha_{i\to l}\big[g^{\mathsf T}(v_i-h_l)\big]k_{i,l}.$$
+<p>只要各来源的 value 不全相同，偏差 \(v_i-h_l\) 就不为零，\(q_l\) 一开始就能拿到非零梯度：哪一路来源更能帮当前步降 loss，\(q_l\) 就立刻往它的 key 方向偏（文末的 <code>lab.py</code> 里可以直接拿有限差分验算这个式子）。</p>
 
 <h2 id="blocks">Block AttnRes 怎样管理历史</h2>
-<p>Full AttnRes 给每个子层输出独立的选择权。代价是历史必须一直可读：对于 \(L\) 个子层，每个 token 的来源存储量按 \(Ld\) 增长，直接逐层聚合的运算量按 \(L^2d\) 增长。层函数内部通常更昂贵，但保留历史会改变重算和流水线通信的设计。</p>
-<p>Block AttnRes 把连续 \(K\) 个子层划为一块，共 \(N=\lceil L/K\rceil\) 块，末块可以较短。第 \(n\) 块保存原始分支输出的和：</p>
+<p>Full AttnRes 把选择权给到了每一层，账单也很直接：\(L\) 个子层一路留下来，每个 token 要存 \(O(Ld)\) 的历史表示，逐层聚合的计算量按 \(O(L^2d)\) 涨。这点算力跟子层内部的矩阵乘比起来不算大头，真正卡脖子的是<strong>显存和通信</strong>——历史得一路留着，activation checkpointing 没法随便丢，流水线并行还得跨卡往后传。</p>
+<p>Block AttnRes 的解法很工程：把连续 \(K\) 个子层打包成一块，总共分成 \(N=\lceil L/K\rceil\) 块（最后一块可以不够 \(K\) 个）。块内恢复老办法，把原始分支输出直接相加，攒成这一块的汇总：</p>
 $$\htmlData{symbol=block}{b_n}=\sum_{j\in\mathcal B_n}F_j(h_j),\qquad b_0=e.$$
-<p>\(\mathcal B_n\) 表示第 \(n\) 块中的子层索引。正在计算的块还有一个<strong>部分和</strong> \(p\)：它只包含这块已经完成的分支输出。块内第一个子层读取 embedding 与之前完成的块；之后的子层再把当前 \(p\) 当作一个来源。每算完一个子层，就把新输出加进 \(p\)；块结束时，将它转成不可变的 \(b_n\)，下一块从空的部分和开始。</p>
+<p>其中 \(\mathcal B_n\) 是第 \(n\) 块里的子层编号。正在跑的这一块另维护一个<strong>部分和</strong> \(p\)，存着块里已经算完的分支输出。轮到块里第一个子层时，\(p\) 还是空的，它只读 embedding 和前面已经封口的块；从第二个子层起，当前的 \(p\) 也加入候选来源。每算完一个子层就把新输出加进 \(p\)，整块跑完就把 \(p\) 封成只读的 \(b_n\)，下一块再从空开始：</p>
 <pre><code>completed = [embedding]
 partial = None
 for l in range(L):
@@ -77,54 +79,56 @@ for l in range(L):
         completed.append(partial)
         partial = None
 output = depth_attention(q_out, completed)</code></pre>
-<p>这里的 <code>None</code> 表示当前块还没有输出。若把它换成一个额外的零向量，零向量也会参与 softmax 分母；例如两个来源的分数均为 0 时，加入第三个零来源就会把已有内容各自的系数从 \(1/2\) 改为 \(1/3\)。块边界的表示与来源数量，都是模型函数的一部分。</p>
+<p>注意代码里用 <code>None</code> 而不是全零向量来占位。要是硬塞一个零向量进去，它虽然 value 是 0，却会多占一个 softmax 分母位置——比如前两个来源分数都是 0，多出一个零向量就会把两者的权重硬生生从 \(1/2\) 压成 \(1/3\)，平白把输出缩了一截。</p>
 
 <figure class="article-figure" id="block-figure"><h3>历史块保留，当前部分和更新</h3>
 <div class="attn-controls"><label for="block-size">每块子层数<select id="block-size"><option value="1">1：Full 粒度</option><option value="2" selected>2</option><option value="3">3</option><option value="6">6</option></select></label></div>
 <div class="layer-strip" id="layer-strip"></div><p class="attn-note">本次聚合可读取的来源：</p><div class="source-bank" id="source-bank"></div><div class="attn-output" id="block-output"></div>
-<figcaption>为追踪加法，固定六个标量分支输出为 1、2、3、4、5、6，embedding 为 10。每一步停在一个子层计算前；紫色边框标出当前部分和，粗右边框标出块的末尾。这些数值用于展示状态更新。</figcaption></figure>
+<figcaption>为了看清累加过程，这里把六个子层的标量输出固定为 1 到 6，embedding 设为 10。每一步停在子层计算之前，紫框是正在增长的部分和，粗右边框标出块边界。</figcaption></figure>
 
-<p>分块把选择粒度从“每个子层”变成“每个完成块”。块中两个分支若正好互相抵消，它们的和已经丢掉了区分两者的能力；后续 attention 只能选择这个和。缩小块可以保留更细的信息，同时增加来源数。\(K=1\) 时，每个块只含一个输出，便恢复 Full 的来源集合。\(K=L\) 时，整个网络只形成一块，块内持续在 embedding 与当前部分和之间学习归一化权重。</p>
-<p>对于固定深度 \(L\)，直接实现需要约 \(O(LNd)\) 聚合运算；保存的历史按 \(O(Nd)\) 增长。假设一个 prefill chunk 有 \(B\) 条、每条 \(T\) 个 token，每个元素占 \(u\) 字节，最终来源库包含 embedding 和全部块，则：</p>
+<p>分块的代价也很明确：选择粒度从「逐层」粗化成了「逐块」。如果同一块里有两个分支正好互相抵消，加完之后信息就没了，后面的层再也分不开它们。缩小 \(K\) 能保住更细的粒度，来源数也会跟着涨；两个极端一目了然——\(K=1\) 时每块就一层，完全回到 Full AttnRes；\(K=L\) 时整个网络只有一块，每一层就只在 embedding 和当前累计和之间学一个动态配比。</p>
+<p>分块之后，聚合计算量降到 \(O(LNd)\)，要存的历史状态降到 \(O(Nd)\)。算一笔具体显存账：对一个形状为 \(B\times T\) 的 prefill chunk、每个元素占 \(u\) 字节，跑完全部块时，光来源库（embedding 加 \(N\) 个完成块）本身就要占：</p>
 $$\htmlData{symbol=memory}{M_{\mathrm{sources}}}=(N+1)\,B\,T\,d\,u.$$
-<p>这个计数只统计来源库；实际峰值还包括当前分支、聚合工作区以及训练的反向激活。例如 \(L=96\)、\(K=12\) 得到 8 块；\(B=1,T=8192,d=4096\)，BF16 的 \(u=2\)。每个来源是 64 MiB，9 个来源为 576 MiB。Full 的 97 个来源则是 6208 MiB，约 6.06 GiB。块数减少带来的容量差异在长 prefill 中尤其明显。</p>
+<p>代一组常见规模感受一下：\(L=96\) 个子层按 \(K=12\) 切成 8 块，取 \(B=1,\ T=8192,\ d=4096\)，BF16 下 \(u=2\)。单个来源是 64 MiB，9 个来源一共 576 MiB；要是换成 Full AttnRes，97 个来源直接飙到 6208 MiB（约 6.06 GiB），光历史缓存就差了十倍——而且这还没算分支激活和反向图。</p>
 
 <h2 id="hardware">让历史只读一次</h2>
-<p>逐层调用上面的伪代码很直接，但每层都重新 stack 来源、RMSNorm、计算 softmax，会生成多个小 kernel 和中间张量。模型变慢时，先用 profiler 观察这些 kernel 的时间、来源库读取字节量和分配次数，再决定融合范围。算子 FLOPs 小而时间随 token 数和块数明显增长，通常意味着数据搬运值得优先检查。</p>
-<p>AttnRes 的查询是层参数，这个设计给了调度机会。进入一块时，之前的块都已经完成，这一块中 \(K\) 个子层的查询也全部已知。可以把它们排成 \(Q\in\mathbb R^{K\times d}\)，一次读取来源，算好各查询对<strong>完成块</strong>的结果。当前块的部分和依赖前一个子层，随后逐层补入。这就是两阶段计算。</p>
-<p>怎样把后来产生的部分和补进一次已经算过的 softmax？对某个子层的已完成来源，保存三个统计量：</p>
+<p>照着上面的伪代码逐层硬写能跑通，但上 GPU 效率很差：每个子层都要把历史来源重新 stack 一遍、算 RMSNorm、算 softmax，冒出一堆零碎小 kernel 和临时张量。这些操作 FLOPs 极小，几乎全是显存带宽瓶颈——同一批完成块，一块里有 \(K\) 个子层，就得从 HBM 重复读 \(K\) 遍。</p>
+<p>转机藏在 AttnRes 的一个结构特点里：查询向量 \(q_l\) 是静态的层参数，不依赖当前块的激活。刚走进一块时，前面所有完成块已经定死，本块 \(K\) 个子层的查询也全在手边。干脆把这 \(K\) 个查询拼成 \(Q\in\mathbb R^{K\times d}\)，一次性把所有完成块从显存读进来，批量算完这 \(K\) 层对<strong>已完成块</strong>的聚合结果；至于还没算出来的当前块部分和 \(p\)，等后面逐层算到时再补进去。这就是两阶段计算。</p>
+<p>问题是，怎么把晚到的部分和无缝并进已经算完的 softmax？办法和 FlashAttention 一样——第一阶段先不急着除分母，对每个子层存下三个统计量：</p>
 $$m=\max_i s_i,\qquad z=\sum_i e^{s_i-m},\qquad u=\sum_i e^{s_i-m}v_i.$$
-<p>这里 \(m,z\) 是标量，\(u\in\mathbb R^d\) 是尚未除以分母的加权和。新部分和为 \(p\in\mathbb R^d\)，它在同一查询下的分数为 \(a=q^{\mathsf T}\operatorname{RMSNorm}(p)\)。令 \(m'=\max(m,a)\)，把两组权重移到共同尺度：</p>
+<p>这里 \(m\) 是当前最大分数，\(z\) 是平移后的分母，\(u\in\mathbb R^d\) 是还没除分母的加权分子。等后面拿到当前部分和 \(p\in\mathbb R^d\)，只需单独算它在这层查询下的分数 \(a=q^{\mathsf T}\operatorname{RMSNorm}(p)\)，取新的共同最大值 \(m'=\max(m,a)\)，把旧统计量和新部分和一起对齐到 \(m'\)：</p>
 $$\begin{aligned}z'&=e^{m-m'}z+e^{a-m'},\\u'&=e^{m-m'}u+e^{a-m'}p,\\h&=u'/z'.\end{aligned}$$
-<p>新旧两部分乘回相同的指数基准，所得结果与一次对所有来源做 softmax 相同。这个 <a href="/posts/flash-attention/">online softmax</a> 合并保留了模型函数；分块本身则改变了可选择的信息粒度。两种操作分别作用于执行顺序和网络结构。</p>
+<p>因为新旧两边的指数基准都对齐到了 \(m'\)，算出来的 \(h\) 跟把所有来源凑齐一次做 softmax 在数学上完全等价。前面讲的「分块」改了模型结构，而这里的 <a href="/posts/flash-attention/">online softmax</a> 纯粹是执行顺序的等价改写，不改变模型函数。</p>
 
 <figure class="article-figure" id="merge-figure"><h3>晚到的部分和，怎样加入已有 softmax</h3>
-<p class="attn-note">固定完成来源的分数为 0、1，标量 values 为 2、−1；当前部分和的 value 为 3。滑杆直接指定其分数，用于隔离观察合并算法。</p>
+<p class="attn-note">固定完成来源的分数为 0、1，标量 values 为 2、−1；当前部分和的 value 为 3，拖动滑杆改变它的分数。</p>
 <div class="attn-controls"><label for="partial-score">部分和分数<input id="partial-score" type="range" min="-4" max="8" value="2" step=".5"><output id="score-value"></output></label></div>
 <div class="article-grid"><div class="phase-card"><strong>阶段 1 · 已完成来源</strong><p id="old-stats"></p></div><div class="phase-card"><strong>阶段 2 · 补入部分和</strong><p id="new-stats"></p></div></div><div class="attn-output" id="merge-output"></div>
-<figcaption>最大值改变时，旧分子与旧分母一起缩放。按步骤检查合并后的结果与三个来源直接 softmax 的结果。</figcaption></figure>
+<figcaption>最大值一变，旧分子和旧分母要按同一系数缩放。按步骤对比在线合并与直接对三个来源算 softmax 的结果。</figcaption></figure>
 
-<p>对于 \([K,B,T,d]\) 这一组查询结果，两阶段实现用批量操作摊薄重复读取。每个子层仍需要自己的统计量：查询不同，权重就不同。训练后 RMSNorm 的增益也可能因子层而异，可以利用 \(q_l^{\mathsf T}(\gamma_l\odot\widehat v)=(q_l\odot\gamma_l)^{\mathsf T}\widehat v\)，把增益吸收到查询，复用来源的单位 RMS 表示。</p>
-<p>第二阶段只处理一个部分和及对应统计量，适合与部分和更新、后续 normalization 融合。实现时让点积、平方和与 softmax 统计量使用 FP32 累加，再按计算精度写回输出。BF16 能减小来源库，但长加法链仍可能吞掉较小增量；可用同一批输入比较 FP32 和 BF16 部分和的误差，并记录每层的权重熵与最大分数。精度策略要覆盖 keys 的归一化与 raw values 的累加。</p>
+<p>第一阶段批量算出 \([K,B,T,d]\) 的中间结果，把重复读历史块的显存带宽摊薄了 \(K\) 倍。不过还有个小坎：每个子层都有自己的 RMSNorm 缩放参数 \(\gamma_l\)，难道每个子层还得各做一遍归一化？不用，把点积改写一下就行：</p>
+$$q_l^{\mathsf T}(\gamma_l\odot\widehat v)=(q_l\odot\gamma_l)^{\mathsf T}\widehat v.$$
+<p>把 \(\gamma_l\) 吸收到查询侧，所有子层就能共用同一份去掉增益的单位 RMS 向量 \(\widehat v\)，历史块真正只用归一化一次、读一次。当然，每个子层的 \(m,z,u\) 统计量还是得各自存着，毕竟查询不同、权重也不同。</p>
+<p>第二阶段每层只合并一个部分和 \(p\)，访存极轻，正好和部分和更新、下一层的 normalization 融成同一个 kernel。精度上要留心两处：点积、平方和以及 softmax 的 \(m,z,u\) 统一用 FP32 累加，最后再转回计算精度；来源库虽然通常用 BF16 省显存，但如果一块里子层很多，BF16 只有 7 位尾数，连加下来容易把小增量吃掉，块内部分和的累加精度值得单独核一下。</p>
 
 <h2 id="training">梯度、重算与跨卡状态</h2>
-<p>同一个历史来源会被很多后续子层读取，它的梯度要累加所有读取路径的贡献。单次读取就有两部分：\(v_i\) 作为 value 的直达梯度 \(\alpha_i g\)，以及它经过 RMSNorm 改变 key、进而改变权重的梯度。Full 的每个子层输出拥有独立路径；Block 内，\(b_n=\sum_{j\in\mathcal B_n}v_j\) 的块级梯度通过加法传给每个 \(v_j\)，每个输出还可能收到本块后续部分和读取产生的梯度。</p>
-<p>因此训练代码中的历史 buffer 必须保持 autograd 关系。推理可以复用已不再读取的工作区；训练时原地修改一个仍被后续计算引用的部分和，会改变反向传播需要的值。一个小而有用的检查是：固定随机种子，让简单 out-of-place 版本与优化实现分别计算损失、查询梯度和各来源梯度，再逐项比较。只比最终输出会漏掉错误的 detach 或缓存复用。</p>
-<p><a href="/posts/gradient-checkpointing/">Activation checkpointing</a> 通常通过丢弃中间值、反向时重算来节省显存。AttnRes 的历史有额外的<strong>前向存活期</strong>：后续层仍要读它。Full 保存每个来源，Block 保存块汇总；聚合的 scores、weights 和局部中间值可以重算。若一次优化只减少了 softmax 中间张量，而峰值几乎不变，可以把显存分解成来源库、层内激活和工作区，检查主要部分是否正是长期存活的来源。重算的粒度必须尊重这三种对象的用途。</p>
-<p>流水线并行中，下一 stage 除了当前部分和，还要拥有可读取的旧块。若每次都发送整个历史，越深的边界传得越多。交错流水线会让同一物理 rank 再次处理同一个 micro-batch 的后续虚拟 stage；把已经收到的块缓存在这个 rank 上，后面就只发送新增块。缓存键要区分 micro-batch 和块编号，反向完成后再释放该 micro-batch 的状态，反向也要合并对应的梯度贡献。这里节省的是重复传输，代价是延长本地缓存的存活期。</p>
-<p>长 prefill 还可以沿 token 轴分片来源库。深度 attention 对每个 token 独立，\(P\) 张 TP 卡各持有 \(T/P\) 个 token，就能独立计算自己的深度聚合。结合层输出的 reduce-scatter、局部聚合和 all-gather，来源存储按每卡 \((N+1)BTdu/P\) 缩小。前面的 576 MiB 算例在 8 卡均匀分片下是每卡 72 MiB；还需单独核算通信缓冲和两阶段中间结果。选择 chunked prefill 时，同一个公式也能估计 chunk 长度对额外显存的影响。</p>
-<p>比较这些残差设计时，质量与系统预算要放在一起。HC/mHC 的核心状态按多路残差宽度增长，AttnRes 按历史来源数增长；它们对 kernel 融合、重算和流水线的压力各不相同。训练实验可以同时记录验证 loss、逐层 RMS、梯度范数、聚合权重的熵、step 时间及显存峰值。改变块数时保持参数量、训练 token 数和数据顺序可比，再报告真实墙钟成本，才能判断信息选择带来的收益是否值得其状态开销。</p>
+<p>放到训练里，一个历史来源会被后面很多子层反复读取，反向时它的梯度自然是所有读取路径之和。哪怕只看单次读取，传回 \(v_i\) 的梯度也有两条路：一是作为 value 的直达项 \(\alpha_i g\)，二是 \(v_i\) 经 RMSNorm 变成 key、反过来影响权重的那条路由项。Full AttnRes 里每个子层输出各走各的路；Block AttnRes 里，完成块 \(b_n=\sum_{j\in\mathcal B_n}v_j\) 收到的块级梯度会原样分发给块内每个 \(v_j\)，再加上各 \(v_j\) 在本块内被后续部分和读取时攒下的梯度。</p>
+<p>这就引出一个写训练代码时极易踩的坑：历史 buffer 和部分和不能随便<strong>原地修改</strong>（in-place）。推理时复写旧 buffer 没问题，训练时只要后面还有子层引用过这个张量，原地改动就会把反向传播要用的版本冲掉。做完融合或省显存优化后，最稳妥的校验是固定随机种子，拿最朴素的 out-of-place 版本当对照，把 loss、查询梯度和每个来源的梯度全比一遍——光看前向输出对得上，很容易放过偷偷 detach 掉的计算图或写坏的缓存。</p>
+<p><a href="/posts/gradient-checkpointing/">Activation checkpointing</a> 的常规套路是前向丢激活、反向再重算，但 AttnRes 的历史状态有<strong>前向存活期</strong>：后面的层还在等着用它，前向没跑完根本丢不掉。因此能重算的主要是子层内部激活，以及聚合时的 scores、weights 等中间量；来源库本身（Full 是每层输出，Block 是各个完成块）必须常驻。如果改完重算发现显存峰值几乎没降，把显存拆开看一眼，大头多半就趴在长期存活的来源库上。</p>
+<p>跨卡训练时，流水线并行（PP）的麻烦更直观：上一个 stage 传给下一个 stage 的不再只是一条残差流，还得把后面要读的历史块一并带过去。如果每次过边界都重传整份历史，越往深处通信量越爆炸。在交错流水线（interleaved PP）里，同一张物理卡会先后跑同一个 micro-batch 的多个虚拟 stage，所以可以把已经收到的旧块留在本地缓存，下次轮到这张卡时只补传新增的块就行。代价是用显存换带宽：缓存要按 micro-batch 和块号分别管住，等该 micro-batch 跑完反向、把对应的历史梯度合并完才能释放。</p>
+<p>到了长 prefill，来源库还可以沿 token 轴切开。因为深度 attention 对每个 token 互相独立，\(P\) 张 TP 卡各管 \(T/P\) 个 token 就能各算各的深度聚合，配合层输出的 reduce-scatter 和进入子层前的 all-gather，单卡的来源库容量直接缩成 \((N+1)BTdu/P\)。前面那笔 576 MiB 的账，8 卡均分后每卡只剩 72 MiB（再给通信缓冲和两阶段中间统计量留出余量即可）；做 chunked prefill 时，也可以直接拿这个公式反推能塞下多长的 chunk。</p>
+<p>回头看开头的对比，三种残差设计的工程账单就很清楚了：HC 和 mHC 的额外状态跟并行残差路数成正比，每一层都在横向混合；AttnRes 的状态则跟着历史块数 \(N\) 走，压力集中在长期存活的来源库、交错流水线缓存和两阶段 kernel 上。要不要分块、\(N\) 取多大，本质上是在更细的深度选择粒度和这笔系统开销之间做权衡。</p>
 
-<p data-topic-bridge="algorithm-expansion">深度权重描述了模型在当前位置怎样读取历史。要判断这些路径对任务的贡献，还可以做<a href="/posts/effective-depth/">有效深度实验</a>：同时记录表示变化和删层后的损失，再检查提前退出的质量与时延。<a href="/posts/recurrent-depth/">共享深度模型</a>则把同一组参数展开成多轮计算，需要为各轮分别追踪隐藏状态和 KV。</p>
+<p data-topic-bridge="algorithm-expansion">顺着深度轴继续往下看，还有两个相邻问题：如果想知道这些跨层路径到底有多少在真正干活，可以结合<a href="/posts/effective-depth/">有效深度实验</a>去测删层和提前退出的代价；而<a href="/posts/recurrent-depth/">共享深度模型</a>则走另一条路——把同一组层参数反复展开成多轮计算，对应要单独追踪每一轮的隐藏状态与 KV。</p>
 <h2 id="practice">实验与练习</h2>
-<p><a href="./lab.py">下载 NumPy 实验</a>，运行 <code>python lab.py</code>。实验用双精度验证查询梯度，比较 online softmax 与直接计算，追踪块边界，并优化一个二维查询，让它从三个来源中选择目标信息。最后输出固定配置的来源库容量。训练对象是这个小型聚合器，输出可用于检查公式与状态语义。</p>
-<p>把实验里的查询初值改为零，可以观察查询仍然移动；把来源设置成三个完全相同的向量，查询梯度则变为零。再把 logits 整体增加 1000，稳定 softmax 与在线合并结果应保持一致。这些修改分别检验可学习性、不可区分来源和数值平移不变性。</p>
+<p><a href="./lab.py">下载配套的 NumPy 脚本</a>，直接跑 <code>python lab.py</code> 就能在 CPU 上把文里的几件事全验一遍：用双精度有限差分核对查询梯度和来源梯度（含经由 RMSNorm 的路由项），比对分组 online softmax 与直接计算的误差，核查块边界和空部分和反例，顺带把一个全零初始化的二维查询训到能从三个来源里挑出目标，最后复算练习里的显存数字。</p>
+<p>脚本里也顺手塞了几个边界自检：全零查询依然能正常学动；把所有来源设成相同向量时，查询梯度立刻归零；把 logits 整体加减 1000，稳定 softmax 和在线合并的结果纹丝不动。你也可以自己改改 <code>block_size</code> 或目标向量，看看权重和块边界怎么跟着变。</p>
 
-<div class="article-exercise"><h3>练习 1：从方向算到输出</h3><p>三个二维来源为 \((1,0),(0,2),(-1,0)\)，RMSNorm 增益为 1，取 \(\varepsilon=0\)，查询为 \(q=(1,0)\)。求 keys、权重和输出。把第二个来源变为 \((0,20)\)，哪些量改变？</p><details><summary>展开解答</summary><p>三个 keys 是 \((\sqrt2,0),(0,\sqrt2),(-\sqrt2,0)\)，分数为 \(\sqrt2,0,-\sqrt2\)。归一化后权重约为 \((0.7679,0.1867,0.0454)\)，输出约为 \((0.7225,0.3734)\)。放大第二个来源后 key 和权重保持相同，输出第二维变成约 3.734；第一维保持约 0.7225。归一化控制打分尺度，value 保留内容幅度。</p></details></div>
-<div class="article-exercise"><h3>练习 2：零查询有没有梯度？</h3><p>只取 \(v_0=(1,0),v_1=(0,1)\)，令 \(q=0\)，增益为 1、\(\varepsilon=0\)。损失为输出的第一维 \(\mathcal L=h_1\)。求 \(\partial\mathcal L/\partial q\)，并写出梯度下降后查询偏向哪一个来源。</p><details><summary>展开解答</summary><p>初始权重均为 \(1/2\)，\(h=(1/2,1/2)\)，上游梯度为 \(g=(1,0)\)。两个 value 的第一维偏差分别为 \(1/2,-1/2\)，keys 为 \((\sqrt2,0),(0,\sqrt2)\)。</p>$$\frac{\partial\mathcal L}{\partial q}=\frac{\sqrt2}{4}(1,-1).$$<p>梯度下降使查询第一维变负、第二维变正，更多选择 \(v_1\)，从而减小输出第一维。把两个 values 都改为 \((1,0)\) 时，每项 \(v_i-h\) 为零，查询梯度也为零。</p></details></div>
-<div class="article-exercise"><h3>练习 3：来源库能否装下？</h3><p>96 个子层每 12 个一块，\(B=2,T=16384,d=4096\)，来源采用 BF16。包含 embedding 的最终来源库多大？均匀分到 8 张卡后每卡多少？若每卡只给来源库 128 MiB，batch 保持 2，每卡均匀分片时 chunk 最长多少 token？</p><details><summary>展开解答</summary><p>共有 9 个来源，字节数为 \(9\times2\times16384\times4096\times2\)，得到 2304 MiB，即 2.25 GiB。8 卡均分后为每卡 288 MiB。设 chunk 长为 \(T_c\)：</p>$$\frac{9\times2\times T_c\times4096\times2}{8}\le128\times2^{20},\qquad T_c\le7281.77\ldots$$<p>整数上界为 7281 token，实际可以选对齐友好的 7168 或 6144，再给工作区留出预算。若另有算子要求 chunk 被 8 整除，则这个约束下最大可取 7280。</p></details></div>
-<div class="article-exercise"><h3>练习 4：一次错误合并怎样改变结果？</h3><p>已完成来源的分数为 \((0,1)\)，values 为 \((2,-1)\)，新部分和的分数为 2、value 为 3。计算正确合并结果。工程师直接平均“旧 attention 输出”和 3，会得到什么？设计一个能发现该错误的测试。</p><details><summary>展开解答</summary><p>旧最大值 \(m=1\)，分母 \(z=e^{-1}+1\)，分子 \(u=2e^{-1}-1\)。新最大值为 2，所以：</p>$$h=\frac{e^{-1}(2e^{-1}-1)+3}{e^{-1}(e^{-1}+1)+1}=\frac{2-e+3e^2}{1+e+e^2}\approx1.9311.$$
-<p>旧输出约为 −0.1932，直接与 3 平均得到约 1.4034；这相当于强行把旧来源组和新来源各分一半权重。测试时应比较完整 softmax 与分组后合并，覆盖不同分组、极端分数以及整体平移 1000 的情况，并在训练实现中比较对应梯度。</p></details></div>
+<div class="article-exercise"><h3>练习 1：从方向算到输出</h3><p>三个二维来源为 \((1,0),(0,2),(-1,0)\)，RMSNorm 增益为 1，取 \(\varepsilon=0\)，查询为 \(q=(1,0)\)。求 keys、权重和输出。把第二个来源放大成 \((0,20)\)，哪些量会变？</p><details><summary>展开解答</summary><p>三个 keys 是 \((\sqrt2,0),(0,\sqrt2),(-\sqrt2,0)\)，分数为 \(\sqrt2,0,-\sqrt2\)。softmax 权重约为 \((0.7679,0.1867,0.0454)\)，输出约为 \((0.7225,0.3734)\)。把第二个来源放大 10 倍后，key 和权重纹丝不动，输出的第二维变成约 3.734，第一维仍是约 0.7225——归一化把打分尺度锁住了，取回的 value 依然保留原本的幅值。</p></details></div>
+<div class="article-exercise"><h3>练习 2：零查询有没有梯度？</h3><p>只取 \(v_0=(1,0),v_1=(0,1)\)，令 \(q=0\)，增益为 1、\(\varepsilon=0\)。损失取输出的第一维 \(\mathcal L=h_1\)。求 \(\partial\mathcal L/\partial q\)，并判断一步梯度下降后查询会偏向哪一个来源。</p><details><summary>展开解答</summary><p>初始权重都是 \(1/2\)，所以 \(h=(1/2,1/2)\)，上游梯度 \(g=(1,0)\)。两个 value 在第一维上的偏差分别是 \(1/2\) 和 \(-1/2\)，keys 是 \((\sqrt2,0)\) 和 \((0,\sqrt2)\)，代入梯度公式得：</p>$$\frac{\partial\mathcal L}{\partial q}=\frac{\sqrt2}{4}(1,-1).$$<p>梯度下降往反方向走，让查询第一维变负、第二维变正，于是更偏向 \(v_1\)，把输出第一维压下去。要是把两个 values 都改成 \((1,0)\)，每一项 \(v_i-h\) 都是 0，查询梯度也就归零了。</p></details></div>
+<div class="article-exercise"><h3>练习 3：来源库能否装下？</h3><p>96 个子层每 12 个一块，\(B=2,T=16384,d=4096\)，来源用 BF16 存。算上 embedding，最终来源库有多大？均匀分到 8 张卡后每卡多少？如果每卡只给来源库 128 MiB、batch 保持 2，均匀分片时 chunk 最长能取多少 token？</p><details><summary>展开解答</summary><p>一共 9 个来源，总字节数是 \(9\times2\times16384\times4096\times2\)，即 2304 MiB（2.25 GiB），8 卡均分后每卡 288 MiB。设 chunk 长为 \(T_c\)：</p>$$\frac{9\times2\times T_c\times4096\times2}{8}\le128\times2^{20},\qquad T_c\le7281.77\ldots$$<p>整数上界是 7281 token。工程上通常会选对齐友好的 7168 或 6144，顺便给工作区留余量；如果算子要求 chunk 被 8 整除，最大可取 7280。</p></details></div>
+<div class="article-exercise"><h3>练习 4：一次错误合并怎样改变结果？</h3><p>已完成来源的分数为 \((0,1)\)，values 为 \((2,-1)\)，新部分和的分数为 2、value 为 3。算出正确合并结果；如果直接把「旧 attention 输出」和 3 取平均，会得到多少？再写一个能抓出这个 bug 的测试思路。</p><details><summary>展开解答</summary><p>旧最大值 \(m=1\)，分母 \(z=e^{-1}+1\)，分子 \(u=2e^{-1}-1\)。新最大值变成 2，对齐后得：</p>$$h=\frac{e^{-1}(2e^{-1}-1)+3}{e^{-1}(e^{-1}+1)+1}=\frac{2-e+3e^2}{1+e+e^2}\approx1.9311.$$
+<p>旧输出约为 −0.1932，直接跟 3 取平均会算出约 1.4034——这相当于硬把旧来源组和新部分和各分一半权重，完全丢了相对分数信息。写单测时，把分组在线合并和一次全量 softmax 对着比，覆盖不同切分方式、极端分数和整体平移 1000，训练代码再把对应的反向梯度也比一遍，这种错一测就露馅。</p></details></div>
 
 <h2 id="references">参考与延伸阅读</h2>
 <ol><li><a href="https://arxiv.org/abs/2603.15031">Attention Residuals</a>（2026）：§3 给出 Full/Block 定义，§4 和 Algorithm 1 推导两阶段计算、pipeline 缓存与 prefill 分片；<a href="https://github.com/MoonshotAI/Attention-Residuals">官方仓库</a>提供报告与 PyTorch 风格伪代码。</li><li><a href="https://arxiv.org/abs/2409.19606">Hyper-Connections</a>（2024）：通过多路残差和层间读写扩展信息传递。</li><li><a href="https://arxiv.org/abs/2512.24880">mHC: Manifold-Constrained Hyper-Connections</a>（2025）：对残差混合施加双随机约束，讨论稳定性与高效实现。</li><li><a href="https://arxiv.org/abs/1805.02867">Online normalizer calculation for softmax</a>（2018）：最大值、分母的在线更新，构成分组合并的基础。</li><li><a href="https://arxiv.org/abs/1910.07467">Root Mean Square Layer Normalization</a>（2019）：RMSNorm 的定义及尺度性质。</li></ol>

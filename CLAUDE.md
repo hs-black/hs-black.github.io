@@ -156,6 +156,15 @@ Validate the reader and publisher with `python3 scripts/check-encrypted-post.py`
   announcements ("下面按报告的顺序走一遍", "本文分三部分", "每遇到一个新部件先讲…再讲…",
   "本节讲…"). Open with the subject — a question, a number, the problem —
   and let headings and the TOC carry the structure.
+- Write natural, human Chinese prose (matching the direct whiteboard tone of
+  `scaling-memory` and `deepseek-v4`), not stiff audited specs: avoid choppy
+  telegraphic sentences glued with semicolons, translationese ("具有正均值",
+  "提供更自由的组合方式，也让…成为需要观察的对象"), AI clichés ("这里最值得理解的是",
+  "这回答了一个具体问题", "X 并不意味着 Y"), and tacked-on defensive disclaimers at
+  the end of every section ("这个估算只用于识别量级…", "比较它们时，需要同时看 A、B 与 C").
+  Fold real assumptions and boundaries naturally into the derivation where they
+  actually matter, and reserve bold text for key terms rather than whole
+  abstract sentences.
 - Use the English term when the Chinese one is uncommon in the ML community
   (micro-batch, all-reduce, kernel, warp, rollout, KV cache, prefill/decode…).
 

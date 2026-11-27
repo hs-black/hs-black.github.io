@@ -36,8 +36,8 @@
 <main class="wrap"><header class="post-header"><h1>SimpleHC：把多路残差的读写合并起来</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-11-11">2026-11-11</time></div></header>
 <nav class="series" data-series="hyperconnections"></nav>
 <article class="prose">
-<p>把一个 Transformer 的单路残差扩展为四条，额外 FLOPs 可以很少，训练时间却明显增加。原因藏在每个 attention 和 FFN 之间：读出几条宽向量，计算门控，把它们合成子层输入，再把新输出写回。计算单元很快做完了乘加，下一步却要等数据搬过来。</p>
-<p>SimpleHC 把这个问题拆成两件事：<strong>保留对模型有用的读写选择，再把相邻子层对同一份宽状态的访问合并起来。</strong>它采用恒等残差通路，保留动态、逐层独立的读写门控；连续四个子层从共同的入口状态生成门控，子层之间用标量系数传递新输出，最后统一写回四条残差流。这里最值得理解的是：哪些信息需要马上交给下一层，哪些大张量可以晚一点再落回显存。</p>
+<p>把 Transformer 的单路残差扩成四条，多出来的 FLOPs 并不多，训练却明显变慢。卡脖子的地方在每个 attention 和 FFN 之间：每层都要从显存里读出几条宽向量、算门控、拼出子层输入，算完再写回去。算力单元一眨眼就干完活了，大半时间都在等数据搬运。</p>
+<p>SimpleHC 的解法分两步走：先把没必要的残差混合删掉，只留动态、逐层独立的<strong>读写门控</strong>和<strong>恒等残差</strong>；再把连续四个子层打包成一组——门控统一从组入口算出来，子层之间只用标量系数传递刚算出的新输出，等整组跑完再一次性写回四条残差流。背后其实是笔很直白的账：哪些窄向量必须立刻交给下一层，哪些宽状态可以攒到组末再落回显存。</p>
 <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
 <li><a href="#operations">先分清读取、计算、混合与写入</a></li>
 <li><a href="#simplify">保留什么：两种有效的交互机制</a></li>
@@ -52,22 +52,22 @@
 <li><a href="#references">参考与延伸阅读</a></li></ol></nav>
 
 <section id="operations"><h2>1. 先分清读取、计算、混合与写入</h2>
-<p>普通残差子层计算 \(x_{l+1}=x_l+F_l(x_l)\)。这里 \(l\) 每增加 1，经过一个 attention 或 FFN；一个完整 Transformer block 包含两个这样的子层。\(F_l\) 包含子层需要的归一化及 attention/FFN 运算。</p>
-<p>Hyper-Connections 同时保存多条状态。对一个 token，令 \(\htmlData{symbol=state}{X_l}\in\mathbb R^{n\times C}\)：\(n\) 行分别是残差流，每行有 \(C\) 个通道。默认 \(n=4\)。完整 batch 的张量还带有 batch、序列位置两个前导维度；以下公式描述一个位置，attention 在计算 \(F_l\) 时仍会访问序列中的其他位置。</p>
-<p>读取门控 \(p_l\in\mathbb R^n\) 决定当前子层从每条流读取多少；写入门控 \(q_l\in\mathbb R^n\) 决定把计算结果向每条流写入多少。残差混合矩阵 \(M_l\in\mathbb R^{n\times n}\) 的第 \(i\) 行、第 \(j\) 列表示旧流 \(j\) 对新流 \(i\) 的贡献。三个步骤是：</p>
+<p>标准残差子层写起来就一行：\(x_{l+1}=x_l+F_l(x_l)\)。这里每走一步 \(l\)，就是过一个 attention 或 FFN（含前面的归一化），所以一个完整的 Transformer block 占两个子层。</p>
+<p>Hyper-Connections 把单路状态扩成了多路。盯住单个 token 来看（下文公式省去 batch 和序列维度，attention 算 \(F_l\) 时照常看全序列），残差状态变成一个矩阵 \(\htmlData{symbol=state}{X_l}\in\mathbb R^{n\times C}\)：共 \(n\) 行，每行是一条 \(C\) 维残差流，默认 \(n=4\)。</p>
+<p>多路残差在子层前后加了三样东西：读取门控 \(p_l\in\mathbb R^n\) 决定从各条流里各取多少，写入门控 \(q_l\in\mathbb R^n\) 决定把子层输出按什么比例分回去，残差混合矩阵 \(M_l\in\mathbb R^{n\times n}\) 则负责在旧流之间重新洗牌（第 \(i\) 行第 \(j\) 列是旧流 \(j\) 对新流 \(i\) 的权重）。合起来就是三步：</p>
 \[
  u_l=X_l^\top\htmlData{symbol=read}{p_l},\qquad
  o_l=F_l(u_l),\qquad
  X_{l+1}=\htmlData{symbol=mixing}{M_l}X_l+\htmlData{symbol=write}{q_l}o_l^\top.
 \]
-<p>\(u_l,o_l\) 都是 \(C\) 维列向量。\(X_l^\top p_l\) 把 \(n\) 条流汇总成一个子层输入；\(q_lo_l^\top\) 是一个 \(n\times C\) 外积，把同一个输出按不同比例分配回各流。例如 \(q_l=(1,0.5,0.2,0.8)^\top\)，四条流分别加上 \(o_l,0.5o_l,0.2o_l,0.8o_l\)。</p>
-<p>HC 允许学习自由的混合矩阵；<a href="/posts/manifold-hyper-connections/">mHC</a> 用 Sinkhorn 归一化，使混合矩阵近似满足非负、每行每列和为 1。SimpleHC 取 \(M_l=I\)，于是每条旧流直接留下，再加上本层写入：</p>
+<p>其中子层的输入 \(u_l\) 和输出 \(o_l\) 都还是 \(C\) 维列向量，没有变宽。\(X_l^\top p_l\) 把 \(n\) 条流加权压成一条输入；外积 \(q_lo_l^\top\) 则是把同一个输出按不同倍数分发回各条流——比如 \(q_l=(1,0.5,0.2,0.8)^\top\)，四条流就分别加上 \(o_l,0.5o_l,0.2o_l,0.8o_l\)。</p>
+<p>原版 HC 直接学一个自由的 \(M_l\)，<a href="/posts/manifold-hyper-connections/">mHC</a> 为了稳住数值，用 Sinkhorn 迭代把它压成近似双随机矩阵（非负，且每行每列之和为 1）。SimpleHC 更干脆：直接令 \(M_l=I\)，旧流原封不动往下传，只叠加上本层的写入：</p>
 \[ X_{l+1}=X_l+q_lo_l^\top. \]
-<p>这个改动保留了跨流的信息交流：子层从多条流读取，经过 \(F_l\) 计算，再把结果写入多条流。它把交流集中在“读入子层—计算—写回”的通路上，旧状态本身沿恒等路径向前传播。</p>
+<p>别以为删了 \(M_l\) 就断了跨流交流。子层依然会从多条流里读信息，经过 \(F_l\) 加工后再写回多条流——跨流交互只是全都收束到了这条非线性计算支路上，主干道则退回到干净的恒等映射。</p>
 </section>
 
 <section id="simplify"><h2>2. 保留什么：两种有效的交互机制</h2>
-<p>先看质量，再决定哪些操作值得保留。在 15B 总参数、每个 token 激活约 1B 参数的 MoE 对照中，把门控和混合逐一拆开，会看到两个有效组合：一组是<strong>共同学习的读取与写入</strong>；另一组是<strong>不受双随机约束的混合</strong>。下表摘取相同实验中的关键配置；平均分由 MMLU、HellaSwag、MATH、MBPP、C3 五项组成，分数越高越好，验证 loss 越低越好。</p>
+<p>敢不敢直接把 \(M_l\) 砍掉，得先拿消融实验说话。在 15B 总参数、每 token 激活约 1B 参数的 MoE 模型上，把读写门控和残差混合拆开排列组合，结果很清楚：真正撑起收益的机制其实只有两套——要么<strong>读写门控一起学</strong>，要么<strong>放开自由混合</strong>。下面摘了这组对照的关键配置（五项平均分涵盖 MMLU、HellaSwag、MATH、MBPP 和 C3）：</p>
 <div class="table-wrap"><table><thead><tr><th>残差设计</th><th>读取 / 写入</th><th>混合</th><th>Loss</th><th>五项平均分</th></tr></thead><tbody>
 <tr><td>Vanilla</td><td>单路残差</td><td>恒等</td><td>1.678</td><td>52.4</td></tr>
 <tr><td>mHC</td><td>共同学习</td><td>Sinkhorn</td><td>1.659</td><td>55.0</td></tr>
@@ -77,54 +77,56 @@
 <tr><td>固定读写</td><td>均固定</td><td>无约束</td><td>1.660</td><td>56.0</td></tr>
 <tr><td>学习读写 + 自由混合</td><td>共同学习</td><td>无约束</td><td>1.657</td><td>56.2</td></tr>
 </tbody></table></div>
-<p>固定读取使用 \(p=\mathbf1/n\)，即平均读取各流；固定写入使用 \(q=\mathbf1\)，即向各流写入同样的输出。只固定其中一侧，就会削弱恒等残差版本的收益。一个自然的理解是：不同子层需要选择合适的信息，也需要把新信息放到合适的流中；读取与写入共同建立这种分工。</p>
-<p>SimpleHC 选择了共同学习的读写门控和恒等残差。这个配置在上述对照中保留了接近 mHC 的质量，同时为后续的加法展开提供了简单结构。自由混合的额外收益和跨深度的传播行为，留到<a href="#stability">稳定性部分</a>一起看。</p>
+<p>表里的「固定读取」是直接取均值 \(p=\mathbf1/n\)，「固定写入」是等量广播 \(q=\mathbf1\)。注意看中间两行：在恒等残差下，读写门控只要锁死任何一边，收益立马缩水大半。道理不难想——光能从特定流里挑东西却不能定向存回去，或者只管定向存却只能糊成一团读，四条流的分工根本立不住，读写必须配合着学。</p>
+<p>对比下来，<strong>学习读写门控 + 恒等残差</strong>（表里的 identityHC）几乎拿到了 mHC 的全部质量，还把残差主干变成了纯加法——这正是后面能做分组展开的前提。至于最下面两行「无约束混合」多出来的那点分数，代价是什么、深层会不会炸，留到<a href="#stability">第 8 节</a>一起算账。</p>
 <h3>动态门控怎样生成</h3>
-<p>将 \(n\times C\) 状态按行展平成 \(nC\) 维向量，进行无仿射参数的 RMSNorm，得到 \(z_l\)。对于读取和写入，各有一套独立参数：</p>
+<p>读写门控都随 token 动态生成：先把 \(n\times C\) 的状态按行拉直成 \(nC\) 维向量，做一次不带仿射参数的 RMSNorm 得到 \(z_l\)，再用两套各自独立的线性映射算出读取和写入的 logit：</p>
 \[
  z_l=\operatorname{RMSNorm}(\operatorname{vec}X_l),\qquad
  \ell_l^s=\alpha_l^s(W_l^s)^\top z_l+b_l^s,
  \quad s\in\{\mathrm{pre},\mathrm{post}\},
 \]
 \[ p_l=\sigma(\ell_l^{\mathrm{pre}}),\qquad q_l=2\sigma(\ell_l^{\mathrm{post}}). \]
-<p>这里 \(W_l^s\in\mathbb R^{nC\times n}\)，\(b_l^s\in\mathbb R^n\)，\(\alpha_l^s\) 是可学习标量。\(\sigma\) 为 sigmoid，因此每个读取系数位于 \((0,1)\)，写入系数位于 \((0,2)\)。这些系数随 token 状态变化，读取系数的总和也可以变化。下一步要减少的，是生成它们时反复访问宽状态的次数。</p>
+<p>其中 \(W_l^s\in\mathbb R^{nC\times n}\)，\(b_l^s\in\mathbb R^n\)，\(\alpha_l^s\) 是可学习标量，\(\sigma\) 是 sigmoid。这样读系数落在 \((0,1)\)，写系数落在 \((0,2)\)，不强求之和为 1。门控本身算起来很轻，真正拖慢速度的，是每算一层门控就要把整份 \(n\times C\) 的宽状态从显存搬一遍。</p>
 </section>
 
 <section id="group"><h2>3. 四个子层怎样只写回一次</h2>
-<p>设一组从子层 \(L\) 开始，共有 \(\htmlData{symbol=group}{K}\) 个子层。默认 \(K=4\)，顺序是 attention、FFN、attention、FFN，正好两个 Transformer block。组入口 \(X_L\) 保存四条宽残差流。</p>
-<p>恒等残差使中间状态成为逐项相加：</p>
+<p>把从子层 \(L\) 开始的连续 \(\htmlData{symbol=group}{K}\) 个子层划成一组。默认 \(K=4\)，依次是 attention、FFN、attention、FFN，正好盖住两个完整的 Transformer block。</p>
+<p>因为残差主干退化成了恒等映射，组内任何一步的状态 \(X_j\) 都只是入口 \(X_L\) 加上前面各层的写入：</p>
 \[
  X_j=X_L+\sum_{k=L}^{j-1}q_ko_k^\top.
 \]
-<p>\(o_k\) 是前面第 \(k\) 个子层的 \(C\) 维输出，\(q_k\) 是当时向各流写入的 \(n\) 维系数。当前子层 \(j\) 用 \(p_j\) 读取状态，把上式代入 \(u_j=X_j^\top p_j\)：</p>
+<p>现在看第 \(j\) 个子层怎么取输入：把上式直接代进 \(u_j=X_j^\top p_j\)，就能把中间宽状态彻底拆开：</p>
 \[
- u_j=\underbrace{X_L^\top p_j}_{\text{入口基础读取}}
- +\sum_{k=L}^{j-1}\underbrace{(p_j^\top q_k)}_{\text{一个标量}}o_k.
+ u_j=\underbrace{X_L^\top p_j}_{\text{从入口读的基础输入}}
+ +\sum_{k=L}^{j-1}\underbrace{(p_j^\top q_k)}_{\text{标量系数}}o_k.
 \]
-<p>一次“写入各流，再从各流读取”，合起来就是一个内积。假设之前的输出向两条流分别写入 \(1\) 倍与 \(0.5\) 倍，后面读取两条流的权重是 \(0.25\) 与 \(0.75\)，那么这个输出对后面输入的总贡献就是 \(0.25\times1+0.75\times0.5=0.625\) 倍。</p>
-<h3>先把门控准备好</h3>
-<p>上面的展开需要当前的 \(p_j,q_j\) 已经可用。逐子层门控原本依赖更新后的 \(X_j\)。SimpleHC 改为让组内各子层从入口 \(X_L\) 生成自己的门控：</p>
+<p>这一步很漂亮：先按 \(q_k\) 写进 \(n\) 条宽流，再按 \(p_j\) 读出来，兜这么大一圈，效果其实就等于把 \(C\) 维窄向量 \(o_k\) 乘上一个标量内积 \(p_j^\top q_k\)。举个数：前一层按 \((1,0.5)\) 写进两条流，后一层按 \((0.25,0.75)\) 读取，前一层输出对后一层输入的净贡献就是 \(0.25\times1+0.75\times0.5=0.625\) 倍，根本不必先把宽状态更新一遍再读出来。</p>
+<h3>卡壳的地方：门控还等着 \(X_j\)</h3>
+<p>上面的展开有个前提——算到第 \(j\) 层时，\(p_j,q_j\) 得先到位。可按原来的写法，门控要等最新的宽状态 \(X_j\) 落地才能算；不把 \(X_j\) 写出来，门控就出不来。</p>
+<p>SimpleHC 的办法很干脆：让组内这 \(K\) 个子层统一看组入口 \(X_L\) 来生成各自的门控：</p>
 \[
  \bar p_j=g_j^{\mathrm{pre}}(X_L),\qquad
  \bar q_j=g_j^{\mathrm{post}}(X_L),\qquad L\le j&lt;L+K.
 \]
-<p>横线表示“根据组入口计算”。每个 \(g_j\) 仍有自己的投影、缩放和偏置。因此四个子层看到同一份输入状态，也可以作出四种不同的读写选择。</p>
-<p><strong>共享入口改变了门控的条件输入；给定这组门控以后，后面的计算重排是代数等价的。</strong>两件事分别由消融实验和数值等价检查来验证。训练时，梯度会通过每个门控函数回到组入口。</p>
-<h3>把跨子层的贡献写成一个小矩阵</h3>
-<p>把组内的门控按子层顺序排成列，得到 \(P=[\bar p_L,\ldots,\bar p_{L+K-1}]\) 和 \(Q=[\bar q_L,\ldots,\bar q_{L+K-1}]\)，二者均为 \(n\times K\)。预先计算：</p>
+<p>头上加横线，表示它是从组入口算出来的。注意，共享的只有输入 \(X_L\)，每个 \(g_j\) 依然拿着自己独立的投影矩阵、缩放因子和偏置，所以四个子层对着同一份入口状态，照样能做出四套不同的读写决策。</p>
+<p>这里要把两件事分开看：改用共享入口是一次<strong>结构近似</strong>（改变了门控的条件输入），好不好使靠第 4 节的消融实验说话；而一旦这组门控算定，后面的延迟写回就是<strong>精确的代数等价</strong>，半点误差都没有。反向传播时，梯度也会顺着每个门控函数一路传回组入口。</p>
+<h3>把跨子层修正收进一个小矩阵</h3>
+<p>把组内各层的门控按列拼成两个 \(n\times K\) 小矩阵 \(P=[\bar p_L,\ldots,\bar p_{L+K-1}]\) 和 \(Q=[\bar q_L,\ldots,\bar q_{L+K-1}]\)，就能在进组时一口气算好两样东西：</p>
 \[
  V=X_L^\top P\in\mathbb R^{C\times K},\qquad
  \htmlData{symbol=correction}{D}=\operatorname{tril}(P^\top Q,-1)\in\mathbb R^{K\times K}.
 \]
-<p>\(V\) 的第 \(a\) 列是第 \(a\) 个子层从入口取得的基础输入。\(D\) 的<strong>行对应后面读取的子层，列对应前面写入的子层</strong>；\(D_{ab}=\bar p_{L+a}^\top\bar q_{L+b}\)。只保留严格下三角，因为第 \(a\) 个子层能接收的输出来自 \(b&lt;a\)。当 \(K=4\) 时，\(D\) 有六个这样的系数。</p>
+<p>\(V\) 的第 \(a\) 列就是第 \(a\) 个子层从入口拿到的基础输入。\(D\) 是一个 \(K\times K\) 严格下三角矩阵，<strong>行对应后面读取的子层，列对应前面写入的子层</strong>，元素 \(D_{ab}=\bar p_{L+a}^\top\bar q_{L+b}\)（只有 \(b&lt;a\) 的历史输出能进当前层，\(K=4\) 时总共就 6 个非零系数）。</p>
+<p>接下来四个子层照旧按顺序跑，每层把基础输入加上前面各层的标量修正：</p>
 \[
  u_{L+a}=V_{:,a}+\sum_{b&lt;a}D_{ab}o_{L+b},\qquad o_{L+a}=F_{L+a}(u_{L+a}).
 \]
-<p>四个子层仍按顺序计算。后一个子层用到了前一个子层刚产生的输出，只是这份信息通过 \(C\) 维向量直接传递。组末再把全部输出排成 \(O=[o_L,\ldots,o_{L+K-1}]\in\mathbb R^{C\times K}\)，统一写回：</p>
+<p>后一层依然吃得到前一层刚算出来的新输出，只是传递载体从 \(n\times C\) 的宽状态换成了 \(C\) 维窄向量。等整组四个子层全算完，把输出按列拼成 \(O=[o_L,\ldots,o_{L+K-1}]\in\mathbb R^{C\times K}\)，在组出口一次性写回宽状态：</p>
 \[ X_{L+K}=X_L+QO^\top. \]
 <figure class="article-figure shc-figure" id="shc-flow">
 <h3>一组之内，旧输出怎样进入新输入</h3>
-<p class="shc-kicker">教学数值：两条流，每条流只有一个数；四个子层都执行 F(u) = u / 2。读门 p、写门 q 已由组入口生成，各子层使用各自的一组。</p>
+<p class="shc-kicker">玩具算例：两条流、每条流 1 维（C = 1），四个子层都算 F(u) = u / 2。四组读写门控 p、q 均已由组入口生成。</p>
 <div class="shc-entry"><span>始终保留的组入口</span><strong>X₀ = [2, 6]</strong></div>
 <div class="shc-equation-card" aria-live="polite"><h4 id="shc-current-title">先生成四组门</h4><p id="shc-current-base"></p><p class="shc-equation-line" id="shc-current-formula"></p><p id="shc-current-reason"></p></div>
 <div class="shc-output-row" id="shc-outputs"></div>
@@ -134,10 +136,10 @@
 </div>
 <p class="shc-matrix-label">修正系数 D：行 = 当前读取子层，列 = 先前写入子层</p>
 <div class="shc-matrix" id="shc-coefficients" role="table" aria-label="四个子层之间的标量贡献系数"></div>
-<details><summary>查看四组读门、写门与算式</summary><div class="table-wrap"><table><thead><tr><th>子层</th><th>读门 p</th><th>写门 q</th><th>入口读取 pᵀX₀</th></tr></thead><tbody><tr><td>0</td><td>[0.75, 0.25]</td><td>[1, 0.5]</td><td>3</td></tr><tr><td>1</td><td>[0.25, 0.75]</td><td>[0.5, 1]</td><td>5</td></tr><tr><td>2</td><td>[0.5, 0.5]</td><td>[1, 1]</td><td>4</td></tr><tr><td>3</td><td>[0.8, 0.2]</td><td>[0.25, 0.75]</td><td>2.8</td></tr></tbody></table></div><p>D 的第 a 行、第 b 列取 pₐᵀqᵦ；只有 b &lt; a 的历史输出进入当前输入。第 0 个子层先得到 u₀ = 3、o₀ = 1.5；第 1 个子层接着得到 u₁ = 5 + 0.625 × 1.5 = 5.9375。</p></details>
-<figcaption>紫色突出当前计算与使用的系数。两种执行方式使用相同的门与子层函数，组末得到相同状态。界面中的长小数保留六位。</figcaption>
+<details><summary>查看四组读门、写门与算式</summary><div class="table-wrap"><table><thead><tr><th>子层</th><th>读门 p</th><th>写门 q</th><th>入口读取 pᵀX₀</th></tr></thead><tbody><tr><td>0</td><td>[0.75, 0.25]</td><td>[1, 0.5]</td><td>3</td></tr><tr><td>1</td><td>[0.25, 0.75]</td><td>[0.5, 1]</td><td>5</td></tr><tr><td>2</td><td>[0.5, 0.5]</td><td>[1, 1]</td><td>4</td></tr><tr><td>3</td><td>[0.8, 0.2]</td><td>[0.25, 0.75]</td><td>2.8</td></tr></tbody></table></div><p>D 的第 a 行、第 b 列是 pₐᵀqᵦ，只有 b &lt; a 的历史输出会汇入当前输入。第 0 层先算出 u₀ = 3、o₀ = 1.5；第 1 层接着算出 u₁ = 5 + 0.625 × 1.5 = 5.9375。</p></details>
+<figcaption>紫色标出当前步正在计算的子层及用到的修正系数。两种方式共用同一组门控，出组时状态完全一致（长小数显示六位）。</figcaption>
 </figure>
-<p>可以把执行顺序记成：<strong>入口读一次以生成各层门控，入口再读一次以生成各层基础输入；依次计算子层并补入历史输出；组末统一写回。</strong>中途保留的是每个子层的窄输出，宽残差状态只在组边界更新。</p>
+<p>整组跑下来，对宽状态的访问缩成了三下：进组读一次算门控，再读一次算各层基础输入，出组统一写回一次。组内四个子层来回倒腾的，全是窄向量。</p>
 <details><summary>对应的伪代码</summary><pre><code># X: [tokens, n, C]；每个 token 独立生成门控
 # P, Q: [tokens, n, K]；各子层参数独立
 P, Q = grouped_gates(X)
@@ -149,11 +151,11 @@ for a in range(K):
     for b in range(a):
         u = u + D[:, a, b, None] * outputs[b]
     outputs.append(sublayers[a](u))
-X_next = X + einsum("tnk,tck-&gt;tnc", Q, stack(outputs, dim=-1))</code></pre><p>这段写法直接表达计算关系。高效实现会把内层乘加、输出读取和最终写回融合，减少临时张量。</p></details>
+X_next = X + einsum("tnk,tck-&gt;tnc", Q, stack(outputs, dim=-1))</code></pre><p>上面是最直观的等价写法；真要跑快，还得把内层加权、读取和最终写回融合进 kernel，避免频繁落地临时张量。</p></details>
 </section>
 
 <section id="gates"><h2>4. 共享入口，为什么仍要逐层独立的门控</h2>
-<p>共享输入是否损失质量，取决于入口包含多少后续门控所需的信息，以及组内新输出能否及时进入后续子层。15B-A1B 对照把这两个问题分开验证：</p>
+<p>把四个子层的门控都改到组入口上算，模型会不会变傻？在 15B-A1B 上拆开一测，就能看清哪一步真不能省、哪一步可以放心省：</p>
 <div class="table-wrap"><table><thead><tr><th>配置</th><th>组内门控</th><th>新输出的标量修正</th><th>Loss</th><th>五项平均分</th></tr></thead><tbody>
 <tr><td>identityHC，逐子层入口</td><td>各层独立</td><td>通过完整状态传递</td><td>1.660</td><td>55.4</td></tr>
 <tr><td>共享 2 个子层</td><td>各层独立</td><td>保留</td><td>1.660</td><td>54.8</td></tr>
@@ -162,101 +164,100 @@ X_next = X + einsum("tnk,tck-&gt;tnc", Q, stack(outputs, dim=-1))</code></pre><p
 <tr><td>共享 4 个子层，复用一对门控</td><td>各层共用同一对</td><td>保留</td><td>1.667</td><td>53.5</td></tr>
 <tr><td>共享 4 个子层，省去修正</td><td>各层独立</td><td>省去，组末仍写回</td><td>1.705</td><td>47.9</td></tr>
 </tbody></table></div>
-<p>最明显的下降发生在省去修正时。虽然组末仍把四个输出写回了残差流，后面的子层在计算当下却只拿到入口信息。这切断了组内的顺序加工。相比之下，四层门控共同看入口，同时保留各自参数和输出修正，维持了接近参考模型的质量。</p>
-<p>门控预测实验进一步检查了入口的信息量：冻结训练好的 identityHC，让独立的小预测器从组入口预测后面子层的门控。误差在冻结教师模型的轨迹上评估，写入门控先除以 2，使读写两种门控都按 \(0\) 到 \(1\) 的尺度统计。测试集上，直接使用对应教师门控参数时，写入门控的平均绝对误差为 0.05044；只训练预测器后，降到 0.01034。读取门控也从 0.05817 降到 0.01653。这解释了为什么“相同输入、不同映射”有机会保留逐层的路由选择。</p>
-<p>这个比较给出的设计结论很具体：<strong>可以尝试减少决定门控时的状态刷新频率，同时保留逐层决策和最新子层输出。</strong>把组继续扩大，需要同时考察门控预测误差、最终质量和修正成本。</p>
+<p>表里有三处落差非常刺眼。第一，<strong>最不能省的是标量修正</strong>——把 \(D\) 删掉后，loss 从 1.660 飙到 1.705，平均分直接掉 7 分。原因很直白：组末虽然还是把四个输出写回了残差流，但组内后三个子层算的时候全看不到前面刚算出来的结果，相当于把串联的四层硬拆成了对着入口各自干活的并联支路，组内有效深度直接拍扁。</p>
+<p>第二，<strong>门控参数必须逐层独立</strong>。同样是共享入口、保留修正，如果偷懒让四层共用同一对门控，loss 涨到 1.667，平均分掉到 53.5——毕竟 attention 和 FFN、前一层和后一层想读想写的流本来就不一样。反过来，只要留住独立参数和标量修正，\(K=4\) 的共享入口几乎没有伤到质量（loss 维持 1.660，平均分 55.0 对 55.4），直到拉大到 \(K=8\) 才开始出现退化。</p>
+<p>为什么单靠组入口 \(X_L\) 就能替后面三层做好门控决策？论文做了一个探针实验：把训好的 identityHC 冻住，用独立的小线性预测器直接从 \(X_L\) 去猜后面子层真实的读写门控（写门控先除以 2，统一折算到 \([0,1]\) 尺度）。在测试集轨迹上，如果直接拿原模型对应层的门控权重套在 \(X_L\) 上，写门控和读门控的平均绝对误差分别是 0.05044 和 0.05817；稍微训练一下预测器，误差立刻降到 <strong>0.01034</strong> 和 <strong>0.01653</strong>。换句话说，入口状态本身就藏着足够多的路由信号，只要给每层留出独立的映射参数，就能复现逐层决策；真正不能滞后的，是送进计算分支的那条数据流。</p>
 </section>
 
 <section id="traffic"><h2>5. 18C 到 9C：逐项计算显存访问</h2>
-<p>GPU 的 HBM 保存大张量，线程在寄存器和片上存储中计算。一次 kernel 可以把数据读进来，完成多步运算再写回；跨 kernel 留下的大型中间张量通常增加显存流量。SimpleHC 的收益主要来自减少对 \(nC\) 个元素的宽残差状态的重复访问。</p>
-<p>先固定计数范围：<strong>每个 token、每个子层的残差连接前向激活读写</strong>，以元素数计。读取参数、小型门控系数和 attention/FFN 内部访问分别核算。一次读或写一条完整的宽残差状态，计 \(nC\) 个元素；一条子层输入或输出只有 \(C\) 个元素。</p>
-<h3>融合后的 mHC 与 identityHC</h3>
+<p>算完质量账，来算显存带宽账。对残差连接这种逐元素小操作来说，算力从来不是瓶颈，真正拖时间的是在 HBM 和片上存储之间来回搬运 \(n\times C\) 的宽状态。</p>
+<p>先把统计口径定死：只算<strong>每个 token、每个子层在残差连接前向中读写的激活元素数</strong>（不计权重、极小的门控标量，也不算 attention/FFN 内部）。搬一次完整的宽残差状态计 \(nC\) 个元素，搬一条子层输入或输出只有 \(C\) 个元素。</p>
+<h3>融合后的 mHC 与 identityHC：都要搬 \(18C\)</h3>
 <div class="table-wrap"><table><thead><tr><th>操作</th><th>读写内容</th><th>每 token、每子层</th></tr></thead><tbody>
 <tr><td>投影与 RMS 统计</td><td>读取宽状态</td><td>\(nC\)</td></tr>
 <tr><td>汇总子层输入</td><td>读取宽状态，写出窄输入</td><td>\(nC+C\)</td></tr>
 <tr><td>写回残差</td><td>读取旧宽状态和窄输出，写出新宽状态</td><td>\(2nC+C\)</td></tr>
 <tr><td>合计</td><td></td><td>\(4nC+2C\)</td></tr>
 </tbody></table></div>
-<p>取 \(n=4\)，结果为 \(18C\)。融合后的 mHC 在同一 kernel 中完成混合、输出分配与残差写回，所以 identityHC 去掉混合后，仍需要这三次操作中的相同大张量访问。减少算术和减少数据搬运，是两笔可以分别检查的账。</p>
-<h3>SimpleHC 的组边界访问与组内修正</h3>
-<p>一组 \(K\) 个子层只做一次门控状态读取、一次基础输入状态读取，以及一次宽状态读出与写回，共 \(4nC\) 个元素。摊到每子层为 \(4nC/K\)。各层的基础输入写出、最终写回时的窄输出读取，平均还需要 \(2C\)。</p>
-<p>组内第 \(a\) 个子层从 0 开始编号。对于 \(a&gt;0\)，修正 kernel 读取一个基础输入和 \(a\) 个之前的输出，再写出一个修正后的输入，共 \((a+2)C\) 个元素。第 0 个子层直接使用基础输入。平均修正流量为：</p>
+<p>代入 \(n=4\)，每层一共要搬 \(18C\) 个元素。注意一个反直觉的事实：哪怕把混合矩阵删了变成 identityHC，只要还是逐子层执行，前向访存量依然是 \(18C\)——因为融合后的 mHC 本来就把混合、输出分配和写回塞在同一个 kernel 里，少算了那点混合乘加，该读该写的宽张量一个没少。</p>
+<h3>SimpleHC：把宽状态访问摊薄到组边界</h3>
+<p>分组之后，连续 \(K\) 个子层只在组边界动宽状态：进组读一次算门控（\(nC\)）、再读一次算基础输入（\(nC\)）、出组读旧写新（\(2nC\)），整组合计 \(4nC\)，摊到每个子层就是 \(4nC/K\)。再加上每层各写出一次基础输入、组末读回一次窄输出，固定占 \(2C\)。</p>
+<p>省下来的带宽不是白拿的，代价是组内的标量修正。从 0 开始给组内子层编号：第 0 层直接用基础输入，没有额外修正；第 \(a\) 层（\(a&gt;0\)）的修正 kernel 要读 1 份基础输入、\(a\) 份前面子层的窄输出，再写出 1 份修正后的输入，一共搬 \((a+2)C\) 个元素。整组平均到每层，修正流量为：</p>
 \[
  Q_{\mathrm{corr}}(K)=\frac{C}{K}\sum_{a=1}^{K-1}(a+2)
  =\frac{C(K-1)(K+4)}{2K}.
 \]
-<p>因此，SimpleHC 每个 token、每个子层的逻辑前向访问量为</p>
+<p>三项合起来，SimpleHC 每个 token、每个子层的逻辑前向访问量就是：</p>
 \[
  \htmlData{symbol=traffic}{Q_{\mathrm{act}}}(K)
  =\underbrace{\frac{4nC}{K}}_{\text{宽状态访问}}
  +\underbrace{2C}_{\text{基础输入写出与输出读取}}
  +\underbrace{\frac{C(K-1)(K+4)}{2K}}_{\text{组内修正}}.
 \]
-<p>当 \(n=K=4\) 时，三项分别为 \(4C,2C,3C\)，合计 \(9C\)。取 \(C=6144\)、8192 个 token、BF16 每元素 2 字节，这部分前向读写从每子层 \(1728\) MiB 降到 \(864\) MiB。这里统计的是所有 token 累计搬运的字节数；设备实际 HBM 事务还受缓存复用和 kernel 布局影响。</p>
+<p>取 \(n=K=4\)，三项正好是 \(4C+2C+3C=9C\)，相比 \(18C\) 直接砍半。换成具体字节数更有体感：宽度 \(C=6144\)、8192 个 token、BF16（2 字节），单看这部分前向激活读写，每子层就从 <strong>1728 MiB 降到 864 MiB</strong>。</p>
 <figure class="article-figure shc-figure" id="shc-traffic">
 <h3>分组更长，宽状态访问更少，历史修正更多</h3>
-<p class="shc-kicker">固定 n = 4 条流。计量单位为 C 个元素 / token / 子层；C 是每条流的通道数。采用正文的逻辑前向访存模型。</p>
+<p class="shc-kicker">固定 n = 4 条流，按正文的逻辑前向访存模型计算，单位为每 token 每子层的元素数（以单流宽度 C 计）。</p>
 <label class="shc-control" for="shc-group-size">每组子层数 K<input id="shc-group-size" type="range" min="1" max="16" step="1" value="4"><output id="shc-group-value" for="shc-group-size">4</output></label>
 <div class="shc-breakdown"><div class="shc-wide">宽状态的读取与写回<strong id="shc-q-wide">4 C</strong></div><div class="shc-base">基础输入写出、最终输出读入<strong id="shc-q-base">2 C</strong></div><div class="shc-correction">历史输出的标量修正<strong id="shc-q-correction">3 C</strong></div></div>
 <div class="shc-bar-axis"><span>0</span><span>18 C：逐子层执行的基线</span></div><div class="shc-traffic-track" role="img" aria-label="逻辑访问量的三部分" id="shc-traffic-bar"><span class="shc-wide" id="shc-bar-wide"></span><span class="shc-base" id="shc-bar-base"></span><span class="shc-correction" id="shc-bar-correction"></span></div>
 <p class="shc-traffic-total"><strong id="shc-q-total">9 C</strong>总访问量 · 相比 18 C 减少 <span id="shc-q-saved">50.0%</span></p>
 <p class="shc-note" id="shc-k-explanation">K = 4 覆盖两个 Transformer block；在 K = 2、4、8、16 这组候选中，9 C 最低。</p>
 <div class="table-wrap"><table class="shc-traffic-table"><thead><tr><th>K</th><th>宽状态</th><th>修正</th><th>合计</th></tr></thead><tbody id="shc-traffic-rows"></tbody></table></div>
-<p class="shc-note">仅就“为反向传播保存入口残差状态”这一项，容量减少 <strong id="shc-state-saved">75.0%</strong>。其他留存激活的大小还取决于子层输入、输出和实现方式。</p>
-<figcaption>三段颜色与上方三项对应。模型包含残差相关前向激活访问；完整训练时间还受反向、kernel 调度及 attention / FFN 计算影响。</figcaption>
+<p class="shc-note">单看反向传播需要保存的残差入口状态，容量减少 <strong id="shc-state-saved">75.0%</strong>（整组实际显存账见第 7 节）。</p>
+<figcaption>色块与上方三项访存一一对应，拖动滑块观察宽状态摊薄与历史修正增长的此消彼长。</figcaption>
 </figure>
-<p>组越大，第一项越小，但每个输出需要送往更多后续子层，第三项随之增长。对 \(n=4\)，上式可整理为</p>
+<p>从公式一眼就能看出组长 \(K\) 的拉扯：\(K\) 越大，宽状态摊得越薄，但后面子层要翻查的历史输出越来越多，修正流量反倒往上爬。代入 \(n=4\) 整理一下：</p>
 \[ \frac{Q_{\mathrm{act}}(K)}C=\frac K2+\frac72+\frac{14}{K}. \]
-<p>连续近似的最低点在 \(K=\sqrt{28}\approx5.29\)，整数 \(K=5\) 给出 \(8.8C\)。\(K=4\) 的 \(9C\) 是所比较的 \(2,4,8,16\) 四种组长中最低的，而且恰好覆盖两个完整 block。实际选组长还要加入质量、尾组、流水线边界和 kernel 效率。<strong>四个子层是有实验支撑、结构对齐的折中点。</strong></p>
-<h3>FLOPs 怎么变</h3>
-<p>采用一次乘加计 2 FLOPs 的近似，mHC 每子层的门控投影将 \(nC\) 维输入映射到 \(n^2+2n\) 个系数，成本约 \(2nC(n^2+2n)\)。去掉混合投影后，读写门控只需 \(2n\) 个系数，成本约 \(4n^2C\)。在 \(n=4\) 时，两者为 \(192C\) 与 \(64C\)。</p>
-<p>分组仍保留各子层的独立门控，投影的乘加总量保持对应的规模，但可以更充分地复用同一次载入的输入。标量修正每组包含 \(K(K-1)/2\) 个“向量乘系数再相加”，平均增加约 \(C(K-1)\) FLOPs/子层；若只计算所需的严格下三角系数，还约需 \(n(K-1)\) FLOPs/子层；伪代码和 CPU 实验为表达简洁，先计算完整 \(P^\top Q\) 再取下三角，这一步约为 \(2nK\) FLOPs/子层。它用少量窄向量算术换取宽状态访问的减少。attention、FFN、归一化和反向传播的成本需要接着加入整步账本。</p>
+<p>连续函数在 \(K=\sqrt{28}\approx5.29\) 处取极小，整数里 \(K=5\) 最低（\(8.8C\)）。不过 5 个子层会把 Transformer block 劈成两半，不利于架构对齐和流水线切分；而 \(K=4\) 的 \(9C\) 已经离极值差不了多少，刚好盖住两个完整 block，质量也没掉，自然成了默认选择。</p>
+<h3>顺手看一眼 FLOPs</h3>
+<p>按一次乘加计 2 FLOPs 算：mHC 每层要把 \(nC\) 维输入投影成 \(n^2+2n\) 个系数（混合矩阵加读写门控），开销约 \(2nC(n^2+2n)\)；去掉混合矩阵后，只剩 \(2n\) 个读写门控系数，降到 \(4n^2C\)。在 \(n=4\) 时，就是从 \(192C\) 降到 \(64C\)。</p>
+<p>分组后各层依然保留独立门控，投影总 FLOPs 还是 \(64C\)/子层，但同一份载入的输入现在被四层一起复用。新增的算术主要是标量修正：整组共 \(K(K-1)/2\) 次窄向量乘加，摊到每层约 \(C(K-1)\) FLOPs；算下三角系数矩阵 \(D\) 本身只花约 \(n(K-1)\) FLOPs/子层（前面伪代码和 <code>lab.py</code> 为写着省事，先算了完整 \(P^\top Q\) 再取下三角，约 \(2nK\) FLOPs/子层，相比 \(C\) 都是零头）。本质上就是拿一点点廉价的窄向量算术，去换宝贵的宽状态显存带宽。</p>
 </section>
 
 <section id="kernels"><h2>6. 把公式变成快的前向与反向</h2>
-<p>代数重排提供的是优化空间，kernel 决定这个空间能用掉多少。在宽度 \(C=6144\) 的效率配置下，SimpleHC 的 PyTorch 实现额外训练时间为 22.5%，专用实现降到 2.4%。这里有三个可迁移的工程方法。</p>
-<h3>先复用加载，再融合小算子</h3>
-<p>组入口展平为 \(x\in\mathbb R^{nC}\)。将 \(K\) 个子层的读写投影拼成 \(W\in\mathbb R^{nC\times2Kn}\)，可以一次得到所有未归一化投影。同时累积平方和：</p>
+<p>纸面上的访存减半不会自动变成速度。在宽度 \(C=6144\) 的实测里，直接用 PyTorch 写 SimpleHC，额外训练开销高达 22.5%；换成专用融合 kernel 后，直接压到 <strong>2.4%</strong>。把这部分性能榨干，靠的是三个很实在的 GPU 优化技巧。</p>
+<h3>先复用加载，再把小算子焊在一起</h3>
+<p>把组入口展平成 \(x\in\mathbb R^{nC}\)，再把 \(K\) 个子层的读写投影矩阵横着拼成一个 \(W\in\mathbb R^{nC\times2Kn}\)，就能在扫描一遍 \(x\) 的同时把所有未归一化投影和平方和一并算出来：</p>
 \[
  t=W^\top x,\quad s=x^\top x,\quad
  r=\left(\frac{s}{nC}+\epsilon\right)^{-1/2}.
 \]
-<p>\(r\) 是 RMS 的倒数。由于门控采用无仿射 RMSNorm，线性投影满足 \(W^\top(rx)=r(W^\top x)\)。因此 kernel 可以一起计算 \(t,s\)，随后在小张量上完成 \(\alpha rt+b\) 和 sigmoid，省下一个 \(nC\) 大小的归一化中间缓冲。</p>
-<p>在 \(n=K=4\) 时，合并投影的形状是 \(4C\times32\)：32 列对应四层、读写两种操作、每种四个系数。接着，基础读取 kernel 从宽状态的一个 tile 生成四个不同的基础输入。修正 kernel 直接接收之前输出的指针，融合乘系数、相加与写出；组末 kernel 一次性完成四份输出分配及残差相加。</p>
-<h3>反向传播也可以一起处理宽梯度</h3>
-<p>重新记住这三个形状：\(P,Q\) 为 \(n\times K\) 门控矩阵，\(V,O\) 为 \(C\times K\) 基础输入与子层输出，\(X_L\) 为 \(n\times C\) 入口。令 \(E=\partial\mathcal L/\partial X_{L+K}\) 为组出口的宽梯度，\(G=\partial\mathcal L/\partial V\) 为各基础输入的梯度。基础读取与最终写回贡献：</p>
+<p>这里的巧妙之处在于：门控用的 RMSNorm 没有仿射缩放参数，\(r\) 只是个标量，所以线性投影满足 \(W^\top(rx)=r(W^\top x)\)。也就是说，根本不需要先落地一份 \(nC\) 大的归一化中间张量再做矩阵乘——kernel 可以边读 \(x\) 边同时攒 \(t\) 和 \(s\)，最后在极小的 \(t\) 上补乘 \(\alpha r\)、加偏置 \(b\) 再过 sigmoid 就完事了。</p>
+<p>以 \(n=K=4\) 为例，拼完的投影权重只有 \(4C\times32\)（32 列对应 4 层 × 读写 2 种 × 4 条流）。紧接着，基础读取 kernel 每从显存载入宽状态的一块 tile，就顺手把四个子层的基础输入一块算出来；组内修正 kernel 直接拿着前面几个窄输出的指针，把乘系数、累加和写出焊在一起；出组时再用一个融合 kernel 一次性分配四份输出并加回宽残差。</p>
+<h3>反向传播照样合并宽梯度</h3>
+<p>核对一下前向的几个矩阵形状：门控 \(P,Q\) 是 \(n\times K\)，基础输入 \(V\) 和子层输出 \(O\) 是 \(C\times K\)，组入口 \(X_L\) 是 \(n\times C\)。反向时，设组出口传回来的宽梯度是 \(E=\partial\mathcal L/\partial X_{L+K}\)，各基础输入的梯度是 \(G=\partial\mathcal L/\partial V\)，那么基础读取和组末写回这两条路径贡献的梯度就是：</p>
 \[
  \nabla_{X_L}\mathcal L\mathrel{+}=E+PG^\top,\qquad
  \nabla_O\mathcal L\mathrel{+}=E^\top Q.
 \]
-<p>符号 \(\mathrel{+}=\) 表示把这条计算路径的梯度累加进去。前式把四层输入返回的梯度和恒等路径的 \(E\) 合在一次宽写出中；后式读取同一份 \(E\)，给四个子层输出生成各自梯度。组内修正和动态门控投影还会贡献梯度，它们沿各自路径继续累加。</p>
+<p>这里 \(\mathrel{+}=\) 表示往对应张量的梯度里累加（组内修正和门控投影的梯度后续也会汇进来）。好处和前向一模一样：左边把恒等路径的 \(E\) 和四层输入的梯度合进一次宽张量写出；右边复用同一份 \(E\)，一口气给四个子层输出算出各自的梯度。</p>
 <details><summary>标量修正的反向传播</summary>
-<p>在组内把子层 \(L+a\) 简写为 \(a\)：\(v_a=V_{:,a}\)，\(p_a=\bar p_{L+a}\)，\(q_a=\bar q_{L+a}\)，\(u_a,o_a\) 分别表示该子层的输入、输出。对于 \(u_a=v_a+\sum_{b&lt;a}D_{ab}o_b\)，令 \(g_a=\partial\mathcal L/\partial u_a\in\mathbb R^C\)。一对 \((a,b)\) 给出</p>
+<p>把组内子层 \(L+a\) 简记为 \(a\)：基础输入 \(v_a=V_{:,a}\)，门控 \(p_a=\bar p_{L+a},q_a=\bar q_{L+a}\)，子层输入输出为 \(u_a,o_a\)。对 \(u_a=v_a+\sum_{b&lt;a}D_{ab}o_b\)，设 \(g_a=\partial\mathcal L/\partial u_a\in\mathbb R^C\)，每条跨层修正边 \((a,b)\) 贡献：</p>
 \[
  \nabla_{o_b}\mathcal L\mathrel{+}=D_{ab}g_a,\qquad
  \nabla_{D_{ab}}\mathcal L=g_a^\top o_b.
 \]
-<p>再由 \(D_{ab}=p_a^\top q_b\) 得到 \(\nabla_{p_a}\mathcal L\mathrel{+}=q_b\nabla_{D_{ab}}\mathcal L\)、\(\nabla_{q_b}\mathcal L\mathrel{+}=p_a\nabla_{D_{ab}}\mathcal L\)。因此反向按子层逆序处理，每个早期输出接收来自后面多个子层的梯度。</p></details>
-<h3>小门控梯度怎样利用 Tensor Core</h3>
-<p>一个常见的 GPU 工程问题是：输出矩阵很小，归约维度却很长。读写门控的两条梯度贡献为</p>
+<p>再顺着 \(D_{ab}=p_a^\top q_b\) 往回传，得到 \(\nabla_{p_a}\mathcal L\mathrel{+}=q_b\nabla_{D_{ab}}\mathcal L\) 和 \(\nabla_{q_b}\mathcal L\mathrel{+}=p_a\nabla_{D_{ab}}\mathcal L\)。反向按子层倒序走一遍，早期输出就能收齐来自后面所有子层的梯度。</p></details>
+<h3>小门控梯度怎么喂给 Tensor Core</h3>
+<p>反向还有一个 GPU 上很经典的别扭形状——输出极小、归约维度极长。看读写门控的两项梯度：</p>
 \[ \nabla_P\mathcal L\mathrel{+}=X_LG,\qquad \nabla_Q\mathcal L\mathrel{+}=EO. \]
-<p>取 \(n=K=4\)，\(X_LG\) 是 \((4\times C)(C\times4)\)，每个 token 只产出 16 个数。把通道分块后，各块的局部结果还需要归约；如果写出许多局部结果再启动一个 kernel 求和，临时缓冲与启动开销会侵蚀收益。</p>
-<p>一种办法是一起处理四个 token。将各 token 的 \(X\) 沿行拼成 \(16\times C\) 矩阵，将各自的 \(G\) 沿列拼成 \(C\times16\) 矩阵，得到适合成块矩阵乘法的 \(16\times16\) 输出：</p>
+<p>在 \(n=K=4\) 时，\(X_LG\) 是 \((4\times C)\) 乘 \((C\times4)\)，每个 token 归约完 \(C\) 维只产出 16 个数。如果硬把通道拆块并行算，各块还得把局部和写回显存、再起一个 kernel 归约，光临时缓冲和启动开销就能把省下的时间吃光。</p>
+<p>解法很聪明：一次打包四个 token。把四个 token 的 \(X\) 竖着叠成 \(16\times C\)，把对应的 \(G\) 横着拼成 \(C\times16\)，直接喂进 Tensor Core 做一次规整的 \(16\times16\) 块状矩阵乘：</p>
 \[
  \begin{bmatrix}X^{(0)}\\X^{(1)}\\X^{(2)}\\X^{(3)}\end{bmatrix}
  \begin{bmatrix}G^{(0)}&G^{(1)}&G^{(2)}&G^{(3)}\end{bmatrix}.
 \]
-<p>结果的块 \((i,j)\) 是 \(X^{(i)}G^{(j)}\)。需要保存的是四个对角块 \(X^{(i)}G^{(i)}\)，各自对应同一个 token 的门控梯度。通道归约在片上累积，最后只写出这四块。</p>
-<figure class="article-figure"><h3>四个 token 拼成一次矩阵乘法</h3><p class="article-note">行标表示状态来自哪个 token，列标表示梯度来自哪个 token。每格是 4×4 个标量；有色对角块被保存。</p><div class="shc-pack" role="img" aria-label="四乘四的分块矩阵，仅 token 编号相同的四个对角块保存"><span></span><b>G⁽⁰⁾</b><b>G⁽¹⁾</b><b>G⁽²⁾</b><b>G⁽³⁾</b><b>X⁽⁰⁾</b><span class="keep">保存</span><span>·</span><span>·</span><span>·</span><b>X⁽¹⁾</b><span>·</span><span class="keep">保存</span><span>·</span><span>·</span><b>X⁽²⁾</b><span>·</span><span>·</span><span class="keep">保存</span><span>·</span><b>X⁽³⁾</b><span>·</span><span>·</span><span>·</span><span class="keep">保存</span></div><figcaption>同一次小矩阵乘法的容量利用率、额外计算和中间存储要一起衡量。这里计算了交叉 token 的块，换取规整的 Tensor Core 运算及更少的归约中间结果。</figcaption></figure>
-<p>这个设计体现了一条实用原则：<strong>先找出反复读取、零碎归约和中间缓冲，再考虑用适合硬件的矩阵块来承载它们。</strong>判断优化是否有效，可以同时测 kernel 时长、显存事务、临时缓冲大小与整步训练时间；Tensor Core 指令形状和精度选择则随目标 GPU 调整。</p>
+<p>算出来的是一个 \(4\times4\) 的分块矩阵，其中 \((i,j)\) 块是 \(X^{(i)}G^{(j)}\)。我们只留下对角线上那四个同 token 块 \(X^{(i)}G^{(i)}\)，其余交叉块直接扔掉。</p>
+<figure class="article-figure"><h3>四个 token 拼成一次矩阵乘法</h3><p class="article-note">行标表示状态来自哪个 token，列标表示梯度来自哪个 token。每格是 4×4 个标量，只保存着色的对角块。</p><div class="shc-pack" role="img" aria-label="四乘四的分块矩阵，仅 token 编号相同的四个对角块保存"><span></span><b>G⁽⁰⁾</b><b>G⁽¹⁾</b><b>G⁽²⁾</b><b>G⁽³⁾</b><b>X⁽⁰⁾</b><span class="keep">保存</span><span>·</span><span>·</span><span>·</span><b>X⁽¹⁾</b><span>·</span><span class="keep">保存</span><span>·</span><span>·</span><b>X⁽²⁾</b><span>·</span><span>·</span><span class="keep">保存</span><span>·</span><b>X⁽³⁾</b><span>·</span><span>·</span><span>·</span><span class="keep">保存</span></div><figcaption>虽然白算了 12 个交叉 token 的非对角块，但通道归约全在片上完成，既吃满了 Tensor Core 的块状吞吐，又省掉了零碎的跨块写回和二次归约——在带宽受限的算子里，多做点廉价算术往往更划算。</figcaption></figure>
 </section>
 
 <section id="storage"><h2>7. 激活显存究竟省在哪里</h2>
-<p>显存流量是运行中累计搬运了多少数据；激活存储是反向传播开始时，还需要留下哪些数据。一个张量可以只存一份、被读取多次，所以这两笔账需要分开。</p>
-<p>先看最简单的残差入口存储。若没有重算，逐子层执行要保存 \(K\) 份 \(n\times C\) 入口，分组执行主要保存一份组入口。仅对这部分状态，理想减少比例为 \(1-1/K\)，\(K=4\) 时为 75%。完整实现还要保存子层输入、输出、基础读取、门控和一些拷贝。</p>
-<p>取八个 Transformer block，即 16 个子层，宽度 \(C=2048\)，一个 8192-token 序列，BF16。令 \(T=8192\) 为本地 microbatch 的 token 数，</p>
+<p>显存带宽算的是「跑一趟搬了多少数据」，激活显存算的是「留到反向传播时还占着多大坑」。同一个张量可以只存一份、反复读十次，所以这两笔账得分开算。</p>
+<p>如果只盯着残差入口状态，不开<a href="/posts/gradient-checkpointing/">激活重算</a>时，逐子层执行每组要留 \(K\) 份 \(n\times C\) 状态，分组后只留 1 份组入口——单看这一项确实省了 \(1-1/K\)，\(K=4\) 时就是 75%。但真实训练里，子层输入、输出、基础读取缓冲和门控张量全都在显存里，拉通算下来就没这么夸张。</p>
+<p>拿一个具体尺寸来盘账：8 个 Transformer block（16 个子层）、宽度 \(C=2048\)、单条 8192-token 序列、BF16。设本地 microbatch 的 token 数为 \(T=8192\)，定义一份形状 \(T\times C\) 的窄激活为单位：</p>
 \[ U=2TC\ \text{bytes}=32\ \text{MiB}. \]
-<p>\(U\) 表示一份形状为 \(T\times C\) 的窄激活。按源码级存储分配估算，留下的边界与 HC 激活如下：</p>
+<p>按实际存储分配核算，不算 attention/FFN 内部激活，残差连接和子层边界留下的显存如下：</p>
 <div class="table-wrap"><table><thead><tr><th>为反向保留的张量</th><th>mHC</th><th>SimpleHC</th></tr></thead><tbody>
 <tr><td>归一化前子层输入</td><td>\(16U=512\) MiB</td><td>\(16U=512\) MiB</td></tr>
 <tr><td>残差状态及输入拷贝</td><td>\(61U=1952\) MiB</td><td>\(20U=640\) MiB</td></tr>
@@ -266,95 +267,91 @@ X_next = X + einsum("tnk,tck-&gt;tnc", Q, stack(outputs, dim=-1))</code></pre><p
 <tr><td>FP32 的 HC 辅助张量</td><td>36.5 MiB</td><td>12.875 MiB</td></tr>
 <tr><td><strong>这组张量合计</strong></td><td><strong>3044.5 MiB</strong></td><td><strong>2092.875 MiB</strong></td></tr>
 </tbody></table></div>
-<p>差值为 951.625 MiB，占这组存储的 31.26%。attention/FFN 内部激活、模型与优化器状态、临时 workspace、CUDA Graph 预留空间在整机显存账本中另行加入。启用<a href="/posts/gradient-checkpointing/">激活重算</a>后，还需要按实际保存边界重新计算。</p>
-<h3>一个容易漏算的实践细节：切片让整块存储继续存活</h3>
-<p>四个基础输入一起分配为一个包含 \(4U\) 数据的缓冲，第一个子层取其中一片作为输入。只要这个输入 view 还被 autograd 保存，整块底层存储就仍然存活。因此输入这一行已经计入了 \(U\) 后，每组还需计入剩余 \(3U\)，四组就是表中的 \(12U\)。这能解释“张量看起来只剩一小片，显存却没有释放”的常见现象。</p>
-<p>排查时，先看张量是否共享底层 storage，再看 autograd 保存了哪些引用。显存统计应对每块存储计数一次，同时覆盖仍被 view 保留的完整分配。主动复制小切片可以缩短大缓冲的生命周期，但会增加复制成本；是否值得，取决于大缓冲何时能释放、其他切片是否还被需要。</p>
-<p><strong>主要收益是减少逐层保留的宽状态；新增的基础读取和辅助张量会抵消一部分节省。</strong>用完整生命周期计算，才能从“理论上少存几份状态”走到真实训练显存。</p>
+<p>合起来省了 <strong>951.625 MiB</strong>，在这组张量里占 <strong>31.26%</strong>——残差状态从 \(61U\) 砍到 \(20U\) 确实很猛，但多出来的基础读取缓冲吃回去了 \(12U\)。</p>
+<h3>一个很容易踩的坑：切片会把整块大缓冲保活</h3>
+<p>表里那行「额外基础读取存储 \(12U\)」是怎么冒出来的？按理说，子层 1 到 3 用的是修正后的输入，反向时并不需要把所有基础读取都留着。问题出在内存布局上：前向时四个子层的基础输入是一起分配在一块 \(4U\) 连续大缓冲里的，第 0 个子层直接切片取了第一份（一个 view）当自己的输入。只要 autograd 还攥着这 1 份 view，PyTorch 就没法释放底下的整块 \(4U\) storage——除了输入行里已经算过的那 \(1U\)，剩下 \(3U\) 就跟着一起活到了反向结束，四组正好白占 \(12U\)。</p>
+<p>平时调显存遇到「明明只留了一小片，显存却死活不掉」，八成就是撞上了这个。如果大缓冲本来很快就能释放，把那片小切片 <code>.clone()</code> 出来切掉对原 storage 的引用，就能把大块显存提前腾出来；反过来如果本来就会拖到反向，复制反而白花带宽，得按具体生命周期决定。</p>
 </section>
 
 <section id="stability">
 <h2>8. 稳定性：恒等路径保住了什么</h2>
-<p>一个早期 FFN 算出的特征，可能要到很多层之后才派上用场。多路残差提供了两种调节办法：写入时决定把它存到哪些 stream，读取时决定从哪些 stream 取回；还可以让中间的混合矩阵不断重新分配它。</p>
-<p>固定一个 token，设第 \(k\) 个子层的输出是 \(o_k\)，第 \(j\) 个子层读取的输入是 \(u_j\)，且 \(j&gt;k\)。用 \(p_j\in\mathbb R^n\) 表示后层的读门、\(q_k\in\mathbb R^n\) 表示前层的写门，\(M_t\in\mathbb R^{n\times n}\) 表示中间第 \(t\) 层的 stream 混合。这里 \(p,q\) 统一表示实际使用的门值；SimpleHC 中就是前文带横线、从各自组入口生成的门控，前后两层可以跨组。沿残差支路展开，\(o_k\) 在 \(u_j\) 中的系数是：</p>
+<p>早期某个 FFN 算出来的特征，往往要隔几十层才被后面的层用上。顺着残差通路展开，看看第 \(k\) 个子层的输出 \(o_k\)，到了后面的第 \(j\) 个子层（\(j&gt;k\)）输入 \(u_j\) 里时，前面挂着多大的系数。统一用 \(p_j,q_k\) 表示实际生效的读写门（在 SimpleHC 里就是从各自组入口算出的 \(\bar p_j,\bar q_k\)，两层完全可以跨组），把中间经过的混合矩阵一路乘起来：</p>
 \[
  c_{j,k}=p_j^\top
- \underbrace{M_{j-1}M_{j-2}\cdots M_{k+1}}_{\text{写入之后、读取之前的重新分配}}
+ \underbrace{M_{j-1}M_{j-2}\cdots M_{k+1}}_{\text{写入之后、读取之前的连乘}}
  q_k.
 \]
-<p>相邻两个子层之间没有中间混合，括号中的乘积取单位矩阵。这个式子把三件事串起来了：\(q_k\) 分配输出，中间矩阵改变分配，\(p_j\) 收集结果。</p>
+<p>相邻两层中间没有混合，括号里就是单位矩阵。这个式子把三步串到了一起：\(q_k\) 负责把 \(o_k\) 存进各条流，中间的 \(M\) 沿深度不断洗牌，最后 \(p_j\) 按需把它们捞出来。</p>
 
-<h3>读写门可以直接学历史权重</h3>
-<p>identityHC 和 SimpleHC 都令中间混合为单位矩阵，于是上式缩成 \(c_{j,k}=p_j^\top q_k\)。例如，前层把输出按 \((1,0.5)\) 写到两条 stream，后层按 \((0.6,0.4)\) 读取，就得到 \(0.6\times1+0.4\times0.5=0.8\) 倍的历史输出。写门与读门合作，便能为不同的前后层组合形成不同权重。</p>
-<p>信息仍会经过计算分支在 stream 之间交流：读门先把多条 stream 汇成一个 \(C\) 维输入，attention 或 FFN 加工它，写门再把结果送回多条 stream。恒等映射保留了旧状态的直通路径，跨 stream 的新信息由这个非线性分支产生。</p>
-<p>SimpleHC 的读门用 sigmoid，写门用两倍 sigmoid。对 \(n\) 条 stream，每个读系数在 \((0,1)\)，写系数在 \((0,2)\)，因此每一对前后层满足：</p>
+<h3>恒等路径：系数天然有界，不随深度膨胀</h3>
+<p>在 identityHC 和 SimpleHC 里，所有 \(M_t=I\)，连乘直接消失，只剩一个内积 \(c_{j,k}=p_j^\top q_k\)。比如前层按 \((1,0.5)\) 写入两条流，后层按 \((0.6,0.4)\) 读出，净权重就是 \(0.6\times1+0.4\times0.5=0.8\)——不同层对之间靠读写门配合，照样能学出各自的跨层权重。</p>
+<p>更关键的是尺度被锁死了。SimpleHC 的读门过 sigmoid、落在 \((0,1)\)，写门是两倍 sigmoid、落在 \((0,2)\)，因此任意两层之间的直接残差系数满足：</p>
 \[
  0&lt;c_{j,k}=\sum_{s=1}^{n}p_{j,s}q_{k,s}&lt;2n.
 \]
-<p>四条 stream 对应上界 8。这个上界控制单个历史输出的<strong>直接残差路径系数</strong>；整个网络的尺度与梯度还取决于许多历史项的累加、计算分支以及门对输入的敏感程度。</p>
+<p>四条流时上界就是 8。注意这个界跟层距 \(j-k\) 无关——隔 2 层还是隔 100 层，直接残差路径都不会出现连乘放大。</p>
 
-<h3>混合矩阵提供的自由度在哪里？</h3>
-<p>换一种设计：读门固定为 \(p_j=\mathbf1/n\)，即平均读取；写门固定为 \(q_k=\mathbf1\)，即把输出同样写入所有 stream。此时可学习的历史权重来自中间混合：</p>
+<h3>混合矩阵的自由度从哪来，又为什么会失控？</h3>
+<p>反过来看第 2 节表里的另一路：把读门锁死成均值 \(p_j=\mathbf1/n\)，写门锁死成广播 \(q_k=\mathbf1\)，这时跨层权重全指望中间的混合矩阵：</p>
 \[
  c_{j,k}=\frac1n\mathbf1^\top
  \bigl(M_{j-1}\cdots M_{k+1}\bigr)\mathbf1.
 \]
-<p>无约束矩阵可以产生带正负号、幅度各异的系数，也会沿深度反复放大某些方向。例如，每次把同一方向放大 1.01 倍，连续 100 次就成为 \(1.01^{100}\approx2.70\) 倍。</p>
-<p>完全双随机的矩阵元素非负，行和、列和都是 1。它保持全一向量，也保持对 stream 求和，因此上面固定读写门的系数恰好是 \(c_{j,k}=1\)。这解释了两类交互的分工：可学习读写门直接选择历史权重；无约束混合通过途中变换学习权重。双随机约束收紧途中变换的自由度，同时保留可学习读写门提供的选择能力。</p>
+<p>如果对 \(M_t\) 不加约束，连乘可以凑出带正负号、幅度任意的权重——所以第 2 节里「固定读写 + 无约束混合」能跑出不错的分数。但代价是深层连乘没有护栏：哪怕每层只把某个方向放大 1.01 倍，叠 100 层就是 \(1.01^{100}\approx2.70\) 倍，随时可能失控。</p>
+<p>加上双随机约束呢？真正的双随机矩阵元素非负、行和与列和都是 1，意味着 \(M\mathbf1=\mathbf1\)、\(\mathbf1^\top M=\mathbf1^\top\)。代进上式一看，无论连乘多少层，\(c_{j,k}\) 恒等于 1。这也正好解释了 mHC 的本质：双随机约束把混合矩阵沿深度的缩放自由度收紧了，模型真正用来挑选历史信息的，还是那套可学习的读写门控。</p>
 
-<h3>稳定性要同时检查数值和导数</h3>
-<p>对完全双随机矩阵 \(M\)，有 \(\|M\|_2\leq1\)：把矩阵固定以后，这条线性路径的欧氏范数受到控制。训练中的混合矩阵还会随输入 \(X\) 改变。若 \(Y=M(X)X\)，输入发生一个小扰动 \(\mathrm dX\)，输出的变化为：</p>
+<h3>双随机约束为什么在高压下还是会炸？</h3>
+<p>理论上，严格双随机矩阵满足谱范数 \(\|M\|_2\leq1\)，看上去已经把线性路径摁住了。问题在于，mHC 的混合矩阵 \(M(X)\) 是随输入动态算出来的。对 \(Y=M(X)X\) 求微分，输入扰动 \(\mathrm dX\) 会走两条路：</p>
 \[
  \mathrm dY=
- \underbrace{M\,\mathrm dX}_{\text{沿当前矩阵传播}}
- +\underbrace{(\mathrm dM)X}_{\text{输入改变了混合方式}}.
+ \underbrace{M\,\mathrm dX}_{\text{固定矩阵路径}}
+ +\underbrace{(\mathrm dM)X}_{\text{动态门路径}}.
 \]
-<p>工程诊断因此有两个层面。前向记录 FFN 输出尺度、混合前后 RMS，以及有限轮 Sinkhorn 的实际行列和，能定位异常值从哪里进入、在哪一步继续增大。反向分别记录固定矩阵路径和动态门路径的梯度，能检查混合方式对输入的敏感性。完整网络的稳定性需要把这两类观测连接起来。</p>
-<h3>压力实验里，异常从哪里开始</h3>
-<p>在230B-A6B、10倍参考学习率的压力实验中，峰值学习率为 \(6.2\times10^{-3}\)，warmup为4000步，三种配置都运行28,000步。mHC出现约 \(1.9\times10^6\) 的梯度峰值，SimpleHC和identityHC保持有界。一次捕获的早层MoE事件中，输入RMS为0.294，写入门控之前的FFN输出RMS已达到 \(2.31\times10^4\)。这一步把异常的起点定位到了计算分支。</p>
-<p>另一次记录中，20轮Sinkhorn后的行和仍为 \((2,1,0.5,0.5)\)，混合把同一token的RMS从 \(5.42\times10^4\) 进一步放大到 \(7.50\times10^4\)。一次反向尖峰的动态混合门输入梯度约为固定矩阵路径的9.4倍。它提示诊断时既要检查分支输出，也要检查归一化误差与动态导数；动态路径的异常究竟来自数学敏感性还是反向数值效应，还需要进一步定位。</p>
-<p><strong>这项简化的取舍很清楚：</strong>保留动态读写门来选择历史信息，以单位矩阵传递旧 stream，消除反复混合及其额外的动态梯度路径。它提供了更简单的传播结构；最终训练质量和稳定范围，则由相应规模、学习率与数值实现下的实验来确定。</p>
+<p>第一项受 \(\|M\|_2\leq1\) 约束，第二项却不然——输入一旦出现异常大值，不仅 \(X\) 本身很大，还会剧烈扯动 \(M(X)\) 的输出，把扰动和梯度一起放大。</p>
+<h3>压力实验里，尖峰是怎么一步步滚大的</h3>
+<p>论文在 230B-A6B 模型上做了一轮极端压力测试：把学习率拉到参考值的 10 倍（峰值 \(6.2\times10^{-3}\)，warmup 4000 步），三种结构都跑 28,000 步。结果 SimpleHC 和 identityHC 全程梯度有界，mHC 却撞出了约 \(1.9\times10^6\) 的梯度尖峰。</p>
+<p>抓现场日志能看到异常滚雪球的过程：一次早层 MoE 里，输入 RMS 还是正常的 0.294，经过 FFN 之后、还没进写入门控，输出 RMS 就已经飙到 \(2.31\times10^4\)——火苗是从计算分支点起来的。但真正把它烧成灾难的，是后面的动态混合：在另一次记录中，20 轮 Sinkhorn 迭代没来得及收敛到双随机，行和还歪在 \((2,1,0.5,0.5)\)，直接把同一个 token 的 RMS 从 \(5.42\times10^4\) 继续放大到 \(7.50\times10^4\)；而在一次反向尖峰里，动态混合门路径 \((\mathrm dM)X\) 传回来的输入梯度，达到了固定矩阵路径 \(M\,\mathrm dX\) 的 <strong>9.4 倍</strong>。</p>
+<p>换句话说，有限步 Sinkhorn 碰到离群大激活会失守，动态混合门本身又多开了一条放大梯度的侧门。SimpleHC 直接令 \(M_l=I\)，相当于把这两处隐患连根拔掉，只留下有界、直通的读写门控。</p>
 </section>
 
 
 <section id="evidence"><h2>9. 质量、速度与规模的证据</h2>
-<p>三个实验分别回答质量能否保持、实现能否加速，以及压力下能否训练。把设置和结论放在一起，才方便决定自己的下一次实验。</p>
+<p>把论文里的质量、速度和稳定性四组主实验放到一张表里，能更直观地看出 SimpleHC 到底站到了什么位置：</p>
 <div class="table-wrap"><table><thead><tr><th>问题</th><th>实验配置</th><th>主要观察</th></tr></thead><tbody>
 <tr><td>组件与共享方式</td><td>15B-A1B，24 层，宽1792</td><td>读写门控 + 恒等残差有效；共享4子层保留接近参考的质量</td></tr>
 <tr><td>更大模型的质量</td><td>30B-A2B，32 层，宽2048</td><td>SimpleHC、mHC、identityHC 的验证 loss 均为1.561</td></tr>
 <tr><td>效率随宽度变化</td><td>固定8层，宽1024–6144；BF16、序列8192、CUDA Graph，无激活重算</td><td>最高宽度时，专用 SimpleHC 实现额外训练时间2.4%</td></tr>
 <tr><td>稳定性压力</td><td>230B-A6B，64层，宽2816，10倍参考学习率，28,000步</td><td>SimpleHC、identityHC 保持有界梯度；mHC 出现大幅梯度与 loss spike</td></tr>
 </tbody></table></div>
-<p>30B-A2B 的十四项平均分为：Vanilla 59.3、mHC 62.9、identityHC 62.8、SimpleHC 63.1。具体任务有升有降：SimpleHC 的 MATH 为 41.5，mHC 为 38.4；HumanEval 则分别为 45.1 和 47.6。整体支持“简化后质量相近”的判断。公开配置中的训练 token 总量尚缺，训练预算匹配需要在复现时补齐。</p>
-<h3>额外开销下降，换算成整步速度是多少</h3>
-<p>在宽度 6144 的八层效率测试里，把 Vanilla 的单步时间记为 \(t_0\)。高效 mHC 约为 \(1.070t_0\)，SimpleHC 为 \(1.024t_0\)。所以相对 mHC，整步用时减少</p>
+<p>在 30B-A2B 上，十四项基准的平均分分别是：Vanilla 59.3、mHC 62.9、identityHC 62.8、SimpleHC 63.1。拆开看单项各有胜负——SimpleHC 的 MATH 拿到 41.5（mHC 是 38.4），HumanEval 则是 45.1（mHC 为 47.6）——总体和 mHC 打平，明显甩开单路残差。</p>
+<h3>省掉的残差开销，折成整步速度是多少？</h3>
+<p>在宽度 6144 的 8 层效率测试中，以 Vanilla 单步时间 \(t_0\) 为基准，高效 mHC 是 \(1.070t_0\)，SimpleHC 降到了 \(1.024t_0\)。换算成相对 mHC 的整步提速：</p>
 \[
  1-\frac{1.024}{1.070}\approx4.30\%,
  \qquad
  \frac{1.070}{1.024}\approx1.045.
 \]
-<p>右边是相同工作量下的吞吐倍率，约提升 4.5%。若某个匹配配置的 mHC 训练要 1000 GPU 小时，按这个比值估算，SimpleHC 约需 957 GPU 小时。这是由报告比例换算的预算示例，实际部署应在目标深度、并行方式和重算配置上测量。</p>
-<p>宽度 1024 时，mHC、identityHC、SimpleHC 的额外开销分别为 26.8%、10.1%、6.3%。随着宽度增加，主要专家矩阵乘法的成本上升，多流连接的相对占比下降。仅删混合与进一步共享访问，分别改善了不同部分的成本。</p>
-<p>截至 2026-11-11，官方项目公开了报告和图表，训练代码与高效 kernel 尚待发布；报告也未列出效率测试的 GPU 型号、卡数和具体并行配置。当前可复现的起点是验证计算等价性，再在自己的 GPU 上实现读写融合、测整步收益。下方 CPU 实验覆盖第一步。</p>
-<p><strong>SimpleHC 的核心价值，是让残差结构与执行计划一起变简单。</strong>读写门控保留选择信息的能力，恒等路径使历史贡献可以直接展开，共享入口把多次宽状态访问合并。最终效果来自这三者的配合，以及把公式落实为低中间存储的 kernel。</p>
+<p>也就是端到端快了约 <strong>4.5%</strong>——按这个比例，原本要烧 1000 GPU 小时的 mHC 训练，换成 SimpleHC 大约 957 GPU 小时就能跑完。</p>
+<p>模型越窄，多路残差的占比越显眼。在宽度 1024 时，mHC、identityHC 和 SimpleHC 的额外开销分别是 <strong>26.8%、10.1% 和 6.3%</strong>。这组递减刚好拆出了两步改动的各自功劳：删掉 Sinkhorn 混合先把额外耗时从 26.8% 压到 10.1%，分组共享读写再从 10.1% 压到 6.3%。等宽度拉到 6144，主干矩阵乘占了大头，相对开销进一步收敛到 2.4%。</p>
+<p>补一句复现现状：截至 2026-11-11，官方仓库只放出了报告和图表，训练代码与融合 kernel 还没开源；报告也没披露训练总 token 数以及效率测试所用的 GPU 型号、卡数和并行策略。眼下能立刻动手的，是先写段脚本把前反向的代数等价性验实，再按第 6 节的思路在自己的卡上焊 kernel 测真实吞吐。</p>
 </section>
 
 <section id="practice"><h2>10. 计算题与可运行实验</h2>
-<div class="article-exercise"><h3>练习一：一次写入经过两条流，后面读到多少</h3><p>入口 \(X=(2,6)^\top\)，第0个子层读取 \(p_0=(0.75,0.25)^\top\)，计算 \(F_0(u)=u/2\)，写入 \(q_0=(1,0.5)^\top\)。第1个子层读取 \(p_1=(0.25,0.75)^\top\)。分别通过完整状态和标量修正计算第1个子层的输入。</p><details><summary>展开解答</summary><p>先有 \(u_0=3,o_0=1.5\)。完整状态更新为 \((3.5,6.75)^\top\)，随后读取 \(0.25\times3.5+0.75\times6.75=5.9375\)。分组方法的基础输入为5，修正系数为 \(p_1^\top q_0=0.625\)，因此 \(5+0.625\times1.5=5.9375\)。两种执行对同一组门控得到相同结果。</p></details></div>
-<div class="article-exercise"><h3>练习二：增加组长，为什么流量会回升</h3><p>四条流下，计算 \(K=4,8,16\) 时每 token、每子层的前向连接流量。若只保存组入口，三种配置的残差入口存储分别减少多少？</p><details><summary>展开解答</summary><p>代入 \(Q_{\mathrm{act}}(K)/C=K/2+3.5+14/K\)，得到 \(9,9.25,12.375\)。对应残差入口状态的理想减少比例为 \(1-1/K\)，即75%、87.5%、93.75%。组长增大持续减少入口存储，修正产生的流量却逐渐增加。选择组长要分别查看流量、存储、质量三项。</p></details></div>
-<div class="article-exercise"><h3>练习三：去掉修正还剩多少顺序依赖</h3><p>保持组入口门控和最终写回，但令组内所有 \(D_{ab}=0\)。四个子层的输入如何变化？哪一项训练机制被改变？</p><details><summary>展开解答</summary><p>各层输入变成 \(u_{L+a}=V_{:,a}=X_L^\top\bar p_{L+a}\)。它们都仅由入口生成，后一个子层的输入失去了前一个子层的新输出。组末依然汇总了所有输出，但组内四步顺序的非线性加工被改成对入口分别加工。这与消融中 loss 从1.660升至1.705对应。</p></details></div>
-<div class="article-exercise"><h3>练习四：把额外开销换算成训练预算</h3><p>同一工作量下，mHC 用时为基线的1.07倍，SimpleHC为1.024倍。mHC任务需要400张卡运行10天，其他条件保持一致，按这个比例估计节省多少 GPU 天？</p><details><summary>展开解答</summary><p>原预算4000 GPU天。新预算为 \(4000\times1.024/1.07\approx3828.04\) GPU天，节省约171.96 GPU天。保持400张卡时约节省0.430天，即10.32小时。预算预测成立的前提是目标配置获得相同的整步时间比例；应先用真实 batch、并行与重算做短程测量。</p></details></div>
-<h3 id="lab">运行一个小实验</h3><p><a href="/posts/simple-hyper-connections/lab.py" download>下载 lab.py</a>，准备 Python 与 NumPy 后运行：</p><pre><code>python lab.py</code></pre>
-<p>实验用小型非线性 tanh 子层和输入相关门控，对比同一组门控下的逐层完整状态更新与分组展开；float64 下最大误差约为 \(5.6\times10^{-16}\)。随后检查完整反向传播，包括修正矩阵、sigmoid 和 RMSNorm，用中心差分核对入口及六类参数的方向导数。</p>
-<p>它还会显示去掉修正、复用一对门控、改成逐层当前状态门控时的输出差异，并打印不同组长的流量账本。最后出现 <code>all checks passed</code>。可以修改组长和子层权重尺度，分别观察访问量与函数变化；质量上的取舍再通过固定训练预算的消融比较。</p>
+<div class="article-exercise"><h3>练习一：一次写入经过两条流，后面读到多少</h3><p>入口 \(X=(2,6)^\top\)，第 0 个子层按 \(p_0=(0.75,0.25)^\top\) 读取、计算 \(F_0(u)=u/2\)、再按 \(q_0=(1,0.5)^\top\) 写回。第 1 个子层按 \(p_1=(0.25,0.75)^\top\) 读取。分别用「更新完整状态」和「标量修正」算出第 1 个子层的输入。</p><details><summary>展开解答</summary><p>第 0 层先算出 \(u_0=3\)、\(o_0=1.5\)。如果逐层更新完整状态，新状态变成 \((2+1\times1.5,\ 6+0.5\times1.5)^\top=(3.5,6.75)^\top\)，第 1 层读出 \(0.25\times3.5+0.75\times6.75=5.9375\)。改用分组展开，第 1 层的基础输入是 \(0.25\times2+0.75\times6=5\)，修正系数 \(p_1^\top q_0=0.625\)，合起来同样是 \(5+0.625\times1.5=5.9375\)。</p></details></div>
+<div class="article-exercise"><h3>练习二：组拉得太长，为什么流量反而回升</h3><p>四条流下，分别算出 \(K=4,8,16\) 时每 token、每子层的前向连接流量。如果只留组入口，这三种组长把残差入口存储各省了多少？</p><details><summary>展开解答</summary><p>代入 \(Q_{\mathrm{act}}(K)/C=K/2+3.5+14/K\)，三者依次为 \(9C\)、\(9.25C\) 和 \(12.375C\)。残差入口状态的理想省存比例是 \(1-1/K\)，对应 75%、87.5% 和 93.75%。组越长，入口确实越省，但后面子层翻查历史输出的修正流量会反超宽状态摊薄的收益。</p></details></div>
+<div class="article-exercise"><h3>练习三：把标量修正清零，网络变成了什么</h3><p>保留组入口门控和组末写回，但把组内所有 \(D_{ab}\) 设成 0。四个子层的输入会怎样变化？为什么消融实验里掉点那么狠？</p><details><summary>展开解答</summary><p>此时每个子层的输入都退化成 \(u_{L+a}=V_{:,a}=X_L^\top\bar p_{L+a}\)，全都只看组入口，彼此看不到前一层刚算出的新输出。组末虽然照样把四份输出加回了残差流，但原本串行的四步非线性加工被拍扁成了四条并行支路，组内有效深度从 4 掉到 1——这正是消融表里 loss 从 1.660 猛涨到 1.705 的原因。</p></details></div>
+<div class="article-exercise"><h3>练习四：把额外开销换算成训练预算</h3><p>同一任务下，mHC 单步耗时是基线的 1.07 倍，SimpleHC 是 1.024 倍。如果 mHC 方案需要 400 张卡跑 10 天，换 SimpleHC 大约能省多少 GPU 天？</p><details><summary>展开解答</summary><p>原预算 4000 GPU 天，换算后变为 \(4000\times1.024/1.07\approx3828.04\) GPU 天，省下约 171.96 GPU 天；同样用 400 张卡，墙钟时间缩短约 0.43 天（10.32 小时）。</p></details></div>
+<h3 id="lab">跑一遍可验证的 NumPy 实验</h3><p><a href="/posts/simple-hyper-connections/lab.py" download>下载 lab.py</a>，装好 Python 和 NumPy 后直接跑：</p><pre><code>python lab.py</code></pre>
+<p>脚本用小型 tanh 子层和输入相关的动态门控，在 float64 下把「逐层更新完整状态」和「分组展开」对了一遍——同一组门控下最大误差只有约 \(5.6\times10^{-16}\)。接着它会把完整反向传播（含修正矩阵 \(D\)、sigmoid 和无仿射 RMSNorm）和中心差分逐一核对，验完入口状态和全部六类参数的方向导数。</p>
+<p>脚本顺带还会打印出「去掉修正」「复用同一对门控」「改回逐层更新门控」三种改动带来的输出差异，以及不同组长 \(K\) 下的访存账本，全部通过后输出 <code>all checks passed</code>。你可以自己改改组长和子层权重尺度，直观看看流量和函数偏移是怎么跟着变的。</p>
 </section>
 
 <section id="references"><h2>参考与延伸阅读</h2><ol>
-<li><a href="https://arxiv.org/abs/2611.05984v1">Zhang et al. · On the Design of Hyper-Connections: Simplification, Stability, and Scalability</a>，2026-11-04，v1。架构与精确展开见§2–3、附录B；前后向优化与流量见§4；消融与规模实验见表2–4；测试配置、存储和压力诊断见附录A、E。</li>
-<li><a href="https://github.com/aHapBean/SimpleHC">SimpleHC 官方项目</a>。2026-11-11访问时公开报告与图表，训练代码和高效kernel列为后续发布计划。</li>
+<li><a href="https://arxiv.org/abs/2611.05984v1">Zhang et al. · On the Design of Hyper-Connections: Simplification, Stability, and Scalability</a>，2026-11-04，v1。架构与精确展开见 §2–3、附录 B；前后向优化与流量见 §4；消融与规模实验见表 2–4；测试配置、存储和压力诊断见附录 A、E。</li>
+<li><a href="https://github.com/aHapBean/SimpleHC">SimpleHC 官方项目</a>。截至 2026-11-11 已公开报告与图表，训练代码和融合 kernel 待后续发布。</li>
 <li><a href="https://arxiv.org/abs/2409.19606">Hyper-Connections</a>；<a href="https://arxiv.org/abs/2512.24880">mHC: Manifold-Constrained Hyper-Connections</a>。站内可接着读<a href="/posts/hyper-connections/">多路信息交换</a>、<a href="/posts/manifold-hyper-connections/">双随机约束与有限精度</a>和<a href="/posts/attention-residuals/">沿深度选择信息</a>。</li>
-<li><a href="https://docs.pytorch.org/docs/2.15/tensor_view.html">PyTorch 2.15 · Tensor Views</a>：view共享底层数据的语义。结合SimpleHC附录A.2，可以核算被切片保活的基础读取缓冲。</li>
-<li><a href="https://docs.nvidia.com/cuda/archive/12.6.3/cuda-c-programming-guide/index.html#element-types-and-matrix-sizes">NVIDIA CUDA 12.6.3 · Element Types and Matrix Sizes</a>：矩阵指令支持的形状、数据类型与累积方式；具体kernel设计需要匹配目标架构。</li>
+<li><a href="https://docs.pytorch.org/docs/2.15/tensor_view.html">PyTorch 2.15 · Tensor Views</a>：view 共享底层 storage 的语义，对照 SimpleHC 附录 A.2 可以核算被切片保活的基础读取缓冲。</li>
+<li><a href="https://docs.nvidia.com/cuda/archive/12.6.3/cuda-c-programming-guide/index.html#element-types-and-matrix-sizes">NVIDIA CUDA 12.6.3 · Element Types and Matrix Sizes</a>：Tensor Core 矩阵指令支持的形状、数据类型与累积方式。</li>
 </ol></section>
 
 </article><nav class="series-pager" data-series="hyperconnections"></nav></main>

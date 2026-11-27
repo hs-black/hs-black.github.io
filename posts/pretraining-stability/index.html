@@ -18,109 +18,109 @@
 <header class="site-header wrap"><a class="site-logo" href="/"><span class="dot"></span>Zunzhe Zhang</a><nav class="site-nav"><a href="/">Home</a><a href="/papers/">Papers</a><a href="/blog/" aria-current="page">Blog</a></nav></header>
 <main class="wrap"><header class="post-header"><h1>深层 Transformer 怎样稳定训练</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header><nav class="series" data-series="pretraining"></nav>
 <article class="prose">
-<p>一个 12 层模型能正常训练，换成 96 层后，loss 在某一步突然抬升。把学习率调小，曲线平稳了，收敛却慢了许多。此时最有用的问题是：变化最先发生在残差流、注意力分数，还是参数更新中？</p>
-<p>这些位置控制不同的量。残差结构决定信息怎样跨过深度；归一化决定输入尺度和局部导数；注意力把分数差变成概率；优化器把梯度转换成实际参数位移。稳定训练需要这些环节的尺度相互匹配。只记录一个总 gradient norm，会把许多不同机制混在一起。</p>
+<p>12 层的模型训得好好的，拉到 96 层，loss 跑着跑着突然飙升。把学习率压低，曲线确实平了，但收敛慢得让人难以接受。遇到这种 spike，最该先问的不是学习率要不要再砍一半，而是：失控最先发生在残差流、注意力分数，还是参数更新这一步？</p>
+<p>这三个位置管的是完全不同的事。残差和归一化决定信号与梯度怎么跨过几十上百层，注意力决定分数差怎么被压成概率，优化器则把梯度换成真正落到权重上的步长。如果只盯着一个全局 gradient norm，等于把几条完全不同的故障链路揉成了一个数——炸了也看不出是谁先动的。</p>
 
 <nav class="toc" aria-label="文章目录"><b>目录</b><ol><li><a href="#jacobian">梯度怎样跨过深度</a></li><li><a href="#normalization">Pre-LN 与 Post-LN</a></li><li><a href="#deepnorm">DeepNorm：残差与初始化</a></li><li><a href="#entropy">分数尺度与注意力熵</a></li><li><a href="#qknorm">QK 归一化与谱尺度</a></li><li><a href="#monitoring">监控与受控实验</a></li><li><a href="#connections">多路残差</a></li><li><a href="#exercises">习题与实验</a></li></ol></nav>
 
 <h2 id="jacobian">深度把局部导数连乘起来</h2>
-<p>记第 \(\ell\) 层的输入为 \(x_\ell\in\mathbb R^d\)，输出为 \(x_{\ell+1}=F_\ell(x_\ell)\)。对固定的一次前向，局部 Jacobian \(J_\ell=\partial x_{\ell+1}/\partial x_\ell\) 是一个 \(d\times d\) 矩阵。这是单向量推导；处理整段 attention 时，把 \(T\) 个 token 的特征一起展平为 \(Td\) 维，Jacobian 也包含跨 token 的导数块，链式法则保持相同形式。若 \(g_L=\nabla_{x_L}\mathcal L\) 是顶层传回的梯度，便有：</p>
+<p>对第 \(\ell\) 层，记输入为 \(x_\ell\in\mathbb R^d\)、输出为 \(x_{\ell+1}=F_\ell(x_\ell)\)，局部 Jacobian 就是 \(d\times d\) 矩阵 \(J_\ell=\partial x_{\ell+1}/\partial x_\ell\)（整段序列的 attention 只是把 \(T\) 个 token 拼成 \(Td\) 维向量，多了跨 token 的导数块，链式法则的形式不变）。梯度从顶层 \(g_L=\nabla_{x_L}\mathcal L\) 传到底层，就是一连串转置矩阵连乘：</p>
 <div class="math-block">\[g_0=\htmlData{symbol=jac}{J_0}^{\!\top}J_1^\top\cdots J_{L-1}^\top g_L,\qquad \|g_0\|_2\le\Big(\prod_{\ell=0}^{L-1}\|J_\ell\|_2\Big)\|g_L\|_2.\]</div>
-<p>矩阵的 \(\|J_\ell\|_2\) 是最大奇异值，表示它对某个方向最多能放大多少。这个上界把每层最坏方向连在一起；实际梯度还取决于各层方向如何旋转。一个标量例子已足够说明深度的敏感性：每层导数只有 1.02，连乘 100 次就是 7.24；每层为 0.98，则剩下约 0.133。</p>
-<p>残差层把 \(F_\ell\) 写成 \(x_\ell+f_\ell(x_\ell)\)，于是局部 Jacobian 是 \(I+J_{f_\ell}\)。恒等项为梯度提供直接通路，而分支的大小、方向和层数继续决定整个乘积。因此，<a href="/posts/neural-network-initialization/#init-residual">初始化让残差分支处在合适尺度</a>，以及训练中保持可控的更新，都是结构设计的一部分。</p>
+<p>这里的谱范数 \(\|J_\ell\|_2\) 是 \(J_\ell\) 的最大奇异值，也就是这一层最多能把某个方向的梯度放大多少倍。当然，这个上界假设每层的最坏方向刚好对齐，实际传播还会受各层旋转方向的影响；但深度的指数效应不需要多复杂就能看出来——哪怕只是标量，每层导数多出 2%（1.02），连乘 100 层就放大到 7.24 倍；反过来每层是 0.98，100 层后就只剩 0.133。</p>
+<p>残差连接把每层写成 \(x_\ell+f_\ell(x_\ell)\)，局部 Jacobian 随之变成 \(I+J_{f_\ell}\)。多出来的恒等项 \(I\) 给梯度修了一条直达底层的快车道，但它并不保证乘积自动有界——刚才那个 \(1.02^{100}=7.24\)，本质上就是每层多了一个 0.02 的残差分支。所以除了<a href="/posts/neural-network-initialization/#init-residual">靠初始化把分支压在合理尺度</a>，训练过程中也得管住分支的大小和方向。</p>
 
 <h2 id="normalization">Pre-LN 与 Post-LN：归一化放在了哪条路径上？</h2>
-<p>用 \(N\) 表示归一化，\(f\) 表示 attention 或 FFN 子层。Post-LN 在相加后归一化，Pre-LN 在进入分支前归一化：</p>
+<p>用 \(N\) 表示归一化，\(f\) 表示 attention 或 FFN 子层。Post-LN 在残差相加之后做归一化，Pre-LN 在进子层之前做归一化：</p>
 <div class="math-block">\[\begin{aligned}
 \text{Post-LN:}\quad y&=N(x+f(x)),&J&=J_N(I+J_f),\\
 \text{Pre-LN:}\quad y&=x+f(N(x)),&J&=I+J_fJ_N.
 \end{aligned}\]</div>
-<p>各 Jacobian 在对应的前向输入处求值。Post-LN 的所有路径都会经过相加之后的归一化；Pre-LN 的恒等通路直接连到下一层。常用 Pre-LN 模型还在整叠网络输出处添加 final norm，它会作用于最终输出及传回来的梯度。</p>
-<p>为了看清尺度作用，把归一化具体化为不带可学习缩放的 RMSNorm。对当前向量 \(x\in\mathbb R^d\)，定义 \(r=\sqrt{\|x\|_2^2/d+\varepsilon}\)，于是：</p>
+<p>差别一眼就能看出来：Post-LN 把 \(J_N\) 乘在了最外面，连恒等路径都要过一遍归一化；Pre-LN 则把恒等项 \(I\) 留在外面，主干直通下一层（实际 Pre-LN 模型通常只在所有 block 结束后的最顶层补一个 final norm，只过一次，不会逐层连乘）。</p>
+<p>为了看清 \(J_N\) 到底对梯度做了什么，拿最干净的 RMSNorm（先省掉可学习的缩放参数）来算一下。对向量 \(x\in\mathbb R^d\)，记 \(r=\sqrt{\|x\|_2^2/d+\varepsilon}\)，那么：</p>
 <div class="math-block">\[N(x)=\frac{x}{r},\qquad J_N=\frac{I}{r}-\frac{xx^\top}{dr^3}.\]</div>
-<p>与 \(x\) 正交的方向被缩放为 \(1/r\)，沿 \(x\) 的方向被缩放为 \(\varepsilon/r^3\)。当 \(\varepsilon\) 很小时，沿径向改变输入长度几乎不改变归一化输出。LayerNorm 还会先减去均值，因此也去掉全体分量同时平移的方向。这种几何变化说明，观察输出 RMS 约等于 1，只能说明前向尺度受控；还需要检查梯度方向的变化。作用于整段序列时，逐 token 归一化的 Jacobian 由这些局部块组成块对角矩阵，attention 则在 token 之间继续传递信息。完整算子推导与低精度归约可看<a href="/posts/rmsnorm-kernel/">RMSNorm 的计算与优化</a>。</p>
-<p><em>On Layer Normalization in the Transformer Architecture</em> 从初始化处的梯度尺度解释了 Post-LN 对 warmup 的敏感性，并分析 Pre-LN 为什么更容易在初始化阶段获得平稳梯度。实际训练中的学习率、数据难度、优化器状态仍会继续变化。Warmup 给这些量一个逐步适应的过程；是否缩短它，应当由相同数据和更新预算下的对照来决定。</p>
+<p>拆开看它的两个特征方向：垂直于 \(x\) 的方向按 \(1/r\) 缩放，沿着 \(x\) 的径向方向只剩 \(\varepsilon/r^3\)。这在几何上很直白——当 \(\varepsilon\) 很小时，把输入整体拉长或压短，归一化后的输出几乎不动，所以沿径向的导数接近 0（LayerNorm 多做一步去均值，还会把全体分量一起平移的方向也压成 0）。换句话说，归一化把前向 RMS 稳在 1 附近的同时，也在反向传播里不断砍掉径向分量，并按 \(1/r\) 缩放正交分量。在 Post-LN 里，这把剪刀每一层都会落到主干梯度上；在 Pre-LN 里，主干绕开了它，只有子层分支会经过 \(J_N\)。完整算子推导和低精度归约见<a href="/posts/rmsnorm-kernel/">RMSNorm 的计算与优化</a>。</p>
+<p>Xiong 等人在 <em>On Layer Normalization in the Transformer Architecture</em> 里正是顺着这条链路分析的：初始化时 Post-LN 顶层附近的梯度明显偏大，不加 warmup 很容易第一步就把参数冲歪；Pre-LN 把恒等通路留出来后，初始化阶段的梯度平稳得多，对 warmup 的依赖也跟着减轻——不过实际训练里优化器二阶矩的冷启动和早期大梯度波动依然存在，所以 Pre-LN 通常还是会留一段 warmup，只是没那么脆弱了。</p>
 
 <figure class="article-figure" id="gradient-flow">
 <h3>沿六层网络反传同一个梯度</h3>
 <div class="stability-controls"><label>归一化位置 <select id="norm-placement"><option value="pre">Pre · x + W N(x)</option><option value="post">Post · N(x + W x)</option></select></label><label>分支尺度 <select id="branch-scale"><option value="0">0</option><option value="0.15" selected>0.15</option><option value="0.5">0.5</option><option value="1">1</option></select></label></div>
 <div class="gradient-row head"><span>层</span><span>前向 RMS · 绿色</span><span>梯度 L2 范数 · 紫色</span></div><div id="gradient-rows" class="gradient-rows"></div><p id="gradient-readout" class="stability-readout" aria-live="polite"></p>
-<figcaption>四维输入 x₀ = [0.3, −0.9, 1.2, 0.6]，顶层梯度 g₆ = [1, −0.5, 0.2, 0.7]。每层用确定的线性分支与 RMSNorm（ε = 10⁻⁴）；进度逐层展示真实 Jacobian 的反向乘法。每一列的条长按该列最大值缩放，数字给出原始数值。这是局部六层堆叠的方向探针。</figcaption>
+<figcaption>六层简化模型的前向与反向探针：输入 x₀ = [0.3, −0.9, 1.2, 0.6]，顶层梯度 g₆ = [1, −0.5, 0.2, 0.7]，每层用固定的线性分支和 RMSNorm（ε = 10⁻⁴），逐步把真实 Jacobian 的转置乘回去。两列进度条各自按本列最大值归一化，右侧显示原始数值。</figcaption>
 </figure>
 
 <h2 id="deepnorm">深度增加时，分支和残差怎样共同缩放？</h2>
-<p>Pre-LN 的残差流在连续相加。记 \(r(x)^2=\|x\|_2^2/d\) 为均方幅值，对一次残差相加有精确关系：</p>
+<p>Pre-LN 虽然保住了底层梯度，却带来了另一个副作用：主干一路只加不归一化，残差流的幅值会越滚越大。把均方幅值记作 \(r(x)^2=\|x\|_2^2/d\)，每过一个残差块都有：</p>
 <div class="math-block">\[r(x+f)^2=r(x)^2+r(f)^2+\frac{2x^\top f}{d}.\]</div>
-<p>最后一项衡量分支与残差的对齐程度。若两者近似不相关，许多层的分支方差会累积；若经常同向，增长会更快。当残差 RMS 越来越大，而分支更新规模大致固定时，深层新增信息的相对比例也会下降。这解释了为什么同时记录残差 RMS、分支 RMS 和二者夹角，比单看归一化后的数值更有用。</p>
-<p>DeepNet 的 DeepNorm 从 Post-LN 出发，同时调整残差系数与参数初始化：</p>
+<p>最后一项 \(2x^\top f/d\) 刻画分支和主干的对齐程度。哪怕分支与主干完全不相关，方差也会随层数线性累积；如果两者经常同向，主干 RMS 会涨得更快。主干越来越粗、分支输出又被 Pre-LN 卡在常数尺度，越往深层走，新分支能撬动主干的比例就越小。所以诊断深层模型时，单看归一化后的激活稳不稳定没用，得把残差 RMS、分支 RMS 和两者的夹角一起盯住。</p>
+<p>想要 Post-LN 的表达力，又不想在深层炸掉，DeepNet 给出的解法是 <strong>DeepNorm</strong>：保留 Post-LN 的位置，但把残差缩放和初始化绑在一起改：</p>
 <div class="math-block">\[x_{\ell+1}=\operatorname{LN}(\htmlData{symbol=alpha}{\alpha}\,x_\ell+f_\ell(x_\ell;\theta_\ell)).\]</div>
-<p>对于含 \(L\) 个 Transformer block、每个 block 含 self-attention 与 FFN 的 encoder-only 或 decoder-only 架构，系数取：</p>
+<p>对于含 \(L\) 个 block（每个含 self-attention 和 FFN 两个子层）的 encoder-only 或 decoder-only 模型，系数取：</p>
 <div class="math-block">\[\alpha=(2L)^{1/4},\qquad \htmlData{symbol=beta}{\beta}=(8L)^{-1/4}.\]</div>
-<p>其中 \(\alpha\) 乘在每个子层的残差支路上；\(\beta\) 是初始化的缩放因子，应用于 FFN 权重、attention 的 value 投影与 output 投影。Q、K 投影保留基础初始化尺度。以 64 个 block 为例，\(\alpha\approx3.364\)，\(\beta\approx0.210\)。增大残差相对贡献，并减小特定分支权重的初始尺度，使一次参数更新对深层输出的影响更可控。</p>
-<p>这里的成对设计很关键：attention 分支包含 V 与 output 两次投影，FFN 也包含前后两次线性变换，初始化缩放会沿计算路径共同起作用。Encoder–decoder 架构还包含 cross-attention，原方法对它给出了依赖 encoder／decoder 深度的另一组系数。迁移设计时，应当先数清楚每个 block 的子层和投影路径，再选择对应的初始化。控制宽度变化时的参数与学习率尺度，则是 <a href="/posts/pretraining-mup/">μP 与超参数迁移</a>处理的相关问题。</p>
+<p>这里 \(\alpha\) 放大每个子层的残差支路，\(\beta\) 用来缩小 FFN 权重以及 attention 的 \(W_V, W_O\) 的初始尺度，而 \(W_Q, W_K\) 保留基础初始化。拿 64 层模型代入，\(\alpha\approx 3.364\)、\(\beta\approx 0.210\)。</p>
+<p>为什么要挑这几个矩阵成对缩放？因为从输入到子层输出，attention 的数值流经 \(W_V\) 和 \(W_O\) 两次投影，FFN 同样经过一升一降两次投影（\(W_Q, W_K\) 只决定 softmax 权重，不直接放大数值幅值）。把每条路径上的两段投影都乘上 \(\beta\)，分支的初始尺度和单步更新扰动都会叠加压低，再配上放大 \(\alpha\) 倍的残差主干，一步参数更新就不会把几百层叠出来的输出掀翻。如果是带 cross-attention 的 encoder–decoder 架构，子层数变了，论文另外给了依赖 encoder/decoder 各自深度的系数公式——套用前先把每个 block 里的子层和投影路径数清楚。至于模型变宽（而不是变深）时怎么同步调初始化和学习率，那是<a href="/posts/pretraining-mup/">μP 与超参数迁移</a>要解决的问题。</p>
 
 <h2 id="entropy">注意力熵：分数尺度怎样改变信息流？</h2>
-<p>训练中还可能出现另一条链：Q、K 范数变大，注意力分数差被放大，概率突然集中在少数位置。对一个 query，令基础分数为 \(z_i\)，共有 \(n\) 个可见 key，用正数 \(a\) 调整整体尺度：</p>
+<p>除了残差主干，注意力里还藏着另一条常见的失控链路：训练过程中 \(Q\)、\(K\) 的范数悄悄涨大，把注意力 logits 之间的差距越拉越开，softmax 迅速坍缩成几乎 one-hot 的尖峰。对单个 query，设 \(n\) 个可见 key 的基础分数为 \(z_i\)，用一个正数 \(a\) 整体缩放：</p>
 <div class="math-block">\[p_i(a)=\frac{e^{az_i}}{\sum_j e^{az_j}},\qquad \htmlData{symbol=entropy}{H(a)}=-\sum_{i=1}^{n}p_i(a)\log p_i(a).\]</div>
-<p>熵的单位是 nats，均匀分配时为 \(\log n\)，集中在一个位置时趋近于 0。为得到尺度变化的结果，记 \(Z(a)=\sum_i e^{az_i}\)，把熵写成 \(H(a)=\log Z(a)-a\,\mathbb E_p[z]\)。利用 \(d\log Z/da=\mathbb E_p[z]\) 与 \(d\mathbb E_p[z]/da=\operatorname{Var}_p(z)\)，可得：</p>
+<p>记配分函数 \(Z(a)=\sum_i e^{az_i}\)，把 \(\log p_i=az_i-\log Z(a)\) 代回熵的定义，立刻写成 \(H(a)=\log Z(a)-a\,\mathbb E_p[z]\)。对 \(a\) 求导，利用 \(\frac{d}{da}\log Z=\mathbb E_p[z]\) 和 \(\frac{d}{da}\mathbb E_p[z]=\operatorname{Var}_p(z)\)，一阶项刚好抵消：</p>
 <div class="math-block">\[\boxed{\frac{dH}{da}=-a\operatorname{Var}_p(z)\le0}\qquad(a\ge0).\]</div>
-<p>基础分数的相对次序保持不变时，放大它们就会降低熵。Softmax 的导数是 \(\operatorname{diag}(p)-pp^\top\)；接近 one-hot 的概率使许多方向上的局部导数变小，模型调整这些注意力选择的速度随之改变。</p>
+<p>只要分数不完全相等，放大尺度 \(a\) 就一定单调压低熵（熵的单位是 nats，均匀分布时最大为 \(\log n\)，坍缩到单个位置时趋近于 0）。麻烦在于，softmax 的 Jacobian 是 \(\operatorname{diag}(p)-pp^\top\)——一旦 \(p\) 逼近 one-hot，这个矩阵几乎全零，梯度穿不过 softmax，对应的注意力头就像被锁死在当前位置上，很难再调回来。</p>
 
 <figure class="article-figure" id="entropy-flow">
 <h3>保持分数方向，只改变温度</h3>
 <div class="stability-controls"><label>尺度 a <input id="attention-scale" type="range" min="0" max="8" step="0.1" value="1"><output id="attention-scale-value">1.0</output></label></div>
 <div class="score-row"><span>key</span><span>a · z</span><span>注意力概率 · 0 到 1</span><span>p</span></div><div id="entropy-bars"></div>
 <div class="entropy-stats"><div class="article-stat">熵 H · nats<output id="entropy-value"></output></div><div class="article-stat">最大概率<output id="max-probability"></output></div><div class="article-stat">dH / da<output id="entropy-derivative"></output></div></div><p id="entropy-readout" class="stability-readout" aria-live="polite"></p>
-<figcaption>三个基础分数固定为 [1, 0, −1]。滑块立即计算对应的 softmax、熵与熵的导数；下方进度展开从分数到熵的四步计算。概率条使用固定的 0～1 刻度，改变 a 时可以直接比较集中程度。</figcaption>
+<figcaption>固定基础分数 [1, 0, −1]，拖动尺度 a 观察 softmax 概率、熵和导数 dH/da 的变化；下方可逐步展开四步计算。概率条锁定 0～1 刻度，方便直接对比分布的尖锐程度。</figcaption>
 </figure>
 
-<p>在缩放点积注意力中，分数为 \(q^\top k_i/\sqrt{d_h}\)，\(d_h\) 是单头维度。两项分数差满足：</p>
+<p>回到缩放点积注意力，单头维度为 \(d_h\) 时，任意两个 key 的分数差满足：</p>
 <div class="math-block">\[\left|\frac{q^\top(k_i-k_j)}{\sqrt{d_h}}\right|\le\frac{\|q\|_2\,\|k_i-k_j\|_2}{\sqrt{d_h}}.\]</div>
-<p>因此，Q／K 范数以及它们的方向共同决定 softmax 的集中程度。某些负责复制、定位的头会自然形成尖锐分布。更有诊断价值的模式是：在相同验证样本、相同可见长度下，一批头的熵突然下降，并伴随 QK 范数、更新比例或 loss 的跃升。<em>Stabilizing Transformer Training by Preventing Attention Entropy Collapse</em> 对这类关联作了系统研究，并用谱尺度控制改善训练稳定性。</p>
+<p>可见 softmax 有多尖锐，直接取决于 \(Q\)、\(K\) 的范数和夹角。当然，低熵本身不一定是坏事——负责复制或精确定位的头本来就很尖锐。真正危险的信号是<strong>熵坍缩</strong>（entropy collapse）：在固定验证样本和相同可见长度下，一批原本分散的头突然集体掉熵，同时伴随 QK 范数飙升、更新比例异常或 loss 抬升。Zhai 等人在 <em>Stabilizing Transformer Training by Preventing Attention Entropy Collapse</em> 里把这条因果链拆得很清楚，并顺势提出了用谱尺度卡住 logits 的做法。</p>
 
 <h2 id="qknorm">从向量长度到矩阵谱尺度</h2>
-<p>QK normalization 直接处理注意力入口。Henry 等人的 QKNorm 沿每个头的向量维度做 L2 归一化，再使用可学习的尺度 \(s\) 乘余弦相似度：</p>
+<p>最直接的拦截点就在注意力入口。Henry 等人的 <strong>QKNorm</strong> 沿每个头的向量维度做 L2 归一化，再乘一个可学习的标量尺度 \(s\)：</p>
 <div class="math-block">\[\widehat q=\frac{q}{\|q\|_2},\quad\widehat k_i=\frac{k_i}{\|k_i\|_2},\quad z_i=s\,\widehat q^\top\widehat k_i.\]</div>
-<p>单位向量的内积落在 \([-1,1]\)，所以分数的绝对值由 \(|s|\) 控制。实现中给向量范数设置正的数值下限，并监测可学习尺度。这个 L2 定义与使用 RMSNorm 的 QK 归一化有不同的尺度约定：忽略 epsilon 时，RMS 归一化后的向量长度为 \(\sqrt{d_h}\)。在不同实现间迁移配置，需要把归一化定义与 attention scaling 一起换算。</p>
-<p>σReparam 则作用于线性层权重，把矩阵方向与谱尺度拆开：</p>
+<p>单位向量的点积落在 \([-1,1]\)，logits 的绝对值就被死死锁在 \(|s|\) 以内（实现时给分母加个小下限防除零，同时盯着 \(s\) 别一路涨飞）。这里有个工程上容易踩的坑：现在大模型里常用的 QK-Norm 往往用 RMSNorm 而不是 L2 归一化。忽略 \(\varepsilon\) 时，RMSNorm 输出的向量 \(L_2\) 范数是 \(\sqrt{d_h}\) 而不是 1，正好和常规注意力的 \(1/\sqrt{d_h}\) 配对；从一套实现搬配置到另一套时，千万别忘了把归一化口径和 attention scaling 一起换算。</p>
+<p>如果说 QK-Norm 是守在注意力门口按住向量长度，<strong>σReparam</strong> 则是往上游退一步，把线性层权重矩阵的“方向”和“谱尺度”拆开：</p>
 <div class="math-block">\[\widehat W=\htmlData{symbol=gamma}{\gamma}\frac{W}{\sigma(W)},\qquad \sigma(W)=\|W\|_2.\]</div>
-<p>若谱范数计算精确，则 \(\|\widehat W\|_2=|\gamma|\)。矩阵 \(W\) 提供方向和相对结构，可学习标量 \(\gamma\) 提供整体尺度。原方法将这种重参数化应用到线性层，并使用 power iteration 估计最大奇异值；一次迭代主要是两个矩阵向量乘法。推理时可以把有效矩阵 \(\widehat W\) 预先算好。</p>
-<p>Power iteration 用上一轮的奇异向量估计热启动，在训练中跟踪谱尺度。若权重方向变化较快，少量迭代会存在估计误差；可定期对抽样层用更多迭代复核。谱估计、归一化和较敏感的注意力计算使用合适的高精度归约，再结合实际 profiler 衡量成本。QK 向量归一化控制每个 token 的分数入口，σReparam 调整参数化及权重尺度的学习速度；选择时可以先观察异常最早出现在哪一层、哪一种量上。</p>
+<p>只要谱范数 \(\sigma(W)\) 算得准，有效权重的谱范数就恒等于 \(|\gamma|\)：\(W\) 只管方向和内部结构，整体放缩交给单个可学习标量 \(\gamma\)。训练时不需要每步做完整 SVD，用上一轮的奇异向量热启动，跑一两步 power iteration（每次迭代主要是两次矩阵-向量乘）就能跟踪最大奇异值；推理时直接把 \(\widehat W\) 提前算好，零额外开销。</p>
+<p>不过 power iteration 毕竟是近似跟踪：训练初期权重方向转得快时，步数太少容易低估真实谱范数，抽几层定期多跑几轮复核会更踏实，归约部分也要留够精度。对比来看，QK-Norm 改动极小、只拦注意力入口的 token 级尺度，现在大模型几乎默认标配；σReparam 把控制前移到线性层参数化本身，还能顺带约束谱尺度的增长速度，只是实现和训练开销略重一些。</p>
 
 <h2 id="monitoring">把稳定性变成一组可以复现实验的量</h2>
-<p>最小监控单元可以是“层 × attention head × 固定验证 batch”。同时记录残差 RMS、分支 RMS、QK 范数分位数、可见位置的注意力熵、梯度范数，以及参数的实际更新比例：</p>
+<p>光看一条全局 loss 和总 grad norm 根本没法排障。一套够用的最小监控面板，按“层 × attention head × 固定验证 batch”的粒度，把残差 RMS、分支 RMS、QK 范数分位数、注意力熵、梯度范数，以及参数的<strong>实际更新比例</strong>一起记下来：</p>
 <div class="math-block">\[\htmlData{symbol=update}{u_\ell}=\frac{\|\theta_\ell^{(t+1)}-\theta_\ell^{(t)}\|_2}{\|\theta_\ell^{(t)}\|_2+\epsilon_u}.\]</div>
-<p>这里 \(\epsilon_u\) 是避免零分母的小常数，参数更新包括优化器与 weight decay 的作用。接近零初始化的参数组需要同时报告绝对更新范数。分片训练中，各组范数由分片平方和汇总得到。不同上下文长度比较熵时，可同时报告 \(H/\log n\)，其中 \(n\) 是该 query 实际可见的 key 数；只有一个可见 key 的位置单独处理。</p>
-<p>FlashAttention 的优势来自分块计算和避免保存完整注意力矩阵。为了监控熵而把每层的 \(S\times S\) 概率全量导出，会改变显存与吞吐。实践中可以每隔一段步数，在固定小样本、少量层和 query 上重算注意力分布，训练主路径持续记录便宜的 QK 范数统计。抽样范围、mask、位置编码与实际 attention scaling 保持一致，诊断数据才能对应真实计算。</p>
+<p>分子是经过优化器和 weight decay 后真正落到参数上的位移，\(\epsilon_u\) 只用来防除零。记这组指标时有三个细节容易漏掉：接近零初始化的参数组分母太小，得同时记绝对更新范数；多卡分片训练要先对各分片平方和做汇总再开方；跨上下文长度比较熵时，除以 \(\log n\)（\(n\) 为该 query 实际可见的 key 数，跳过 \(n=1\) 的首 token）才能归一化到同一刻度。</p>
+<p>至于怎么拿注意力熵，千万别为了监控把每层 \(S\times S\) 的注意力矩阵全量物化出来——那样直接把 FlashAttention 省下的显存和吞吐全吐回去了。实际做法是主训练路径只打便宜的 QK 范数，每隔几百步拿一小批固定验证样本，只挑几层、少量 query（保持 mask、位置编码和 attention scaling 与主路径完全一致）重算一次完整分布就够了。</p>
 <div class="stability-table"><table><thead><tr><th>先出现的变化</th><th>待验证的机制</th><th>控制一个变量的探针</th></tr></thead><tbody>
-<tr><td>残差 RMS 随深度快速增长</td><td>分支尺度或同向累积过大</td><td>固定初始化与 batch，改变残差／分支缩放，比较层间 Jacobian 和分支比例</td></tr>
-<tr><td>QK 范数上升，固定样本的熵骤降</td><td>注意力分数差放大</td><td>仅替换 QK 归一化或控制投影谱尺度，记录同一组头的分数与梯度</td></tr>
-<tr><td>梯度范数平稳，实际更新突然变大</td><td>优化器预条件、状态或参数组尺度发生变化</td><td>保存完整 optimizer state，逐组核对更新与二阶矩，再回放同一批数据</td></tr>
-<tr><td>特定长度或精度下首次出现非有限值</td><td>归约、softmax 或 mask 边界的数值路径</td><td>对同一张量用 FP32 参考计算，逐步定位第一个分歧的算子</td></tr>
+<tr><td>残差 RMS 随深度快速增长</td><td>分支尺度或同向累积过大</td><td>固定初始化与 batch，只改残差或分支缩放，对比层间 Jacobian 和分支比例</td></tr>
+<tr><td>QK 范数上升，固定样本的熵骤降</td><td>注意力 logits 分数差被放大</td><td>只加 QK-Norm 或约束投影谱尺度，对比同一组头的分数与梯度</td></tr>
+<tr><td>梯度范数平稳，实际更新突然变大</td><td>优化器预条件、二阶矩状态或参数组尺度漂移</td><td>加载完整 optimizer state，逐组核对更新量与二阶矩，回放同一批数据</td></tr>
+<tr><td>特定长度或精度下首次出现非有限值</td><td>归约、softmax 或 mask 边界的数值溢出</td><td>同一张量跑一遍 FP32 参考路径，逐算子定位第一个分歧点</td></tr>
 </tbody></table></div>
-<p>梯度裁剪也有明确的操作顺序。全局范数裁剪把梯度变成 \(g'=g\min(1,c/\|g\|_2)\)，其中 \(c\) 为阈值。使用 FP16 loss scaling 时，先累积完同一次更新的梯度，再 unscale，随后裁剪。若真实梯度范数为 5、loss scale 为 128、阈值为 1，正确结果范数为 1；先裁剪放大后的梯度，再除以 128，会只剩 \(1/128\)。PyTorch 的 AMP 示例明确展示了 unscale 后进行 clipping 的顺序。</p>
-<p>裁剪限制梯度，参数位移还受到优化器影响。以 Adam 的首次更新为例，忽略 epsilon 与 weight decay，偏差校正后 \(\widehat m=g\)、\(\widehat v=g^2\)，于是每个非零分量的更新约为 \(-\eta\operatorname{sign}(g)\)。一致缩小梯度会在分子分母中抵消，因此还要观察上面的实际更新比例。优化器的完整推导可看<a href="/posts/optimizers/">优化器</a>，训练计划中的 warmup、batch 与 checkpoint 回放可结合<a href="/posts/smol-marathon/">SmolLM3 训练过程</a>。</p>
-<p>保存异常发生前的权重、优化器状态、随机数状态与数据位置，才能在相同起点重放。先用 FP32 和单批数据定位数值路径，再一次只改学习率、归一化或某个分支系数。稳定性方案的收益最终要在同一训练预算下比较验证损失、吞吐和稳定步数；较平滑的曲线只是其中一项证据。</p>
+<p>除了监控，还有两个工程环节最容易给人制造假象。第一个是<strong>梯度裁剪的顺序</strong>。全局范数裁剪把梯度缩成 \(g'=g\min(1,c/\|g\|_2)\)，但用 FP16 loss scaling 时，顺序必须是先累积完同一次更新的梯度，再 unscale，最后才裁剪（PyTorch AMP 文档专门强调过这一点）。举个直白的例子：真实梯度范数是 5、loss scale 是 128、阈值 \(c=1\)，正确顺序裁完范数正好是 1；反过来先裁放大后的梯度再除以 128，梯度直接被砍成 \(1/128\)，曲线看着稳了，其实模型几乎没在学。</p>
+<p>第二个假象来自优化器本身：裁剪住了梯度，不代表裁剪住了参数位移。拿 Adam 第一步来算——省掉 \(\varepsilon\) 和 weight decay，偏差校正后 \(\widehat m=g\)、\(\widehat v=g^2\)，每个非零分量的更新都是 \(-\eta\operatorname{sign}(g)\)。全局范数裁剪对梯度做的是统一缩放，进到 Adam 里分子分母一除直接抵消，所以还得盯着上面那条实际更新比例 \(u_\ell\)。优化器的完整推导见<a href="/posts/optimizers/">优化器</a>，warmup、batch 调度和 checkpoint 回放的实战细节可以看<a href="/posts/smol-marathon/">SmolLM3 训练过程</a>。</p>
+<p>排障时还有一条铁律：checkpoint 里一定要把权重、优化器状态、随机数状态和数据指针一起存下来，保证能从异常前几步原样重放。复现之后，先用单批数据切 FP32 排除纯数值溢出，再一次只动一个变量（学习率、归一化或分支系数）。别被一条更平的 loss 曲线骗了——调稳的代价如果是收敛变慢或吞吐掉一截，最终还是要在同等预算下拿验证 loss 说话。</p>
 
 <h2 id="connections">残差连接还可以怎样设计？</h2>
-<p>Pre-LN 与 DeepNorm 调整的是一条残差流中的路径和尺度。若把状态扩展为多条流，就可以学习不同层之间怎样交换信息，见 <a href="/posts/hyper-connections/">Hyper-Connections</a>。多流的混合矩阵会再次带来跨层连乘问题，<a href="/posts/manifold-hyper-connections/">mHC</a> 用双随机约束控制这种传播；<a href="/posts/attention-residuals/">Attention Residuals</a> 则让当前层沿深度选择历史表示。这些设计共同面对同一个问题：新增的信息怎样写进去，早期的信息和梯度又怎样保留下来。</p>
+<p>前面讨论的 Pre-LN 和 DeepNorm，都是在单条残差流里调路径和尺度。如果把主干拓宽成多条并行的残差流，让网络自己学跨层怎么混合信息，就走到了 <a href="/posts/hyper-connections/">Hyper-Connections</a>；但多路混合矩阵一样会跨层连乘，容易重新把梯度放飞，于是 <a href="/posts/manifold-hyper-connections/">mHC</a> 用双随机约束把混合幅度锁住，<a href="/posts/attention-residuals/">Attention Residuals</a> 则干脆让当前层用注意力沿深度挑历史表示。绕了一大圈，本质还是同一对矛盾：新算出来的信息怎么写进去，同时不把前面传过来的信息和梯度冲垮。</p>
 
-<p data-topic-bridge="algorithm-expansion">当同一个残差块反复使用时，参数梯度会汇集多个展开位置的贡献。<a href="/posts/recurrent-depth/">共享深度与递归计算</a>把这一点落实到训练展开、截断反向和停止策略；衡量层的实际作用则可以结合<a href="/posts/effective-depth/">表示测量与删层干预</a>。</p>
+<p data-topic-bridge="algorithm-expansion">如果进一步让同一个残差块沿深度反复循环，参数梯度就会把多次展开的贡献叠在一起——训练展开、截断反传和停止策略见<a href="/posts/recurrent-depth/">共享深度与递归计算</a>；想直接量出每一层到底起了多大作用，可以接着看<a href="/posts/effective-depth/">表示测量与删层干预</a>。</p>
 <h2 id="exercises">用数字检查稳定性判断</h2>
-<div class="article-exercise"><h3>练习一：归一化后的输出平稳，梯度会怎样？</h3><p>给定 \(x=[3,4]\)，RMSNorm 的 \(\varepsilon=0\)、缩放参数为 1。求输出 RMS，以及平行、垂直于 \(x\) 两个方向上的 Jacobian 特征值。</p><details><summary>推导与答案</summary><p>\(r=\sqrt{25/2}\approx3.536\)，输出为 \([0.849,1.131]\)，RMS 恰为 1。沿 \(x\) 的特征值是 0；沿与 \(x\) 垂直的方向，特征值为 \(1/r\approx0.283\)。对输入整体放大不会改变输出方向和长度，因此径向导数为零。串联时，下一层的线性变换还会旋转方向，需要使用完整 Jacobian 检查梯度传播。</p></details></div>
-<div class="article-exercise"><h3>练习二：为什么要同时改 DeepNorm 的两个系数？</h3><p>一个 decoder-only 模型有 64 个 block。计算 DeepNorm 的残差系数和初始化因子，并说明 attention 中哪些矩阵应用初始化缩放。</p><details><summary>推导与答案</summary><p>\(\alpha=(128)^{1/4}\approx3.364\)，\(\beta=(512)^{-1/4}\approx0.210\)。Value 与 output 投影、FFN 权重应用 \(\beta\)，Q 与 K 保留基础初始化。只增大 \(\alpha\) 会改变残差相对比例，却没有实现原方法对分支初始化的配套设计。验证时从同样的基础随机权重出发，分别只改 \(\alpha\)、只改 \(\beta\)、两者同时改，比较输出变化量、层间梯度与短程训练表现。</p></details></div>
-<div class="article-exercise"><h3>练习三：注意力熵为什么下降？</h3><p>基础分数为 \([1,0,-1]\)，分别计算尺度 \(a=0\)、\(a=1\) 的熵，并求 \(a=1\) 处的熵导数。</p><details><summary>推导与答案</summary><p>\(a=0\) 给出均匀分布，\(H=\log3\approx1.099\)。\(a=1\) 的概率约为 \([0.66524,0.24473,0.09003]\)，\(H\approx0.83240\)。分数均值为 \(0.57521\)，二阶矩为 \(0.75527\)，方差约为 \(0.42440\)，因此 \(dH/da\approx-0.42440\)。这个导数针对固定基础分数的尺度变化；真实训练中的方向变化可以通过同时记录原始分数与范数来区分。</p></details></div>
-<div class="article-exercise"><h3>练习四：裁剪后为什么更新仍然很大？</h3><p>Adam 首步遇到梯度 \([3,4]\)，先将其范数裁剪到 1。忽略 epsilon 与 weight decay，学习率为 0.01。求参数更新向量及其范数。</p><details><summary>推导与答案</summary><p>裁剪后梯度为 \([0.6,0.8]\)。Adam 首步经过偏差校正，两个分量都除以自己的绝对值，更新为 \([-0.01,-0.01]\)，范数约 0.01414。未裁剪的正梯度在这些假设下给出相同结果。之后的更新受到历史一、二阶矩影响，因此监控应同时保留梯度范数、裁剪比例、优化器状态统计和真实参数位移。</p></details></div>
+<div class="article-exercise"><h3>练习一：归一化后的输出平稳，梯度会怎样？</h3><p>给定 \(x=[3,4]\)，RMSNorm 的 \(\varepsilon=0\)、缩放参数为 1。求输出 RMS，以及平行、垂直于 \(x\) 两个方向上的 Jacobian 特征值。</p><details><summary>推导与答案</summary><p>\(r=\sqrt{25/2}\approx3.536\)，输出为 \([0.849,1.131]\)，RMS 恰为 1。沿 \(x\) 的特征值是 0，因为把输入整体放大不会改变输出方向和长度，径向导数自然为零；垂直于 \(x\) 的方向特征值为 \(1/r\approx0.283\)。多层串联时，下一层的线性变换还会把方向转开，所以不能只看单个特征值，得拿完整 Jacobian 算。</p></details></div>
+<div class="article-exercise"><h3>练习二：为什么要同时改 DeepNorm 的两个系数？</h3><p>一个 decoder-only 模型有 64 个 block。计算 DeepNorm 的残差系数和初始化因子，并说明 attention 中哪些矩阵应用初始化缩放。</p><details><summary>推导与答案</summary><p>代入 \(L=64\)，得 \(\alpha=(128)^{1/4}\approx3.364\)，\(\beta=(512)^{-1/4}\approx0.210\)。需要乘 \(\beta\) 的是 attention 的 \(W_V, W_O\) 和 FFN 权重，\(W_Q, W_K\) 保留基础初始化。只拉大 \(\alpha\) 而不缩 \(\beta\)，分支的初始幅度和更新扰动并没有降下来；如果想亲手验证，从同一份随机权重出发，对比“只改 \(\alpha\)”“只改 \(\beta\)”“两者一起改”的输出变化量和层间梯度即可。</p></details></div>
+<div class="article-exercise"><h3>练习三：注意力熵为什么下降？</h3><p>基础分数为 \([1,0,-1]\)，分别计算尺度 \(a=0\)、\(a=1\) 的熵，并求 \(a=1\) 处的熵导数。</p><details><summary>推导与答案</summary><p>\(a=0\) 时是均匀分布，\(H=\log3\approx1.099\)。\(a=1\) 时概率约为 \([0.66524,0.24473,0.09003]\)，算得 \(H\approx0.83240\)。此时分数均值 \(\mathbb E_p[z]\approx0.57521\)，二阶矩 \(\mathbb E_p[z^2]\approx0.75527\)，方差 \(\operatorname{Var}_p(z)\approx0.42440\)，因此 \(dH/da=-a\operatorname{Var}_p(z)\approx-0.42440\)。注意这个公式假设基础分数方向不变——真训练里方向也在动，排障时要把原始分数和 QK 范数分开看。</p></details></div>
+<div class="article-exercise"><h3>练习四：裁剪后为什么更新仍然很大？</h3><p>Adam 首步遇到梯度 \([3,4]\)，先将其范数裁剪到 1。忽略 epsilon 与 weight decay，学习率为 0.01。求参数更新向量及其范数。</p><details><summary>推导与答案</summary><p>裁剪后的梯度是 \([0.6,0.8]\)。但 Adam 第一步做完偏差校正后，每个分量都会除以自己的绝对值，结果更新依然是 \([-0.01,-0.01]\)（范数约 0.01414）——跟完全不裁剪一模一样。后面几步虽有历史一、二阶矩的平滑缓冲，梯度裁剪和实际步长之间依然隔着一层预条件，不能混为一谈。</p></details></div>
 
 <h2 id="lab">CPU 实验：让导数公式接受有限差分检查</h2>
-<p><a href="/posts/pretraining-stability/lab.py" download>下载 lab.py</a>，在有 NumPy 的环境中运行 <code>python lab.py</code>。脚本对四维 RMSNorm 和六层 Pre／Post 堆叠计算解析 Jacobian，并分别用有限差分验证；对不同注意力尺度检查熵导数，再验证谱归一化的缩放不变性、loss scaling 的裁剪顺序与 Adam 首步的梯度缩放抵消。</p>
+<p><a href="/posts/pretraining-stability/lab.py" download>下载 lab.py</a>，只要装了 NumPy 就能在 CPU 上直接跑 <code>python lab.py</code>。它会把本文的几个核心公式逐一拿有限差分和数值断言验一遍：四维 RMSNorm 与六层 Pre/Post 堆叠的解析 Jacobian、注意力熵导数、σReparam 的缩放不变性、FP16 loss scaling 的裁剪顺序，以及 Adam 首步的缩放抵消。</p>
 <pre><code>pre: output RMS 1.0967, input-gradient norm 1.1659
 post: output RMS 1.0000, input-gradient norm 0.6297
 Attention entropy: scale 1 -&gt; 0.8324; scale 8 -&gt; 0.0030 nats
 100 scalar residual Jacobians of 1.02: gain 7.2446
 Unscale then clip: norm 1.000000; reversed: 0.007812
 PASS: RMSNorm/stack finite differences, entropy derivative, spectral scaling, clipping order, Adam probe</code></pre>
-<p>这个探针使用线性分支、固定随机种子和给定的顶层梯度，用来核对传播公式。可以把层数从 6 改到 24、分支尺度从 0.15 改到 0.5，再换一个顶层梯度方向，比较哪些结论随方向改变。也可以在栈顶加上 final norm，重新用链式法则和有限差分验证它的影响。把这些数值检查做完后，再将同样的记录量放进真实的小型 Transformer 训练中。</p>
+<p>脚本里故意用了线性分支和固定种子，方便你直接改着玩：比如把层数从 6 拉到 24、分支尺度从 0.15 调到 0.5，再换一个顶层梯度方向，看看哪些现象会反转；也可以自己给栈顶补一层 final norm，顺手用有限差分检验链式法则有没有写错。</p>
 
 <h2 id="references">参考资料</h2><ul>
 <li><a href="https://arxiv.org/abs/2002.04745">On Layer Normalization in the Transformer Architecture</a>：Pre-LN、Post-LN 的初始化梯度分析与 warmup。</li>

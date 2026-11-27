@@ -53,40 +53,40 @@
   <header class="post-header"><h1>已有模型怎样长成 MoE：从权重复用到专家分化</h1><div class="post-meta"><span class="kind interactive">交互</span><time datetime="2026-10-22">2026-10-22</time></div></header>
   <nav class="series" data-series="pretraining"></nav>
   <article class="prose">
-    <p>已经花了一大笔算力训练出一个 dense 模型，现在还有一笔预算，怎样让它继续变强？沿用原结构继续训练是一种选择。另一种选择是把 FFN 扩展为多个专家，每个 token 只调用其中几个，让新增参数承载更细的分工。这就是 sparse upcycling：用已有 checkpoint 初始化更大的稀疏模型，再继续训练。</p>
-    <p>权重复制很容易，困难在于转换前后的计算如何衔接。复制出来的专家起初会给出同样的答案；路由可能改变输出尺度；把一个大 FFN 切成小专家后，还需要正确组合各个分片。只有同时理解这些细节，才能判断新增容量是在产生收益，还是让模型重新学习刚刚失去的东西。</p>
+    <p>手里已经有一个花大价钱训好的 dense checkpoint，现在又批了一笔算力，怎么花更划算？沿着原结构继续训当然是一条路，也可以走另一条：把 FFN 扩成多个专家，让每个 token 只激活其中几个，把新增参数留给更细的分工。这就是 <strong>sparse upcycling</strong>（稀疏升级）——拿现成的 dense 权重初始化更大的 MoE，再接着训。</p>
+    <p>把权重拷几份不难，真正麻烦的是「转换这一刀」切下去之后前后怎么衔接。刚复制完时所有专家长得一模一样，router 往哪送答案都相同；门控如果没归一化，这一层的输出幅度会突然掉一截；要是把大 FFN 切成细粒度小专家，不仅不能切错通道，还得保证初始路由把原 FFN 的各个分片都拼全。任何一个环节没接好，后面烧掉的算力就不是在长新能力，而是在帮模型重新学回刚刚丢掉的东西。</p>
     <nav class="toc" aria-label="文章目录"><b>目录</b><ol>
       <li><a href="#reuse">从一个 FFN 到多个专家</a></li><li><a href="#routing">门控既控制输出，也控制梯度</a></li><li><a href="#granularity">SwiGLU 怎样切成细粒度专家</a></li><li><a href="#specialization">从复制到分工</a></li><li><a href="#budget">已有投入与下一笔预算</a></li><li><a href="#hardware">相同 FLOPs，为什么速度不同</a></li><li><a href="#practice">实验与练习</a></li><li><a href="#references">参考与延伸阅读</a></li>
     </ol></nav>
 
     <section id="reuse" data-math-scope="routing">
       <h2>从一个 FFN 到多个专家</h2>
-      <p>把一层 FFN 写成函数 \(f(x)\)，输入是当前 token 的隐藏向量 \(x\in\mathbb R^d\)，输出也有 \(d\) 个坐标。创建 \(\htmlData{symbol=experts}{E}\) 个专家，各自加载同一份 FFN 权重，得到 \(f_1=\cdots=f_E=f\)。Attention、归一化和其余层可以直接继承。Router 为每个 token 产生 \(E\) 个分数，选出 \(\htmlData{symbol=topk}{K}\) 个专家，输出为：</p>
+      <p>把一层 FFN 写成函数 \(f(x)\)，输入是当前 token 的隐藏向量 \(x\in\mathbb R^d\)，输出同样是 \(d\) 维向量。最直接的转换做法是建 \(\htmlData{symbol=experts}{E}\) 个专家，全部载入同一份 FFN 权重，于是初始时 \(f_1=\cdots=f_E=f\)，而 attention、归一化和其余层原封不动地继承下来。Router 为每个 token 给这 \(E\) 个专家打分，挑出 \(\htmlData{symbol=topk}{K}\) 个，输出加权求和：</p>
       \[y(x)=\sum_{i\in\htmlData{symbol=selected}{S(x)}}\htmlData{symbol=gate}{g_i(x)}f_i(x).\]
-      <p>\(S(x)\) 是这个 token 的专家集合，\(g_i(x)\) 是实际参与加权的门控值。初始化时所有专家相同，因此：</p>
+      <p>这里 \(S(x)\) 是被选中的专家集合，\(g_i(x)\) 是实际参与加权的门控系数。刚复制完时所有专家完全一样，可以直接把 \(f(x)\) 提出来：</p>
       \[y(x)=\left(\sum_{i\in S(x)}g_i(x)\right)f(x).\]
-      <p>只要 token 成功送达专家、门控和为 1，转换后的这层就保持原来的输出。若每个转换层都满足这个条件，整条网络的前向也能衔接。这个检查可以在第一次优化器更新之前完成：固定一批 token、关闭随机 dropout，逐层比较 dense 与 MoE 的输出误差，再比较最终 logits。</p>
-      <p>Sparse Upcycling 从这类权重复用出发，研究了专家初始化、转换层位置、容量与训练恢复。它包含 T5 和 ViT 实验；其中路由归一化与 optimizer state 的选择具有模型和任务依赖。最值得保留的实验方式是<strong>从同一个 checkpoint 出发，比较继续 dense 训练与转换后的质量—成本曲线</strong>。已有 <a href="/posts/scaling-moe/">MoE 的路由与系统实现</a>解释了 token dispatch、容量和专家并行，转换实验可以在这些组件之上进行。</p>
+      <p>结论很直接：只要 token 没有因为容量上限被丢弃，且选中专家的门控之和等于 1，转换后的这一层就精确保持原来的输出；每层都如此，整条网络的前向也就无缝接上了。这一步在跑第一次参数更新之前就能验完——固定一批 token、关掉 dropout，逐层对比 dense 与 MoE 的隐状态误差，再核对最终 logits 即可。</p>
+      <p>Sparse Upcycling 论文最早在 T5 和 ViT 上系统试了这类权重复用，讨论过该转换哪些层、专家容量怎么设、优化器状态要不要继承。具体超参往往取决于模型和任务，但评测口径是固定的：<strong>从同一个 dense checkpoint 分叉</strong>，在同等算力下直接对比「继续训 dense」和「转成 MoE 再训」的质量—成本曲线。关于 MoE 的 token dispatch、容量与专家并行细节，前面 <a href="/posts/scaling-moe/">MoE 的路由与系统实现</a> 已经拆过，这里不再重复。</p>
     </section>
 
     <section id="routing" data-math-scope="routing">
       <h2>门控既控制输出，也控制梯度</h2>
-      <p>令 router logits 为 \(z_i\)，全体专家的 softmax 概率为 \(p_i=e^{z_i}/\sum_j e^{z_j}\)。有两种常见的门控计算：</p>
+      <p>记 router 打出的 logits 为 \(z_i\)，在全体专家上做 softmax 得到概率 \(p_i=e^{z_i}/\sum_j e^{z_j}\)。常见的门控写法有两种：</p>
       \[g_i=\begin{cases}p_i,&i\in S,\\0,&i\notin S,
       \end{cases}\qquad\text{或}\qquad
       g_i=\begin{cases}\dfrac{p_i}{\sum_{j\in S}p_j},&i\in S,\\0,&i\notin S.
       \end{cases}\]
-      <p>左边先对所有专家做 softmax，再保留 top-k；右边把选中的门控重新归一化，等价于对选中 logits 做 softmax。全体概率近似均匀时，左边的门控和约为 \(K/E\)。例如 8 个完整复制的专家选 2 个，输出约为原来的四分之一。右边的门控和为 1，初始输出直接衔接。</p>
-      <p>梯度也随之变化。先看专家输出的一个标量分量 \(v_i\)，加权结果为 \(y=\sum_i g_i v_i\)。在 top-k 名次保持不变的局部区间，选中集合内归一化给出：</p>
-      \[\frac{\partial y}{\partial z_j}=g_j(v_j-y)\quad(j\in S).\]
-      <p>集合外的局部导数为零。若选中专家给出相同的 \(v_j\)，加权平均 \(y\) 也等于这个值，router 暂时收不到通过输出权重传来的学习信号。特别是 top-1 的归一化门控恒为 1，这条梯度会一直为零。负载均衡等辅助目标还可以更新 router；主任务如何影响专家选择，则需要在路由设计中明确安排。</p>
-      <p>全体 softmax 后取 top-k 时，令 \(a_j=v_j\mathbf1[j\in S]\)，则：</p>
+      <p>左边是先对全体专家做 softmax，再截出 top-k；右边则把选中的几项重新归一，等价于只在选中集合内部做 softmax。从前向看，右边的门控和恒为 1，转换瞬间输出严丝合缝；左边呢？初始化时 router 分数大致均匀，选出来的门控之和约等于 \(K/E\)——比如 8 个完整复制的专家里选 2 个，这一层的输出当场缩水成原来的四分之一。</p>
+      <p>问题在于，前向好衔接的写法，反向梯度反而不一定好传。我们只盯专家输出里的一个标量分量 \(v_i\)，加权结果是 \(y=\sum_i g_i v_i\)。在 top-k 名次不变的局部邻域里，先看右边这种<strong>选中集合内归一化</strong>：</p>
+      \[\frac{\partial y}{\partial z_j}=g_j(v_j-y)\quad(j\in S),\]
+      <p>未选中专家的局部导数则是 0。对照公式一眼就能看出问题：刚复制完时，所有选中专家给出的 \(v_j\) 完全相同，加权平均 \(y\) 也等于这个值，括号里的 \(v_j-y\) 直接归零——主任务损失顺着输出权重传回 router 的梯度暂时断了。换成 top-1 更极端：选中的唯一专家门控恒为 1，哪怕后面专家分化了，这条梯度也永远是 0。此时 router 只能靠负载均衡之类的辅助损失推动，主任务本身没法直接教它该选谁。</p>
+      <p>再看左边这种<strong>全体 softmax 后取 top-k</strong>。记 \(a_j=v_j\mathbf1[j\in S]\)，求导可得：</p>
       \[\frac{\partial y}{\partial z_j}=p_j(a_j-y).\]
-      <p>选中概率的总量参与输出，router 因而保留了这条梯度，同时要处理转换时的尺度变化。这里的差异来自加权函数本身，可以通过有限差分验证。NVIDIA 的大规模 upcycling 研究把门控顺序与权重缩放共同消融，说明初始化误差与后续收敛速度应当分别测量。</p>
+      <p>这里选中专家的概率总量 \(\sum_{i\in S}p_i\) 直接留在输出里，它会跟着 \(z_j\) 一起变。所以哪怕所有专家输出一模一样（只要不为 0 且 \(K\lt E\)），加权后的 \(y\) 仍不等于 \(v_j\)，\(a_j-y\) 就不会归零——router 从第一步起就能收到主任务梯度。代价正是前面看到的：转换瞬间输出尺度会掉一截。这也是为什么 NVIDIA 的大规模 upcycling 研究专门把「门控归一化顺序」和「权重缩放」绑在一起做消融：初始化对得齐，不代表后面一定收敛得快。</p>
 
       <figure class="article-figure" id="router-demo">
         <h3>复制的专家给出相同答案，门控怎样影响结果？</h3>
-        <p class="up-small">观察一个输出分量。Dense 值为 2；三个 router logits 为 [z₀, 0, −1]。条长表示最终门控 g，固定刻度 0～1。</p>
+        <p class="up-small">观察单个输出分量。原 dense 输出为 2，三个 router logits 为 [z₀, 0, −1]。条长表示最终门控 g（刻度 0～1）。</p>
         <div class="up-controls">
           <label>门控 <select id="router-mode"><option value="selected">选中集合内归一化</option><option value="global">全体 softmax 后选取</option></select></label>
           <label>Top-K <select id="router-k"><option value="1">1</option><option value="2" selected>2</option></select></label>
@@ -96,22 +96,22 @@
         <div id="router-experts" class="up-experts"></div>
         <div class="up-stats"><div class="article-stat">门控和<strong id="router-sum"></strong></div><div class="article-stat">加权输出 y<strong id="router-output"></strong></div></div>
         <p id="router-readout" class="up-readout" aria-live="polite"></p>
-        <figcaption>推进到最后一步检查 ∂y/∂z。先比较复制后的两种门控；再切到分化后的专家并保持 top-2，观察集合内归一化怎样重新获得梯度。Top-1 则始终只有一个归一化权重。</figcaption>
+        <figcaption>把步骤推到最后看 ∂y/∂z：先在「复制后」对比两种门控；再切到「分化后」并保持 top-2，看集合内归一化是怎么重新拿到梯度的；换成 top-1，它的导数则始终为零。</figcaption>
       </figure>
     </section>
 
     <section id="granularity" data-math-scope="granularity">
       <h2>SwiGLU 怎样切成细粒度专家</h2>
-      <p>完整复制时，选两个专家需要计算两份完整 FFN。另一种扩容方式是把每个专家做小，允许一个 token 组合更多个细粒度部件。记模型宽度为 \(d\)、原 FFN 中间宽度为 \(m\)，无 bias 的 SwiGLU 为：</p>
+      <p>如果把整个 FFN 完整复制，每个 token 选 2 个专家就得算两份完整 FFN，激活计算量直接翻倍。另一种思路是把每个专家切小，用大致相同的激活计算量去组合更多个细粒度专家。记模型隐藏宽度为 \(d\)、原 FFN 中间宽度为 \(m\)，无 bias 的 SwiGLU 可以写成：</p>
       \[h=\operatorname{SiLU}(W_gx)\odot(W_ux),\qquad f(x)=W_dh.\]
-      <p>\(W_g,W_u\in\mathbb R^{m\times d}\) 分别是 gate 和 up 投影，\(W_d\in\mathbb R^{d\times m}\) 是 down 投影。中间向量 \(h\) 有 \(m\) 个通道。把这些通道分成 \(\htmlData{symbol=granularity}{G}\) 个大小相等的集合 \(J_1,\ldots,J_G\)，每个小专家宽度为 \(m/G\)。元素乘法逐通道进行，因此可以精确分解：</p>
+      <p>其中 \(W_g,W_u\in\mathbb R^{m\times d}\) 分别是 gate 和 up 投影，\(W_d\in\mathbb R^{d\times m}\) 是 down 投影，中间向量 \(h\) 共有 \(m\) 个通道。把这 \(m\) 个通道均匀分成 \(\htmlData{symbol=granularity}{G}\) 组 \(J_1,\ldots,J_G\)，每组宽 \(m/G\)。因为逐元素乘法各通道互不干扰，整个 FFN 恰好拆成 \(G\) 个独立小专家之和：</p>
       \[f(x)=\sum_{g=1}^{G}W_d[:,J_g]\left[\operatorname{SiLU}(W_g[J_g,:]x)\odot W_u[J_g,:]x\right]=\sum_{g=1}^{G}f^{(g)}(x).\]
-      <p>转换 checkpoint 时，同一个 \(J_g\) 必须同时作用于 gate/up 的行和 down 的列。融合 gate/up 的实现通常把它们装在一个大张量里，需要先按存储约定拆开，再配对切片。配错行号也能得到合法的矩阵形状，但中间通道已经换了含义。官方 Megatron-LM 转换器显式处理了这组对应关系。</p>
-      <p>接下来给每个分片建立若干副本。初始化时，如果 router 每个分片恰好选一个副本，就能收集到完整 FFN 的所有贡献；若选中门控都为 \(1/G\)，加权结果为 \(f(x)/G\)。将这些副本的 down 投影乘 \(G\)，即可在这组门控下恢复输出。每片的覆盖情况与总幅度是两个独立的检查量。</p>
+      <p>写 checkpoint 转换脚本时有个容易踩的坑：同一个索引集合 \(J_g\) 必须同时切在 \(W_g, W_u\) 的行和 \(W_d\) 的列上。很多训练框架为了吞吐，会把 gate 和 up 融成一个大张量来存；切之前必须先按框架的内存排布拆开，再配对切片。行号一旦配错，矩阵形状依然合法，程序照跑不误，但中间通道早就张冠李戴了。Megatron-LM 官方转换器专门显式处理了这组对应关系。</p>
+      <p>切完之后，把每个分片各自复制几份，就凑出了更大的专家池。要让初始输出精确还原原来的 FFN，得同时过两道关：第一，router 必须从每个分片里恰好挑出一份副本，把 \(f^{(1)}\) 到 \(f^{(G)}\) 收全；第二，如果选中的 \(G\) 个门控都是 \(1/G\)，加权求和只得到 \(f(x)/G\)，还得把各副本的 down 投影乘上 \(G\) 才能把幅度拉回来。<strong>分片漏选靠调倍数救不回来，分片选齐了幅度不对也会偏移</strong>，下面可以亲自试一下。</p>
 
       <figure class="article-figure" id="shard-demo">
         <h3>选齐分片，再恢复输出幅度</h3>
-        <p class="up-small">输入 x = [1, −1]，四个 SwiGLU 中间通道分为 A、B 两片，每片建立两个副本。四个专家的原始 router 概率均为 1/4，固定选择两个专家。</p>
+        <p class="up-small">输入 x = [1, −1]，四个 SwiGLU 中间通道分成 A、B 两片，每片各复制两份。四个专家的原始 router 概率均为 1/4，固定选 2 个专家。</p>
         <div class="up-controls">
           <label>选择 <select id="shard-choice"><option value="complete">A₀ + B₀ · 每片一个</option><option value="duplicate">A₀ + A₁ · 同片两个</option></select></label>
           <label>门控 <select id="shard-gate"><option value="0.5">选中归一化 · 各 1/2</option><option value="0.25">全体 softmax · 各 1/4</option></select></label>
@@ -120,46 +120,45 @@
         <div id="shard-cards" class="up-shards"></div>
         <div class="up-stats"><div class="article-stat">原 dense 输出<strong>[1.7498, −0.9410]</strong></div><div class="article-stat">MoE 输出<strong id="shard-output"></strong><span id="shard-error"></span></div></div>
         <p id="shard-readout" class="up-readout" aria-live="polite"></p>
-        <figcaption>A、B 各包含两个隐藏通道；卡片中的向量是各分片对二维输出的贡献。先保持 A₀+B₀，配对门控与 down 倍数；再选 A₀+A₁，看相同的总门控为什么仍无法还原 B 的贡献。</figcaption>
+        <figcaption>A、B 各占两个隐藏通道，卡片里的向量是各自对二维输出的贡献。先保持 A₀+B₀，配对门控与 down 倍数把误差压到 0；再切到 A₀+A₁，看看就算总门控一样，漏掉的分片 B 为什么没法靠倍数补回来。</figcaption>
       </figure>
-      <p>Virtual grouping 将这个想法用于初始化：把不同分片及其副本分组，配合 router 初值，使初次选择覆盖需要的分片，再补偿门控造成的尺度变化。以后专家参数和路由会继续学习，逐步形成更自由的组合。</p>
-      <p>补偿尺度时还需要看激活函数。若 \(f(x)=W_2\operatorname{ReLU}^2(W_1x)\)，两份权重同时乘正数 \(s\) 会使输出乘 \(s^3\)，因此可以从需要的输出倍数解出立方根缩放。SwiGLU 的 SiLU 满足 \(\operatorname{SiLU}(u)=u\sigma(u)\)，缩放输入也会改变 sigmoid 门值，整体缩放关系需要实测。分配缩放到多份权重，会同时改变后续梯度与优化轨迹；将缩放集中到 down 投影，则容易构造精确的前向校验。转换实验可以同时记录初始输出误差、第一步更新与后续恢复曲线。</p>
+      <p>Virtual grouping 就是把这套思路落到了初始化里：先把各个分片和它们的副本编好组，配上对应的 router 初值，保证转换瞬间每个 token 刚好凑齐一整套分片，再把门控压低的幅度补回来。等训练跑起来，专家权重和路由都会放开更新，不再受初始分组限制。</p>
+      <p>补幅度时，选缩放哪一层权重也有讲究。如果是 \(f(x)=W_2\operatorname{ReLU}^2(W_1x)\) 这种齐次结构，把 \(W_1\) 和 \(W_2\) 同时乘上正数 \(s\)，输出会精确放大 \(s^3\) 倍，所以开个立方根就能把缩放均匀摊给两层权重。SwiGLU 却不行：\(\operatorname{SiLU}(u)=u\sigma(u)\)，一旦缩放 \(W_g\)，里面的 sigmoid 门值跟着变，输出不再按简单的幂次放大（后文 <code>lab.py</code> 验了这一点）。如果把倍数全压在最后的 \(W_d\) 上，前向可以做到机器精度级还原，但代价是 \(W_d\) 的权重范数和后续梯度尺度会被单独放大；反过来把缩放分摊到多层权重，前向虽会带一点初始误差，优化轨迹却可能更稳。</p>
     </section>
 
     <section id="specialization">
       <h2>从复制到分工</h2>
-      <p>相同的专家怎样开始变得不同？设损失对 MoE 输出的梯度为 \(u\)，选中专家参数的梯度包含 \(g_iJ_{f_i}^\top u\)。不同专家收到的 token、权重和误差信号不同，就会迈出不同的第一步。专家输出产生差异后，router 可以从“哪个专家更能降低当前误差”中获得更多信号。</p>
-      <p>一组小实验就能分清这条链：复制三个线性专家，对四个输入做 top-2 归一化路由；记录第一次反向的专家梯度与 router 梯度。前者可以不同，后者在专家完全相同时为零。只更新一次专家，再重新计算 router 梯度，就能看到非零信号。后面的 NumPy 实验把这一步完整算出来。</p>
-      <p>真实训练还要看专家是否有足够的数据。按层记录 token 负载、每专家更新范数、门控熵，以及同一分片副本之间的输出相关性。负载很均匀、输出高度相似，说明需要继续观察分化速度；少数专家长期拿不到 token，则先检查路由和容量。负载均衡控制训练机会，领域评测与输出差异帮助判断这些机会有没有变成有用能力。</p>
-      <p>学习率计划同样影响分化。若 dense 训练已经退火到很小的学习率，直接延续这个末值可能让新增容量改变得很慢。可以从同一个转换 checkpoint 分叉，在相同新增 token 下比较末值延续与重新 warmup 的计划，观察共享层、专家和 router 的实际更新比例。Optimizer state 的继承也要作为明确的实验变量：旧的一、二阶矩会改变步长，新 router 则没有对应历史。<a href="/posts/pretraining-stability/">训练稳定性</a>介绍了这些更新量怎样监控。</p>
-      <p>Branch-Train-MiX 提供另一种顺序：先从共同基座分支，在不同领域独立训练 dense 模型；再把这些模型的 FFN 保留为专家，其余参数平均，最后训练 MoE 和 token 级 router。这样专家进入 MoE 时已经具备差异，新增成本包括领域训练与组合后的适应。共享层平均还要求检查参数坐标和能力取舍，这与 <a href="/posts/model-merging/">模型合并</a>直接相连。</p>
+      <p>一模一样的专家，是怎么走出不同方向的？记损失对 MoE 层输出的梯度为 \(u\)，专家 \(i\) 的输出对其参数的雅可比矩阵为 \(J_{f_i}\)，只要它被选中，参数梯度里就有一项 \(g_i J_{f_i}^\top u\)。虽然初始化时所有专家权重完全一致，但 router 分给每个专家的 token 集合、门控权重 \(g_i\) 和上游误差 \(u\) 并不相同，所以第一步更新就会把它们推向不同方向。只要专家输出拉开一点差距，前面归零的 \(v_j-y\) 就不再是 0，router 随之重新收到「选哪个专家更降 loss」的主任务信号。</p>
+      <p>拿个极简算例就能把这条因果链看清楚：复制三个相同的线性专家，对四个样本做 top-2 归一化路由。第一次反向时，三个专家拿到的梯度各不相同，而 router 的梯度严格为零；只要让专家先更新一步，再算一次反向，router 梯度立刻变成非零。后面的 NumPy 实验把这两步完整算了出来。</p>
+      <p>不过在真实训练里，有梯度不等于分化得动。线上盯训练时，通常要按层看四样指标：各专家分到的 token 负载、参数更新范数、门控熵，以及同一分片不同副本之间的输出相关性。如果少数专家长期饿死、拿不到 token，先查路由初始化和容量设置；如果负载很均匀，但副本之间输出依然高度相关，说明大家还在干一样的活，新增容量还没真正分化开。</p>
+      <p>分化得快不快，还和学习率与优化器状态密切相关。很多 dense checkpoint 是从余弦退火尾巴上拿出来的，学习率已经压得很低，直接接着这个末值往下训，新复制出来的专家半天拉不开差距；这时往往需要重新做一次 warmup，或者从同一个转换点分叉，对比「延续末值」和「重新升温」两种计划下，共享层、专家和 router 各自的实际更新比例。优化器状态也是同样的道理：继承旧的 Adam 一、二阶矩会直接改变更新步长，而新加的 router 压根没有历史状态，两边步调不一致很容易出问题（这些更新量的监控方式见 <a href="/posts/pretraining-stability/">训练稳定性</a>）。</p>
+      <p>如果不想靠「完全相同的副本慢慢熬出差异」，Branch-Train-MiX 走了另一条顺序：先从同一个基座分叉，在不同领域上各自独立训出一批 dense 模型，再把它们的 FFN 直接留作专家、其余共享层做权重平均，最后接上 token 级 router 一起继续训。这样专家进门时就自带分工，但代价是前期多了各领域的独立训练开销；而且把不同分支的 attention 等共享层直接平均，本质上就是 <a href="/posts/model-merging/">模型合并</a>——参数能不能对齐、合并后会不会掉点，同样得过一遍账。</p>
     </section>
 
     <section id="budget" data-math-scope="budget">
       <h2>已有投入与下一笔预算</h2>
-      <p>设保留的共享部分有 \(N_s\) 个参数，被转换的 dense FFN 合计有 \(P_f\) 个参数。每个专家宽度缩为原来的 \(1/G\)，共有 \(E\) 个专家，每个 token 选 \(K\) 个。计入新增 router 参数 \(N_r\) 后：</p>
+      <p>先算参数账。记不动的共享部分（嵌入、attention、归一化等）有 \(N_s\) 个参数，待转换的 dense FFN 合计有 \(P_f\) 个参数。把 FFN 切成 \(G\) 份细粒度专家、扩到总数 \(E\) 个、每个 token 激活 \(K\) 个，再算上新增的 router 参数 \(N_r\)，总参数与每 token 激活参数分别是：</p>
       \[\htmlData{symbol=total}{N_{\rm total}}=N_s+\frac{E}{G}P_f+N_r,\qquad
       \htmlData{symbol=active}{N_{\rm active}}\approx N_s+\frac{K}{G}P_f.\]
-      <p>总参数决定权重存储的主要部分；激活参数给出主要矩阵 FLOPs 的一阶估算。令 \(N_s=1\mathrm B\)、\(P_f=6\mathrm B\)、\(E=64,G=8,K=8\)，可以把一个 7B dense 模型转换为约 49B 总参数、7B 激活参数的模型。新增 router 的计算与存储单独计入实测。</p>
-      <p>已有 dense checkpoint 时，下一笔预算要比较的是：新增相同计算后，继续 dense、upcycling 和从零训练各自达到什么质量。若还在规划完整训练流程，则需要把 dense 阶段一起计入：</p>
+      <p>总参数决定权重显存的大头，激活参数决定主要矩阵乘 FLOPs 的量级（\(N_r\) 占比很小，估算激活参数时通常略去）。拿一个 7B dense 模型代进去：\(N_s=1\mathrm B\)、\(P_f=6\mathrm B\)，取 \(E=64,G=8,K=8\)，转完之后总参数涨到约 49B，每 token 激活参数仍停在 7B——差不多用同样的单 token 计算量，换了七倍大的参数池。</p>
+      <p>再算训练账，这里要分清你站在哪个时间点做决策。如果手里已经有一个现成的 dense checkpoint，前期算力属于沉没成本，你只关心<strong>下一笔新增预算</strong>花在「继续训 dense」「upcycling 成 MoE」还是「从零训 MoE」上更划算；但如果是在从头规划整条训练流水线，就必须把转换前后的算力合起来记：</p>
       \[C_{\rm total}\approx6N_{\rm dense}\htmlData{symbol=dense-tokens}{D_d}+6N_{\rm active}\htmlData{symbol=moe-tokens}{D_m}.\]
-      <p>这里 \(D_d\) 是转换前累计处理的 token，\(D_m\) 是转换后的 token，\(C\) 的单位为 FLOPs。两阶段都应使用各自实际形状校准 attention、router、重计算和通信的额外成本。相同 token 数在不同激活参数下，对应不同预算；比较时同时画质量对 token、FLOPs 和 GPU 时间的曲线。</p>
-      <p>Scaling Laws for Upcycling 进一步研究了转换时机。一个已经训练更久的 dense 模型提供更好的起点，但复制出来的专家在后续阶段可能改善得更慢。它用两个阶段数据量的交互项描述这种现象。可以把固定模型家族的经验形式写成：</p>
+      <p>其中 \(D_d\) 和 \(D_m\) 分别是转换前后的累计 token 数。不同配置的激活参数与系统开销不同，同样训 100B token 花的算力和卡时可能差很远，所以做对比时别只画 loss—token 曲线，一定要把 FLOPs 和实际 GPU 时间也拉到一起看。</p>
+      <p>顺着这本账往前推，马上会遇到一个关键问题：<strong>dense 模型训到什么时候转 MoE 最划算？</strong>《Scaling Laws for Upcycling》发现了一个很直观的权衡：dense 训得越久，转换时的起点越低，但复制出来的专家在后续阶段收敛得反而越慢（可以理解成旧权重「定型」了）。论文用一个带交互项的经验幂律来刻画这种折中：</p>
       \[\widehat L(d_d,d_m)=A d_d^{-a}d_m^{-b+c\log d_d}+L_\infty,\qquad d_d,d_m>0.\]
-      <p>\(d_d=D_d/D_0\)、\(d_m=D_m/D_0\) 是按固定 token 单位 \(D_0\) 归一化后的阶段长度；\(A,a,b,c,L_\infty\) 都在这个单位约定下拟合。转换瞬间的损失另行记录，幂律拟合使用正的后续训练长度。在该经验形式下，后续训练的有效衰减指数为 \(b-c\log d_d\)。这把“从较好位置开始”和“单位新增预算改善多快”分成了两个可以测量的问题。</p>
-      <p>具体可以选三个 dense checkpoint，对每个都做同样的转换，再训练三个新增预算；留出最长预算验证曲线。数据、评测与 schedule 保持可比，参数和数据范围超出小实验时补锚点。<a href="/posts/pretraining-scaling/">训练预算与 Scaling Laws</a>讲过这类拟合、留出验证和外推误差。模型能否部署，还取决于所有专家权重的容量以及目标 batch 下的执行效率。</p>
+      <p>这里的 \(d_d=D_d/D_0\)、\(d_m=D_m/D_0\) 是按固定单位 \(D_0\) 归一化后的阶段长度（转换瞬间的损失跳变另记，幂律只拟合 \(d_m>0\) 的后续区间）。盯住 \(d_m\) 的指数就能看懂它的意思：后续训练的有效衰减率是 \(b-c\log d_d\)。只要交互项系数 \(c>0\)，前期 dense 训得越长，\(d_d^{-a}\) 把起点压得越低，同时 \(b-c\log d_d\) 却把后面的下降斜率拉平了。</p>
+      <p>工程上想摸清自己模型家族的这条曲线，做法很直接：选三个不同训练进度的 dense checkpoint，用同一套配方转成 MoE，各跑几档新增预算，留出最长那档做留出验证（这类拟合、留出验证和外推误差的坑，我们在 <a href="/posts/pretraining-scaling/">训练预算与 Scaling Laws</a> 里专门拆过）。</p>
     </section>
 
     <section id="hardware" data-math-scope="hardware">
       <h2>相同 FLOPs，为什么速度不同</h2>
-      <p>比较两种相同总参数、相同激活参数的配置：粗粒度方案 \((E,G,K)=(8,1,1)\)，细粒度方案 \((64,8,8)\)。若一层处理 \(T=1024\) 个 token 且路由均匀，每个专家收到的平均 token 数都是：</p>
+      <p>细粒度切分能在激活参数不变的情况下把专家数量翻好几倍，但问题马上就来了：账面 FLOPs 一样，跑在 GPU 上速度真的一样吗？拿两组总参数和激活参数完全相同的配置比一下——粗粒度 \((E,G,K)=(8,1,1)\) 对细粒度 \((64,8,8)\)。假设一层处理 \(T=1024\) 个 token 且路由均匀，每个专家平均分到的 token 数居然一模一样：</p>
       \[n_e=\frac{TK}{E}=128.\]
-      <p>细粒度方案有八倍数量的专家，每个专家的中间宽度变成八分之一。在 8 张 EP 卡上，粗粒度每卡一个专家，细粒度每卡八个。前者做一个较宽的 GEMM，后者做八个较窄的 GEMM；矩阵乘总 FLOPs 接近，但 tile 利用率、启动开销和 grouped GEMM 调度会变化。因而“每个专家的 token 数一样”仍不足以确定效率。</p>
-      <p>通信也会变化。将一次专家调用的输入向量和返回向量各计一份，隐藏宽度为 \(d\)、每元素 \(b\) 字节，逻辑 dispatch 与 combine 数据量为：</p>
+      <p>可落到 8 张专家并行（EP）卡上，矩阵乘法的形状已经彻底变了。粗粒度每张卡只有 1 个大专家，算一次宽 GEMM；细粒度每张卡塞着 8 个小专家，每个的中间宽度缩成原来的八分之一，得算 8 次窄 GEMM。总 FLOPs 没变，但窄矩阵的 Tensor Core tile 利用率更容易掉，内核启动和 grouped GEMM 调度开销也会抬头。所以光看「每专家平均 token 数相同」，根本判断不了算得快不快。</p>
+      <p>更刺眼的变化在通信。每个 token 调 \(K\) 个专家，来回就要发 \(K\) 份输入、收 \(K\) 份输出。记隐藏宽度为 \(d\)、每元素占 \(b\) 字节，一次前向里 dispatch 加 combine 的逻辑通信量是：</p>
       \[\htmlData{symbol=payload}{V_{\rm logical}}=2TKdb.\]
-      <p>在 \(T=1024,d=4096,b=2\) 时，top-1 为 16 MiB，top-8 为 128 MiB。这里按独立专家调用计数；实际跨卡字节数还取决于本地命中、专家放置，以及对相同目的地 token 的复用。细粒度设计需要把这些通信路径和 GEMM 形状一起考虑。</p>
-      <p>可以做一个直接的工程对照：固定总专家参数与激活 FLOPs，改变粒度；对每种配置扫描实际训练会使用的 microbatch，分开记录路由、permute、dispatch、专家计算和 combine。再加入完整前反向及优化器步骤，观察最忙 rank 的时间与专家 token 数分布。小 GEMM 瓶颈通常表现为专家计算的有效吞吐下降；负载偏斜则表现为卡间耗时差增大；网络瓶颈需要从 dispatch/combine 的实际字节与等待时间定位。</p>
-      <p>已有 dense 模型、转换映射、训练恢复与硬件形状因此形成一条闭环：先验证数据流与输出尺度，再测专家分化与验证质量，最后按真实预算选择可部署的配置。一个更大的参数计数，只有走完这条链才成为可用的模型容量。</p>
+      <p>把 \(T=1024,d=4096,b=2\)（BF16）代进去：粗粒度 top-1 只要传 16 MiB，细粒度 top-8 直接涨到 128 MiB，整整 8 倍。实际跨卡流量还会受本地命中率、专家放置策略和同目的地 token 复用的影响，未必真的满打满算翻 8 倍，但 \(K\) 增大带来的通信压力是实打实的。</p>
+      <p>真要选粒度，别在纸上拍脑袋，直接固定总专家参数和激活 FLOPs，在目标硬件上扫一遍实际训练会用到的 microbatch：用 profiler 把路由、permute、dispatch、专家 GEMM 和 combine 拆开计时，再挂上完整前反向与优化器步，盯最忙那张 rank 的耗时和各专家的 token 分布。这样瓶颈在哪一目了然——专家计算的有效吞吐掉下去，是小 GEMM 太碎；卡间耗时差拉大、大家都在等最慢那张卡，是负载偏斜；dispatch 和 combine 的等待时间占了大头，就是通信撞墙了。</p>
     </section>
 
     <section id="practice">
@@ -167,32 +166,32 @@
       <p><a href="/posts/moe-upcycling/lab.py" download>下载 NumPy CPU 实验 lab.py</a>，安装 NumPy 后运行：</p>
       <pre><code>python3 -m pip install numpy
 python3 lab.py</code></pre>
-      <p>实验分别用有限差分检查两种门控的 router 导数；在三个相同线性专家上做一次更新，观察差异怎样产生；对随机输入核验 SwiGLU 分片重建；再计算参数与逻辑通信账本。默认输出包括：</p>
+      <p>脚本用纯 NumPy 跑了四组小验证：拿有限差分核对两种门控的 router 导数、在三个相同的线性专家上更新一步看分化怎么启动、对随机输入检验 SwiGLU 切分能否精确还原，以及验算前面的参数和逻辑通信账本。默认输出包括：</p>
       <pre><code>Cloned experts, global-softmax top-2: y=1.819939
 Cloned experts, selected-softmax top-2: y=2.000000
 One expert update: toy loss 2.117188 -&gt; 2.034577
 router gradient norm now 0.026028
 SwiGLU full=[1.749839, -0.940973]
 Parameter budget: total=49B active=7B</code></pre>
-      <p>最后应看到 <code>PASS</code>。这些数值来自小型 CPU 算例。可以把 <code>toy_loss</code> 的 top-2 改成 top-1，观察归一化 router 的梯度；或故意把某个分片的 down 列切错，检查重建断言怎样定位映射问题。测量 GPU 性能时，再使用上面的形状与分阶段计时方法。</p>
+      <p>跑通之后最后一行会打印 <code>PASS</code>。想顺手多试两个边界情况的话，可以把 <code>toy_loss</code> 里的 top-2 改成 top-1，亲眼看看归一化门控的 router 梯度怎么一直死在 0；或者故意把某个分片的 down 投影列索引切歪，体验一下重建断言怎么第一时间把映射 bug 抓出来。</p>
 
       <div class="article-exercise"><h3>练习 1：复制以后，输出和梯度是多少</h3>
-        <p>8 个专家的标量输出均为 2，router 全体概率均为 1/8，固定选中其中 2 个。求全体 softmax 后选取的输出，以及对一个选中 logit 和一个未选中 logit 的局部导数。再求选中集合内归一化的结果。</p>
-        <details><summary>展开解答</summary><p>固定集合后，全体 softmax 方案的输出为 \(y=2\times(1/8)\times2=0.5\)。选中位置的导数是 \((1/8)(2-0.5)=0.1875\)，未选中位置为 \((1/8)(0-0.5)=-0.0625\)。所有导数相加为 \(2\times0.1875+6\times(-0.0625)=0\)，与共同平移 logits 保持 softmax 不变相符。</p><p>选中归一化后，两个门控各为 1/2，输出为 2，所有 router 局部导数为零。相同 logits 在 top-k 边界有并列；以上导数针对已经固定的选择分支，实验中可用微小扰动固定名次后验证。</p></details>
+        <p>8 个专家的标量输出都是 2，router 给出的全体 softmax 概率均为 \(1/8\)，固定选中其中 2 个。分别算出「全体 softmax 后选取」和「选中集合内归一化」两种写法下的输出 \(y\)，以及 \(y\) 对单个选中 logit 和未选中 logit 的局部导数。</p>
+        <details><summary>展开解答</summary><p>先看全体 softmax 后选取：输出为 \(y=2\times(1/8)\times2=0.5\)。套用 \(\partial y/\partial z_j = p_j(a_j-y)\)，选中位置的导数是 \((1/8)(2-0.5)=0.1875\)，未选中位置是 \((1/8)(0-0.5)=-0.0625\)。8 项相加得 \(2\times0.1875+6\times(-0.0625)=0\)，正好对应「所有 logits 同时平移一个常数不改变 softmax 输出」的性质。</p><p>再看选中集合内归一化：两个门控各为 \(1/2\)，输出直接还原成 2，所有 router 局部导数全为 0。（注：logits 完全相等时正好落在 top-k 的并列边界上，以上导数针对固定选中分支后的局部区间，写有限差分测试时给选中项加一点极小扰动固定名次即可。）</p></details>
       </div>
       <div class="article-exercise"><h3>练习 2：缩放正确，为什么还原失败</h3>
-        <p>两片 FFN 输出分别为 \(a=[1,2]\)、\(b=[3,-1]\)，原 dense 输出为它们之和。每片各复制两份，选两个专家，归一化门控均为 1/2。Down 权重都乘 2。分别计算选 A₀+B₀ 与 A₀+A₁ 的输出；后者能否用一个整体标量恢复？</p>
-        <details><summary>展开解答</summary><p>原输出为 \([4,1]\)。选齐两片时，\((1/2)(2a)+(1/2)(2b)=a+b=[4,1]\)。两次选 A 时，输出为 \(2a=[2,4]\)。若再乘标量 \(s\)，第一个分量要求 \(s=2\)，第二个要求 \(s=1/4\)，两者不相容。必须恢复 B 的方向贡献，再处理整体尺度。这个例子把分片覆盖与门控幅度两个检查分开了。</p></details>
+        <p>两片 FFN 的输出分别是 \(a=[1,2]\)、\(b=[3,-1]\)，原 dense 输出为两者之和。每片各复制两份，固定选 2 个专家，归一化门控都是 \(1/2\)，down 权重也都乘 2。分别算选 A₀+B₀ 和选 A₀+A₁ 的输出；后者能不能靠一个整体标量救回来？</p>
+        <details><summary>展开解答</summary><p>原 dense 输出是 \(a+b=[4,1]\)。选到 A₀+B₀ 时，\((1/2)(2a)+(1/2)(2b)=a+b=[4,1]\)，分毫不差；但选成 A₀+A₁ 时，结果是 \((1/2)(2a)+(1/2)(2a)=2a=[2,4]\)。想靠一个整体标量 \(s\) 把 \([2,4]\) 缩回 \([4,1]\) 是不可能的——第一维要求 \(s=2\)，第二维要求 \(s=1/4\)，根本无解。少了分片 B 的方向贡献，调多大的缩放倍数都补不回来。</p></details>
       </div>
       <div class="article-exercise"><h3>练习 3：两阶段预算怎样记</h3>
-        <p>一个 dense 模型有 1B 共享参数和 6B 待转换 FFN 参数，已训练 300B token。转换为 \(E=64,G=8,K=8\) 后再训练 90B token。按主要权重矩阵估算，总参数、激活参数、新增计算与两阶段总计算分别是多少？</p>
-        <details><summary>展开解答</summary><p>总参数为 \(1+(64/8)\times6=49\mathrm B\)，激活参数为 \(1+(8/8)\times6=7\mathrm B\)。这里把 router 参数单独留作额外账目。新增计算为：</p>
+        <p>一个 dense 模型有 1B 共享参数和 6B 待转换 FFN 参数，已经训了 300B token。转成 \(E=64,G=8,K=8\) 的 MoE 后再训 90B token。按主要权重矩阵估算，总参数、激活参数、新增计算量和两阶段总计算量分别是多少？</p>
+        <details><summary>展开解答</summary><p>略去很小的 router 参数，总参数为 \(1+(64/8)\times6=49\mathrm B\)，激活参数为 \(1+(8/8)\times6=7\mathrm B\)。转换后的新增计算量是：</p>
           \[C_m=6\times7\times10^9\times90\times10^9=3.78\times10^{21}\text{ FLOPs}.\]
-          <p>Dense 阶段为 \(6\times7\times300\times10^{18}=1.26\times10^{22}\) FLOPs；合计 \(1.638\times10^{22}\) FLOPs。使用现成模型决定下一步时比较新增 3.78×10²¹ 的收益；规划完整流程时比较两阶段合计。实际训练时间还需要加入 router、attention、通信和利用率。</p></details>
+          <p>前期 dense 阶段已经花掉 \(6\times7\times300\times10^{18}=1.26\times10^{22}\text{ FLOPs}\)，两阶段合计 \(1.638\times10^{22}\text{ FLOPs}\)。如果手头已有这个 300B 的 checkpoint，评估要不要做 upcycling 只看新增的 \(3.78\times10^{21}\) FLOPs 值不值；如果是从零规划整个训练项目，则要拿两阶段总账去和从头训 MoE 对比。</p></details>
       </div>
       <div class="article-exercise"><h3>练习 4：同样的计算量，为何通信增大</h3>
-        <p>比较 \((E,G,K)=(8,1,1)\) 与 \((64,8,8)\)，每层有 1024 个 token，隐藏宽度 4096，BF16 每元素 2 字节。求平均每专家 token 数、dispatch 与 combine 的逻辑总量，并说明 profiler 还需要记录什么。</p>
-        <details><summary>展开解答</summary><p>两者每专家平均分别为 \(1024/8=128\) 和 \(1024\times8/64=128\)。按每个专家调用发送输入、返回输出各一份计数，粗粒度为 \(2\times1024\times1\times4096\times2=16777216\) 字节，即 16 MiB；细粒度为它的 8 倍，即 128 MiB。</p><p>相同总参数和激活计算来自专家数增加八倍、中间宽度缩小八倍。Profiler 需要记录小 GEMM 的实际吞吐、各专家和各 rank 的 token 分布、真实跨卡字节数、dispatch/combine 等待及完整训练 step。专家放置和同目的地复用会改变实际网络流量，因此逻辑字节数适合做起点，再用测量定位瓶颈。</p></details>
+        <p>比较 \((E,G,K)=(8,1,1)\) 和 \((64,8,8)\)，每层有 1024 个 token，隐藏宽度 4096，BF16 每元素占 2 字节。算出平均每专家 token 数和 dispatch/combine 逻辑总量，并说明上真机用 profiler 测时还必须补看哪些指标。</p>
+        <details><summary>展开解答</summary><p>两种配置下，每个专家平均都分到 128 个 token（\(1024/8=128\) 与 \(1024\times8/64=128\)）。按每次专家调用来回各传一份向量算，粗粒度的逻辑通信量是 \(2\times1024\times1\times4096\times2=16{,}777{,}216\) 字节（16 MiB），细粒度因为 \(K\) 翻了 8 倍，直接涨到 128 MiB。</p><p>总参数和激活 FLOPs 没变，是因为专家数量乘 8 的同时每个专家的中间宽度除了 8；但上真机跑时，profiler 还得补齐四类实测数据：窄 GEMM 的实际算力吞吐、各专家与各 rank 的负载分布、考虑本地命中和同目的地复用后的真实跨卡字节数，以及 dispatch/combine 的通信等待时间。</p></details>
       </div>
     </section>
 
