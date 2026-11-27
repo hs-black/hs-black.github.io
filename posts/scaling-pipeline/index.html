@@ -1,5 +1,13 @@
 <!doctype html>
-<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>流水线并行：从 GPipe 到 DualPipe · Zunzhe Zhang</title><meta name="description" content="从 micro-batch 依赖推导流水线空泡、激活峰值和通信成本，交互比较 AFAB、1F1B、交错、Zero Bubble 与 DualPipe。"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script><style>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>流水线并行：从 GPipe 到 DualPipe · Zunzhe Zhang</title><meta name="description" content="从 micro-batch 依赖推导流水线空泡、激活峰值和通信成本，交互比较 AFAB、1F1B、交错、Zero Bubble 与 DualPipe。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/scaling-pipeline/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="流水线并行：从 GPipe 到 DualPipe · Zunzhe Zhang">
+  <meta property="og:description" content="从 micro-batch 依赖推导流水线空泡、激活峰值和通信成本，交互比较 AFAB、1F1B、交错、Zero Bubble 与 DualPipe。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/scaling-pipeline/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary"><link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script><style>
 .article-figure h3{margin-top:0;font-size:19px}.article-figure p{font-size:15px}.article-figure svg{display:block;width:100%;height:auto}.article-figure svg text{font-family:var(--font-sans);fill:var(--text)}
 .controls{display:flex;gap:12px 18px;flex-wrap:wrap;align-items:center}.controls label{display:flex;align-items:center;gap:8px;font-size:14px}.controls input[type=range]{width:130px;max-width:40vw}.controls output{font-variant-numeric:tabular-nums;min-width:2em}.controls select,.controls input[type=number]{font:inherit;max-width:100%;background:var(--bg-soft);color:var(--text);border:1px solid var(--border);padding:4px 6px;border-radius:5px}
 .readout-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(125px,1fr));gap:10px;margin-top:14px}.readout-grid div{padding:10px;background:var(--bg-soft);border-radius:8px;font-size:13px;color:var(--text-soft)}.readout-grid b{display:block;color:var(--text);font-size:21px;font-variant-numeric:tabular-nums}.demo-note{font-size:14px;color:var(--text-soft)}
@@ -505,4 +513,4 @@ $$\underbrace{\frac{\partial\mathcal L}{\partial X}=GW^\top}_{B\text{：输入�
     document.querySelectorAll('.gv').forEach((el) => views.push(makeView(el)));
 
     document.addEventListener('visibilitychange',()=>{if(document.hidden)views.forEach(v=>v.stop());});
-})();</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+})();</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

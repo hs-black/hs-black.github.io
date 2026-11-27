@@ -3,8 +3,16 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sparse attention：只看需要的历史 · Zunzhe Zhang</title>
 <meta name="description" content="推导稀疏归一化、窗口配对数、内容选择与块布局，结合 mask 构建、块利用率与端到端性能排查，附交互图解、练习与实验。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/sparse-attention/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Sparse attention：只看需要的历史 · Zunzhe Zhang">
+  <meta property="og:description" content="推导稀疏归一化、窗口配对数、内容选择与块布局，结合 mask 构建、块利用率与端到端性能排查，附交互图解、练习与实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/sparse-attention/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -103,5 +111,5 @@ output = attention(q, K[chosen], V[chosen])</code></pre>
 })();
 
 </script>
-<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body></html>

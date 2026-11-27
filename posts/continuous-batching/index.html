@@ -1,6 +1,14 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Continuous batching：每一轮重新组队 · Zunzhe Zhang</title><meta name="description" content="从一轮调度的 token 预算推导 chunked prefill、KV 准入和公平性，手算 TTFT、ITL 与吞吐，用时间轴和预算实验定位长尾与抢占。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="canonical" href="https://hs-black.github.io/posts/continuous-batching/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Continuous batching：每一轮重新组队 · Zunzhe Zhang">
+  <meta property="og:description" content="从一轮调度的 token 预算推导 chunked prefill、KV 准入和公平性，手算 TTFT、ITL 与吞吐，用时间轴和预算实验定位长尾与抢占。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/continuous-batching/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -70,4 +78,4 @@ ArticleSteps.mount('#schedule-demo',{steps:schedule,render(s){$('schedule-rows')
 function simulate(budget){let rs=[{id:'A',arrival:0,p:6,o:3,e:[]},{id:'B',arrival:2,p:2,o:2,e:[]},{id:'C',arrival:6,p:3,o:2,e:[]}],now=0,rounds=0;while(rs.some(r=>r.e.length<r.o)){let ready=rs.filter(r=>r.arrival<=now&&r.e.length<r.o);if(!ready.length){now=Math.min(...rs.filter(r=>r.arrival>now).map(r=>r.arrival));continue;}let decode=ready.filter(r=>r.p===0).sort((a,b)=>a.e.at(-1)-b.e.at(-1)||a.arrival-b.arrival).slice(0,budget),left=budget-decode.length,prefill=[];for(const r of ready){if(r.p&&left){let n=Math.min(r.p,left);prefill.push([r,n]);left-=n;}}let P=prefill.reduce((a,x)=>a+x[1],0),finish=now+2+.5*P+decode.length;decode.forEach(r=>r.e.push(finish));for(const [r,n] of prefill){r.p-=n;if(!r.p)r.e.push(finish);}now=finish;rounds++;}return{rs,now,rounds};}
 function update(){let B=+$('budget-input').value,run=simulate(B);$('budget-value').value=B;$('budget-result').textContent=`${run.rounds} 轮 · 总时长 ${fmt(run.now,1)} ms · 输出吞吐 ${fmt(7000/run.now)} token/s`;$('budget-rows').innerHTML=run.rs.map(r=>`<tr><td>${r.id}</td><td>${r.e.join('，')}</td><td>${fmt(r.e[0]-r.arrival,1)}</td></tr>`).join('');}$('budget-input').addEventListener('input',update);update();
 })();</script>
-<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

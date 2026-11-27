@@ -22,14 +22,19 @@ feed.xml              RSS; hand-maintained, one <item> per post
 assets/site.css       shared styles + color tokens (light/dark)
 assets/article.css    shared inline figure and exercise styles
 assets/article-steps.js manual, rewindable figure controls
-assets/posts.js       list of all posts (category, tags, desc) + tags/related box on posts
-assets/post-links.js  generated cross-reference index (scripts/post-links.py)
+assets/posts.js       list of all posts (category, tags, desc) + theme toggle,
+                      reading UX (progress, sticky TOC, copy code, anchors),
+                      tags/related box and link preview cards on posts
+assets/post-links.js  generated cross-reference & reading-meta index (scripts/sync.py)
 assets/series.js      series list + nav for multi-part posts
 assets/curriculum.js  ten-stage LLM engineering map + per-post route links
 assets/curriculum.css shared learning-map styles
 assets/anim.js        timeline animation engine (smooth, scrubbable, step-able)
 assets/img/           avatar and other shared images
 assets/favicon.svg
+sitemap.xml           generated sitemap of public pages (scripts/sync.py)
+robots.txt            generated robots file (scripts/sync.py)
+scripts/sync.py       refreshes post-links.js, sitemap.xml, OG tags, asset versions & checks links
 files/resume.pdf      linked from the home page
 templates/article.html    starting point for an article / interactive post
 templates/encrypted-article.html    public shell for an encrypted post
@@ -60,9 +65,10 @@ folder and are referenced relatively.
    list, or series cards to the homepage.
 5. Add an `<item>` at the **top** of `feed.xml` (RFC 822 `pubDate`).
 6. Link related posts to each other in the text where a concept is
-   explained elsewhere, then run `python3 scripts/post-links.py` to refresh
-   the cross-reference index, the blog's content-versioned data URLs, and
-   matching shared script/style URLs.
+   explained elsewhere, then run `python3 scripts/post-links.py` (or
+   `python3 scripts/sync.py`) to refresh the cross-reference & reading-time
+   index, `sitemap.xml`, Open Graph / canonical tags on public pages, the
+   content-versioned asset URLs, and link/catalog integrity checks.
 7. Preview locally (below), then commit and push.
 
 The header nav (Home / Papers / Blog) is copied into every page;

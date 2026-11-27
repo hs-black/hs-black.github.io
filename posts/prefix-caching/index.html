@@ -1,6 +1,14 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Prefix caching：相同的开头，只算一次 · Zunzhe Zhang</title><meta name="description" content="推导前缀 KV 的计算身份、哈希链和满块边界，量化重算量与 TTFT 收益，分析 tokenizer 差异、共享池容量、缓存驱逐和命中后的性能问题。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="canonical" href="https://hs-black.github.io/posts/prefix-caching/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Prefix caching：相同的开头，只算一次 · Zunzhe Zhang">
+  <meta property="og:description" content="推导前缀 KV 的计算身份、哈希链和满块边界，量化重算量与 TTFT 收益，分析 tokenizer 差异、共享池容量、缓存驱逐和命中后的性能问题。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/prefix-caching/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -60,4 +68,4 @@ $('change-position').addEventListener('input',hashUpdate);hashUpdate();
 function savingUpdate(){let N=4096,H=+$('hit-input').value,total=N*(N+1)/2,remaining=total-H*(H+1)/2,cold=55+.05*N,hot=55+.05*(N-H);$('hit-value').value=H;$('saving-bars').innerHTML=bars([['输入行数',(N-H)/N],['Attention',remaining/total,'alt'],['TTFT',hot/cold]]);$('saving-result').textContent=`剩余 ${N-H} 个输入位置；${remaining.toLocaleString()} 对 query-key。TTFT：${fmt(cold,1)} → ${fmt(hot,1)} ms，加速 ${fmt(cold/hot)}×。`;}
 $('hit-input').addEventListener('input',savingUpdate);savingUpdate();
 })();</script>
-<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

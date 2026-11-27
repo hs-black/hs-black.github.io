@@ -5,9 +5,17 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Blog · Zunzhe Zhang</title>
   <meta name="description" content="全部文章与交互图解：按时间轴、分类、系列和标签浏览。">
+  <link rel="canonical" href="https://hs-black.github.io/blog/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="website">
+  <meta property="og:title" content="Blog · Zunzhe Zhang">
+  <meta property="og:description" content="全部文章与交互图解：按时间轴、分类、系列和标签浏览。">
+  <meta property="og:url" content="https://hs-black.github.io/blog/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
   <link rel="alternate" type="application/rss+xml" title="Zunzhe Zhang" href="/feed.xml">
-  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc">
   <link rel="stylesheet" href="/assets/curriculum.css?v=dd0ca17259f8">
   <style>
     .blog-tools { display: grid; grid-template-columns: minmax(0, 1fr); gap: 12px; margin: 8px 0 8px; }
@@ -76,7 +84,7 @@
         <button type="button" data-view="series">系列</button>
         <button type="button" data-view="tags">标签</button>
       </div>
-      <input class="search" type="search" placeholder="搜索标题、简介或标签…" aria-label="搜索">
+      <input class="search" type="search" placeholder="搜索标题、简介或标签…（按 / 聚焦）" aria-label="搜索">
       <div class="filter-row">
         <div class="filters" role="group" aria-label="按类型筛选">
           <button type="button" data-kind="all">全部</button>
@@ -96,12 +104,14 @@
   <footer class="site-footer wrap">© 2026 Zunzhe Zhang · <a href="/feed.xml">RSS</a></footer>
 
   <script src="/assets/series.js?v=5467d14ac48a"></script>
-  <script src="/assets/posts.js?v=f5c7a324e45c"></script>
+  <script src="/assets/post-links.js?v=4bc4201f8026"></script>
+  <script src="/assets/posts.js?v=187e642e65a0"></script>
   <script src="/assets/curriculum.js?v=7c93701c5259"></script>
   <script>
     (() => {
       const { POSTS, CATEGORIES, KINDS } = window.SITE;
       const SERIES = window.SERIES || {};
+      const META = window.POST_META || {};
       const list = document.getElementById('list');
       const search = document.querySelector('.search');
       const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -144,9 +154,12 @@
 
       function entry(p) {
         const [label, cls] = KINDS[p.kind];
+        const m = META[p.slug];
+        const stat = m && m.mins && p.kind !== 'encrypted' ? '<span>约 ' + m.mins + ' 分钟</span>' : '';
         return '<article class="entry">' +
           '<a class="entry-title" href="/posts/' + p.slug + '/">' + esc(p.title) + '</a>' +
           '<div class="entry-meta"><span class="' + cls + '">' + label + '</span>' +
+          stat +
           '<a class="cat" data-cat="' + p.cat + '">' + esc(CATEGORIES[p.cat]) + '</a>' +
           p.tags.map((t) => '<a class="tag" data-tag="' + esc(t) + '">#' + esc(t) + '</a>').join('') +
           '<time datetime="' + p.date + '">' + p.date + '</time></div>' +
@@ -231,6 +244,13 @@
         const b = e.target.closest('button'); if (!b) return; st.kind = b.dataset.kind; render();
       });
       search.addEventListener('input', () => { st.q = search.value.trim(); render(); });
+      document.addEventListener('keydown', (e) => {
+        if (e.key === '/' && !e.metaKey && !e.ctrlKey && !e.altKey && !e.target.closest('input, textarea, select')) {
+          e.preventDefault(); search.focus(); search.select();
+        } else if (e.key === 'Escape' && document.activeElement === search) {
+          if (search.value) { search.value = ''; st.q = ''; render(); } else search.blur();
+        }
+      });
       document.getElementById('active').addEventListener('click', (e) => {
         const b = e.target.closest('[data-clear]'); if (!b) return; st[b.dataset.clear] = ''; render();
       });

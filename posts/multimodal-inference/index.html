@@ -1,7 +1,15 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>图像与视频推理：token、计算与显存账本 · Zunzhe Zhang</title><meta name="description" content="沿像素、patch、视觉token与语言KV推导图像视频成本，分析动态batch、两级缓存、特征占位不变量与资源调度；含图解、四道习题与实验。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="canonical" href="https://hs-black.github.io/posts/multimodal-inference/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="图像与视频推理：token、计算与显存账本 · Zunzhe Zhang">
+  <meta property="og:description" content="沿像素、patch、视觉token与语言KV推导图像视频成本，分析动态batch、两级缓存、特征占位不变量与资源调度；含图解、四道习题与实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/multimodal-inference/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -62,4 +70,4 @@ python3 lab.py --frames 8 --height 448 --width 448</code></pre><p>默认输出15
 <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 <script type="application/json" id="math-definitions">{"global": {"visual": {"label": "Nvis · 语言侧视觉位置数", "description": "视觉编码和空间合并后，送入语言模型的视觉向量数量。", "unit": "token"}}}</script>
 <script src="/assets/article-steps.js?v=1c7283b439be"></script><script>(()=>{const groups=[[0,1,4,5],[2,3,6,7],[8,9,12,13],[10,11,14,15]];const p=document.querySelector('#patch-grid'),v=document.querySelector('#visual-grid');p.innerHTML=Array.from({length:16},(_,i)=>'<span>'+i+'</span>').join('');v.innerHTML=Array.from({length:4},(_,i)=>'<span>v'+i+'</span>').join('');ArticleSteps.mount('#vision-merge',{steps:[{title:'视觉网格',caption:'16个patch已有视觉encoder特征，按二维邻接关系分成四组。'},...groups.map((g,i)=>({title:'合并第'+i+'组',caption:'patch '+g.join('、')+' → 拼接与投影 → 语言向量 v'+i}))],render(s,i){[...p.children].forEach((e,j)=>e.classList.toggle('on',i>0&&groups[i-1].includes(j)));[...v.children].forEach((e,j)=>e.classList.toggle('on',j<i))}});
-function budget(){const scale=+document.querySelector('#vision-scale').value,f=+document.querySelector('#vision-frames').value,t=Math.ceil(f/2),patch=t*32*48*scale*scale,vis=patch/4,total=vis+388,mib=total*56/1024;document.querySelector('#vision-result').textContent='时间块 '+t+'；raw patch '+patch+'；视觉 token '+vis+'；视觉 KV '+(vis*56/1024).toFixed(2)+' MiB；完整预留 '+total+' 位置 / '+mib.toFixed(5)+' MiB';document.querySelector('#vision-bar').style.width=Math.min(100,mib/1024*100)+'%'}document.querySelector('#vision-scale').addEventListener('change',budget);document.querySelector('#vision-frames').addEventListener('change',budget);budget();})();</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+function budget(){const scale=+document.querySelector('#vision-scale').value,f=+document.querySelector('#vision-frames').value,t=Math.ceil(f/2),patch=t*32*48*scale*scale,vis=patch/4,total=vis+388,mib=total*56/1024;document.querySelector('#vision-result').textContent='时间块 '+t+'；raw patch '+patch+'；视觉 token '+vis+'；视觉 KV '+(vis*56/1024).toFixed(2)+' MiB；完整预留 '+total+' 位置 / '+mib.toFixed(5)+' MiB';document.querySelector('#vision-bar').style.width=Math.min(100,mib/1024*100)+'%'}document.querySelector('#vision-scale').addEventListener('change',budget);document.querySelector('#vision-frames').addEventListener('change',budget);budget();})();</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

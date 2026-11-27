@@ -1,6 +1,14 @@
 <!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DSpark · Zunzhe Zhang</title><meta name="description" content="拆开 DSpark 的并行 backbone、低秩 Markov head、条件置信度和硬件感知调度，手算校准、预算与因果依赖，理解草稿质量怎样转化成服务吞吐。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="canonical" href="https://hs-black.github.io/posts/dspark/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="DSpark · Zunzhe Zhang">
+  <meta property="og:description" content="拆开 DSpark 的并行 backbone、低秩 Markov head、条件置信度和硬件感知调度，手算校准、预算与因果依赖，理解草稿质量怎样转化成服务吞吐。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/dspark/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -77,4 +85,4 @@ $('previous-token').addEventListener('change',markovUpdate);$('markov-strength')
 const curves=[[.9,.72,.36],[.6,.36,.216]],times=[4,4.3,4.7,5.4,6.4,8,10];function allocationUpdate(){let budget=+$('allocation-budget').value,choices=curves.flatMap((row,r)=>row.map((a,j)=>({a,r,j}))).sort((x,y)=>y.a-x.a||x.r-y.r||x.j-y.j).slice(0,budget-2),ns=[0,0];choices.forEach(x=>ns[x.r]=Math.max(ns[x.r],x.j+1));let E=2+choices.reduce((v,x)=>v+x.a,0),t=times[budget-2];$('allocation-value').value=budget;$('allocation-rows').innerHTML=curves.map((row,r)=>`<tr><td>${'AB'[r]}</td>${row.map((a,j)=>`<td class="${j<ns[r]?'current':''}">${fmt(a,3)} ${j<ns[r]?'✓':''}</td>`).join('')}</tr>`).join('');$('allocation-result').textContent=`前缀长度 (${ns.join(', ')})；期望输出 ${fmt(E,4)}；轮时 ${fmt(t,1)} ms；预计 ${fmt(E*1000/t)} token/s。`;}
 $('allocation-budget').addEventListener('input',allocationUpdate);allocationUpdate();
 })();</script>
-<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

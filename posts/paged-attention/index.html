@@ -5,8 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang</title>
   <meta name="description" content="从连续缓存的浪费讲到页表寻址、分块 softmax、容量预算和写时复制：用完整推导、三个可操作动态图、四道习题与 CPU 实验理解分页推理。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/paged-attention/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="PagedAttention：让 KV cache 按需生长 · Zunzhe Zhang">
+  <meta property="og:description" content="从连续缓存的浪费讲到页表寻址、分块 softmax、容量预算和写时复制：用完整推导、三个可操作动态图、四道习题与 CPU 实验理解分页推理。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/paged-attention/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
@@ -485,8 +493,8 @@ PASS: dense oracle, COW isolation, refcounts, release, transactional OOM, addres
   [address,merge,cow].forEach(el => observer.observe(el));
 })();
 </script>
-<script src="/assets/post-links.js?v=99069aae00f8"></script>
-<script src="/assets/posts.js?v=f5c7a324e45c"></script>
+<script src="/assets/post-links.js?v=4bc4201f8026"></script>
+<script src="/assets/posts.js?v=187e642e65a0"></script>
 <script src="/assets/series.js?v=5467d14ac48a"></script>
 <script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body>

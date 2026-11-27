@@ -5,8 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>JAX 分片编程与 Profiling · Zunzhe Zhang</title>
   <meta name="description" content="用 JAX 的 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 和 profile，在时间线上分出计算、通信与空闲。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/scaling-jax/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="JAX 分片编程与 Profiling · Zunzhe Zhang">
+  <meta property="og:description" content="用 JAX 的 mesh、PartitionSpec、shard_map 写分片程序，读懂 HLO 和 profile，在时间线上分出计算、通信与空闲。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/scaling-jax/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
   <script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script>
@@ -929,8 +937,8 @@ print(prof.key_averages().table(sort_by="cuda_time_total", row_limit=10))
     window.addEventListener('resize', () => { clearTimeout(rz); rz = setTimeout(drawTL, 150); });
   })();
   </script>
-  <script src="/assets/post-links.js?v=99069aae00f8"></script>
-  <script src="/assets/posts.js?v=f5c7a324e45c"></script>
+  <script src="/assets/post-links.js?v=4bc4201f8026"></script>
+  <script src="/assets/posts.js?v=187e642e65a0"></script>
 <script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body>
 </html>

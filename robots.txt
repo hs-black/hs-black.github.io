@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://hs-black.github.io/sitemap.xml

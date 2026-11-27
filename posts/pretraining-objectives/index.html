@@ -4,8 +4,16 @@
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>一段文本提供什么监督：从去噪、FIM 到多 token 预测 · Zunzhe Zhang</title>
 <meta name="description" content="把 T5、UL2、FIM 与多 token 预测放进同一套条件概率、标签和计算预算中，推导监督数量、梯度累积归一化与词表显存，并用 NumPy 检查目标是否写对。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/pretraining-objectives/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="一段文本提供什么监督：从去噪、FIM 到多 token 预测 · Zunzhe Zhang">
+  <meta property="og:description" content="把 T5、UL2、FIM 与多 token 预测放进同一套条件概率、标签和计算预算中，推导监督数量、梯度累积归一化与词表显存，并用 NumPy 检查目标是否写对。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/pretraining-objectives/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
 <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-<link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+<link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -120,5 +128,5 @@ PASS: reconstruction, shifted labels, packing counterexample, boundaries, gradie
 <footer class="site-footer wrap"><a href="/blog/">← 全部文章</a></footer>
 <script type="application/json" id="math-definitions">{"global":{"loss":{"label":"有效目标平均损失 ℒ","description":"有效目标 token 的负对数概率之和，除以有效目标数。","unit":"nats / token"},"count":{"label":"有效目标数 M","description":"当前求均值范围内所有 mⱼ 的总和；梯度累积时应覆盖完整累积窗口。"},"mask":{"label":"计分标记 mⱼ","description":"1 表示第 j 个标签贡献交叉熵；0 表示跳过该标签。信息可见性另由 attention mask 决定。"},"pairmask":{"label":"有效预测对 mₜ,ₕ","description":"位置 t 对距离 h 的标签存在且在同一文档时为 1。"}}}</script>
 <script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/pretraining-objectives/figures.js"></script>
-<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body></html>

@@ -1,7 +1,15 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>从小模型调参到大模型：μP 与超参数迁移 · Zunzhe Zhang</title><meta name="description" content="从特征更新推导μP的初始化与SGD、Adam学习率缩放，串起Tensor Programs和后续参数化研究，用交互计算、工程诊断及NumPy实验学习宽度迁移。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
+  <link rel="canonical" href="https://hs-black.github.io/posts/pretraining-mup/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="从小模型调参到大模型：μP 与超参数迁移 · Zunzhe Zhang">
+  <meta property="og:description" content="从特征更新推导μP的初始化与SGD、Adam学习率缩放，串起Tensor Programs和后续参数化研究，用交互计算、工程诊断及NumPy实验学习宽度迁移。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/pretraining-mup/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28"><link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
 .mup-figure{margin:1.8em 0;padding:18px;border:1px solid var(--border);border-radius:12px;background:var(--surface)}.mup-figure h3{margin-top:0;font-size:18px}.mup-figure p,.mup-figure figcaption{font-size:14px;line-height:1.75}.mup-figure figcaption{color:var(--text-soft);margin-top:12px}.mup-figure svg{width:100%;height:auto;display:block}.mup-controls{display:flex;gap:14px;flex-wrap:wrap;align-items:center;font-size:14px;margin:12px 0}.mup-controls label{display:flex;gap:7px;align-items:center;flex-wrap:wrap}.mup-controls select{font:inherit;background:var(--bg);color:var(--text);border:1px solid var(--border);padding:5px;border-radius:6px;max-width:100%}.mup-controls input[type=range]{width:150px;max-width:100%}.mup-result{padding:12px;background:var(--bg-soft);border-radius:8px;font-variant-numeric:tabular-nums;font-size:14px;line-height:1.8}.mup-figure table{font-size:14px;width:100%;min-width:0}.mup-figure th,.mup-figure td{padding:8px 4px;white-space:normal}.mup-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}.mup-grid>div{min-width:0}.mup-exercise{border-top:1px solid var(--border);padding-top:14px;margin-top:24px}.mup-axis{stroke:var(--border);stroke-width:1}.mup-label{fill:var(--text-soft);font:14px var(--font-sans, sans-serif)}.mup-value{fill:var(--text);font:15px var(--font-mono,monospace)}.mup-cell{fill:var(--bg-soft);stroke:var(--border)}.mup-on{fill:var(--accent-soft);stroke:var(--accent)}.mup-base{fill:var(--text-soft)}.mup-scaled{fill:var(--accent)}.mup-curve{stroke:var(--accent);stroke-width:3;fill:none}.mup-dash{stroke:var(--text-soft);stroke-dasharray:5 5;fill:none}
@@ -125,4 +133,4 @@ $('epsilon-svg').innerHTML=svg;$('eps-gradient-value').textContent=gl.toFixed(1)
 ['eps-gradient','eps-value'].forEach(id=>$(id).addEventListener('input',epsilon));$('eps-reset').addEventListener('click',()=>{$('eps-gradient').value=-9;$('eps-value').value=-8;epsilon();});epsilon();
 window.addEventListener('resize',()=>{player.render();epsilon();});
 })();
-</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

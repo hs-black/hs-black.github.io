@@ -106,17 +106,71 @@
     {"slug": "hello-world", "title": "新博客，从零开始", "date": "2026-10-19", "kind": "interactive", "cat": "basics", "tags": [], "desc": "这个博客怎么搭的，以及一个可以拖动的 temperature 采样演示。"},
   ];
 
-  window.SITE = { POSTS, CATEGORIES, KINDS };
+  // ---------- site-wide light / dark theme toggle ----------
+  const THEME_KEY = 'site-theme';
+  const prefersDark = () => matchMedia('(prefers-color-scheme: dark)').matches;
+  const currentTheme = () => document.documentElement.dataset.theme || (prefersDark() ? 'dark' : 'light');
 
-  // ---------- post pages: tags under the header, related posts at the end ----------
+  function applyTheme(t, persist) {
+    if (t === 'light' || t === 'dark') {
+      document.documentElement.dataset.theme = t;
+      if (persist) { try { localStorage.setItem(THEME_KEY, t); } catch {} }
+    }
+    updateThemeBtns();
+    document.dispatchEvent(new CustomEvent('themechange', { detail: { theme: currentTheme() } }));
+  }
+
+  function toggleTheme() {
+    applyTheme(currentTheme() === 'dark' ? 'light' : 'dark', true);
+  }
+
+  const SUN_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg>';
+  const MOON_SVG = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12.79A9 9 0 1 1 11.21 3a7 7 0 0 0 9.79 9.79z"/></svg>';
+
+  function updateThemeBtns() {
+    const dark = currentTheme() === 'dark';
+    document.querySelectorAll('.theme-btn').forEach((b) => {
+      b.innerHTML = dark ? SUN_SVG : MOON_SVG;
+      b.title = dark ? '切换到浅色模式' : '切换到深色模式';
+      b.setAttribute('aria-label', b.title);
+    });
+  }
+
+  try {
+    const saved = localStorage.getItem(THEME_KEY);
+    if (saved === 'light' || saved === 'dark') document.documentElement.dataset.theme = saved;
+  } catch {}
+
+  function mountThemeBtn() {
+    const nav = document.querySelector('.site-nav');
+    if (nav && !nav.querySelector('.theme-btn')) {
+      const b = document.createElement('button');
+      b.type = 'button';
+      b.className = 'theme-btn';
+      b.addEventListener('click', toggleTheme);
+      nav.appendChild(b);
+      updateThemeBtns();
+    }
+  }
+
+  window.SITE = { POSTS, CATEGORIES, KINDS, toggleTheme, currentTheme };
+
+  // ---------- post pages: tags, reading UX, related posts, previews ----------
   const slug = location.pathname.match(/^\/posts\/([^/]+)\//)?.[1];
   const me = POSTS.find((p) => p.slug === slug);
-  if (!me) return;
   const esc = (t) => String(t).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const tagLink = (t) => '<a class="tag" href="/blog/?tag=' + encodeURIComponent(t) + '">#' + esc(t) + '</a>';
 
-  function render() {
+  function renderPost() {
+    if (!me) return;
     const meta = document.querySelector('.post-header .post-meta');
+    const info = (window.POST_META || {})[slug];
+    if (meta && info && info.mins && me.kind !== 'encrypted' && !meta.querySelector('.read-time')) {
+      const rt = document.createElement('span');
+      rt.className = 'read-time';
+      rt.textContent = '约 ' + info.mins + ' 分钟';
+      meta.appendChild(rt);
+    }
     if (meta && !meta.querySelector('.post-tax')) {
       const span = document.createElement('span');
       span.className = 'post-tax';
@@ -142,8 +196,130 @@
     box.innerHTML = '<h2>相关文章</h2><div class="related-grid">' + html + '</div>';
     main.appendChild(box);
   }
+
+  function readingEnhancements() {
+    if (!me || me.kind === 'encrypted') return;
+    const prose = document.querySelector('article.prose');
+    if (!prose) return;
+
+    // 1. Top reading progress bar + back-to-top button.
+    const bar = document.createElement('div');
+    bar.className = 'read-progress';
+    bar.setAttribute('aria-hidden', 'true');
+    document.body.appendChild(bar);
+
+    const topBtn = document.createElement('button');
+    topBtn.type = 'button';
+    topBtn.className = 'to-top';
+    topBtn.textContent = '↑';
+    topBtn.title = '返回顶部';
+    topBtn.setAttribute('aria-label', '返回顶部');
+    topBtn.hidden = true;
+    topBtn.addEventListener('click', () => {
+      const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
+      window.scrollTo({ top: 0, behavior: smooth ? 'smooth' : 'auto' });
+    });
+    document.body.appendChild(topBtn);
+
+    // 2. Heading anchor copy buttons.
+    prose.querySelectorAll('h2[id], h3[id]').forEach((h) => {
+      if (h.querySelector('.heading-anchor')) return;
+      const a = document.createElement('a');
+      a.className = 'heading-anchor';
+      a.href = '#' + h.id;
+      a.textContent = '#';
+      a.setAttribute('aria-label', '复制本节链接');
+      a.addEventListener('click', (e) => {
+        const url = location.origin + location.pathname + '#' + h.id;
+        if (navigator.clipboard?.writeText) {
+          e.preventDefault();
+          history.replaceState(null, '', '#' + h.id);
+          navigator.clipboard.writeText(url).then(() => {
+            a.textContent = '✓';
+            setTimeout(() => { a.textContent = '#'; }, 1200);
+          }).catch(() => {});
+        }
+      });
+      h.appendChild(a);
+    });
+
+    // 3. Code block copy buttons.
+    prose.querySelectorAll('pre').forEach((pre) => {
+      if (pre.closest('.pre-wrap')) return;
+      const wrap = document.createElement('div');
+      wrap.className = 'pre-wrap';
+      pre.parentNode.insertBefore(wrap, pre);
+      wrap.appendChild(pre);
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'code-copy';
+      btn.textContent = '复制';
+      btn.addEventListener('click', () => {
+        const text = (pre.querySelector('code') || pre).textContent;
+        navigator.clipboard?.writeText(text).then(() => {
+          btn.textContent = '已复制 ✓';
+          btn.classList.add('copied');
+          setTimeout(() => { btn.textContent = '复制'; btn.classList.remove('copied'); }, 1500);
+        }).catch(() => {});
+      });
+      wrap.appendChild(btn);
+    });
+
+    // 4. Desktop floating TOC with ScrollSpy (built from inline .toc or h2[id]).
+    const tocLinks = [];
+    const inlineToc = prose.querySelector('.toc');
+    if (inlineToc) {
+      inlineToc.querySelectorAll('a[href^="#"]').forEach((a) => {
+        const id = decodeURIComponent(a.getAttribute('href').slice(1));
+        const target = document.getElementById(id);
+        if (target) tocLinks.push({ id, text: a.textContent.trim(), el: target });
+      });
+    } else {
+      prose.querySelectorAll('h2[id]').forEach((h) => {
+        const text = h.textContent.replace(/#$/, '').trim();
+        tocLinks.push({ id: h.id, text, el: h });
+      });
+    }
+
+    let sideAnchors = [];
+    if (tocLinks.length >= 3) {
+      const aside = document.createElement('nav');
+      aside.className = 'side-toc';
+      aside.setAttribute('aria-label', '页面目录');
+      aside.innerHTML = '<div class="side-toc-title">目录</div><ol>' +
+        tocLinks.map((x) => '<li><a href="#' + esc(x.id) + '">' + esc(x.text) + '</a></li>').join('') +
+        '</ol>';
+      document.body.appendChild(aside);
+      sideAnchors = Array.from(aside.querySelectorAll('a'));
+    }
+
+    let ticking = false;
+    function onScroll() {
+      if (ticking) return;
+      ticking = true;
+      requestAnimationFrame(() => {
+        ticking = false;
+        const max = Math.max(1, document.documentElement.scrollHeight - innerHeight);
+        bar.style.transform = 'scaleX(' + Math.min(1, Math.max(0, scrollY / max)) + ')';
+        topBtn.hidden = scrollY < 600;
+        if (sideAnchors.length) {
+          let active = 0;
+          const cut = scrollY + 120;
+          for (let i = 0; i < tocLinks.length; i++) {
+            if (tocLinks[i].el.getBoundingClientRect().top + scrollY <= cut) active = i;
+          }
+          sideAnchors.forEach((a, i) => a.classList.toggle('is-active', i === active));
+        }
+      });
+    }
+    addEventListener('scroll', onScroll, { passive: true });
+    addEventListener('resize', onScroll, { passive: true });
+    onScroll();
+  }
+
   // Hover / focus a link to another post: show its title, kind and summary.
   function previews() {
+    if (!me || me.kind === 'encrypted') return;
     const card = document.createElement('div');
     card.className = 'link-card';
     card.hidden = true;
@@ -174,6 +350,11 @@
     addEventListener('scroll', () => { card.hidden = true; }, { passive: true });
   }
 
-  const start = () => { render(); if (matchMedia('(hover: hover)').matches) previews(); };
+  const start = () => {
+    mountThemeBtn();
+    renderPost();
+    readingEnhancements();
+    if (matchMedia('(hover: hover)').matches) previews();
+  };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', start); else start();
 })();

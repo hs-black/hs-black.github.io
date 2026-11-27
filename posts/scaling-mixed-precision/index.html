@@ -5,8 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>混合精度训练：从 BF16 到 FP8 与 NVFP4 · Zunzhe Zhang</title>
   <meta name="description" content="从浮点编码到三次训练 GEMM，推导 FP8/FP4 的缩放、转置一致性、随机舍入和 Adam 噪声，分析分布式量化通信与显存账，附数值交互、习题及 NumPy 实验。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/scaling-mixed-precision/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="混合精度训练：从 BF16 到 FP8 与 NVFP4 · Zunzhe Zhang">
+  <meta property="og:description" content="从浮点编码到三次训练 GEMM，推导 FP8/FP4 的缩放、转置一致性、随机舍入和 Adam 噪声，分析分布式量化通信与显存账，附数值交互、习题及 NumPy 实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/scaling-mixed-precision/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc">
   <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946"><link rel="stylesheet" href="/posts/scaling-mixed-precision/training.css">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
@@ -1225,8 +1233,8 @@ PASS: transpose, SR moments, Adam noise, gather metadata, RHT, GEMM gradients/de
 
   </script>
   <script src="/assets/article-steps.js?v=1c7283b439be"></script><script src="/posts/scaling-mixed-precision/training.js"></script>
-  <script src="/assets/post-links.js?v=99069aae00f8"></script>
-  <script src="/assets/posts.js?v=f5c7a324e45c"></script>
+  <script src="/assets/post-links.js?v=4bc4201f8026"></script>
+  <script src="/assets/posts.js?v=187e642e65a0"></script>
 <script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body>
 </html>

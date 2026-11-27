@@ -1,7 +1,15 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LoRA / QLoRA：参数高效微调 · Zunzhe Zhang</title><meta name="description" content="从低秩前向与梯度推导到 NF4 账本、checkpoint 梯度排查、保存合并和量化误差；含数值图解、四道习题与 NumPy 实验。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="canonical" href="https://hs-black.github.io/posts/lora-qlora/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="LoRA / QLoRA：参数高效微调 · Zunzhe Zhang">
+  <meta property="og:description" content="从低秩前向与梯度推导到 NF4 账本、checkpoint 梯度排查、保存合并和量化误差；含数值图解、四道习题与 NumPy 实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/lora-qlora/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -78,4 +86,4 @@ const rows=[...document.querySelectorAll('#lora-forward tbody tr')];
 ArticleSteps.mount('#lora-forward',{steps:[{title:'底座',caption:'底座给出 [1,2]，这条分支的参数保持冻结。'},{title:'降维',caption:'1×1 + 2×(−1)=−1，输入沿 A 投影到一个低秩方向。'},{title:'展开并缩放',caption:'−1×[2,1]×0.5=[−1,−0.5]，得到与底座输出同形状的增量。'},{title:'相加',caption:'[1,2]+[−1,−0.5]=[0,1.5]。两个小矩阵共同改变最终输出。'}],render(s,i){['[1, 2]',i>=1?'−1':'待计算',i>=2?'[−1, −0.5]':'待计算',i>=3?'[0, 1.5]':'待计算'].forEach((v,j)=>{rows[j].cells[1].textContent=v;rows[j].classList.toggle('active',j===i)})}});
 const states=[['B=[0,0]ᵀ；z=−1；y=[1,2]','原模型输出保持不变，loss=2。'],['G=[0,2]；dB=[0,−2]ᵀ；dA=[0,0]','B 收到误差信号；A 的梯度路径包含当前为零的 B。'],['B=[0,0.2]ᵀ；y=[1,1.8]','完成一次更新，loss 从 2 降到 1.62。'],['G=[0,1.8]；dA=[0.36,0.72]','新的 B 打开了 A 的梯度路径。']];
 ArticleSteps.mount('#lora-gradient',{steps:states.map((x,i)=>({title:'第 '+i+' 步',caption:x[1]})),render(s,i){document.querySelector('#gradient-state').textContent=states[i][0]}});
-})();</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>
+})();</script><script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script></body></html>

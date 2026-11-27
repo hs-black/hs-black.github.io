@@ -112,10 +112,19 @@ img, svg, video, canvas { max-width: 100%; }
   background: var(--accent);
   box-shadow: 0 0 0 4px var(--accent-soft);
 }
-.site-nav { display: flex; gap: 18px; font-size: 15px; }
+.site-nav { display: flex; align-items: center; gap: 18px; font-size: 15px; }
 .site-nav a { color: var(--text-soft); }
 .site-nav a:hover, .site-nav a[aria-current="page"] { color: var(--text); text-decoration: none; }
 .site-nav a[aria-current="page"] { font-weight: 600; }
+.theme-btn {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 30px; height: 30px; padding: 0;
+  border: 1px solid var(--border); border-radius: 8px;
+  background: var(--surface); color: var(--text-soft);
+  cursor: pointer; transition: border-color 0.15s, color 0.15s;
+}
+.theme-btn:hover { border-color: var(--accent); color: var(--text); }
+.theme-btn svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; stroke-linejoin: round; }
 
 .site-footer {
   margin-top: 96px;
@@ -854,3 +863,72 @@ a.card:hover { border-color: var(--accent); text-decoration: none; }
 .link-card b { font-size: 15px; color: var(--text); }
 .link-card .lc-desc { color: var(--text-soft); }
 .link-card > .kind + .lc-cat { margin-top: -4px; }
+
+/* ---------- reading UX: progress, anchors, code copy, floating TOC ---------- */
+.read-progress {
+  position: fixed; inset: 0 0 auto 0; height: 2px; z-index: 60;
+  background: linear-gradient(90deg, var(--accent), var(--accent-2));
+  transform-origin: 0 50%; transform: scaleX(0);
+  pointer-events: none;
+}
+.read-time { color: var(--text-faint); font-size: 13px; }
+.prose h2[id], .prose h3[id] { scroll-margin-top: 24px; }
+.prose .heading-anchor {
+  margin-left: 8px; font-weight: 400; font-size: 0.8em;
+  color: var(--text-faint); opacity: 0; transition: opacity 0.15s, color 0.15s;
+  text-decoration: none;
+}
+.prose h2:hover .heading-anchor, .prose h3:hover .heading-anchor,
+.prose .heading-anchor:focus { opacity: 1; }
+.prose .heading-anchor:hover { color: var(--accent); text-decoration: none; }
+
+.prose .pre-wrap { position: relative; }
+.prose .pre-wrap pre { padding-right: 68px; }
+.code-copy {
+  position: absolute; top: 8px; right: 8px;
+  padding: 2px 9px; border: 1px solid var(--border); border-radius: 6px;
+  background: var(--surface); color: var(--text-soft);
+  font: inherit; font-size: 12px; line-height: 1.5; cursor: pointer;
+  opacity: 0.75; transition: opacity 0.15s, border-color 0.15s, color 0.15s;
+}
+.code-copy:hover, .prose .pre-wrap:hover .code-copy { opacity: 1; border-color: var(--accent); color: var(--text); }
+.code-copy.copied { opacity: 1; border-color: var(--accent); color: var(--accent); }
+
+.side-toc { display: none; }
+@media (min-width: 1240px) {
+  .side-toc {
+    display: block;
+    position: fixed;
+    top: 96px;
+    left: calc(50% + 384px);
+    width: min(224px, calc(50vw - 404px));
+    max-height: calc(100vh - 140px);
+    overflow-y: auto;
+    padding-left: 14px;
+    border-left: 1px solid var(--border);
+    font-size: 13px;
+    line-height: 1.45;
+  }
+  .side-toc-title {
+    font-size: 11px; font-weight: 700; letter-spacing: 0.08em;
+    text-transform: uppercase; color: var(--text-faint); margin-bottom: 8px;
+  }
+  .side-toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
+  .side-toc a {
+    display: block; color: var(--text-faint);
+    transition: color 0.15s;
+  }
+  .side-toc a:hover { color: var(--text); text-decoration: none; }
+  .side-toc a.is-active { color: var(--accent); font-weight: 600; }
+}
+
+.to-top {
+  position: fixed; right: 20px; bottom: 24px; z-index: 40;
+  width: 38px; height: 38px; padding: 0;
+  border: 1px solid var(--border); border-radius: 50%;
+  background: var(--surface); color: var(--text-soft);
+  box-shadow: var(--shadow); font-size: 16px; cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, transform 0.15s;
+}
+.to-top:hover { border-color: var(--accent); color: var(--accent); transform: translateY(-2px); }
+.to-top[hidden] { display: none; }

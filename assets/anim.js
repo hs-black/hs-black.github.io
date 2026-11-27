@@ -251,11 +251,13 @@
     api.player = player;
     // Colors are resolved from CSS tokens when the timeline is built; rebuild
     // when the color scheme flips so var(--accent) etc. follow light/dark.
-    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    const rebuildColors = () => {
       if (!built) return;
       built.forEach((b) => { if (b.key === 'text' && b.el.dataset.animText !== undefined) b.el.textContent = b.el.dataset.animText; });
       built = null; lastT = t; render(t);
-    });
+    };
+    matchMedia('(prefers-color-scheme: dark)').addEventListener('change', rebuildColors);
+    document.addEventListener('themechange', rebuildColors);
     return api;
   }
 

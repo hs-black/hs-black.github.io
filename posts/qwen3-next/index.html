@@ -5,8 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Qwen3-Next：混合线性注意力与超稀疏 MoE · Zunzhe Zhang</title>
   <meta name="description" content="推导 Gated DeltaNet、混合注意力与 512 expert MoE，追踪前缀快照和 MTP 回滚，计算缓存、专家批量与跨卡通信；附数值交互、六道习题及 NumPy 实验。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/qwen3-next/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="Qwen3-Next：混合线性注意力与超稀疏 MoE · Zunzhe Zhang">
+  <meta property="og:description" content="推导 Gated DeltaNet、混合注意力与 512 expert MoE，追踪前缀快照和 MTP 回滚，计算缓存、专家批量与跨卡通信；附数值交互、六道习题及 NumPy 实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/qwen3-next/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc">
   <link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
   <link rel="stylesheet" href="./engineering.css?v=b77e1c4f50ce">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
@@ -1363,7 +1371,7 @@ All checks passed: chunk algebra, streaming state, prefix forks, rollback, memor
   </script>
   <script src="/assets/article-steps.js?v=1c7283b439be"></script>
   <script src="./engineering.js?v=539444546c06"></script>
-  <script src="/assets/anim.js?v=499c11838720"></script>
+  <script src="/assets/anim.js?v=6a3a07b92c8a"></script>
   <script>
   /* ---------------- animated figures (assets/anim.js) ---------------- */
   (() => {
@@ -1602,8 +1610,8 @@ All checks passed: chunk algebra, streaming state, prefix forks, rollback, memor
     })();
   })();
   </script>
-  <script src="/assets/post-links.js?v=99069aae00f8"></script>
-  <script src="/assets/posts.js?v=f5c7a324e45c"></script>
+  <script src="/assets/post-links.js?v=4bc4201f8026"></script>
+  <script src="/assets/posts.js?v=187e642e65a0"></script>
 <script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body>
 </html>

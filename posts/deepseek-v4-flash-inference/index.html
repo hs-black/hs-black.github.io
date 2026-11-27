@@ -1,7 +1,15 @@
 <!doctype html>
 <html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>DeepSeek-V4-Flash 推理：一枚 token，4 张卡 · Zunzhe Zhang</title><meta name="description" content="逐卡推导原生 FP4 权重、复制缓存、prefill 峰值、FP32 归约与专家调度；用可操作容量账本和时间线连接工程排错、习题与 CPU 实验。">
-<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
+  <link rel="canonical" href="https://hs-black.github.io/posts/deepseek-v4-flash-inference/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="DeepSeek-V4-Flash 推理：一枚 token，4 张卡 · Zunzhe Zhang">
+  <meta property="og:description" content="逐卡推导原生 FP4 权重、复制缓存、prefill 峰值、FP32 归约与专家调度；用可操作容量账本和时间线连接工程排错、习题与 CPU 实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/deepseek-v4-flash-inference/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
+<link rel="icon" href="/assets/favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc"><link rel="stylesheet" href="/assets/article.css?v=4273bfad8946">
 <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css"><link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
 <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script><script defer src="/assets/vendor/katex/0.16.11/contrib/auto-render.min.js"></script><script defer src="/assets/reader-math.js?v=dab9cf38d619"></script>
 <style>
@@ -133,5 +141,5 @@ all checks passed</code></pre><p>先根据练习 2 预测第二次运行的 cach
  ArticleSteps.mount('#wave-demo',{steps:Array.from({length:17},(_,t)=>({title:'时刻 '+t+' ms',caption:t===16?'四波 combine 全部完成，流水总长 16 ms。':'观察每条资源队列的开始条件：上一阶段已完成，且当前资源已空闲。'})),duration:700,render(step,i,p){const t=Math.min(16,i+p);$('wave-time').textContent=t.toFixed(1)+' ms';$('wave-done').textContent=tasks.filter(x=>x.combine[1]<=t).length+' / 4';document.querySelectorAll('#wave-demo .ds-cursor').forEach(e=>e.style.left=t/max*100+'%');document.querySelectorAll('#wave-demo .ds-wave').forEach(e=>{e.classList.toggle('is-done',t>=+e.dataset.end);e.style.opacity=t<+e.dataset.start?'.35':'1';});}});
 })();
 </script>
-<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=99069aae00f8"></script><script src="/assets/posts.js?v=f5c7a324e45c"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
+<script src="/assets/series.js?v=5467d14ac48a"></script><script src="/assets/post-links.js?v=4bc4201f8026"></script><script src="/assets/posts.js?v=187e642e65a0"></script><script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body></html>

@@ -405,3 +405,257 @@ window.POST_LINKS = {
   "sparse-pretraining"
  ]
 };
+window.POST_META = {
+ "activation-sparsity": {
+  "mins": 14
+ },
+ "attention-residuals": {
+  "mins": 15
+ },
+ "concept-models": {
+  "mins": 17
+ },
+ "continuous-batching": {
+  "mins": 8
+ },
+ "cpu-overhead": {
+  "mins": 9
+ },
+ "cuda-graph": {
+  "mins": 9
+ },
+ "cuda-streams": {
+  "mins": 8
+ },
+ "deepseek-v4": {
+  "mins": 58
+ },
+ "deepseek-v4-flash": {
+  "mins": 12
+ },
+ "deepseek-v4-flash-inference": {
+  "mins": 15
+ },
+ "deepseek-v4-pro": {
+  "mins": 13
+ },
+ "deepseek-v4-pro-inference": {
+  "mins": 15
+ },
+ "distributed-inference": {
+  "mins": 10
+ },
+ "dspark": {
+  "mins": 10
+ },
+ "effective-depth": {
+  "mins": 15
+ },
+ "engram": {
+  "mins": 13
+ },
+ "flash-attention": {
+  "mins": 10
+ },
+ "gemm-optimization": {
+  "mins": 9
+ },
+ "gradient-checkpointing": {
+  "mins": 9
+ },
+ "hello-world": {
+  "mins": 2
+ },
+ "hyper-connections": {
+  "mins": 14
+ },
+ "inference-benchmarking": {
+  "mins": 9
+ },
+ "iquest-q1": {
+  "mins": 23
+ },
+ "kimi-k2": {
+  "mins": 36
+ },
+ "kimi-k3": {
+  "mins": 42
+ },
+ "kimi-linear": {
+  "mins": 27
+ },
+ "kv-cache": {
+  "mins": 20
+ },
+ "kv-cache-compression": {
+  "mins": 9
+ },
+ "linear-attention": {
+  "mins": 9
+ },
+ "llm-engineering": {
+  "mins": 2
+ },
+ "llm-quantization": {
+  "mins": 9
+ },
+ "lora-qlora": {
+  "mins": 10
+ },
+ "manifold-hyper-connections": {
+  "mins": 15
+ },
+ "mini-inference-engine": {
+  "mins": 9
+ },
+ "model-merging": {
+  "mins": 16
+ },
+ "moe-upcycling": {
+  "mins": 15
+ },
+ "multi-adapter-serving": {
+  "mins": 9
+ },
+ "multimodal-inference": {
+  "mins": 8
+ },
+ "neural-network-initialization": {
+  "mins": 58
+ },
+ "next-token": {
+  "mins": 5
+ },
+ "optimizers": {
+  "mins": 12
+ },
+ "over-encoding": {
+  "mins": 13
+ },
+ "paged-attention": {
+  "mins": 21
+ },
+ "prefill-decode-disaggregation": {
+  "mins": 11
+ },
+ "prefix-caching": {
+  "mins": 9
+ },
+ "pretraining-data-curation": {
+  "mins": 12
+ },
+ "pretraining-data-mixture": {
+  "mins": 14
+ },
+ "pretraining-mup": {
+  "mins": 16
+ },
+ "pretraining-objectives": {
+  "mins": 13
+ },
+ "pretraining-scaling": {
+  "mins": 17
+ },
+ "pretraining-stability": {
+  "mins": 14
+ },
+ "qwen3-next": {
+  "mins": 56
+ },
+ "recurrent-depth": {
+  "mins": 12
+ },
+ "rmsnorm-kernel": {
+  "mins": 10
+ },
+ "rope-long-context": {
+  "mins": 9
+ },
+ "sampling-structured-decoding": {
+  "mins": 8
+ },
+ "scaling-5d": {
+  "mins": 31
+ },
+ "scaling-collectives": {
+  "mins": 10
+ },
+ "scaling-context-parallel": {
+  "mins": 21
+ },
+ "scaling-data-parallel": {
+  "mins": 28
+ },
+ "scaling-gpu-kernels": {
+  "mins": 42
+ },
+ "scaling-inference": {
+  "mins": 44
+ },
+ "scaling-jax": {
+  "mins": 27
+ },
+ "scaling-memory": {
+  "mins": 29
+ },
+ "scaling-mixed-precision": {
+  "mins": 43
+ },
+ "scaling-moe": {
+  "mins": 37
+ },
+ "scaling-pipeline": {
+  "mins": 10
+ },
+ "scaling-roofline": {
+  "mins": 29
+ },
+ "scaling-tensor-parallel": {
+  "mins": 29
+ },
+ "simple-hyper-connections": {
+  "mins": 28
+ },
+ "smol-architecture": {
+  "mins": 32
+ },
+ "smol-decisions": {
+  "mins": 28
+ },
+ "smol-infrastructure": {
+  "mins": 22
+ },
+ "smol-marathon": {
+  "mins": 26
+ },
+ "smol-optim-data": {
+  "mins": 28
+ },
+ "smol-post-training": {
+  "mins": 37
+ },
+ "sparse-attention": {
+  "mins": 8
+ },
+ "sparse-pretraining": {
+  "mins": 14
+ },
+ "speculative-decoding": {
+  "mins": 9
+ },
+ "state-space-models": {
+  "mins": 13
+ },
+ "tensor-layouts": {
+  "mins": 8
+ },
+ "torch-compile": {
+  "mins": 9
+ },
+ "vla-inference": {
+  "mins": 10
+ },
+ "weight-pruning": {
+  "mins": 12
+ }
+};

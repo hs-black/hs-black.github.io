@@ -5,8 +5,16 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>KV cache：记住已经算过的历史 · Zunzhe Zhang</title>
   <meta name="description" content="从一行 attention 的数值计算出发，推导 KV 为什么可复用、prefill/decode 怎样交接、位置与 mask 如何对齐，再算清 GQA 缓存的容量和读取成本；含可操作图解、符号释义、习题与 NumPy 实验。">
+  <link rel="canonical" href="https://hs-black.github.io/posts/kv-cache/">
+  <meta property="og:site_name" content="Zunzhe Zhang">
+  <meta property="og:type" content="article">
+  <meta property="og:title" content="KV cache：记住已经算过的历史 · Zunzhe Zhang">
+  <meta property="og:description" content="从一行 attention 的数值计算出发，推导 KV 为什么可复用、prefill/decode 怎样交接、位置与 mask 如何对齐，再算清 GQA 缓存的容量和读取成本；含可操作图解、符号释义、习题与 NumPy 实验。">
+  <meta property="og:url" content="https://hs-black.github.io/posts/kv-cache/">
+  <meta property="og:image" content="https://hs-black.github.io/assets/img/avatar.jpg">
+  <meta name="twitter:card" content="summary">
   <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml">
-  <link rel="stylesheet" href="/assets/site.css?v=98894e8d84a2">
+  <link rel="stylesheet" href="/assets/site.css?v=4c8af28ae6fc">
   <link rel="stylesheet" href="/assets/vendor/katex/0.16.11/katex.min.css">
   <link rel="stylesheet" href="/assets/reader-math.css?v=29189e08ca28">
   <script defer src="/assets/vendor/katex/0.16.11/katex.min.js"></script>
@@ -415,8 +423,8 @@ wrong mask detected: PASS
   ['mask-prefix','mask-chunk','mask-wrong'].forEach(id=>document.getElementById(id).addEventListener('change',()=>maskPlayer.refresh()));
 })();
 </script>
-<script src="/assets/post-links.js?v=99069aae00f8"></script>
-<script src="/assets/posts.js?v=f5c7a324e45c"></script>
+<script src="/assets/post-links.js?v=4bc4201f8026"></script>
+<script src="/assets/posts.js?v=187e642e65a0"></script>
 <script src="/assets/curriculum.js?v=7c93701c5259"></script>
 </body>
 </html>
